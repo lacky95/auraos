@@ -20,7 +20,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import {
-  initRepo, patchesRoot, readSeries, safeDirectoryArgs, SYSTEM_APP_LATER_MESSAGE, SYSTEM_APP_OVERLAYS, type SeriesBase,
+  initRepo, patchesOverride, readSeries, safeDirectoryArgs, SYSTEM_APP_LATER_MESSAGE, SYSTEM_APP_OVERLAYS, type SeriesBase,
 } from '@aura/core';
 import { api } from '../lib/client.js';
 import { color, fail, info, ok, warn } from '../lib/format.js';
@@ -43,6 +43,8 @@ export interface AppSourceView {
   upstream:             { repository?: string; branch?: string; commit?: string; dirty?: boolean } | null;
   source:               { path: string; writable: boolean; mounted: boolean };
   workspace:            { n: number; path: string } | null;
+  /** The installation's patch repo: /mnt/aura/patches/<appId>, and whether it is bound here. */
+  patches?:             { path: string; mounted: boolean };
   workspaces:           number[];
   /** The user the caller acts for (workspaces are per user). */
   user?:                string;
@@ -92,21 +94,30 @@ export async function getAppSource(app: string, opts: { ensure?: boolean } = {})
   return r;
 }
 
-/** R2: create (if missing) and bind a workspace of `app` at /mnt/aura/work/<appId>. */
-export async function bindWorkspace(app: string, opts: { n?: number; new?: boolean } = {}): Promise<WorkspaceBind> {
+/** The mount API (`aura mount`), kinds `work` and `patches`: the one way they are bound. */
+async function mountVolume<T>(app: string, body: Record<string, unknown>, what: string): Promise<T> {
   const inst = encodeURIComponent(callerInstance());
-  const r = await apiOrBody<WorkspaceBind & RouteError>(() => api.post(`/api/instances/${inst}/app-workspace`, {
-    app, ...(opts.n !== undefined ? { n: opts.n } : {}), ...(opts.new ? { new: true } : {}),
-  }));
-  if (r.error) routeFail(`workspace for ${app}`, r);
+  const r = await apiOrBody<T & RouteError>(() => api.post(`/api/instances/${inst}/mounts`, { targetAppId: app, ...body }));
+  if (r.error) routeFail(`${what} of ${app}`, r);
   return r;
 }
 
-/** R2 DELETE: detach the workspace of `app` bound here (its directory stays). */
+/** `aura mount <app> --work [n]`: create (if missing) and bind a workspace of `app` at /mnt/aura/work/<appId>. */
+export function bindWorkspace(app: string, opts: { n?: number; new?: boolean } = {}): Promise<WorkspaceBind> {
+  return mountVolume<WorkspaceBind>(app, {
+    kind: 'work', ...(opts.n !== undefined ? { n: opts.n } : {}), ...(opts.new ? { new: true } : {}),
+  }, 'workspace');
+}
+
+/** `aura mount <app> --patches`: bind the installation's patch repo at /mnt/aura/patches/<appId>. */
+export function bindPatchRepo(app: string): Promise<{ ok: true; appId: string; installationId: string; path: string; created: boolean }> {
+  return mountVolume(app, { kind: 'patches' }, 'patch repository');
+}
+
+/** `aura mount rm <appId>:work`: detach the workspace of `app` bound here (its directory stays). */
 export async function detachWorkspace(app: string): Promise<void> {
   const inst = encodeURIComponent(callerInstance());
-  const r = await apiOrBody<{ ok?: boolean } & RouteError>(() => api.del(`/api/instances/${inst}/app-workspace?app=${encodeURIComponent(app)}`));
-  if (r.error) routeFail(`workspace for ${app}`, r);
+  await api.del(`/api/instances/${inst}/mounts/${encodeURIComponent(`${app}:work`)}`);
 }
 
 /**
@@ -195,10 +206,18 @@ export function appFromArgOrCwd(app: string | undefined, cwd = process.cwd()): s
   fail('name the app (id or name), or run this inside its source or patch workspace');
 }
 
-/** Where an installation's patch repo lives (local git, created on the first save). */
-export function patchRepoDir(installationId: string): string {
-  if (!/^[0-9a-f-]{8,64}$/i.test(installationId)) fail(`unexpected installation id '${installationId}'`);
-  return join(patchesRoot(), installationId);
+/**
+ * The installation's patch repo (git; the series is created on the first
+ * save): one dir per installation on the app-data volume, bound into this
+ * Terminal at /mnt/aura/patches/<appId> (bound here if it is not yet).
+ * `AURA_PATCHES_DIR` (tests only) puts it at `<dir>/<installationId>` instead.
+ */
+export async function patchRepoOf(v: Pick<AppSourceView, 'appId' | 'installationId' | 'patches'>): Promise<string> {
+  if (!/^[0-9a-f-]{8,64}$/i.test(v.installationId)) fail(`unexpected installation id '${v.installationId}'`);
+  const override = patchesOverride();
+  if (override) return join(override, v.installationId);
+  if (v.patches?.mounted) return v.patches.path;
+  return (await bindPatchRepo(v.appId)).path;
 }
 
 /** The patch repo revision that is installed now (set by a successful activate). */
@@ -251,7 +270,7 @@ workspace. Binds a source view into this Terminal (read-only for closed
 installs). Use the paths it prints; never reach app source another way.`)
     .action(async (app: string | undefined, o: { json?: boolean }) => {
       const v = await getAppSource(appFromArgOrCwd(app), { ensure: true });
-      const repo = patchRepoDir(v.installationId);
+      const repo = await patchRepoOf(v);
       const hasRepo = existsSync(join(repo, '.git'));
       const series = hasRepo ? safeSeries(repo) : null;
       const local = {

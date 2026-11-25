@@ -51,8 +51,12 @@
  * declaration or re-bind of it comes back read-only. Changes go through a
  * patch workspace instead: a `work` mount binds a writable dir of the
  * app-data volume (`aura/workspaces/<userId>/<installationId>/<n>`) at
- * `/mnt/aura/work/<appId>` of the one consumer that asked for it. It does not
- * follow the app's directory and is never mirrored into sidecars.
+ * `/mnt/aura/work/<appId>` of the one consumer that asked for it. The patch
+ * repository of an installation is one dir of the volume too
+ * (`aura/patches/<installationId>`), bound writable at
+ * `/mnt/aura/patches/<appId>` (a `patches` mount): every Terminal of every
+ * user who patches that installation sees the same series, and it outlives
+ * them. Neither follows the app's directory or is mirrored into sidecars.
  *
  * Known limit: a consumer holding the Docker socket (the System Terminal)
  * can bind anything itself. Until Phase 5 removes the socket (D30),
@@ -81,10 +85,15 @@ export const MOUNT_ROOT_PATH = '/mnt/aura';
 export const MOUNT_DIR_NAME = '.mnt';
 
 export type MountMode = 'ro' | 'rw';
-export type MountKind = 'source' | 'data' | 'work';
+export type MountKind = 'source' | 'data' | 'work' | 'patches';
 
 /** Where `work` mounts appear under a consumer's mount root. */
 export const WORK_DIR_NAME = 'work';
+/** Where `patches` mounts appear under a consumer's mount root. */
+export const PATCHES_DIR_NAME = 'patches';
+const PATCHES_SUBPATH = /^aura\/patches\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+/** Kinds that bind a writable dir of the app-data volume, owned by the consumer alone. */
+const isVolumeKind = (kind: MountKind): kind is 'work' | 'patches' => kind === 'work' || kind === 'patches';
 const WORKSPACE_SUBPATH = /^aura\/workspaces\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/[1-9]\d{0,3}$/;
 /**
  * How a mount came to exist in this shell generation:
@@ -147,6 +156,8 @@ export interface AuraMount {
   inheritedFrom?: string;
   /** `work` mounts: the workspace dir, relative to the root dataDir. */
   workspace?: string;
+  /** `patches` mounts: the patch repository dir, relative to the root dataDir. */
+  patches?: string;
 }
 
 export interface AddMountSpec {
@@ -162,6 +173,11 @@ export interface AddMountSpec {
    * always writable. Excludes `data`.
    */
   workspace?: string;
+  /**
+   * The patch repository of an installation, relative to the root dataDir
+   * (`aura/patches/<installationId>`): a `patches` mount, always writable.
+   */
+  patches?: string;
 }
 
 interface MountManagerOpts {
@@ -220,6 +236,7 @@ export class MountManager {
     this.writeDeclFile(instanceId, this.list(instanceId).filter((m) => m.origin !== 'inherited').map((m) => ({
       targetAppId: m.targetAppId, mode: m.mode, data: m.kind === 'data', declaredAt: m.declaredAt,
       ...(m.workspace ? { workspace: m.workspace } : {}),
+      ...(m.patches ? { patches: m.patches } : {}),
     })));
   }
 
@@ -258,11 +275,11 @@ export class MountManager {
       try { names = readdirSync(root); } catch { continue; }   // root absent
       for (const name of names) {
         if (current.has(name)) continue;
-        if (name === WORK_DIR_NAME) {
+        if (name === WORK_DIR_NAME || name === PATCHES_DIR_NAME) {
           let work: string[] = [];
           try { work = readdirSync(join(root, name)); } catch { /* gone */ }
           for (const app of work) {
-            if (current.has(`${WORK_DIR_NAME}/${app}`)) continue;
+            if (current.has(`${name}/${app}`)) continue;
             try { rmdirSync(join(root, name, app)); } catch { /* mounted, non-empty, or gone */ }
           }
         }
@@ -302,7 +319,7 @@ export class MountManager {
         const m = await this.add(instanceId, spec, { persist: false, origin: 'restored' });
         restored++;
         // A writable source of an app closed since is restored read-only, and stays so.
-        kept.push(m.mode === (spec.mode ?? 'ro') || m.kind === 'work' ? spec : { ...spec, mode: m.mode });
+        kept.push(m.mode === (spec.mode ?? 'ro') || isVolumeKind(m.kind) ? spec : { ...spec, mode: m.mode });
       } catch (err) {
         failed++;
         kept.push(spec);
@@ -361,12 +378,16 @@ export class MountManager {
   // ─── Path resolution ───────────────────────────────────────────────────
 
   /** Shell-side path of what we'd mount FROM, for a target app. */
-  private resolveSource(targetAppId: string, kind: MountKind, workspace?: string): string {
+  private resolveSource(targetAppId: string, kind: MountKind, subpath?: string): string {
     const manifest = this.opts.registry.getById(targetAppId);
     if (!manifest) throw new Error(`App not found: ${targetAppId}`);
     if (kind === 'work') {
-      if (!workspace || !WORKSPACE_SUBPATH.test(workspace)) throw new Error(`invalid workspace: ${JSON.stringify(workspace)}`);
-      return join(this.opts.dataDir, workspace);
+      if (!subpath || !WORKSPACE_SUBPATH.test(subpath)) throw new Error(`invalid workspace: ${JSON.stringify(subpath)}`);
+      return join(this.opts.dataDir, subpath);
+    }
+    if (kind === 'patches') {
+      if (!subpath || !PATCHES_SUBPATH.test(subpath)) throw new Error(`invalid patch repository: ${JSON.stringify(subpath)}`);
+      return join(this.opts.dataDir, subpath);
     }
     if (kind === 'source') return manifest.appDir;
     // Data: the app-level dir holding every instance's data. Always under
@@ -416,6 +437,7 @@ export class MountManager {
 
   private dirName(targetAppId: string, kind: MountKind): string {
     if (kind === 'work') return `${WORK_DIR_NAME}/${targetAppId}`;
+    if (kind === 'patches') return `${PATCHES_DIR_NAME}/${targetAppId}`;
     return kind === 'data' ? `${targetAppId}.data` : targetAppId;
   }
 
@@ -435,7 +457,7 @@ export class MountManager {
     if (!cap.ok) throw new Error(`mount propagation unavailable: ${cap.reason}`);
 
     const kind: MountKind = kindOf(spec);
-    let mode: MountMode = kind === 'work' ? 'rw' : spec.mode ?? 'ro';
+    let mode: MountMode = isVolumeKind(kind) ? 'rw' : spec.mode ?? 'ro';
     if (kind === 'source' && mode === 'rw' && this.isClosed(spec.targetAppId)) {
       // A request is refused; a declaration, re-bind or mirror made while the
       // app was open comes back read-only.
@@ -454,13 +476,13 @@ export class MountManager {
     const consumerDataDir = this.opts.instanceDataDir(instanceId);
     if (!consumerDataDir) throw new Error(`Instance not found: ${instanceId}`);
 
-    const srcShell = this.resolveSource(spec.targetAppId, kind, spec.workspace);
+    const srcShell = this.resolveSource(spec.targetAppId, kind, kind === 'patches' ? spec.patches : spec.workspace);
     // A data dir only appears once the target has spawned — create it so a
     // data mount of a fresh target binds an empty dir instead of failing.
     if (kind !== 'source') { try { mkdirSync(srcShell, { recursive: true }); } catch { /* mount will report */ } }
     const dirName  = this.dirName(spec.targetAppId, kind);
     const root     = this.rootFor(instanceId, consumerDataDir);
-    if (kind === 'work' && root.containerDir !== MOUNT_ROOT_PATH) {
+    if (isVolumeKind(kind) && root.containerDir !== MOUNT_ROOT_PATH) {
       throw new Error(`${instanceId} has no mount root at ${MOUNT_ROOT_PATH} — restart it to get one`);
     }
     const dstShell = join(root.shellDir, dirName);
@@ -501,6 +523,7 @@ export class MountManager {
       origin: opts.origin ?? 'added',
       declaredAt: spec.declaredAt ?? new Date().toISOString(),
       ...(kind === 'work' ? { workspace: spec.workspace! } : {}),
+      ...(kind === 'patches' ? { patches: spec.patches! } : {}),
     };
 
     try {
@@ -516,8 +539,8 @@ export class MountManager {
     this.mounts.get(instanceId)!.set(id, mount);
     // `persist: false` while reapply() is replaying what is already on disk.
     if (opts.persist !== false) this.writeDecls(instanceId);
-    // A workspace belongs to the consumer that asked for it, not its sidecars.
-    if (!isSidecarConsumer(instanceId) && kind !== 'work') this.queueFanout(() => this.fanoutAdd(instanceId, mount));
+    // A workspace or patch repo belongs to the consumer that asked for it, not its sidecars.
+    if (!isSidecarConsumer(instanceId) && !isVolumeKind(kind)) this.queueFanout(() => this.fanoutAdd(instanceId, mount));
     return mount;
   }
 
@@ -532,7 +555,7 @@ export class MountManager {
     this.writeDecls(instanceId);   // an explicit detach is a change of intent
     if (this.mounts.get(instanceId)!.size === 0) this.mounts.delete(instanceId);
     this.pruneStale(instanceId);
-    if (!isSidecarConsumer(instanceId) && mount.kind !== 'work') this.queueFanout(() => this.fanoutRemove(instanceId, mountId));
+    if (!isSidecarConsumer(instanceId) && !isVolumeKind(mount.kind)) this.queueFanout(() => this.fanoutRemove(instanceId, mountId));
   }
 
   /**
@@ -587,8 +610,8 @@ export class MountManager {
     if (!this.capable().ok) return { rebound, failed };
     for (const [consumer, set] of [...this.mounts]) {
       for (const old of [...set.values()]) {
-        // A workspace does not live in the app's directory.
-        if (old.targetAppId !== targetAppId || old.kind === 'work') continue;
+        // A workspace or patch repo does not live in the app's directory.
+        if (old.targetAppId !== targetAppId || isVolumeKind(old.kind)) continue;
         // A parent's re-add fans out into its sidecars and may already have
         // replaced their inherited copy.
         if (set.get(old.id) !== old) continue;
@@ -802,8 +825,9 @@ export class MountManager {
       // Live instance: re-adopt so the API can see and detach it. Mode is read
       // back from the kernel rather than assumed — we don't know what a
       // previous shell asked for, only what actually exists now.
-      const kind: MountKind = dirName.startsWith(`${WORK_DIR_NAME}/`) ? 'work' : dirName.endsWith('.data') ? 'data' : 'source';
-      const targetAppId = kind === 'work' ? dirName.slice(WORK_DIR_NAME.length + 1)
+      const kind: MountKind = dirName.startsWith(`${WORK_DIR_NAME}/`) ? 'work'
+        : dirName.startsWith(`${PATCHES_DIR_NAME}/`) ? 'patches' : dirName.endsWith('.data') ? 'data' : 'source';
+      const targetAppId = isVolumeKind(kind) ? dirName.slice(dirName.indexOf('/') + 1)
         : kind === 'data' ? dirName.slice(0, -'.data'.length) : dirName;
       const decl = this.readDecls(instanceId).find((d) => d.targetAppId === targetAppId && kindOf(d) === kind);
       const mount: AuraMount = {
@@ -820,6 +844,7 @@ export class MountManager {
         origin: 'adopted',
         declaredAt: decl?.declaredAt ?? new Date().toISOString(),
         ...(kind === 'work' && decl?.workspace ? { workspace: decl.workspace } : {}),
+        ...(kind === 'patches' && decl?.patches ? { patches: decl.patches } : {}),
       };
       if (!this.mounts.has(instanceId)) this.mounts.set(instanceId, new Map());
       this.mounts.get(instanceId)!.set(mount.id, mount);
@@ -886,8 +911,8 @@ export class MountManager {
    *   <dataDir>/scopes/.../apps/<appId>/<instanceId>/.mnt/<dirName>  (legacy)
    */
   private parseMountPath(path: string): { instanceId: string; dirName: string } | null {
-    const work = new RegExp(`/aura/mounts/([^/]+)/${WORK_DIR_NAME}/([^/]+)$`).exec(path);
-    if (work) return { instanceId: work[1]!, dirName: `${WORK_DIR_NAME}/${work[2]!}` };
+    const volume = new RegExp(`/aura/mounts/([^/]+)/(${WORK_DIR_NAME}|${PATCHES_DIR_NAME})/([^/]+)$`).exec(path);
+    if (volume) return { instanceId: volume[1]!, dirName: `${volume[2]!}/${volume[3]!}` };
     const canonical = path.match(/\/aura\/mounts\/([^/]+)\/([^/]+)$/);
     if (canonical) return { instanceId: canonical[1]!, dirName: canonical[2]! };
     const legacy = new RegExp(`/([^/]+)/${MOUNT_DIR_NAME}/([^/]+)$`).exec(path);
@@ -992,5 +1017,5 @@ export class MountManager {
 
 /** What a declaration or request mounts. */
 function kindOf(spec: AddMountSpec): MountKind {
-  return spec.workspace ? 'work' : spec.data ? 'data' : 'source';
+  return spec.patches ? 'patches' : spec.workspace ? 'work' : spec.data ? 'data' : 'source';
 }

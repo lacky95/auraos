@@ -456,6 +456,17 @@ export function workspaceSubpath(userId: string, installationId: string, n: numb
   return `aura/workspaces/${userId}/${installationId}/${n}`;
 }
 
+/**
+ * The patch repository of an installation, relative to the root dataDir
+ * (`aura/patches/<installationId>`): one per installation on the app-data
+ * volume, next to the workspaces, bound into Terminals at
+ * `/mnt/aura/patches/<appId>`. `aura dev` keeps the series there.
+ */
+export function patchRepoSubpath(installationId: string): string {
+  if (!SEGMENT.test(installationId)) throw new Error(`invalid patch repository owner: ${JSON.stringify(installationId)}`);
+  return `aura/patches/${installationId}`;
+}
+
 /** The existing workspace numbers, ascending. */
 export function listWorkspaces(dataDir: string, userId: string, installationId: string): number[] {
   let names: string[] = [];

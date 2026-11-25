@@ -17,7 +17,7 @@ export { compareVersions } from './version.js';
 export { publishGit, publishOci } from './Publisher.js';
 export {
   checkoutApp, cloneUrl, isDevCheckout, readAppSource, readPublishMarker, resolveAppRepository, shellFetchPlace, stampManifest, PUBLISH_MARKER,
-  effectiveSourceMode, installRecordPath, listWorkspaces, workspaceRoot, workspaceSubpath, withoutCredentials, SENSITIVE_APPS,
+  effectiveSourceMode, installRecordPath, listWorkspaces, workspaceRoot, workspaceSubpath, patchRepoSubpath, withoutCredentials, SENSITIVE_APPS,
   SYSTEM_APP_OVERLAYS, SYSTEM_APP_LATER, SYSTEM_APP_LATER_MESSAGE,
 } from './AppSource.js';
 export type {

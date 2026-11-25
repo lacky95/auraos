@@ -7,7 +7,8 @@
  *     patches/0001-<slug>.patch  `git format-patch` output, applied in order
  *
  * One library for both kinds of patch (D53): app patches (`aura dev patch …`,
- * repo at /data/patches/<installationId>/) and, later, system patches
+ * repo: the app-data volume's aura/patches/<installationId>, bound at
+ * /mnt/aura/patches/<appId>) and, later, system patches
  * (/data/patches/system/). It only knows git and the series file; where the
  * repo lives, who approves and how a patched tree is installed belong to the
  * caller.
@@ -27,7 +28,7 @@ import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { parse, stringify } from 'yaml';
 import { z } from 'zod';
-import { MOUNT_ROOT_PATH, WORK_DIR_NAME } from '../app-manager/MountManager.js';
+import { MOUNT_ROOT_PATH, PATCHES_DIR_NAME, WORK_DIR_NAME } from '../app-manager/MountManager.js';
 
 export const SERIES_FILE = 'aura-patches.yaml';
 export const PATCHES_DIR = 'patches';
@@ -61,22 +62,32 @@ export class SeriesError extends Error {}
 // Nobody can answer a credential prompt here.
 const GIT_ENV = { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' };
 
-/** Where app patch repos live (`aura dev`, one per installation). */
-export const patchesRoot = (): string => process.env['AURA_PATCHES_DIR'] ?? '/data/patches';
+/**
+ * Tests only: a local root for patch repos (`<root>/<installationId>`)
+ * instead of the one the shell binds into the Terminal at
+ * `/mnt/aura/patches/<appId>` (the app-data volume's `aura/patches/<installationId>`).
+ */
+export const patchesOverride = (): string | null => process.env['AURA_PATCHES_DIR'] || null;
 
 /**
  * Git refuses a repo another user owns ("dubious ownership"). The shell
- * creates workspace directories (as root, on the app-data volume) that the
- * Terminal's git then works in, and either side may open a patch repo the
- * other made. Exactly these trees are trusted, each by its own path on the
- * command line (`-c safe.directory=<top>`: protected config, written nowhere):
- * a patch repo, a workspace bound into a Terminal (`/mnt/aura/work/<app>`)
- * and a workspace in the shell (`<dataDir>/aura/workspaces/...`). Any other
- * repo keeps git's check.
+ * creates workspace and patch-repo directories (as root, on the app-data
+ * volume) that the Terminal's git then works in, and either side may open a
+ * patch repo the other made. Exactly these trees are trusted, each by its own
+ * path on the command line (`-c safe.directory=<top>`: protected config,
+ * written nowhere): a workspace or patch repo bound into a Terminal
+ * (`/mnt/aura/work/<app>`, `/mnt/aura/patches/<app>`), the same dirs in the
+ * shell (`<dataDir>/aura/workspaces/...`, `<dataDir>/aura/patches/...`), and
+ * the tests' override root. Any other repo keeps git's check.
  */
 export function safeDirectoryArgs(dir: string): string[] {
   const top = resolve(dir);
-  const roots = [patchesRoot(), join(MOUNT_ROOT_PATH, WORK_DIR_NAME), join(process.env['AURA_DATA_DIR'] ?? '/data', 'aura', 'workspaces')];
+  const data = process.env['AURA_DATA_DIR'] ?? '/data';
+  const override = patchesOverride();
+  const roots = [
+    join(MOUNT_ROOT_PATH, WORK_DIR_NAME), join(MOUNT_ROOT_PATH, PATCHES_DIR_NAME),
+    join(data, 'aura', 'workspaces'), join(data, 'aura', 'patches'), ...(override ? [override] : []),
+  ];
   return roots.some((r) => top.startsWith(`${resolve(r)}/`)) ? ['-c', `safe.directory=${top}`] : [];
 }
 

@@ -14,6 +14,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFil
 import { join } from 'node:path';
 import { Command } from 'commander';
 import { registerDev } from '../src/commands/dev.js';
+import { registerMount } from '../src/commands/mount.js';
 import { appFromArgOrCwd, bindWorkspace, WORKSPACE_MARKER } from '../src/commands/dev-source.js';
 import { activateRevision, cleanApp, notifyNeedsRepair, saveWorkspace, startWorkspace, updateSeries } from '../src/commands/dev-patch.js';
 
@@ -100,11 +101,16 @@ function world() {
   let installed = git(upstream, 'rev-parse', 'HEAD');
   const routes = (r: Seen): [number, unknown] | undefined => {
     if (r.url.startsWith(`/api/instances/${INST}/app-source`)) return [200, { ...view(), upstream: { ...view().upstream, commit: installed } }];
-    if (r.method === 'POST' && r.url === `/api/instances/${INST}/app-workspace`) {
+    // The mount API (`aura mount`), kind `work`: what `aura dev patch` binds workspaces with.
+    if (r.method === 'POST' && r.url === `/api/instances/${INST}/mounts` && r.body['kind'] === 'work') {
       const n = r.body['new'] ? ++highest : (r.body['n'] as number | undefined) ?? bound ?? (highest || ++highest);
       mkdirSync(join(wsRoot, String(n)), { recursive: true });
       bound = n;
-      return [200, { ok: true, appId: APP, installationId, n, path: join(wsRoot, String(n)), created: true }];
+      return [200, { ok: true, appId: APP, installationId, n, path: join(wsRoot, String(n)), created: true, mount: { kind: 'work' } }];
+    }
+    if (r.method === 'DELETE' && r.url === `/api/instances/${INST}/mounts/${encodeURIComponent(`${APP}:work`)}`) {
+      bound = null;
+      return [200, { ok: true, removed: `${APP}:work` }];
     }
     return undefined;
   };
@@ -311,7 +317,6 @@ test('activate and update reuse one scratch build workspace; patch start never h
   const w = world();
   const seen = await fakeShell((r) => {
     if (r.method === 'POST' && r.url === `/api/apps/${APP}/activate`) return [200, { ok: true, running: [] }];
-    if (r.method === 'DELETE' && r.url.startsWith(`/api/instances/${INST}/app-workspace`)) return [200, { ok: true, removed: true }];
     return w.routes(r);
   });
   await savedChange(w);
@@ -418,4 +423,118 @@ test('Track P v1: patch start / activate / update refuse a built-in app with the
   assert.equal(status.ok, true);
   assert.match(status.text, /\/mnt\/aura\/com\.aura\.terminal\s+.*read-only/);
   assert.match(status.text, /built-in app — Patching built-in apps comes later/);
+});
+
+test('the patch repo is the installation\'s, bound from the volume (no AURA_PATCHES_DIR): two Terminals share the series, and it outlives the one that saved it', async () => {
+  const w = world();
+  const override = process.env['AURA_PATCHES_DIR'];
+  delete process.env['AURA_PATCHES_DIR'];
+  // The app-data volume's aura/patches/<installationId>, as the shell binds it at /mnt/aura/patches/<app>.
+  const volumeRepo = join(w.root, 'volume', 'aura', 'patches', w.installationId);
+  const bindsOf: Record<string, number> = {};
+  const other = 'com.aura.terminal-7';
+  await fakeShell((r) => {
+    const m = /^\/api\/instances\/([^/?]+)\/(app-source|mounts)/.exec(r.url);
+    const inst = m ? decodeURIComponent(m[1]!) : null;
+    if (inst && m![2] === 'app-source') {
+      const view = w.routes({ ...r, url: r.url.replace(inst, INST) })![1] as Record<string, unknown>;
+      return [200, { ...view, patches: { path: volumeRepo, mounted: (bindsOf[inst] ?? 0) > 0 } }];
+    }
+    if (inst && r.method === 'POST' && r.body['kind'] === 'patches') {
+      bindsOf[inst] = (bindsOf[inst] ?? 0) + 1;
+      mkdirSync(volumeRepo, { recursive: true });
+      return [200, { ok: true, appId: APP, installationId: w.installationId, path: volumeRepo, created: false, mount: { kind: 'patches' } }];
+    }
+    return w.routes({ ...r, url: inst ? r.url.replace(inst, INST) : r.url });
+  });
+  try {
+    await savedChange(w);
+    assert.equal(bindsOf[INST], 1, 'this Terminal bound the patch repo through the mount API');
+    assert.ok(existsSync(join(volumeRepo, 'aura-patches.yaml')), 'saved into the volume dir, not the Terminal\'s /data');
+    assert.ok(!existsSync(join(TEST_ROOT, 'patches', w.installationId)), 'nothing under the test override root');
+
+    // Another Terminal of the same user (the first one is gone): the same series.
+    process.env['APP_INSTANCE_ID'] = other;
+    const program = new Command();
+    program.exitOverride();
+    registerDev(program);
+    const lines: string[] = [];
+    const log = console.log;
+    console.log = (...a: unknown[]) => { lines.push(a.join(' ')); };
+    try { await program.parseAsync(['node', 'aura', 'dev', 'patch', 'list', APP, '--json']); }
+    finally { console.log = log; }
+    const listed = JSON.parse(lines.join('\n')) as { repo: string; series: { patches: Array<{ subject: string }> } };
+    assert.equal(listed.repo, volumeRepo);
+    assert.deepEqual(listed.series.patches.map((p) => p.subject), ['Status shows busy']);
+    assert.equal(bindsOf[other], 1, 'the second Terminal bound the same repository');
+  } finally {
+    if (override !== undefined) process.env['AURA_PATCHES_DIR'] = override;
+  }
+});
+
+test('aura mount <app> --patches, ls and rm: the patches and work kinds through the one mount API; no --work', async () => {
+  const mounts = [
+    { id: APP, targetAppId: APP, kind: 'source', mode: 'ro', containerPath: `/mnt/aura/${APP}`, origin: 'added' },
+    { id: `${APP}:data`, targetAppId: APP, kind: 'data', mode: 'ro', containerPath: `/mnt/aura/${APP}.data`, origin: 'added' },
+    { id: `${APP}:patches`, targetAppId: APP, kind: 'patches', mode: 'rw', containerPath: `/mnt/aura/patches/${APP}`, origin: 'added' },
+    { id: `${APP}:work`, targetAppId: APP, kind: 'work', mode: 'rw', containerPath: `/mnt/aura/work/${APP}`, origin: 'added' },
+  ];
+  const seen = await fakeShell((r) => {
+    if (r.url === '/api/apps') return [200, [{ manifest: { id: APP, scopeId: 'user' }, instances: [] }]];
+    if (r.method === 'GET' && r.url.startsWith(`/api/instances/${INST}/mounts`)) return [200, { capable: true, mounts }];
+    if (r.method === 'POST' && r.url === `/api/instances/${INST}/mounts`) return [200, { ok: true, mount: mounts[2] }];
+    if (r.method === 'DELETE' && r.url.startsWith(`/api/instances/${INST}/mounts/`)) return [200, { ok: true, removed: decodeURIComponent(r.url.split('/').pop()!) }];
+    return undefined;
+  });
+  const run = async (...args: string[]) => {
+    const program = new Command();
+    program.exitOverride();
+    registerMount(program);
+    const lines: string[] = [];
+    const [log, err] = [console.log, console.error];
+    console.log = (...a: unknown[]) => { lines.push(a.join(' ')); }; console.error = console.log;
+    try { await program.parseAsync(['node', 'aura', 'mount', ...args]); return { ok: true, text: lines.join('\n') }; }
+    catch (e) { return { ok: false, text: `${lines.join('\n')}\n${(e as Error).message}` }; }
+    finally { console.log = log; console.error = err; }
+  };
+  const posts = () => seen.filter((r) => r.method === 'POST').map((r) => r.body);
+
+  assert.equal((await run(APP, '--patches')).ok, true);
+  assert.equal((await run('add', APP, '--patches')).ok, true);
+  assert.deepEqual(posts(), [{ targetAppId: APP, kind: 'patches' }, { targetAppId: APP, kind: 'patches' }]);
+  assert.equal((await run(APP, '--patches', '--wr')).ok, false, '--patches takes no --wr');
+  assert.equal((await run(APP, '--work')).ok, false, 'workspaces are aura dev patch start\'s alone');
+  assert.equal(posts().length, 2);
+
+  const ls = await run('ls');
+  for (const kind of ['source', 'data', 'patches', 'work']) assert.match(ls.text, new RegExp(kind));
+  assert.match(ls.text, /\/mnt\/aura\/patches\/io\.test\.status/);
+  assert.match(ls.text, /\/mnt\/aura\/work\/io\.test\.status/);
+
+  await run('rm', `${APP}:patches`, `${APP}:work`);
+  await run('rm', APP);
+  const dels = seen.filter((r) => r.method === 'DELETE').map((r) => decodeURIComponent(r.url.split('/').pop()!));
+  assert.deepEqual(dels, [`${APP}:patches`, `${APP}:work`, APP, `${APP}:data`, `${APP}:patches`, `${APP}:work`]);
+});
+
+test('aura dev patch start binds through the same mount kinds: patches (the repo) and work (the workspace)', async () => {
+  const w = world();
+  const override = process.env['AURA_PATCHES_DIR'];
+  delete process.env['AURA_PATCHES_DIR'];
+  const volumeRepo = join(w.root, 'volume', 'aura', 'patches', w.installationId);
+  const seen = await fakeShell((r) => {
+    if (r.method === 'POST' && r.url === `/api/instances/${INST}/mounts` && r.body['kind'] === 'patches') {
+      mkdirSync(volumeRepo, { recursive: true });
+      return [200, { ok: true, appId: APP, installationId: w.installationId, path: volumeRepo, created: true, mount: { kind: 'patches' } }];
+    }
+    return w.routes(r);
+  });
+  try {
+    await quiet(() => startWorkspace(APP));
+    assert.deepEqual(seen.filter((r) => r.url === `/api/instances/${INST}/mounts`).map((r) => r.body),
+      [{ targetAppId: APP, kind: 'patches' }, { targetAppId: APP, kind: 'work', new: true }]);
+    assert.equal(seen.some((r) => r.url.includes('/app-workspace')), false, 'no parallel route');
+  } finally {
+    if (override !== undefined) process.env['AURA_PATCHES_DIR'] = override;
+  }
 });

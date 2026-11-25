@@ -7,6 +7,7 @@
  *   GET|POST /api/instances/<inst>/app-source      status (+ the source view in the caller)
  *   POST|DELETE /api/instances/<inst>/app-workspace  bind / detach a writable workspace
  *   POST /api/instances/<inst>/app-workspace/clean  delete old workspaces (never the bound one, the newest N or one in use)
+ *   POST /api/instances/<inst>/mounts {kind}         `patches` / `work` binds (mountAppVolume); R2 is a thin call into it
  *   POST /api/apps/<id>/source-mode                 open (owner approval) or close
  *   POST /api/apps/<id>/activate                    install a workspace or the rollback tree
  *
@@ -53,7 +54,7 @@ export interface AppSourceDeps {
   mounts: {
     capable(): { ok: boolean; reason?: string };
     list(instanceId: string): AuraMount[];
-    add(instanceId: string, spec: { targetAppId: string; mode?: 'ro' | 'rw'; workspace?: string }): Promise<AuraMount>;
+    add(instanceId: string, spec: { targetAppId: string; mode?: 'ro' | 'rw'; workspace?: string; patches?: string }): Promise<AuraMount>;
     remove(instanceId: string, mountId: string): Promise<void>;
     rebindTarget(appId: string): Promise<unknown>;
     /** Live binds of a workspace dir (relative to dataDir), in every instance. */
@@ -178,6 +179,7 @@ function workspaceOwner(principal: AccessPrincipal, requested: unknown): string 
 
 const sourcePath = (appId: string) => `${core.MOUNT_ROOT_PATH}/${appId}`;
 const workPath = (appId: string) => `${core.MOUNT_ROOT_PATH}/${core.WORK_DIR_NAME}/${appId}`;
+const patchesPath = (appId: string) => `${core.MOUNT_ROOT_PATH}/${core.PATCHES_DIR_NAME}/${appId}`;
 const workNumber = (m: AuraMount | undefined): number | null => {
   const n = Number(m?.workspace?.split('/').pop());
   return Number.isInteger(n) && n > 0 ? n : null;
@@ -229,6 +231,7 @@ export async function appSourceStatus(request: Request, instanceId: string | und
     }
   }
   const work = deps.mounts.list(inst).find((m) => m.id === `${app.id}:work`);
+  const repo = deps.mounts.list(inst).find((m) => m.id === `${app.id}:patches`);
   const workspaces = key ? core.listWorkspaces(deps.dataDir, userId, key) : [];
   const path = view?.containerPath ?? sourcePath(app.id);
   const builtIn = (app.scopeId === 'system' || isOverlay(deps, app)) && !core.SYSTEM_APP_OVERLAYS;
@@ -246,49 +249,83 @@ export async function appSourceStatus(request: Request, instanceId: string | und
     upstream: upstreamOf(deps, app),
     source: { path, writable: view?.mode === 'rw', mounted: !!view },
     workspace: work ? { n: workNumber(work), path: work.containerPath } : null,
+    patches: { path: repo?.containerPath ?? patchesPath(app.id), mounted: !!repo && repo.patches === (key ? core.patchRepoSubpath(key) : null) },
     workspaces,
     user: userId,
     next,
   });
 }
 
-// ── R2: the workspace bind ──────────────────────────────────────────────────
+// ── R2: the patch repo and workspace binds (mount kinds `patches`, `work`) ──
 
-export async function bindWorkspace(request: Request, instanceId: string | undefined, deps: AppSourceDeps): Promise<Response> {
+/**
+ * `aura mount <app> --patches | --work [n]` (POST /api/instances/<inst>/mounts
+ * with `kind`), the one way to bind them; `aura dev` uses it too. Both are
+ * dirs of the app-data volume, bound writable into the calling instance:
+ *
+ *   patches  the installation's patch repository, `aura/patches/<installationId>`
+ *            at /mnt/aura/patches/<appId>: one per installation, so every
+ *            Terminal of every user who may patch it shares the series, and it
+ *            outlives them (multi-user rule for now: writable for the owner and
+ *            those users' own instances)
+ *   work     workspace `n` of this user and installation,
+ *            `aura/workspaces/<userId>/<installationId>/<n>` at /mnt/aura/work/<appId>
+ *            (`n` default: the one bound now, else the highest, else 1; `new`: highest + 1)
+ *
+ * Another dir of the same kind bound there for that app is replaced.
+ *   200 { ok, mount, appId, installationId, path, created, n? }
+ */
+export async function mountAppVolume(
+  request: Request, instanceId: string | undefined, deps: AppSourceDeps,
+  body: { app: unknown; kind: 'patches' | 'work'; n?: unknown; new?: unknown },
+): Promise<Response> {
   const principal = await deps.authenticate(request);
   if (principal instanceof Response) return principal;
   const inst = consumer(deps, instanceId);
   if (inst instanceof Response) return inst;
-  const body = await readJson(request);
-  if (body instanceof Response) return body;
-  const app = resolveApp(deps, body['app']);
+  const app = resolveApp(deps, body.app);
   if (app instanceof Response) return app;
-  if (body['n'] !== undefined && (!Number.isInteger(body['n']) || (body['n'] as number) < 1 || (body['n'] as number) > 9999)) {
+  if (body.n !== undefined && (!Number.isInteger(body.n) || (body.n as number) < 1 || (body.n as number) > 9999)) {
     return json({ error: 'invalid-workspace', message: 'n must be a whole number from 1 to 9999' }, 400);
   }
   const cap = deps.mounts.capable();
   if (!cap.ok) return json({ error: 'mounts-unavailable', message: cap.reason ?? 'mount propagation is unavailable on this host' }, 503);
   const { key } = await patchInstallation(deps, app);
   if (!key) return json({ error: 'no-installation', message: `${app.id} has no installation record yet; try again once it has started` }, 409);
-  const userId = actingUser(principal);
 
-  const existing = core.listWorkspaces(deps.dataDir, userId, key);
-  const bound = deps.mounts.list(inst).find((m) => m.id === `${app.id}:work`);
-  const boundHere = bound?.workspace?.startsWith(`aura/workspaces/${userId}/${key}/`) ? workNumber(bound) : null;
-  const n = typeof body['n'] === 'number' ? body['n']
-    : body['new'] === true ? (existing.at(-1) ?? 0) + 1
-      : boundHere ?? existing.at(-1) ?? 1;
+  const bound = deps.mounts.list(inst).find((m) => m.id === `${app.id}:${body.kind}`);
   let subpath: string;
-  try { subpath = core.workspaceSubpath(userId, key, n); }
-  catch (err) { return json({ error: 'invalid-workspace', message: (err as Error).message }, 400); }
+  let n: number | undefined;
+  if (body.kind === 'patches') {
+    subpath = core.patchRepoSubpath(key);
+  } else {
+    const userId = actingUser(principal);
+    const existing = core.listWorkspaces(deps.dataDir, userId, key);
+    const boundHere = bound?.workspace?.startsWith(`aura/workspaces/${userId}/${key}/`) ? workNumber(bound) : null;
+    n = typeof body.n === 'number' ? body.n
+      : body.new === true ? (existing.at(-1) ?? 0) + 1
+        : boundHere ?? existing.at(-1) ?? 1;
+    try { subpath = core.workspaceSubpath(userId, key, n); }
+    catch (err) { return json({ error: 'invalid-workspace', message: (err as Error).message }, 400); }
+  }
   const created = !existsSync(join(deps.dataDir, subpath));
+  const same = (m: AuraMount) => (body.kind === 'patches' ? m.patches : m.workspace) === subpath;
+  let mount = bound && same(bound) ? bound : undefined;
   try {
-    if (bound && bound.workspace !== subpath) await deps.mounts.remove(inst, bound.id);
-    if (!bound || bound.workspace !== subpath) await deps.mounts.add(inst, { targetAppId: app.id, workspace: subpath });
+    if (bound && !mount) await deps.mounts.remove(inst, bound.id);
+    mount ??= await deps.mounts.add(inst, { targetAppId: app.id, ...(body.kind === 'patches' ? { patches: subpath } : { workspace: subpath }) });
   } catch (err) {
     return json({ error: 'mount-failed', message: (err as Error).message }, 409);
   }
-  return json({ ok: true, appId: app.id, installationId: key, n, path: workPath(app.id), created });
+  const path = body.kind === 'patches' ? patchesPath(app.id) : workPath(app.id);
+  return json({ ok: true, mount, appId: app.id, installationId: key, path, created, ...(n !== undefined ? { n } : {}) });
+}
+
+/** R2 POST `{ app, n?, new? }`: kept within the branch, the same code as `aura mount <app> --work`. */
+export async function bindWorkspace(request: Request, instanceId: string | undefined, deps: AppSourceDeps): Promise<Response> {
+  const body = await readJson(request);
+  if (body instanceof Response) return body;
+  return mountAppVolume(request, instanceId, deps, { app: body['app'], kind: 'work', n: body['n'], new: body['new'] });
 }
 
 export async function detachWorkspace(request: Request, instanceId: string | undefined, deps: AppSourceDeps): Promise<Response> {

@@ -38,7 +38,7 @@ import { installWithChoices } from './nexus.js';
 import type { RestartResult } from './app.js';
 import {
   ACTIVE_REF, appFromArgOrCwd, bindWorkspace, cleanWorkspaces, detachWorkspace, findWorkspace, getAppSource, gitOut,
-  patchRepoDir, readWorkspaceMarker, refuseBuiltIn, upstreamBase, writeWorkspaceMarker, type AppSourceView, type WorkspaceMarker,
+  patchRepoOf, readWorkspaceMarker, refuseBuiltIn, upstreamBase, writeWorkspaceMarker, type AppSourceView, type WorkspaceMarker,
 } from './dev-source.js';
 
 const GIT_ENV = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
@@ -73,15 +73,18 @@ function describeFailure(r: Extract<ApplyResult, { ok: false }>): string {
 export interface StartResult { path: string; n: number; created: boolean; marker: WorkspaceMarker; apply: ApplyResult | null }
 
 /**
- * Bind a workspace of `app` into this Terminal and, when it is empty, fill it:
- * clone the base, check it out, apply the saved series (stopping at a conflict
- * for the user to resolve). `base`: another upstream ref to start from (repair
- * after an update).
+ * The only way a workspace is created, filled and mounted (`aura mount` does
+ * not offer it). Re-attaches this user's workspace of `app` — the one bound
+ * here, else the newest one this user has (made in any Terminal), never the
+ * scratch build workspace — or, with `new` or none existing, a fresh one.
+ * An empty one is filled: clone the base, check it out, apply the saved
+ * series (stopping at a conflict for the user to resolve). `base`: another
+ * upstream ref to start from (repair after an update).
  */
 export async function startWorkspace(app: string, opts: { base?: string; new?: boolean } = {}): Promise<StartResult> {
   const v = await getAppSource(app);
   refuseBuiltIn(v);
-  const repo = patchRepoDir(v.installationId);
+  const repo = await patchRepoOf(v);
   const series = seriesAt(repo);
   const upstream = upstreamBase(v);
   const from: SeriesBase | null = series?.base ?? upstream;
@@ -89,7 +92,9 @@ export async function startWorkspace(app: string, opts: { base?: string; new?: b
     fail(`${v.appId} does not say where its source lives (no upstream repository${v.upstream?.commit ? '' : ' or commit'}) — `
       + 'its author publishes with `aura dev publish --repo <url>`; until then it cannot be patched');
   }
-  let ws = await bindWorkspace(v.appId, opts.new ? { new: true } : {});
+  const scratch = Number(gitOut(repo, ['config', '--get', scratchKey(v)]));
+  const reattach = opts.new ? undefined : v.workspace?.n ?? [...v.workspaces].reverse().find((n) => n !== scratch);
+  let ws = await bindWorkspace(v.appId, reattach !== undefined ? { n: reattach } : { new: true });
   // The build workspace of activate/update is no place to edit: a fresh one instead.
   if (readWorkspaceMarker(ws.path)?.scratch) ws = await bindWorkspace(v.appId, { new: true });
   const existing = readWorkspaceMarker(ws.path);
@@ -129,7 +134,7 @@ export async function startWorkspace(app: string, opts: { base?: string; new?: b
 export interface SavedPatches { repo: string; commit: string; changed: boolean; files: string[] }
 
 /** Commit pending work in the workspace (with `message`), then save the series into the patch repo. */
-export function saveWorkspace(wsRoot: string, message?: string): SavedPatches {
+export async function saveWorkspace(wsRoot: string, message?: string): Promise<SavedPatches> {
   const marker = readWorkspaceMarker(wsRoot);
   if (!marker) fail(`${wsRoot} is not a patch workspace`);
   if (marker!.scratch) fail(`${wsRoot} is the build workspace of activate/update — edit in your own (aura dev patch start)`);
@@ -142,7 +147,7 @@ export function saveWorkspace(wsRoot: string, message?: string): SavedPatches {
     git(wsRoot, [...identity(wsRoot), 'commit', '-q', '-m', message!]);
   }
   const patches = exportPatches(wsRoot, marker!.baseCommit);
-  const repo = patchRepoDir(marker!.installationId);
+  const repo = await patchRepoOf(await getAppSource(marker!.appId));
   const subjects = patches.map((p) => p.subject);
   const r = saveSeries(repo, {
     app: marker!.appId, base: marker!.base, patches,
@@ -201,7 +206,7 @@ export interface CleanResult {
  */
 export async function cleanApp(app: string, opts: { keep?: number; force?: boolean; onLoss?: (held: CleanResult['held']) => void } = {}): Promise<CleanResult> {
   const v = await getAppSource(app);
-  const repo = patchRepoDir(v.installationId);
+  const repo = await patchRepoOf(v);
   const dry = await cleanWorkspaces(v.appId, { keep: opts.keep, dryRun: true });
   const held: CleanResult['held'] = dry.inUse.map((n) => ({ n, why: ['bound in another Terminal'] }));
   const inspect = dry.candidates.filter((n) => !dry.inUse.includes(n));
@@ -248,7 +253,7 @@ export async function installWorkspace(v: AppSourceView, n: number, rev: string)
   const res = await activateRoute(v.appId, { workspace: n });
   if (!res) return { status: 'not-approved', reason: 'the owner did not approve the activation' };
   if (!res.ok) return { status: 'failed', reason: res.message ?? res.error ?? 'activation failed' };
-  const repo = patchRepoDir(v.installationId);
+  const repo = await patchRepoOf(v);
   const previous = gitOut(repo, ['rev-parse', '-q', '--verify', ACTIVE_REF]);
   git(repo, ['update-ref', ACTIVE_REF, rev]);
   if (!res.running?.length) return { status: 'installed', rev, restarted: null, workspace: n };
@@ -279,7 +284,7 @@ const scratchKey = (v: AppSourceView) => `aura.${v.user ?? 'default'}.scratch`;
  * edited here, else a new one (recorded).
  */
 async function scratchWorkspace(v: AppSourceView) {
-  const repo = patchRepoDir(v.installationId);
+  const repo = await patchRepoOf(v);
   const known = Number(gitOut(repo, ['config', '--get', scratchKey(v)]));
   const reuse = Number.isInteger(known) && v.workspaces.includes(known) && known !== v.workspace?.n;
   const ws = await bindWorkspace(v.appId, reuse ? { n: known } : { new: true });
@@ -322,7 +327,7 @@ async function rebind(v: AppSourceView): Promise<void> {
 export async function activateRevision(app: string, rev?: string): Promise<ActivateOutcome> {
   const v = await getAppSource(app);
   refuseBuiltIn(v);
-  const repo = patchRepoDir(v.installationId);
+  const repo = await patchRepoOf(v);
   const commit = existsSync(join(repo, '.git')) ? gitOut(repo, ['rev-parse', '-q', '--verify', `${rev ?? 'HEAD'}^{commit}`]) : null;
   if (!commit) fail(rev ? `'${rev}' is not a revision of ${repo}` : `nothing saved for ${v.appId} yet — aura dev patch start, change, aura dev patch save`);
   const series = seriesAt(repo, commit!)!;
@@ -371,7 +376,7 @@ export function resolveRemoteRef(repository: string, ref: string): string {
 export async function updateSeries(app: string, opts: { ref?: string; activate?: boolean } = {}): Promise<ActivateOutcome | { status: 'current'; commit: string } | { status: 'saved'; rev: string }> {
   const v = await getAppSource(app);
   refuseBuiltIn(v);
-  const repo = patchRepoDir(v.installationId);
+  const repo = await patchRepoOf(v);
   const series = seriesAt(repo);
   if (!series?.patches.length) fail(`${v.appId} has no saved patches — update it with aura nexus app update ${v.appId}`);
   const base = series!.base;
@@ -472,10 +477,10 @@ export function registerDevPatch(dev: Command): void {
     .option('-m, --message <msg>', 'Commit message for uncommitted changes (the patch subject)')
     .option('-C, --workspace <dir>', 'The workspace (default: the one this directory is in)')
     .description('Commit the workspace and save its patches + aura-patches.yaml as one commit in the patch repo.')
-    .action((o: { message?: string; workspace?: string }) => {
+    .action(async (o: { message?: string; workspace?: string }) => {
       const ws = findWorkspace(o.workspace ?? process.cwd());
       if (!ws) fail('not in a patch workspace — cd to /mnt/aura/work/<app> (aura dev patch start <app>)');
-      const r = saveWorkspace(ws!.root, o.message);
+      const r = await saveWorkspace(ws!.root, o.message);
       if (!r.changed) { info(`nothing new — the series is saved as ${r.commit.slice(0, 12)}`); return; }
       ok(`saved ${r.files.length} patch(es) as ${r.commit.slice(0, 12)} in ${r.repo}`);
       for (const f of r.files) console.log(`  ${f}`);
@@ -489,7 +494,7 @@ export function registerDevPatch(dev: Command): void {
     .description('The saved series: base, patches, the saved and the active revision, the remote.')
     .action(async (app: string | undefined, o: { json?: boolean }) => {
       const v = await getAppSource(appFromArgOrCwd(app));
-      const repo = patchRepoDir(v.installationId);
+      const repo = await patchRepoOf(v);
       const series = seriesAt(repo);
       const head = series ? gitOut(repo, ['rev-parse', 'HEAD']) : null;
       const active = series ? gitOut(repo, ['rev-parse', '-q', '--verify', ACTIVE_REF]) : null;
@@ -510,7 +515,7 @@ export function registerDevPatch(dev: Command): void {
     .description('Show or set the patch repo\'s remote, to share the customization; --push pushes it.')
     .action(async (url: string | undefined, o: { push?: boolean; app?: string }) => {
       const v = await getAppSource(appFromArgOrCwd(o.app));
-      const repo = patchRepoDir(v.installationId);
+      const repo = await patchRepoOf(v);
       if (!existsSync(join(repo, '.git'))) fail(`no patches saved for ${v.appId} yet`);
       if (url) {
         if (url.startsWith('-')) fail('invalid url');

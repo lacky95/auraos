@@ -299,3 +299,34 @@ test('a workspace binds writable at /mnt/aura/work/<app> in the calling consumer
   await w.mm.remove(INST, 'io.shop.app:work');
   assert.equal(w.kernel.size, 0);
 });
+
+test('the patch repo binds writable at /mnt/aura/patches/<app>: one dir per installation, shared by every Terminal, outliving them', async (t) => {
+  const w = world(t, { closed: new Set(['io.shop.app']) });
+  const OTHER = 'io.test.app-3';
+  const repo = 'aura/patches/inst-1234';
+  const a = await w.mm.add(INST, { targetAppId: 'io.shop.app', patches: repo });
+  const b = await w.mm.add(OTHER, { targetAppId: 'io.shop.app', patches: repo });
+  assert.deepEqual([a.id, a.kind, a.mode, a.containerPath, a.patches], ['io.shop.app:patches', 'patches', 'rw', '/mnt/aura/patches/io.shop.app', repo]);
+  assert.equal(a.hostSource, join(w.dataDir, repo), 'on the app-data volume, not in an instance\'s data');
+  assert.equal(b.hostSource, a.hostSource, 'two Terminals, one repository');
+  assert.equal(w.kernel.get(join(w.mountRootDir(OTHER), 'patches', 'io.shop.app')), 'rw');
+  assert.deepEqual(w.decls(INST), [{ targetAppId: 'io.shop.app', mode: 'rw', data: false, declaredAt: a.declaredAt, patches: repo }]);
+  await assert.rejects(w.mm.add(INST, { targetAppId: 'io.other.app', patches: 'aura/workspaces/x' }), /invalid patch repository/);
+
+  // A workspace and the patch repo of one app live side by side.
+  const ws = await w.mm.add(INST, { targetAppId: 'io.shop.app', workspace: 'aura/workspaces/default/inst-1234/1' });
+  assert.equal(ws.containerPath, '/mnt/aura/work/io.shop.app');
+
+  // The series written through one Terminal survives that Terminal going away.
+  fs.writeFileSync(join(w.dataDir, repo, 'aura-patches.yaml'), 'app: io.shop.app\n');
+  w.mm.removeAll(INST);
+  w.mm.forget(INST);
+  assert.equal(fs.readFileSync(join(w.dataDir, repo, 'aura-patches.yaml'), 'utf-8'), 'app: io.shop.app\n');
+  assert.ok(w.mm.list(OTHER).some((m) => m.id === 'io.shop.app:patches'), 'still bound in the other Terminal');
+
+  // Shell restart: adopted as a patches mount.
+  const fresh = new MountManager({ ...w.mm.opts });
+  fresh.reconcile(new Set([OTHER]));
+  const adopted = fresh.list(OTHER).find((x) => x.id === 'io.shop.app:patches');
+  assert.deepEqual([adopted.kind, adopted.patches, adopted.containerPath], ['patches', repo, '/mnt/aura/patches/io.shop.app']);
+});

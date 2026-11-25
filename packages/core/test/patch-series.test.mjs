@@ -187,3 +187,19 @@ test('git ownership: a patch repo or workspace another user owns works; any othe
     if (before === undefined) delete process.env.AURA_PATCHES_DIR; else process.env.AURA_PATCHES_DIR = before;
   }
 });
+
+test('git ownership: the patch repo and workspaces the shell binds into a Terminal, and their volume dirs, are the trusted roots', () => {
+  const before = process.env.AURA_PATCHES_DIR;
+  delete process.env.AURA_PATCHES_DIR;
+  try {
+    const data = process.env.AURA_DATA_DIR ?? '/data';
+    for (const dir of ['/mnt/aura/patches/io.test.app', '/mnt/aura/work/io.test.app', join(data, 'aura', 'patches', 'inst-1'), join(data, 'aura', 'workspaces', 'default', 'inst-1', '2')]) {
+      assert.deepEqual(safeDirectoryArgs(dir), ['-c', `safe.directory=${dir}`], dir);
+    }
+    for (const dir of ['/data/patches/inst-1', '/mnt/aura/io.test.app', '/mnt/aura/patches', join(data, 'scopes', 'x')]) {
+      assert.deepEqual(safeDirectoryArgs(dir), [], dir);
+    }
+  } finally {
+    if (before !== undefined) process.env.AURA_PATCHES_DIR = before;
+  }
+});

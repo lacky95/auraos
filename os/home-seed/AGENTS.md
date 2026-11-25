@@ -65,8 +65,9 @@ The grammar is kubectl-style: `aura <verb> <resource> [name]`. Short resource na
 
 **Mount another app's files live.**
 - `aura mount` opens a wizard.
-- `aura mount add <app…>` attaches files; add `--wr` to make them writable. `--wr` is refused for a closed install (see "Working on Aura apps").
-- `aura mount ls` and `aura mount rm` show and detach mounts.
+- `aura mount <app…>` (or `aura mount add <app…>`) attaches files; add `--wr` to make them writable. `--wr` is refused for a closed install (see "Working on Aura apps").
+- `aura mount <app> --patches` attaches the app's patch repository at `/mnt/aura/patches/<appId>` (writable; one per installation, shared by all your Terminals).
+- `aura mount ls` and `aura mount rm` show and detach mounts of every kind: source, data, patches and work (patch workspaces).
 - Mounts are read-only by default and need no restart.
 - They only work in container sandboxes, and the target app needs the `apps.mount` permission.
 
@@ -92,8 +93,8 @@ The grammar is kubectl-style: `aura <verb> <resource> [name]`. Short resource na
 - **Read the source** at `/mnt/aura/<appId>`. `status` binds it into this Terminal.
 - **A closed install** (the default for installed apps, and always for system apps) is read-only. A write fails with "Read-only file system". That is expected: don't work around it.
 - **To change a closed app**, use a patch workspace:
-  1. `aura dev patch start <app>` gives you a writable copy at `/mnt/aura/work/<appId>`. Edit and test there.
-  2. `aura dev patch save` saves your change as a versioned patch.
+  1. `aura dev patch start <app>` gives you a writable copy at `/mnt/aura/work/<appId>`: your existing workspace of that app if you have one (from any Terminal), else a fresh one (`--new` always starts fresh). Workspaces are made only this way. Edit and test there.
+  2. `aura dev patch save` saves your change as a versioned patch into the app's patch repository (`/mnt/aura/patches/<appId>`, shared by all your Terminals).
   3. `aura dev patch activate` installs it. The owner approves it in the desktop; the previous version is kept for rollback.
 - **Built-in apps** (Settings, Terminal, …) are read-only: you can read their source, but patching built-in apps comes later. Use a normal app (installed from Nexus, or your own) or Developer Mode.
 - **An open install** (the owner ran `aura dev open <app>`) and **your own apps** (`aura dev new`) are writable: `status` prints the writable path.
