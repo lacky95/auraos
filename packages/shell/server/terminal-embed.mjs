@@ -11,6 +11,9 @@
  *                           only in the life of the Terminal instance it was
  *                           made in (`binding`): session names are reused.
  *   terminal.sessions.list  privileged, separate: read every session's metadata.
+ *   terminal.screen.read    privileged, separate (5.16 programmatic access): with
+ *                           the list grant, what a listed session's screen shows,
+ *                           as derived facts only (lib/terminalScreen.ts).
  *
  * The System Terminal itself (system scope) keeps full control. A caller that
  * is not a verified app (the owner's desktop, the CLI, an agent, anyone who
@@ -63,6 +66,12 @@ export function createTerminalAccess(deps) {
     try { return await deps.authorize(appId, 'terminal.sessions.list'); } catch { return false; }
   }
 
+  /** Whether `appId` may read the screen state of the sessions it may list (both grants). */
+  async function mayReadScreens(appId) {
+    if (!(await holdsListGrant(appId))) return false;
+    try { return await deps.authorize(appId, 'terminal.screen.read'); } catch { return false; }
+  }
+
   /**
    * Whether `appId` may show and close this one session: its app grant, plus
    * the session's own, made in the instance life that runs now.
@@ -79,7 +88,7 @@ export function createTerminalAccess(deps) {
     }
   }
 
-  return { isSystemTerminal, holdsEmbedGrant, holdsListGrant, mayUseSession };
+  return { isSystemTerminal, holdsEmbedGrant, holdsListGrant, mayReadScreens, mayUseSession };
 }
 
 const core = () => import('@aura/core');
@@ -103,6 +112,21 @@ export function terminalUpstream(mgr, instanceId) {
   return { inst, base: `http://${up?.host ?? 'localhost'}:${up?.port ?? inst.port}` };
 }
 
+/**
+ * A request to a running Terminal instance's own API, sent as the OS (the
+ * instance's identity headers), or null when it is not running. Throws when
+ * the instance does not answer in `timeoutMs`.
+ */
+export async function fetchTerminal(mgr, instanceId, path, init = {}, timeoutMs = 10_000) {
+  const up = terminalUpstream(mgr, instanceId);
+  if (!up) return null;
+  return fetch(`${up.base}${path}`, {
+    ...init,
+    headers: { 'x-aura-app-id': up.inst.appId, 'x-aura-instance-id': up.inst.instanceId },
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+}
+
 const live = createTerminalAccess({
   scopeOf: async (appId) => (await core()).getAppManager().registry.getScopeId(appId),
   authorize: async (appId, permission) => {
@@ -115,7 +139,7 @@ const live = createTerminalAccess({
   },
   sessionLife: (sessionId) => instanceLife(terminalSessionInstance(sessionId)),
 });
-export const { isSystemTerminal, holdsEmbedGrant, holdsListGrant, mayUseSession } = live;
+export const { isSystemTerminal, holdsEmbedGrant, holdsListGrant, mayReadScreens, mayUseSession } = live;
 
 /**
  * Record that `appId` created (or was shown) `sessionId`, so it may show and

@@ -57,6 +57,13 @@ export const BUILTIN_PERMISSIONS = [
   /** List the metadata of every Terminal session (`/api/terminal/sessions`). Privileged like `terminal.embed`. */
   'terminal.sessions.list',
   /**
+   * Programmatic screen access to the owner's Terminal (5.16), together with
+   * `terminal.sessions.list`: what a listed session's screen shows, as derived
+   * facts (`/api/terminal/sessions/screen`: an agent is at work), never the
+   * rows. Privileged like `terminal.embed`.
+   */
+  'terminal.screen.read',
+  /**
    * Ask the owner to confirm an action in the shell's own dialog
    * (`osClient.user.confirm`, D49). The app gets back only whether the owner
    * confirmed and a single-use approval id; never a password. ENFORCED:

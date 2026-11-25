@@ -38,9 +38,10 @@ export const ENFORCED_PERMISSIONS: readonly string[] = [
   'notifications.systemModal',
   // Deprecated alias of systemModal (phase 6 rename) — same gate.
   'notifications.desktopModal',
-  // The owner's System Terminal (D25, D29): embed its sessions, list them.
+  // The owner's System Terminal (D25, D29, 5.16): embed its sessions, list them, read their screen state.
   'terminal.embed',
   'terminal.sessions.list',
+  'terminal.screen.read',
   // Owner confirmation through the shell's dialog (D49). Declaring it is enough.
   'user.confirm',
 ];

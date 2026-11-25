@@ -19,7 +19,7 @@ import {
 } from '../src/lib/identity.js';
 import { issueSetupCode, SetupCodeRefused } from '../src/lib/setup-ticket.js';
 import { fetchWhoami, localHints } from '../src/commands/identity.js';
-import { printAccessReport } from '../src/commands/admin.js';
+import { notifPermission, printAccessReport } from '../src/commands/admin.js';
 import { eventKey, readAccessReport } from '../../shell/src/lib/access/report.ts';
 import { osAuthHeaders } from '../../app-sdk/src/os-auth.ts';
 
@@ -390,4 +390,8 @@ test('the CLI and the SDK agree on what is a proxy path', () => {
   }
   assert.equal(isProxyPath('/api/proxy/a'), true);
   assert.equal(isProxyPath('/api/apps'), false);
+});
+
+test('the owner\'s Terminal grants pass by their full name, terminal.screen.read included', () => {
+  for (const p of ['terminal.embed', 'terminal.sessions.list', 'terminal.screen.read']) assert.equal(notifPermission(p), p);
 });

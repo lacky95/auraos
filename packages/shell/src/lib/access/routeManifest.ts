@@ -410,6 +410,10 @@ const routes: RouteAccessManifest['routes'] = {
   '/api/terminal/sessions/ended': {
     methods: { POST: rule(INSTANCE, 'app', { systemApp: 'com.aura.terminal' }) },
   },
+  // Programmatic screen access (5.16): both grants; derived facts only (lib/terminalScreen.ts).
+  '/api/terminal/sessions/screen': {
+    methods: { GET: rule(APP_PERMISSION, 'app', { permissions: ['terminal.sessions.list', 'terminal.screen.read'] }) },
+  },
   '/api/terminal/sessions': {
     methods: {
       GET: rule(APP_PERMISSION, 'app', { permissions: ['terminal.sessions.list'] }),

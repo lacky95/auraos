@@ -38,7 +38,7 @@ const apps = new Map([
   // Phase 6 rename: a manifest that still requests the deprecated name.
   ['com.example.legacy', { permissions: ['system.notifications', 'notifications.desktopModal'], scope: 'user' }],
   // D25: an app that requests the owner's Terminal grants.
-  ['com.example.embedder', { permissions: ['terminal.embed', 'terminal.sessions.list'], scope: 'user' }],
+  ['com.example.embedder', { permissions: ['terminal.embed', 'terminal.sessions.list', 'terminal.screen.read'], scope: 'user' }],
   // Phase 3: an app that declares an OS-wide KV write.
   ['com.example.themer', { permissions: ['system.kv.os.theme.write'], scope: 'user' }],
 ]);
@@ -479,10 +479,10 @@ test('rename: stored desktopModal grants migrate to systemModal (subject, scope,
   await grants.revoke(subject, 'notifications.systemModal');
 });
 
-test('terminal.embed and terminal.sessions.list: requested AND owner-granted, per app, revocable', async () => {
+test('terminal.embed, terminal.sessions.list and terminal.screen.read: requested AND owner-granted, per app, revocable', async () => {
   const BY = adminAttribution(ADMIN);
   const app = { kind: 'app', id: 'com.example.embedder' };
-  for (const perm of ['terminal.embed', 'terminal.sessions.list']) {
+  for (const perm of ['terminal.embed', 'terminal.sessions.list', 'terminal.screen.read']) {
     assert.ok(PRIVILEGED_PERMISSIONS.includes(perm) && ENFORCED_PERMISSIONS.includes(perm), perm);
     assert.equal((await authz.authorize(inst('com.example.embedder'), perm)).allow, false, `${perm} before the grant`);
     assert.equal((await authz.authorize(inst('com.example.basic'), perm)).allow, false, `${perm} not requested`);
@@ -490,6 +490,11 @@ test('terminal.embed and terminal.sessions.list: requested AND owner-granted, pe
   await grants.grant(app, 'terminal.embed', { by: BY, appScope: 'user' });
   assert.equal((await authz.authorize(inst('com.example.embedder'), 'terminal.embed')).allow, true);
   assert.equal((await authz.authorize(inst('com.example.embedder'), 'terminal.sessions.list')).allow, false, 'listing is separate');
+  assert.equal((await authz.authorize(inst('com.example.embedder'), 'terminal.screen.read')).allow, false, 'screen reads are separate');
+  await grants.grant(app, 'terminal.screen.read', { by: BY, appScope: 'user' });
+  assert.equal((await authz.authorize(inst('com.example.embedder'), 'terminal.screen.read')).allow, true);
+  await grants.revoke(app, 'terminal.screen.read');
+  assert.equal((await authz.authorize(inst('com.example.embedder'), 'terminal.screen.read')).allow, false);
   // A grant to an app that does not request it does nothing.
   await grants.grant({ kind: 'app', id: 'com.example.basic' }, 'terminal.embed', { by: BY, appScope: 'user' });
   assert.equal((await authz.authorize(inst('com.example.basic'), 'terminal.embed')).allow, false);

@@ -3,7 +3,7 @@ import * as core from '@aura/core';
 import { jsonResponse } from '../../../lib/appResponse.js';
 import { verifiedAppCaller } from '../../../lib/terminalCaller.ts';
 import {
-  forgetSessionGrants, holdsListGrant, isSystemTerminal, mayUseSession, terminalSessionInstance, terminalUpstream,
+  fetchTerminal, forgetSessionGrants, holdsListGrant, isSystemTerminal, mayUseSession, terminalSessionInstance,
 } from '../../../../server/terminal-embed.mjs';
 
 /**
@@ -31,16 +31,9 @@ async function appCaller(request: Request): Promise<{ appId: string } | null | R
 }
 
 async function forward(instanceId: string, path: string, init: RequestInit = {}): Promise<Response> {
-  const up = terminalUpstream(core.getAppManager(), instanceId);
-  if (!up) return jsonResponse({ error: 'instance-not-running', message: `${instanceId} is not a running Terminal instance` }, 404);
-  const { inst } = up;
-  const url = `${up.base}${path}`;
   try {
-    const res = await fetch(url, {
-      ...init,
-      headers: { 'x-aura-app-id': inst.appId, 'x-aura-instance-id': inst.instanceId },
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-    });
+    const res = await fetchTerminal(core.getAppManager(), instanceId, path, init, TIMEOUT_MS);
+    if (!res) return jsonResponse({ error: 'instance-not-running', message: `${instanceId} is not a running Terminal instance` }, 404);
     const text = await res.text();
     return new Response(text, {
       status: res.status,

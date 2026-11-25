@@ -39,7 +39,9 @@ export const PRIVILEGED_PERMISSIONS = [
   // The owner's System Terminal (D25, D29, 5.16). `terminal.embed`: create
   // Terminal sessions and show and close the ones it created (each is also
   // granted per session). `terminal.sessions.list`: read every session's metadata.
-  'terminal.embed', 'terminal.sessions.list',
+  // `terminal.screen.read`: programmatic screen access (5.16), with the list
+  // grant: whether a listed session's screen shows an agent at work.
+  'terminal.embed', 'terminal.sessions.list', 'terminal.screen.read',
 ] as const;
 /**
  * Deprecated permission names → their current name. Accepted by grant /
