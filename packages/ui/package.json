@@ -16,6 +16,13 @@
       "types": "./dist/lib/utils.d.ts"
     }
   },
+  "typesVersions": {
+    "*": {
+      "lib/utils": [
+        "./dist/lib/utils.d.ts"
+      ]
+    }
+  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json && node -e \"const f=require('node:fs');f.mkdirSync('dist/styles',{recursive:true});f.cpSync('src/styles','dist/styles',{recursive:true})\"",
     "dev": "tsc -p tsconfig.build.json --watch",
