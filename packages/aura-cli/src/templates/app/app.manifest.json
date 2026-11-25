@@ -8,5 +8,6 @@
   "tools": {{TOOLS_JSON}},
   "instanceMode": "{{INSTANCE_MODE}}",
   "activityMode": "{{ACTIVITY_MODE}}",
-  "keymapActions": []
+  "keymapActions": [],
+  "source": { "defaultMode": "closed" }
 }
