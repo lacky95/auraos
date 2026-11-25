@@ -41,7 +41,8 @@
  *     for (const [k, v] of Object.entries(auraIdentityHeaders())) res.headers.set(k, v);
  *     return res;
  *   }
- *   export const config = { matcher: '/(.*)' };
+ *   // Node.js runtime (Next 15.5+): this module's lifecycle guard uses node:crypto, which Edge can't load.
+ *   export const config = { matcher: '/(.*)', runtime: 'nodejs' };
  *
  * Implementation note: we deliberately do NOT take a runtime dependency on `next`.
  * The Route Handler signature `(req: Request, ctx: { params: ... }) => Response` is
