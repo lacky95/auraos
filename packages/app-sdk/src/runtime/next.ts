@@ -7,6 +7,11 @@
  *   • POST /api/lifecycle/onActivityCreate (activity-mode apps only)
  *   • POST /api/lifecycle/onActivityDestroy/[activityId]
  *   • POST /api/lifecycle/onIntent         (non-multi-activity apps + services)
+ *   • POST /api/lifecycle/onSaveState      (optional, before a planned restart)
+ *
+ * Both factories refuse a call without the kernel's lifecycle token with 401
+ * before any hook runs (see ./lifecycle-guard); health still answers a probe
+ * that sends no token.
  *
  * Astro apps get this for free via `auraAppIntegration()` + the `createLifecycleHandler`
  * factories in `../lifecycle.ts`. Next.js apps don't have an integration, so this
@@ -40,7 +45,17 @@
  */
 
 import { parseIntentPayload, type IntentPayload } from '../intent.js';
+import { lifecycleContextOf, type LifecycleContext, type SaveStateRequest, type SaveStateResult } from '../lifecycle.js';
+import { LIFECYCLE_TOKEN_HEADER, lifecycleRefusalResponse, lifecycleRequestRefused } from './lifecycle-guard.js';
 export type { IntentPayload } from '../intent.js';
+export type { LifecycleContext, SaveStateRequest, SaveStateResult } from '../lifecycle.js';
+
+/** The shared pre-handler check: a 401 response, or null to go on. */
+function refused(request: Request): Response | null {
+  return lifecycleRequestRefused(new URL(request.url).pathname, request.headers.get(LIFECYCLE_TOKEN_HEADER))
+    ? lifecycleRefusalResponse()
+    : null;
+}
 
 const APP_ID = () => process.env['APP_ID'] ?? 'unknown';
 const INSTANCE_ID = () => process.env['APP_INSTANCE_ID'] ?? null;
@@ -102,19 +117,24 @@ export interface ActivityCreateResult {
   metadata?: Record<string, unknown>;
 }
 
+/** A plain hook; stop hooks get `ctx.reason` (`user` | `restart`) from the kernel. */
+type PlainHook = (ctx: LifecycleContext) => void | Promise<void>;
+
 export interface NextLifecycleImpl {
-  onCreate?: () => void | Promise<void>;
-  onStart?:  () => void | Promise<void>;
-  onResume?: () => void | Promise<void>;
-  onPause?:  () => void | Promise<void>;
-  onStop?:   () => void | Promise<void>;
-  onDestroy?: () => void | Promise<void>;
+  onCreate?: PlainHook;
+  onStart?:  PlainHook;
+  onResume?: PlainHook;
+  onPause?:  PlainHook;
+  onStop?:   PlainHook;
+  onDestroy?: PlainHook;
   /** Optional handler for `onActivityCreate`. Return path/title/metadata. */
   onActivityCreate?: (req: ActivityCreateRequest) => ActivityCreateResult | Promise<ActivityCreateResult>;
   /** Optional handler for `onActivityDestroy/[activityId]`. */
   onActivityDestroy?: (activityId: string) => void | Promise<void>;
   /** Optional handler for `onIntent` (Android onNewIntent / onStartCommand). */
   onIntent?: (req: IntentRequest) => void | Promise<void>;
+  /** Optional handler for `onSaveState` (before a planned restart). Return each activity's state. */
+  onSaveState?: (req: SaveStateRequest) => SaveStateResult | Promise<SaveStateResult>;
 }
 
 /**
@@ -130,13 +150,15 @@ export function createNextLifecycleRoutes(impl: NextLifecycleImpl = {}) {
 
   return {
     POST: async (request: Request, ctx: NextCtx): Promise<Response> => {
+      const denied = refused(request);
+      if (denied) return denied;
       const params = await Promise.resolve(ctx.params);
       const raw = params?.hook;
       const segments = Array.isArray(raw) ? raw : raw ? [raw] : [];
       const hook = segments[0] ?? '';
 
       // Plain lifecycle hooks — onCreate / onStart / onResume / onPause / onStop / onDestroy.
-      const plain: Record<string, (() => void | Promise<void>) | undefined> = {
+      const plain: Record<string, PlainHook | undefined> = {
         onCreate:  impl.onCreate,
         onStart:   impl.onStart,
         onResume:  impl.onResume,
@@ -145,10 +167,11 @@ export function createNextLifecycleRoutes(impl: NextLifecycleImpl = {}) {
         onDestroy: impl.onDestroy,
       };
       if (hook in plain) {
-        console.log(`[${APP_ID()}] ${hook}`);
+        const hookCtx = lifecycleContextOf(request.headers);
+        console.log(`[${APP_ID()}] ${hook}${hookCtx.reason ? ` (${hookCtx.reason})` : ''}`);
         try {
           const fn = plain[hook];
-          if (fn) await fn();
+          if (fn) await fn(hookCtx);
           return json({ ok: true });
         } catch (err) {
           console.error(`[${APP_ID()}] ${hook} failed:`, err);
@@ -205,6 +228,20 @@ export function createNextLifecycleRoutes(impl: NextLifecycleImpl = {}) {
         }
       }
 
+      // onSaveState — POST body { activityIds } → { ok, states }. Without an
+      // impl it is "not implemented" (404), like onIntent.
+      if (hook === 'onSaveState' && impl.onSaveState) {
+        const body = await request.json().catch(() => ({})) as Partial<SaveStateRequest>;
+        const activityIds = Array.isArray(body.activityIds) ? body.activityIds.filter((x): x is string => typeof x === 'string') : [];
+        try {
+          const res = await impl.onSaveState({ activityIds });
+          return json({ ok: true, states: res?.states ?? {} });
+        } catch (err) {
+          console.error(`[${APP_ID()}] onSaveState failed:`, err);
+          return json({ ok: false, error: String(err) }, 500);
+        }
+      }
+
       // Unknown hook — return 404 so the AppManager's `callOptionalLifecycle`
       // path treats it as "not implemented" rather than a hard failure.
       return json({ ok: false, error: `unknown lifecycle hook: ${hook}` }, 404);
@@ -217,14 +254,15 @@ export function createNextLifecycleRoutes(impl: NextLifecycleImpl = {}) {
 // =========================================================================
 
 /**
- * Returns `{ GET }` for `app/api/lifecycle/health/route.ts`. The shell's
- * `verifyHealthIdentity` (`ProotRunner.ts:427`) parses the body as
- * `{ ok, appId, instanceId }` and matches against the resolved instance —
- * a mismatch fails the spawn (port-squat protection).
+ * Returns `{ GET }` for `app/api/lifecycle/health/route.ts`. The kernel's
+ * health identity check (`lifecycleGate.ts`) parses the body as
+ * `{ ok, appId, instanceId }` and matches it against the instance it started —
+ * a mismatch fails the spawn (port-squat protection). A probe with a wrong
+ * lifecycle token gets 401; one without a token still gets the body.
  */
 export function createNextHealthRoute() {
   return {
-    GET: async (): Promise<Response> => json({
+    GET: async (request: Request): Promise<Response> => refused(request) ?? json({
       ok: true,
       appId: APP_ID(),
       instanceId: INSTANCE_ID(),

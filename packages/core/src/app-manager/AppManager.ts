@@ -1420,7 +1420,8 @@ export class AppManager {
         instanceToken:   this.tokens.mint(instanceId, undefined, owner),
         ...(owner ? { owner } : {}),
       });
-      this.upsertInstance(instanceId, appId, { pid, port, startedAt: new Date(), inPool: opts.inPool, sandbox: manifest.sandbox, owner });
+      const lifecycle = runner.lifecycleStatus(instanceId) ?? undefined;
+      this.upsertInstance(instanceId, appId, { pid, port, startedAt: new Date(), inPool: opts.inPool, sandbox: manifest.sandbox, owner, lifecycle });
       if (opts.inPool) this.savePoolIds();
       this.transition(instanceId, appId, 'created', port);
 

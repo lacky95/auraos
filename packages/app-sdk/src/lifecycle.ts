@@ -64,6 +64,12 @@ export type LifecycleHookName =
  *  sidecars); `user` = a real stop; null = not a stop, or an older OS. */
 export interface LifecycleContext { reason: 'user' | 'restart' | null; }
 
+/** The hook context from the kernel's `x-aura-stop-reason` header. */
+export function lifecycleContextOf(headers: Headers): LifecycleContext {
+  const r = headers.get('x-aura-stop-reason');
+  return { reason: r === 'restart' || r === 'user' ? r : null };
+}
+
 /**
  * Factory for the six plain lifecycle hooks. Default behaviour: log + return
  * `{ ok: true }`. Pass `impl` to run app code; errors propagate as 500.
@@ -73,8 +79,7 @@ export function createLifecycleHandler(
   impl?: (ctx: LifecycleContext) => void | Promise<void>,
 ): APIRoute {
   return async ({ request }) => {
-    const r = request.headers.get('x-aura-stop-reason');
-    const ctx: LifecycleContext = { reason: r === 'restart' || r === 'user' ? r : null };
+    const ctx = lifecycleContextOf(request.headers);
     console.log(`[${APP_ID()}] ${hook}${ctx.reason ? ` (${ctx.reason})` : ''}`);
     try {
       if (impl) await impl(ctx);

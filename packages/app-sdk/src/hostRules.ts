@@ -379,15 +379,48 @@ export const APP_HOST_ROUTE_HEADER = 'x-aura-frame-route';
  * be decoded counts as reserved, so it can't slip past the router to the app.
  */
 export function isAuraReservedPath(path: string): boolean {
+  const p = normalizedRequestPath(path);
+  return p === null || p === '/_aura' || p.startsWith(AURA_RESERVED_PREFIX);
+}
+
+/**
+ * A raw request path with dot segments, slashes, one layer of
+ * percent-encoding and case resolved; null when it can't be decoded.
+ */
+function normalizedRequestPath(path: string): string | null {
   try {
     const raw = path.split(/[?#]/, 1)[0] ?? '';
     const slashed = `/${raw.replace(/\\/g, '/')}`.replace(/\/{2,}/g, '/');
     const decoded = decodeURIComponent(new URL(slashed, 'http://h').pathname).replace(/\\/g, '/');
-    const p = new URL(`/${decoded}`.replace(/\/{2,}/g, '/'), 'http://h').pathname.toLowerCase();
-    return p === '/_aura' || p.startsWith(AURA_RESERVED_PREFIX);
+    return new URL(`/${decoded}`.replace(/\/{2,}/g, '/'), 'http://h').pathname.toLowerCase();
   } catch {
-    return true;
+    return null;
   }
+}
+
+// ── lifecycle routes ─────────────────────────────────────────────────────────
+
+/**
+ * Carries the per-start lifecycle secret (`AURA_LIFECYCLE_TOKEN`) from the
+ * kernel to an app's `/api/lifecycle/*` routes. Only the runner sends it; the
+ * shell removes it from every request it forwards to an app.
+ */
+export const LIFECYCLE_TOKEN_HEADER = 'x-aura-lifecycle';
+
+/** The one lifecycle route that also answers without the token (other probes). */
+export const LIFECYCLE_HEALTH_PATH = '/api/lifecycle/health';
+
+/**
+ * The normalized form of a request path under `/api/lifecycle` (the same
+ * resolution as `isAuraReservedPath`, without a trailing slash), or null for
+ * any other path. An `/api/` path that can't be decoded counts as a lifecycle
+ * path, so an encoding trick can't slip a hook call past a guard.
+ */
+export function lifecycleRequestPath(path: string): string | null {
+  const p = normalizedRequestPath(path);
+  if (p === null) return /^[/\\]+api[/\\]/i.test(path) ? '/api/lifecycle/?' : null;
+  const trimmed = p.length > 1 ? p.replace(/\/+$/, '') : p;
+  return trimmed === '/api/lifecycle' || trimmed.startsWith('/api/lifecycle/') ? trimmed : null;
 }
 
 /** Header carrying the signed app identity from the gateway to the shell API. */

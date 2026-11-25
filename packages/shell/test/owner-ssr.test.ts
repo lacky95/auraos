@@ -8,7 +8,7 @@ import { after, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { GATEWAY_IDENTITY_HEADER, OWNER_SSR_HEADER } from '@aura/core/host-rules';
+import { GATEWAY_IDENTITY_HEADER, LIFECYCLE_TOKEN_HEADER, OWNER_SSR_HEADER } from '@aura/core/host-rules';
 import type { GatewayIdentityClaim } from '@aura/core';
 import { createAppHostRouter } from '../server/app-hosts.mjs';
 import { createAppHostAuth } from '../server/app-host-auth.mjs';
@@ -185,6 +185,16 @@ test('the shell strips the owner claim from anything leaving for an app', () => 
   const node: Record<string, string> = { [OWNER_SSR_HEADER]: token };
   stripShellCredentials(node, 'test');
   assert.deepEqual(node, {});
+});
+
+test('the shell strips a lifecycle token header from anything leaving for an app', () => {
+  const headers = new Headers({ [LIFECYCLE_TOKEN_HEADER]: 'guess', accept: 'text/html' });
+  stripShellCredentials(headers, 'test');
+  assert.equal(headers.get(LIFECYCLE_TOKEN_HEADER), null);
+  assert.deepEqual(stripShellCredentials(['X-Aura-Lifecycle', 'guess', 'accept', 'x'], 'test'), ['accept', 'x']);
+  const node: Record<string, string> = { [LIFECYCLE_TOKEN_HEADER]: 'guess', accept: 'x' };
+  stripShellCredentials(node, 'test');
+  assert.deepEqual(node, { accept: 'x' });
 });
 
 // ── the claim itself ────────────────────────────────────────────────────────
