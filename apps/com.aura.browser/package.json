@@ -7,7 +7,8 @@
     "dev": "APP_PORT=${APP_PORT:-4001} astro dev --host 0.0.0.0 --port ${APP_PORT:-4001}",
     "build": "astro build",
     "start": "node dist/server/entry.mjs",
-    "typecheck": "astro check"
+    "typecheck": "astro check",
+    "test": "node --test --experimental-strip-types test/*.test.mjs"
   },
   "dependencies": {
     "@aura/app-sdk": "workspace:*",

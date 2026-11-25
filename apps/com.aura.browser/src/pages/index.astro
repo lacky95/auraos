@@ -13,6 +13,14 @@
  * so back/forward walk our own list — same way every native browser UI
  * separates "tab history" from the underlying window history.
  *
+ * Where an address loads is lib/engine-policy.ts's decision, made before
+ * every navigation: websites load on their own origins with the full
+ * sandbox (their sign-ins need `allow-same-origin`); another Aura app opens
+ * as its own window; this App Host, the shell and non-web schemes never load
+ * here. A load that still ends up readable (same-origin with this page) is
+ * reset to an opaque blank. "Open in external browser" is always in the ⚙
+ * menu, and on the notice whenever a page does not load here.
+ *
  * Practical limit users will hit: most popular sites set
  * `X-Frame-Options: DENY` or `Content-Security-Policy: frame-ancestors`
  * which forbid being framed. Those refuse to load and the iframe stays
@@ -28,7 +36,8 @@ const DEFAULT_HOME = 'https://duckduckgo.com/?q=AuraOS';
 // host-intercepted popup), onActivityCreate builds the iframe URL as
 // `/?url=<encoded>` so the engine paints the right destination on first
 // load. Without a `?url=`, we fall back to DEFAULT_HOME. The home button
-// always navigates to DEFAULT_HOME regardless — see `data-home` below.
+// always navigates to DEFAULT_HOME regardless — see `data-home` below. The
+// page script classifies it like any other address before loading it.
 const rawUrl = Astro.url.searchParams.get('url');
 const INITIAL_URL = rawUrl && /^https?:\/\//i.test(rawUrl) ? rawUrl : DEFAULT_HOME;
 
@@ -79,11 +88,13 @@ const FRAME_NAME = JSON.stringify({
         <button id="zoom-out-btn"   title="Zoom out (Ctrl+-)"     aria-label="Zoom out">−</button>
         <button id="zoom-reset-btn" title="Reset zoom (Ctrl+0)"   aria-label="Reset zoom">100%</button>
         <button id="zoom-in-btn"    title="Zoom in (Ctrl++)"      aria-label="Zoom in">+</button>
+        <a id="external-btn" class="tool-link" target="_blank" rel="noopener noreferrer" title="Open in external browser: for sites whose sign-in or storage fails in here, or that refuse to be shown" aria-label="Open in external browser">↗</a>
         <div class="menu-wrap">
           <button id="settings-btn" title="Settings" aria-label="Settings" aria-haspopup="true" aria-expanded="false">⚙</button>
           <div id="settings-menu" class="settings-menu" role="menu" hidden>
             <button id="menu-native-btn" type="button" role="menuitemcheckbox" aria-checked="false" disabled title="Checking whether this device can open native windows…">Native mode</button>
             <button id="menu-bookmarks-btn" type="button" role="menuitemcheckbox" aria-checked="true" title="Show or hide the bookmarks bar (Ctrl+Shift+B)">Bookmarks bar: on</button>
+            <a id="menu-external-btn" role="menuitem" target="_blank" rel="noopener noreferrer" title="Open this page in its own browser tab, for sites whose sign-in or storage fails in here">Open in external browser</a>
             <button id="menu-debug-btn" type="button" role="menuitem" aria-pressed="false">Debug panel</button>
           </div>
         </div>
@@ -91,16 +102,27 @@ const FRAME_NAME = JSON.stringify({
     </header>
 
     <div class="engine-wrap">
+      <div id="engine-notice" class="engine-notice" role="status" hidden>
+        <span id="engine-notice-text" class="engine-notice-text"></span>
+        <span class="engine-notice-actions">
+          <button id="engine-notice-app" type="button" hidden>Open as app window</button>
+          <button id="engine-notice-launcher" type="button" hidden>Open launcher</button>
+          <a id="engine-notice-external" target="_blank" rel="noopener noreferrer" hidden>Open in external browser</a>
+          <button id="engine-notice-close" type="button" title="Dismiss" aria-label="Dismiss">✕</button>
+        </span>
+      </div>
+      <!-- No src and no sandbox flags until the page script has classified the
+           first address (lib/engine-policy.ts): every load goes through it. -->
       <iframe
         id="engine"
         class="engine"
         title="Web view"
         name={FRAME_NAME}
         data-home={DEFAULT_HOME}
-        src={INITIAL_URL}
-        referrerpolicy="no-referrer-when-downgrade"
+        data-initial={INITIAL_URL}
+        referrerpolicy="no-referrer"
         allow="clipboard-read; clipboard-write; fullscreen"
-        sandbox="allow-scripts allow-forms allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads"
+        sandbox=""
       ></iframe>
       <aside id="debug-panel" class="debug-panel" hidden aria-label="Debug">
         <header class="debug-head">
@@ -180,6 +202,24 @@ const FRAME_NAME = JSON.stringify({
         outline: none;
       }
       .nav-group button[disabled], .tools-group button[disabled] { opacity: 0.3; cursor: not-allowed; }
+      /* The ↗ link looks like its neighbouring buttons. */
+      .tools-group .tool-link {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 0.95rem;
+        min-width: 32px;
+        padding: 0 8px;
+        color: var(--aura-color-primary, #00ff41);
+        border: 1px solid var(--aura-color-border, #222);
+        text-decoration: none;
+      }
+      .tools-group .tool-link:hover, .tools-group .tool-link:focus-visible {
+        border-color: var(--aura-color-primary, #00ff41);
+        box-shadow: 0 0 8px var(--aura-color-primary, #00ff41);
+        outline: none;
+      }
+      .tools-group .tool-link[aria-disabled="true"] { opacity: 0.3; pointer-events: none; }
 
       .url-form { position: relative; display: flex; flex: 1 1 100%; order: 2; min-width: 0; gap: 0; }
       .url-form input {
@@ -351,6 +391,45 @@ const FRAME_NAME = JSON.stringify({
        * pointer by JS. */
       .settings-menu.bookmark-menu { position: fixed; top: 0; left: 0; right: auto; min-width: 120px; z-index: 30; }
 
+      /* ── Engine notice ───────────────────────────────────────── */
+      /* Over the top of the engine: why an address did not load here, and
+       * what to do instead (open the app's own window, or a real tab). */
+      .engine-notice {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        z-index: 15;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px 12px;
+        padding: 8px 10px;
+        font-size: 0.78rem;
+        background: var(--aura-color-surface, #111);
+        border-bottom: 1px solid var(--aura-color-primary, #00ff41);
+        box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+      }
+      .engine-notice[hidden] { display: none; }
+      .engine-notice-text { flex: 1 1 240px; min-width: 0; overflow-wrap: anywhere; }
+      .engine-notice-actions { display: flex; gap: 6px; flex-shrink: 0; align-items: stretch; }
+      .engine-notice-actions button, .engine-notice-actions a {
+        font: inherit;
+        font-size: 0.75rem;
+        background: transparent;
+        color: var(--aura-color-primary, #00ff41);
+        border: 1px solid var(--aura-color-border, #222);
+        padding: 3px 8px;
+        cursor: pointer;
+        text-decoration: none;
+      }
+      .engine-notice-actions [hidden] { display: none; }
+      .engine-notice-actions button:hover, .engine-notice-actions a:hover,
+      .engine-notice-actions button:focus-visible, .engine-notice-actions a:focus-visible {
+        border-color: var(--aura-color-primary, #00ff41);
+        outline: none;
+      }
+
       /* ── Engine viewport ──────────────────────────────────────── */
       .engine-wrap {
         position: relative;
@@ -503,7 +582,7 @@ const FRAME_NAME = JSON.stringify({
         z-index: 10;
       }
       .settings-menu[hidden] { display: none; }
-      .settings-menu button {
+      .settings-menu button, .settings-menu a {
         font: inherit;
         font-size: 0.78rem;
         line-height: 1.3;
@@ -516,8 +595,12 @@ const FRAME_NAME = JSON.stringify({
         cursor: pointer;
         white-space: nowrap;
       }
+      .settings-menu a { text-decoration: none; }
+      .settings-menu a[aria-disabled="true"] { opacity: 0.5; pointer-events: none; }
       .settings-menu button:hover,
-      .settings-menu button:focus-visible {
+      .settings-menu button:focus-visible,
+      .settings-menu a:hover,
+      .settings-menu a:focus-visible {
         border-color: var(--aura-color-primary, #00ff41);
         color: var(--aura-color-primary, #00ff41);
         outline: none;
@@ -573,15 +656,21 @@ const FRAME_NAME = JSON.stringify({
         // via the iframe's data-home attribute). The engine's initial
         // `src` may differ when an intent dispatched us at a specific
         // URL — that's the first history entry, not the home target.
-        var HOME = engine.dataset.home || engine.getAttribute('src');
-        var INITIAL = engine.getAttribute('src');
+        var HOME = engine.dataset.home;
+        var INITIAL = engine.dataset.initial || HOME;
         // History stack of URLs. cursor points at the currently-visible
         // entry. Pushing a new URL truncates anything past the cursor.
+        // Only addresses the policy let load are ever pushed.
         var history = [INITIAL];
         var cursor = 0;
         // True while we triggered the next iframe `load`; lets us skip
         // history pushes for back/forward jumps.
         var suppressPush = true;        // initial home load is the seed entry
+        // lib/engine-policy.ts, handed over by browser-ux.ts (usePolicy). No
+        // address loads before it arrives; that call also loads INITIAL.
+        var policy = null;
+        var noticeListener = null;
+        var pendingNotice = null;
         // Per-navigation timing.
         var navStartedAt = 0;
         var loadWatchdog = null;        // 15s timer for "still loading" warn
@@ -665,10 +754,40 @@ const FRAME_NAME = JSON.stringify({
           if (dbgLoadMs) dbgLoadMs.textContent = ms == null ? '—' : ms + ' ms';
         }
 
+        // Tell browser-ux.ts why the engine is not showing `url` (it owns the
+        // notice bar). kind: the policy's kind, or 'reset' / 'slow' /
+        // 'needs-top-level', and 'loaded' when a load ends a slow wait.
+        // `user` = the user asked for this address now.
+        function notify(kind, url, user) {
+          var n = { kind: kind, url: url || '', user: user === true };
+          if (noticeListener) { try { noticeListener(n); } catch (err) { console.warn('[browser] notice', err); } }
+          else if (kind !== 'loaded') pendingNotice = n;
+        }
+
+        // The engine shows nothing, as an opaque document that runs no script.
+        function resetEngine(why) {
+          clearTimeout(loadWatchdog);
+          chrome.dataset.loading = '';
+          suppressPush = true;
+          engine.setAttribute('sandbox', policy ? policy.blankSandbox : '');
+          engine.setAttribute('src', 'about:blank');
+          dbgSetState('reset');
+          dbgLog_line('warn', 'engine reset (' + why + ')');
+        }
+
         function navigate(url, opts) {
           opts = opts || {};
           var push = opts.push !== false;
-          if (!url) return;
+          if (!url || !policy) return;
+          var target = policy.classify(url);
+          if (target.kind !== 'external') {
+            // Never pushed: back/forward only ever walk addresses that loaded.
+            dbgLog_line('warn', 'not loaded here (' + target.kind + ') → ' + target.url);
+            syncInputFromHistory();
+            notify(target.kind, target.url, opts.user === true);
+            return;
+          }
+          url = target.url;
           if (push) {
             history.length = cursor + 1;
             history.push(url);
@@ -690,6 +809,7 @@ const FRAME_NAME = JSON.stringify({
           loadWatchdog = setTimeout(function () {
             dbgLog_line('warn', 'still loading after 15s — site may refuse framing (X-Frame-Options / CSP frame-ancestors)');
             dbgSetState('slow');
+            notify('slow', url, false);
           }, 15000);
           if (nativeMode) {
             // The native window IS the engine here; the iframe stays parked at
@@ -698,6 +818,8 @@ const FRAME_NAME = JSON.stringify({
             else attachSurface(url);
           } else {
             detachSurface('navigate');
+            // Flags apply from the next navigation on, so they go first.
+            engine.setAttribute('sandbox', policy.sandboxFor(target.kind));
             engine.setAttribute('src', url);
           }
           syncInputFromHistory();
@@ -708,27 +830,24 @@ const FRAME_NAME = JSON.stringify({
         engine.addEventListener('load', function () {
           clearTimeout(loadWatchdog);
           chrome.dataset.loading = '';
+          notify('loaded', '', false);
           var ms = Math.round(performance.now() - navStartedAt);
           dbgSetLoadMs(ms);
           dbgSetState('idle');
-          // Same-origin frames let us peek contentWindow.location to
-          // capture user-driven nav (link clicks). Cross-origin throws;
-          // we just trust the URL we set ourselves in that case.
+          // A website is never same-origin with us, so reading its location
+          // throws. A document we CAN read is same-origin with this App Host:
+          // only our own about:blank (or a browser error page) may stay.
+          // Anything else got here by a redirect or link the router's
+          // frame-ancestors should have stopped, and is reset at once.
           try {
             var real = engine.contentWindow && engine.contentWindow.location.href;
-            pageTitle = (engine.contentDocument && engine.contentDocument.title) || '';
-            if (real && !suppressPush && real !== history[cursor]) {
-              history.length = cursor + 1;
-              history.push(real);
-              cursor = history.length - 1;
-              syncInputFromHistory();
-              syncButtons();
-              dbgLog_line('ok', 'same-origin nav captured → ' + real);
+            if (real && policy && !policy.readableLoadAllowed(real)) {
+              resetEngine('same-origin document');
+              notify('reset', real, false);
+              suppressPush = false;
+              return;
             }
-            // Successfully read the URL — the bar is truthful.
-            setUrlStale(false);
-            syncInputFromHistory();
-            dbgLog_line('ok', 'load ' + ms + 'ms');
+            dbgLog_line('ok', 'load ' + ms + 'ms (' + (real || 'blank') + ')');
           } catch (_) {
             // Cross-origin: we got a load event so a navigation happened,
             // but browser security forbids reading where to. If this load
@@ -785,6 +904,14 @@ const FRAME_NAME = JSON.stringify({
           if (d.source !== 'host') return;
           if (typeof d.url !== 'string' || !d.url) return;
           var reason = typeof d.reason === 'string' ? d.reason : 'unknown';
+          // The engine went somewhere it may not show (a redirect onto this
+          // desktop): reset it rather than record the address.
+          var landed = policy && !nativeMode ? policy.classify(d.url).kind : 'external';
+          if (landed !== 'external') {
+            resetEngine('host reported ' + landed);
+            notify('reset', d.url, false);
+            return;
+          }
           if (typeof d.title === 'string') pageTitle = d.title;
           // `title` arrives without a URL change — leave history alone,
           // just refresh the URL bar styling to "fresh".
@@ -951,6 +1078,7 @@ const FRAME_NAME = JSON.stringify({
           // iframe's white about:blank flashes through whenever the surface
           // hides for an overlay, on an otherwise dark desktop.
           engine.style.visibility = 'hidden';
+          engine.setAttribute('sandbox', policy ? policy.blankSandbox : '');
           engine.setAttribute('src', 'about:blank');
           chrome.dataset.loading = 'false';
           dbgSetState('native');
@@ -1057,7 +1185,12 @@ const FRAME_NAME = JSON.stringify({
           // to every window, since it cannot tell which one framed the URL.
           var current = history[cursor];
           if (!current || !sameSite(d.url, current)) return;
-          if (!nativeWanted) { dbgLog_line('warn', 'cannot be framed (' + (d.reason || '?') + '); native mode is off'); return; }
+          if (!policy || policy.classify(d.url).kind !== 'external') return;
+          if (!nativeWanted) {
+            dbgLog_line('warn', 'cannot be framed (' + (d.reason || '?') + '); native mode is off');
+            notify('needs-top-level', d.url, false);
+            return;
+          }
           dbgLog_line('warn', 'cannot be framed (' + (d.reason || '?') + ') → going native');
           attachSurface(d.url);
         });
@@ -1071,6 +1204,8 @@ const FRAME_NAME = JSON.stringify({
           nativeMode = on;
           var current = surfaceUrl || history[cursor] || HOME;
           if (on) {
+            if (!policy || policy.classify(current).kind !== 'external') return;
+            engine.setAttribute('sandbox', policy.blankSandbox);
             engine.setAttribute('src', 'about:blank');
             attachSurface(current);
           } else {
@@ -1122,7 +1257,21 @@ const FRAME_NAME = JSON.stringify({
         // That bundled module runs after this script and drives navigation
         // only through these calls.
         window.__browser = {
-          navigate: function (url) { navigate(url); },
+          // Called for what the user typed or picked: an Aura app address
+          // then opens its own window right away.
+          navigate: function (url) { navigate(url, { user: true }); },
+          // lib/engine-policy.ts bound to this page; loads the first address.
+          usePolicy: function (p) {
+            if (policy) return;
+            policy = p;
+            navStartedAt = performance.now();
+            navigate(INITIAL, { push: false });
+          },
+          // cb({kind, url, user}) whenever the engine does not show an address.
+          onNotice: function (cb) {
+            noticeListener = cb;
+            if (pendingNotice) { var n = pendingNotice; pendingNotice = null; cb(n); }
+          },
           currentUrl: function () { return history[cursor] || ''; },
           currentTitle: function () { return pageTitle; },
           // cb(url, title) on every change of the current URL or title.
@@ -1168,7 +1317,6 @@ const FRAME_NAME = JSON.stringify({
         syncInputFromHistory();
         syncButtons();
         dbgLog_line('ok', 'browser ready · home = ' + HOME);
-        navStartedAt = performance.now();   // first paint timing starts here
       })();
     </script>
     <script>

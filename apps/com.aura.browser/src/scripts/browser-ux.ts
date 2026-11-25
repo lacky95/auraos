@@ -1,13 +1,20 @@
 // Address bar + bookmarks for the Browser page: search-or-URL resolution,
 // a suggestion dropdown over history and bookmarks with inline completion,
-// the ☆ button and the bookmarks bar. index.astro's inline script owns the
-// engine (iframe / native window) and hands us `window.__browser`.
+// the ☆ button and the bookmarks bar. Also the engine policy hand-over and
+// the notice for addresses that do not load in the engine. index.astro's
+// inline script owns the engine (iframe / native window) and hands us
+// `window.__browser`.
 //
 // Page titles / URLs are untrusted: always textContent, never innerHTML.
+import { OsClient, appHostRuntime, postToShell } from '@aura/app-sdk';
 import {
   resolveInput, classifyInput, searchUrl, rankEntries, inlineCompletion,
   displayUrl, SEARCH_ENGINE, type Entry,
 } from '../lib/omnibox';
+import {
+  BLANK_SANDBOX, classifyEngineUrl, readableLoadAllowed, sandboxFor,
+  type EngineContext, type EngineKind, type EngineTarget,
+} from '../lib/engine-policy';
 
 interface Host {
   navigate(url: string): void;
@@ -16,7 +23,16 @@ interface Host {
   onUrlChange(cb: (url: string, title: string) => void): void;
   coverEngine(reason: string, covered: boolean): void;
   closeSettingsMenu(): void;
+  usePolicy(policy: EnginePolicy): void;
+  onNotice(cb: (n: EngineNotice) => void): void;
 }
+interface EnginePolicy {
+  classify(url: string): EngineTarget;
+  sandboxFor(kind: EngineKind): string | null;
+  readableLoadAllowed(href: string): boolean;
+  blankSandbox: string;
+}
+interface EngineNotice { kind: EngineKind | 'reset' | 'slow' | 'needs-top-level' | 'loaded'; url: string; user: boolean }
 interface Bookmark { id: string; title: string; url: string }
 interface HistoryEntry { url: string; title: string; visitCount: number; lastVisit: number }
 
@@ -397,6 +413,123 @@ function init(host: Host) {
   loadHistory();
 }
 
+// ---- engine policy and notice ----------------------------------------------
+
+const VIEW_ACTION = 'aura.intent.action.VIEW';
+
+function initEngine(host: Host) {
+  const notice = document.getElementById('engine-notice')!;
+  const text = document.getElementById('engine-notice-text')!;
+  const appBtn = document.getElementById('engine-notice-app') as HTMLButtonElement;
+  const launcherBtn = document.getElementById('engine-notice-launcher') as HTMLButtonElement;
+  const external = document.getElementById('engine-notice-external') as HTMLAnchorElement;
+  const closeBtn = document.getElementById('engine-notice-close')!;
+  const menuExternal = document.getElementById('menu-external-btn') as HTMLAnchorElement;
+  const toolExternal = document.getElementById('external-btn') as HTMLAnchorElement;
+
+  // Without the runtime (opened outside AuraOS) the page knows its own origin only.
+  const ctx: EngineContext = { selfOrigin: window.location.origin, shellOrigin: appHostRuntime()?.shellOrigin ?? null };
+  const classify = (url: string) => classifyEngineUrl(url, ctx);
+
+  let appUrl = '';
+  let shownKind = '';
+  function show(message: string, opts: { app?: string; launcher?: boolean; external?: string } = {}, kind = '') {
+    shownKind = kind;
+    text.textContent = message;
+    appUrl = opts.app ?? '';
+    appBtn.hidden = !opts.app;
+    launcherBtn.hidden = !opts.launcher;
+    external.hidden = !opts.external;
+    if (opts.external) external.href = opts.external;
+    else external.removeAttribute('href');
+    notice.hidden = false;
+    host.coverEngine('notice', true);
+  }
+  function hide() {
+    if (notice.hidden) return;
+    notice.hidden = true;
+    host.coverEngine('notice', false);
+  }
+  closeBtn.addEventListener('click', hide);
+  external.addEventListener('click', hide);
+  launcherBtn.addEventListener('click', () => { hide(); postToShell({ type: 'aura.system.openLauncher' }); });
+
+  // Another Aura app opens as its own Activity: a VIEW intent for its App Host
+  // address, which the OS resolves to that app (never to the Browser).
+  let opening = false;
+  async function openApp(url: string) {
+    if (opening) return;
+    opening = true;
+    appBtn.disabled = true;
+    show('Opening this AuraOS app in its own window…');
+    try {
+      const r = await new OsClient().startIntent({
+        action: VIEW_ACTION, uri: url, category: ['aura.intent.category.DEFAULT'],
+      });
+      if (r.kind === 'started' && r.appId !== 'com.aura.browser') {
+        show('This AuraOS app opened in its own window.');
+      } else if (r.kind === 'rejected') {
+        show(`The app refused to open: ${r.message}`, { app: url, launcher: true });
+      } else {
+        show('No AuraOS app answers at this address. Open the app from the launcher.', { launcher: true });
+      }
+    } catch (err) {
+      const why = err instanceof Error ? err.message.replace(/^startIntent: /, '') : String(err);
+      show(`AuraOS did not open this app (${why}). Open it from the launcher.`, { app: url, launcher: true });
+    } finally {
+      opening = false;
+      appBtn.disabled = false;
+    }
+  }
+  appBtn.addEventListener('click', () => { if (appUrl) void openApp(appUrl); });
+
+  host.onNotice((n) => {
+    switch (n.kind) {
+      case 'loaded':
+        if (shownKind === 'slow') hide();
+        return;
+      case 'app':
+        // Only what the user asked for opens by itself. An address that
+        // arrived any other way (a VIEW intent, a link) waits for a click.
+        if (n.user) void openApp(n.url);
+        else show('This is an AuraOS app. It opens in its own window, not in here.', { app: n.url });
+        return;
+      case 'self':
+        show('This is Aura Browser\'s own address. It does not open inside itself.');
+        return;
+      case 'shell':
+        show('This is the AuraOS desktop\'s own address. It does not open inside Aura Browser.');
+        return;
+      case 'refused':
+        show('Aura Browser opens http and https addresses only.');
+        return;
+      case 'reset':
+        show('A page tried to load an AuraOS address inside Aura Browser, so it was stopped.');
+        return;
+      case 'slow':
+      case 'needs-top-level':
+      case 'external':
+        show(n.kind === 'slow'
+          ? 'This page is slow to load, or refuses to be shown inside another page.'
+          : 'This page needs its own browser tab.', { external: n.url }, n.kind);
+        return;
+    }
+  });
+
+  // "Open in external browser" (↗ and the ⚙ menu) always follows the current page.
+  host.onUrlChange((url) => {
+    hide();
+    const ok = classify(url).kind === 'external';
+    for (const a of [menuExternal, toolExternal]) {
+      if (ok) a.href = url; else a.removeAttribute('href');
+      a.setAttribute('aria-disabled', String(!ok));
+    }
+  });
+  menuExternal.addEventListener('click', () => host.closeSettingsMenu());
+
+  host.usePolicy({ classify, sandboxFor, readableLoadAllowed, blankSandbox: BLANK_SANDBOX });
+}
+
 const host = (window as unknown as { __browser?: Host }).__browser;
-if (host) init(host);
+if (host) { initEngine(host); init(host); }
 else console.warn('[browser] page hook missing; address bar extras disabled');

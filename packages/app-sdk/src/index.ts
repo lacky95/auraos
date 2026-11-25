@@ -20,6 +20,9 @@ export type {
 // Interface Registry — `osClient.interfaces`. Discovery + runtime registration.
 export { InterfacesApi } from './interfaces.js';
 export { appHostUrl, appHostUrlFromRequest } from './hosts.js';
+// The one App Host name rule, for pages that must tell this desktop's apps apart from websites.
+export { parseAppHost } from './hostRules.js';
+export type { ParsedAppHost } from './hostRules.js';
 // App Host transport: the runtime bootstrap and the verified shell channel.
 export { appHostRuntime, bodylessMutationHeaders, osAuthHeaders, osUrl } from './os-auth.js';
 export { postToShell, isFromShell } from './channel.js';

@@ -293,6 +293,17 @@ test('the response is framed by the exact shell (and its own pages) only, and ca
   assert.deepEqual(r.headers['set-cookie'], ['own=1; Path=/']);
 });
 
+test('the Browser App Host may not frame its own pages, only the shell may', async () => {
+  // Its engine frames any site with allow-same-origin: a redirect back onto
+  // its own App Host must be refused by the browser before any script runs.
+  labels.notes1234!.record.appId = 'com.aura.browser';
+  apps = [{ manifest: { id: 'com.aura.browser', name: 'Browser', componentType: 'activity', hosts: [] }, instances: [live('io.acme.notes')] }];
+  const good = await signIn();
+  const r = await get(HOST, '/', { cookie: good });
+  assert.equal(r.status, 200);
+  assert.equal(r.headers['content-security-policy'], `frame-ancestors http://${BASE}`);
+});
+
 test('embedding adds granted origins only on an embed document', async () => {
   const good = await signIn();
   embedOrigins = ['http://terminalx1--desk.example', 'javascript:alert(1)'];

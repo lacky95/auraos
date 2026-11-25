@@ -2,6 +2,7 @@ import type { APIRoute } from 'astro';
 import { getAppManager, IntentError } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../lib/appResponse.js';
 import { isOwnerCaller, verifiedAppCaller } from '../../../lib/terminalCaller.ts';
+import { appHostViewTarget } from '../../../lib/appHostIntent.ts';
 import {
   OPEN_TERMINAL_ACTION, TERMINAL_APP_ID, grantSession, isSystemTerminal, openTerminalCommand, openTerminalRefusal,
   terminalSessionInstance,
@@ -42,6 +43,11 @@ interface IntentBody {
  * from an app, `background` needs the owner's `terminal.embed` grant and
  * `sessionId` a session the app was granted (403 `terminal-not-granted`). A
  * session an app creates with `background` is granted to it here.
+ *
+ * A VIEW of an App Host address goes to the app holding that App Host, not
+ * to whatever handles http(s): Aura Browser opens other apps this way, as
+ * their own Activity (lib/appHostIntent.ts). It then counts as naming that
+ * app, so every check on an explicit target applies.
  */
 export const POST: APIRoute = async (ctx) => {
   const { request } = ctx;
@@ -49,7 +55,10 @@ export const POST: APIRoute = async (ctx) => {
   if (!body || typeof body.action !== 'string' || body.action.length === 0) {
     return errorResponse('Intent body must include a string `action`', 400);
   }
-  const intent = {
+  const intent: {
+    action: string; appId?: string; category?: string[]; type?: string; uri?: string;
+    extras?: Record<string, unknown>; instanceId?: string; flags?: string[];
+  } = {
     action: body.action,
     ...(typeof body.appId === 'string' && body.appId.length > 0 ? { appId: body.appId } : {}),
     ...(Array.isArray(body.category) ? { category: body.category.filter((c): c is string => typeof c === 'string') } : {}),
@@ -65,6 +74,8 @@ export const POST: APIRoute = async (ctx) => {
   if (body.flags !== undefined && !Array.isArray(body.flags)) {
     return errorResponse('`flags` must be an array of strings', 400);
   }
+  const appHostApp = await appHostViewTarget(intent);
+  if (appHostApp) intent.appId = appHostApp;
   const caller = verifiedAppCaller(request, getAppManager());
   if (caller === 'invalid') return errorResponse('The caller identity did not verify', 401);
   const asking = caller ?? (openTerminalCommand(intent) && await isOwnerCaller(ctx) ? { owner: true } : null);
