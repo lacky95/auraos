@@ -7,13 +7,29 @@
  *   url(path)          osUrl(): the shell's root on the proxy route, the
  *                      same-origin gateway on an App Host
  *   bodylessHeaders()  what a mutation without a body needs at the gateway
+ *   appHost()          the App Host bootstrap, or null when the runtime is missing
+ *   postToShell(msg)   AuraChannel to the shell (an install approval: aura.approval.request)
+ *   isFromShell(ev)    whether a message event is the shell's answer
  */
-import { bodylessMutationHeaders, osUrl } from '@aura/app-sdk/os-auth';
+import { postToShell, isFromShell } from '@aura/app-sdk';
+import { appHostRuntime, bodylessMutationHeaders, osUrl } from '@aura/app-sdk/os-auth';
 
 declare global {
   interface Window {
-    auraOs?: { url: typeof osUrl; bodylessHeaders: typeof bodylessMutationHeaders };
+    auraOs?: {
+      url: typeof osUrl;
+      bodylessHeaders: typeof bodylessMutationHeaders;
+      appHost: typeof appHostRuntime;
+      postToShell: typeof postToShell;
+      isFromShell: typeof isFromShell;
+    };
   }
 }
 
-window.auraOs = { url: osUrl, bodylessHeaders: bodylessMutationHeaders };
+window.auraOs = {
+  url: osUrl,
+  bodylessHeaders: bodylessMutationHeaders,
+  appHost: appHostRuntime,
+  postToShell,
+  isFromShell,
+};
