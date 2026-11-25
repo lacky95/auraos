@@ -2,9 +2,10 @@
  * The one HTTP path out of the smoke test, plus a loopback proxy that puts the
  * `aura` CLI behind the same guard.
  *
- * Requests carry no credentials or cookies. Redirects are not followed, because
- * a redirect target would bypass the allowlist. Error details never include a
- * response body.
+ * Requests carry no cookies, and no credential except the host operator's
+ * one-time ticket when `identity` gives one (lib/operator.mjs). Redirects are
+ * not followed, because a redirect target would bypass the allowlist. Error
+ * details never include a response body.
  */
 import { createServer } from 'node:http';
 
@@ -26,7 +27,7 @@ export function normalizeTarget(target) {
   return url.origin;
 }
 
-export function createClient({ target, guard, fetchImpl = fetch, timeoutMs = 10_000 }) {
+export function createClient({ target, guard, identity = null, fetchImpl = fetch, timeoutMs = 10_000 }) {
   const base = normalizeTarget(target);
 
   /** Guard first, then send. Throws GuardViolation without touching the network. */
@@ -37,7 +38,7 @@ export function createClient({ target, guard, fetchImpl = fetch, timeoutMs = 10_
       const res = await fetchImpl(base + path, {
         method,
         redirect: 'manual',
-        headers: { accept: 'application/json' },
+        headers: { accept: 'application/json', ...(identity?.(method, path) ?? {}) },
         signal: AbortSignal.timeout(timeoutMs),
       });
       return { status: res.status, text: await res.text() };

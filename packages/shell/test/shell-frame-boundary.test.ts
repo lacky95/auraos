@@ -446,3 +446,14 @@ test('IP mode moves to the App Hosts address on its own, unless the owner stays 
   assert.equal(autoSwitchTarget('http://10-0-0-5.nip.io:3000/', '?a=1', '#x'), 'http://10-0-0-5.nip.io:3000/?a=1#x');
   assert.ok(AUTO_SWITCH_SECONDS > 0 && AUTO_SWITCH_SECONDS <= 5);
 });
+
+test('WebKit on os.aura.localhost gets the "Apps blocked" bar with a link that keeps the page, and is never moved (D44, D57)', () => {
+  const plan = settleSetupBar(planCookieFallback({ host: 'os.aura.localhost:3000', protocol: 'http:', pathname: '/', webkit: true }), true);
+  assert.ok(plan.show && plan.kind === 'link' && plan.reason === 'cookies');
+  assert.equal(plan.href, 'http://127-0-0-1.nip.io:3000/');
+  assert.equal(shouldAutoSwitch(plan, false), false, 'the owner decides; the other address is a new sign-in');
+  assert.equal(autoSwitchTarget(plan.href, '?open=com.aura.docs', '#a1'), 'http://127-0-0-1.nip.io:3000/?open=com.aura.docs#a1');
+  const src = readFileSync(new URL('../src/components/shell/AppHostSetupBar.astro', import.meta.url), 'utf-8');
+  assert.match(src, /'Apps blocked in this browser\.'/);
+  assert.match(src, /link\.href = autoSwitchTarget\(plan\.href, location\.search, location\.hash\)/);
+});
