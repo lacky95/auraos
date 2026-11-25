@@ -11,7 +11,7 @@
  */
 import type { AuraRuntimeBootstrap } from '@aura/core';
 import { AURA_CHANNEL_VERSION } from './auraChannel.js';
-import { AURA_RESERVED_PATHS } from './hostRules.js';
+import { AURA_RESERVED_PATHS, OWNER_SSR_HEADER } from './hostRules.js';
 
 const LOCAL_OS = 'http://localhost:3000';
 
@@ -98,9 +98,18 @@ function isProxyUrl(url: string): boolean {
   }
 }
 
-/** The instance bearer for this URL, or {} in a browser or on a proxied path. */
-export function osAuthHeaders(url: string, opts: { token?: string } = {}): Record<string, string> {
+/**
+ * The instance bearer for this URL, or {} in a browser or on a proxied path.
+ * `request`: the page request being rendered. A trusted system UI (Settings,
+ * Nexus) gets the owner's signed SSR claim on it from the router (D45), and it
+ * goes back to the shell with the bearer, so the page's reads act for the
+ * owner. Any other app never gets one, and the shell ignores it without the
+ * bearer of the instance it names.
+ */
+export function osAuthHeaders(url: string, opts: { token?: string; request?: Request } = {}): Record<string, string> {
   if (isBrowser() || isProxyUrl(url)) return {};
   const token = opts.token ?? osEnv()['AURA_INSTANCE_TOKEN'];
-  return token ? { Authorization: `Bearer ${token}` } : {};
+  if (!token) return {};
+  const ownerSsr = opts.request?.headers.get(OWNER_SSR_HEADER);
+  return { Authorization: `Bearer ${token}`, ...(ownerSsr ? { [OWNER_SSR_HEADER]: ownerSsr } : {}) };
 }

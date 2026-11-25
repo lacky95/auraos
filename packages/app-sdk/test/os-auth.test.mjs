@@ -59,6 +59,19 @@ test('proxied URLs stay tokenless in every spelling', () => {
   assert.deepEqual(osAuthHeaders('http://os/api/proxyish'), { Authorization: 'Bearer env-token' });
 });
 
+test('a page render forwards the owner SSR claim with the token, to the shell only (D45)', () => {
+  const page = new Request('http://settings--desk.test/apps', { headers: { 'x-aura-owner-ssr': 'agw1.claim.mac' } });
+  assert.deepEqual(osAuthHeaders('http://os/api/apps', { request: page }), {});
+  process.env.AURA_INSTANCE_TOKEN = 'env-token';
+  assert.deepEqual(osAuthHeaders('http://os/api/apps', { request: page }),
+    { Authorization: 'Bearer env-token', 'x-aura-owner-ssr': 'agw1.claim.mac' });
+  assert.deepEqual(osAuthHeaders('http://os/api/apps', { request: new Request('http://settings--desk.test/apps') }),
+    { Authorization: 'Bearer env-token' });
+  assert.deepEqual(osAuthHeaders('http://os/api/proxy/com.example.counter/x', { request: page }), {}, 'never to another app');
+  inBrowser();
+  assert.deepEqual(osAuthHeaders('http://os/api/apps', { request: page }), {});
+});
+
 test('notifications send no token from a browser', async () => {
   process.env.AURA_INSTANCE_TOKEN = 'env-token';
   inBrowser();

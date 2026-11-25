@@ -10,7 +10,7 @@ const refresh = new URL(Astro.request.url).searchParams.get('refresh') === '1';
 
 let doc: Catalog;
 try {
-  doc = await shellGet<Catalog>(`/api/nexus${refresh ? '?refresh=1' : ''}`, 180_000);
+  doc = await shellGet<Catalog>(Astro.request, `/api/nexus${refresh ? '?refresh=1' : ''}`, 180_000);
 } catch (err) {
   return new Response((err as Error).message, { status: 502 });
 }

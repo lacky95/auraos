@@ -2,6 +2,7 @@
 import '@aura/ui/styles/scificn-bridge.css';
 import '../styles/settings.css';
 import WorkspaceManager from '../components/WorkspaceManager';
+import { shellFetch } from '../lib/shellClient';
 
 /**
  * Workspace + layout-strategy management page.
@@ -12,16 +13,14 @@ import WorkspaceManager from '../components/WorkspaceManager';
  * come from `/api/data/layouts` (a Settings-mirror of @aura/core's
  * `LayoutStrategyRegistry`).
  */
-// SSR-read workspace state directly from the shell's KV. OS_API_BASE
-// is injected by ProotRunner so we can talk to the shell over the
-// internal localhost interface without the Referer permission gate.
-const osBase = process.env['OS_API_BASE'] ?? 'http://127.0.0.1:3000';
+// SSR-read workspace state from the shell's KV, as the owner through
+// Settings (lib/shellClient.ts).
 let workspaces = {
   workspaces: [{ id: 'ws-1', name: 'Main', layoutId: 'tiling', members: [] }],
   activeWorkspaceId: 'ws-1',
 };
 try {
-  const r = await fetch(`${osBase}/api/kv/os/workspaces`, { signal: AbortSignal.timeout(2000) });
+  const r = await shellFetch(Astro.request, `/api/kv/os/workspaces`, 2000);
   if (r.ok) {
     const body = await r.json() as { value?: typeof workspaces };
     if (body.value) workspaces = body.value;

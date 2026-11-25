@@ -2,11 +2,11 @@
 import '@aura/ui/styles/scificn-bridge.css';
 import '../styles/settings.css';
 import Icon from '../components/Icon.astro';
+import { shellFetch } from '../lib/shellClient';
 
 // SSR-fetch the apps list + enable state from the shell. /api/apps already
 // includes `enabled` per app since the route was extended to surface it for
 // dock/launcher filtering, so a single request gives us everything we need.
-const osBase = process.env['OS_API_BASE'] ?? 'http://127.0.0.1:3000';
 
 interface AppDto {
   manifest: {
@@ -26,7 +26,7 @@ interface AppDto {
 
 let apps: AppDto[] = [];
 try {
-  const r = await fetch(`${osBase}/api/apps`, { signal: AbortSignal.timeout(2000) });
+  const r = await shellFetch(Astro.request, `/api/apps`, 2000);
   if (r.ok) apps = await r.json() as AppDto[];
 } catch (err) {
   console.warn(`[settings/apps] could not load apps: ${(err as Error).message}`);
@@ -36,7 +36,7 @@ try {
 // (core app-manager/appBuild.ts). Read-only — `aura build app` builds.
 const serve = new Map<string, { mode: string; label: string; detail?: string }>();
 try {
-  const r = await fetch(`${osBase}/api/apps/serve`, { signal: AbortSignal.timeout(2000) });
+  const r = await shellFetch(Astro.request, `/api/apps/serve`, 2000);
   if (r.ok) for (const s of (await r.json() as { apps: Array<{ appId: string; mode: string; label: string; detail?: string }> }).apps) serve.set(s.appId, s);
 } catch { /* older shell: no label */ }
 

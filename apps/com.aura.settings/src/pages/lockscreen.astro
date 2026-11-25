@@ -2,6 +2,7 @@
 import '@aura/ui/styles/scificn-bridge.css';
 import '../styles/settings.css';
 import Icon from '../components/Icon.astro';
+import { shellFetch } from '../lib/shellClient';
 
 // SSR-read `os/lockscreen` directly from the shell's internal port. Falls
 // back to the same defaults the shell's LockScreenOverlay uses so the form
@@ -31,10 +32,9 @@ const ZOOM_MIN = 0.2;
 const ZOOM_MAX = 3;
 const ZOOM_STEP = 0.01;
 
-const osBase = process.env['OS_API_BASE'] ?? 'http://127.0.0.1:3000';
 let cfg: LockScreenConfig = DEFAULT_CONFIG;
 try {
-  const r = await fetch(`${osBase}/api/kv/os/lockscreen`, { signal: AbortSignal.timeout(1500) });
+  const r = await shellFetch(Astro.request, `/api/kv/os/lockscreen`, 1500);
   if (r.ok) {
     const body = await r.json() as { value?: Partial<LockScreenConfig> };
     if (body.value) cfg = { ...DEFAULT_CONFIG, ...body.value };

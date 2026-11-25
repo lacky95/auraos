@@ -16,6 +16,8 @@ import { coreAuthServices, ownerSessionOf, sessionCookieToken } from './authSurf
  * `resolvePrincipal`); this turns its verdict into a route's answer:
  *
  *   Authorization: Bearer aura1.…        → instance (verified AURA_INSTANCE_TOKEN; `userId` = its user)
+ *     + the router's owner SSR claim     → user through a trusted system UI's server (D45, its
+ *                                          page reads; identify.ts `ssrOwner`, the same scope)
  *   Authorization: Bearer aura_k1_…      → apiKey   (owner-issued key, verified)
  *   Authorization: Bearer aura-sess1.…   → user     (the owner's live login session)
  *   X-Aura-Operator: <one-time code>     → operator (the host CLI in the master, its

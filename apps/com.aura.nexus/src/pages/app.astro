@@ -12,7 +12,7 @@ let entry: CatalogEntry | null = null;
 let catalogDown = false;
 if (id) {
   try {
-    const doc = await shellGet<Catalog>('/api/nexus');
+    const doc = await shellGet<Catalog>(Astro.request, '/api/nexus');
     entry = doc.apps.find((a) => a.id === id) ?? null;
   } catch { catalogDown = true; }
 }

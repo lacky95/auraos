@@ -24,8 +24,8 @@ let catalog: CatalogEntry[] = [];
 let error: string | null = null;
 try {
   [items, catalog] = await Promise.all([
-    shellGet<InstalledItem[]>('/api/nexus/installed'),
-    shellGet<Catalog>('/api/nexus').then((c) => c.apps).catch(() => [] as CatalogEntry[]),
+    shellGet<InstalledItem[]>(Astro.request, '/api/nexus/installed'),
+    shellGet<Catalog>(Astro.request, '/api/nexus').then((c) => c.apps).catch(() => [] as CatalogEntry[]),
   ]);
 } catch (err) {
   error = (err as Error).message;

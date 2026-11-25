@@ -3,17 +3,15 @@ import '@aura/ui/styles/scificn-bridge.css';
 import '../styles/settings.css';
 import ColorModePicker from '../components/ColorModePicker';
 import Icon from '../components/Icon.astro';
+import { shellFetch } from '../lib/shellClient';
 
-// SSR-read the active theme selection from the OS KV. The page lives in
-// the Settings iframe, which is proxied by the shell — we hit the shell's
-// internal port (OS_API_BASE injected by ProotRunner) to bypass the proxy
-// and avoid the Referer-based permission gate.
-const osBase = process.env['OS_API_BASE'] ?? 'http://127.0.0.1:3000';
+// SSR-read the active theme selection from the OS KV, as the owner through
+// Settings (lib/shellClient.ts).
 let currentDarkId    = 'sci-fi';
 let currentLightId   = 'paper';
 let currentColorMode: 'light' | 'dark' | 'auto' = 'dark';
 try {
-  const r = await fetch(`${osBase}/api/kv/os/theme`, { signal: AbortSignal.timeout(2000) });
+  const r = await shellFetch(Astro.request, `/api/kv/os/theme`, 2000);
   if (r.ok) {
     const body = await r.json() as { value?: { themeIdDark?: string; themeIdLight?: string; colorMode?: typeof currentColorMode } };
     if (body.value?.themeIdDark)  currentDarkId    = body.value.themeIdDark;
@@ -32,7 +30,7 @@ type ThemeCard  = { id: string; name: string; description: string; tone: 'dark' 
 
 let THEMES: ThemeCard[] = [];
 try {
-  const tr = await fetch(`${osBase}/api/os/themes`, { signal: AbortSignal.timeout(2000) });
+  const tr = await shellFetch(Astro.request, `/api/os/themes`, 2000);
   if (tr.ok) {
     const body = await tr.json() as {
       themes?: Array<{ id: string; name: string; description?: string; tone: 'dark' | 'light'; swatch: ToneSwatch }>;

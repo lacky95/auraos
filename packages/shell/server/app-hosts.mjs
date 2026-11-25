@@ -7,7 +7,9 @@
  * to the instance that holds the slot, minus the shell's own credentials: no
  * prefix, no rewriting, no injected scripts. Nothing reaches the app without
  * a valid app cookie from the one-time handoff, and `/_aura/*` is answered
- * here, never by the app. Every other Host goes on to the shell.
+ * here, never by the app. A trusted system UI's page request on a live owner
+ * session also carries the signed owner SSR claim (D45, `ownerSsrHeader`).
+ * Every other Host goes on to the shell.
  *
  * Interception wraps the HTTP server's `emit` for `request` and `upgrade`, so
  * a claimed request never reaches Astro, Vite, socket.io (whose engine.io
@@ -24,7 +26,7 @@
 import http from 'node:http';
 import net from 'node:net';
 import {
-  APP_HOST_ROUTE_HEADER, AURA_RESERVED_PATHS, appHostCookieName, isAuraReservedPath, parseAppHost,
+  APP_HOST_ROUTE_HEADER, AURA_RESERVED_PATHS, OWNER_SSR_HEADER, appHostCookieName, isAuraReservedPath, parseAppHost,
 } from '@aura/core/host-rules';
 import {
   SESSION_COOKIES, countSurfaceEvent, gatedHttpSurface, internalServiceHeaders, observeHttpSurface, reportSurface,
@@ -32,6 +34,7 @@ import {
 } from './access-bridge.mjs';
 import { appHostAuth, appHostEmbedCookieName, safeReturnPath } from './app-host-auth.mjs';
 import { handleAppGateway, handleAppGatewayUpgrade, serveAppRuntime } from './app-gateway.mjs';
+import { isOwnerUiInstallation, ownerUiApp, signOwnerSsrClaim } from './gateway-identity.mjs';
 import {
   OWN_API_RE, browserBoundaryError, classifyHost, hostListed, hostParses, hostPolicy, isShellOrigin, originOf, requestEdge,
 } from './host-policy.mjs';
@@ -357,6 +360,29 @@ export function createAppHostRouter({
     return requestIdentity(req, { appHost });
   }
 
+  /**
+   * D45: the owner claim for a page request to a trusted system UI, which its
+   * server sends back with its reads of the shell (gateway-identity.mjs
+   * `signOwnerSsrClaim`). Only a GET or HEAD, to the active `system`
+   * installation of an OWNER_UI_APPS app, on a full host cookie whose owner
+   * session appSession() found live, and bound to the instance that serves it.
+   * Never on an upgrade. Fails closed.
+   */
+  async function ownerSsrHeader(route, req, session, t) {
+    if (req.method !== 'GET' && req.method !== 'HEAD') return null;
+    if (session.embed !== undefined || !ownerUiApp(route.record.appId) || t.appId !== route.record.appId) return null;
+    if (typeof session.sid !== 'string' || !session.sid || typeof session.userId !== 'string' || !session.userId) return null;
+    try {
+      if (!(await isOwnerUiInstallation(route.svc.registry, route.record))) return null;
+    } catch {
+      return null;
+    }
+    return signOwnerSsrClaim({
+      appId: route.record.appId, installationId: route.record.installationId, instanceId: t.instanceId,
+      userId: session.userId, sid: session.sid,
+    });
+  }
+
   /** Asks for a start, once at a time. `start()` claims the slot in the lifecycle. */
   function startSlotOne({ record }) {
     const scope = record.instanceScope.kind === 'user' ? `user:${record.instanceScope.userId}` : 'shared';
@@ -494,6 +520,8 @@ export function createAppHostRouter({
     if (t.starting) return page(503, `Starting ${t.appName}…`, 'This page reloads by itself when it is up.', { refresh: 2 });
     const headers = appRequestHeaders(req, 'app-hosts-http');
     for (const [k, v] of Object.entries({ ...forwardedHeaders(req, edge), ...identityHeaders(t), ...activityHeaders(req.url, t.instanceId), [APP_HOST_ROUTE_HEADER]: 'host' })) headers.push(k, v);
+    const ownerSsr = await ownerSsrHeader(route, req, session, t);
+    if (ownerSsr) headers.push(OWNER_SSR_HEADER, ownerSsr);
     const { ancestors, embedders } = await frameAncestors(route, edge, session, url);
     // The embed document still needs the grant its code was issued under.
     if (session.embed && path === '/' && embedders === 0) return page(403, 'Request refused', 'This embedded session is no longer granted.');

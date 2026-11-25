@@ -13,7 +13,7 @@ const refresh = new URL(Astro.request.url).searchParams.get('refresh') === '1';
 
 let doc: Catalog | null = null;
 try {
-  doc = await shellGet<Catalog>('/api/nexus', FIRST_PAINT_MS);
+  doc = await shellGet<Catalog>(Astro.request, '/api/nexus', FIRST_PAINT_MS);
 } catch { /* still loading or unreachable: the client takes over */ }
 ---
 <Layout title="Browse" active="browse">

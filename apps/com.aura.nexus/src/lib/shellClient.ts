@@ -1,12 +1,17 @@
 /** Server-side fetch helper. Calls the shell directly (no proxy hop)
  *  using the OS_API_BASE env the runner injects. Falls back to localhost
- *  for outside-OS dev runs. */
-import { osBase } from '@aura/app-sdk/os-auth';
+ *  for outside-OS dev runs. A page's reads pass the page request: they carry
+ *  this instance's token and, on the signed-in owner's page request, the
+ *  router's owner SSR claim (D45, the SDK's `osAuthHeaders`), so they read as
+ *  the owner acting through Nexus. */
+import { osAuthHeaders, osBase } from '@aura/app-sdk/os-auth';
 
 const OS_API = osBase({ fallback: 'http://127.0.0.1:3000' });
 
-export async function shellGet<T>(path: string, timeoutMs = 8_000): Promise<T> {
-  const res = await fetch(`${OS_API}${path}`, {
+export async function shellGet<T>(request: Request, path: string, timeoutMs = 8_000): Promise<T> {
+  const url = `${OS_API}${path}`;
+  const res = await fetch(url, {
+    headers: osAuthHeaders(url, { request }),
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) throw new Error(`${path} → HTTP ${res.status}`);
