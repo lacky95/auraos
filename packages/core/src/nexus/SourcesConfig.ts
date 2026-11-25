@@ -26,6 +26,7 @@ import {
   type RegistryConfig, type RegistryEntry,
 } from './RegistryConfig.js';
 import type { SourceAuth } from './RegistryAuth.js';
+import { readOsKey, writeOsKey } from './osKv.js';
 
 // ─── Shape ──────────────────────────────────────────────────────────────
 export type SourceKind = 'oci' | 'git-index' | 'git-app';
@@ -124,30 +125,26 @@ export const DEFAULT_SOURCES_CONFIG: SourcesConfig = {
 export const DEFAULT_APP_REPO_PREFIX = 'aura-apps';
 
 // ─── KV I/O ─────────────────────────────────────────────────────────────
-const KV_PATH        = '/api/kv/os/nexus/sources';
-const LEGACY_KV_PATH = '/api/kv/os/nexus/registries';
+const KV_KEY        = 'nexus/sources';
+const LEGACY_KV_KEY = 'nexus/registries';
 
 /**
- * GET the stored sources config. When the new key is absent, migrate the
- * legacy `os/nexus/registries` value (mapping each entry → an 'oci' source)
- * and persist it under the new key once. Falls back to the default config
- * when nothing is stored anywhere.
+ * Read the stored sources config (in process, osKv.ts). When the new key is
+ * absent, migrate the legacy `os/nexus/registries` value (mapping each
+ * entry → an 'oci' source) and persist it under the new key once. Falls back
+ * to the default config when nothing is stored anywhere.
  */
-export async function loadSourcesConfig(osApiBase: string): Promise<SourcesConfig> {
+export async function loadSourcesConfig(): Promise<SourcesConfig> {
   // 1. New key wins.
   try {
-    const r = await fetch(`${osApiBase}${KV_PATH}`);
-    if (r.ok) {
-      const body = await r.json() as { value?: unknown };
-      const v = normaliseConfig(body?.value);
-      if (v) return v;
-    }
+    const v = normaliseConfig(await readOsKey(KV_KEY));
+    if (v) return v;
   } catch { /* fall through to migration */ }
 
   // 2. Migrate the legacy registries key, if present.
-  const migrated = await migrateFromLegacy(osApiBase);
+  const migrated = await migrateFromLegacy();
   if (migrated) {
-    try { await saveSourcesConfig(osApiBase, migrated); } catch { /* best-effort */ }
+    try { await saveSourcesConfig(migrated); } catch { /* best-effort */ }
     return migrated;
   }
 
@@ -155,39 +152,30 @@ export async function loadSourcesConfig(osApiBase: string): Promise<SourcesConfi
   return cloneDefault();
 }
 
-/** PUT the whole config. Replaces any existing value. */
-export async function saveSourcesConfig(osApiBase: string, cfg: SourcesConfig): Promise<void> {
-  const r = await fetch(`${osApiBase}${KV_PATH}`, {
-    method:  'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify({ value: cfg }),
-  });
-  if (!r.ok) {
-    const detail = await r.text().catch(() => '');
-    throw new Error(`saveSourcesConfig: PUT ${KV_PATH} → HTTP ${r.status}${detail ? ` — ${detail}` : ''}`);
+/** Write the whole config. Replaces any existing value. */
+export async function saveSourcesConfig(cfg: SourcesConfig): Promise<void> {
+  try {
+    await writeOsKey(KV_KEY, cfg);
+  } catch (err) {
+    throw new Error(`saveSourcesConfig: os/${KV_KEY} — ${(err as Error).message}`);
   }
 }
 
 /** Seed the default config IF nothing is stored (and nothing to migrate).
  *  Returns the resulting config. */
-export async function seedSourcesConfigIfMissing(osApiBase: string): Promise<SourcesConfig> {
-  const cfg = await loadSourcesConfig(osApiBase);
+export async function seedSourcesConfigIfMissing(): Promise<SourcesConfig> {
+  const cfg = await loadSourcesConfig();
   // loadSourcesConfig already persists on migration; persist the default too
   // so subsequent reads are stable.
   try {
-    const r = await fetch(`${osApiBase}${KV_PATH}`);
-    const exists = r.ok && normaliseConfig((await r.json() as { value?: unknown })?.value);
-    if (!exists) await saveSourcesConfig(osApiBase, cfg);
+    if (!normaliseConfig(await readOsKey(KV_KEY))) await saveSourcesConfig(cfg);
   } catch { /* best-effort */ }
   return cfg;
 }
 
-async function migrateFromLegacy(osApiBase: string): Promise<SourcesConfig | null> {
+async function migrateFromLegacy(): Promise<SourcesConfig | null> {
   try {
-    const r = await fetch(`${osApiBase}${LEGACY_KV_PATH}`);
-    if (!r.ok) return null;
-    const body = await r.json() as { value?: unknown };
-    const legacy = body?.value as RegistryConfig | undefined;
+    const legacy = await readOsKey(LEGACY_KV_KEY) as RegistryConfig | undefined;
     if (!legacy || !Array.isArray(legacy.registries) || legacy.registries.length === 0) return null;
     const sources: SourceEntry[] = legacy.registries.map((e) => ({
       kind:     'oci' as const,

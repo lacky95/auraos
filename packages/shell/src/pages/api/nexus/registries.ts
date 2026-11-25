@@ -18,8 +18,6 @@ import { jsonResponse } from '../../../lib/appResponse.js';
  * /api/nexus/sources so the two views can never drift.
  */
 
-const OS_API_BASE = process.env['OS_API_BASE'] ?? 'http://localhost:3000';
-
 function isEntry(v: unknown): v is RegistryEntry {
   if (!v || typeof v !== 'object') return false;
   const e = v as Record<string, unknown>;
@@ -34,7 +32,7 @@ function toOciSource(e: RegistryEntry): SourceEntry {
 }
 
 export const GET: APIRoute = async () => {
-  const cfg = await loadSourcesConfig(OS_API_BASE);
+  const cfg = await loadSourcesConfig();
   return jsonResponse(ociRegistryView(cfg));
 };
 
@@ -52,7 +50,7 @@ export const PUT: APIRoute = async ({ request }) => {
     names.add(e.name);
   }
   // Replace all OCI sources; preserve any git-index / git-app sources.
-  const cfg = await loadSourcesConfig(OS_API_BASE);
+  const cfg = await loadSourcesConfig();
   const kept = cfg.sources.filter((s) => s.kind !== 'oci');
   // This legacy shape knows nothing of logins / repo prefixes: keep them for a
   // registry whose name and URL are unchanged instead of silently dropping them.
@@ -66,7 +64,7 @@ export const PUT: APIRoute = async ({ request }) => {
     }
     return next;
   }), ...kept];
-  await saveSourcesConfig(OS_API_BASE, cfg);
+  await saveSourcesConfig(cfg);
   refreshNexusSources(cfg);
   return jsonResponse(ociRegistryView(cfg));
 };
@@ -76,12 +74,12 @@ export const POST: APIRoute = async ({ request }) => {
   try { body = await request.json(); }
   catch { return jsonResponse({ error: 'invalid-json' }, 400); }
   if (!isEntry(body)) return jsonResponse({ error: 'invalid-entry' }, 400);
-  const cfg = await loadSourcesConfig(OS_API_BASE);
+  const cfg = await loadSourcesConfig();
   if (cfg.sources.some((s) => s.name === body.name)) {
     return jsonResponse({ error: 'duplicate-name', detail: body.name }, 409);
   }
   cfg.sources.push(toOciSource(body));
-  await saveSourcesConfig(OS_API_BASE, cfg);
+  await saveSourcesConfig(cfg);
   refreshNexusSources(cfg);
   return jsonResponse(ociRegistryView(cfg));
 };

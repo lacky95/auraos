@@ -1,6 +1,8 @@
 import type {
-  AccessPrincipal, AdminPrincipal, AppInstance, AppManager, InstancePrincipal, Principal, UserPrincipal,
+  AccessPrincipal, AdminPrincipal, AppInstance, AppManager, InstancePrincipal, OperatorPrincipal, Principal, UserPrincipal,
 } from '@aura/core';
+// The file-only entry, as the CLI uses it: one subject rule on both sides.
+import { operatorRequestSubject } from '@aura/core/setup-tickets';
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { loadAppHostServices, type AppHostServices } from '../../../server/app-host-auth.mjs';
@@ -87,10 +89,14 @@ export type CredentialRejection =
   | 'admin-session-invalid'
   | 'unsupported-scheme'
   | 'credential-invalid'
-  | 'instance-not-running';
+  | 'instance-not-running'
+  | 'operator-ticket-invalid';
+
+/** Who a request can authenticate as: a core principal, or the host operator (`X-Aura-Operator`). */
+export type CallerPrincipal = Principal | OperatorPrincipal;
 
 export interface ResolvedPrincipal extends VerifiedIdentity {
-  principal: Principal;
+  principal: CallerPrincipal;
   /** Set when a credential was presented and did not verify. The principal is then anonymous. */
   rejected?: { reason: CredentialRejection; instanceId?: string };
 }
@@ -114,6 +120,15 @@ export interface PrincipalDeps {
   } | null;
   /** App Host services for the D45 owner check; loaded when absent. */
   ownerServices?: GatewayOwnerDeps['services'];
+  /**
+   * The host operator's one-time tickets (core `FileSetupTickets`, purpose
+   * `operator`): `claim` uses one up, `peek` (the report) only looks. Absent:
+   * an operator header is `unverified`.
+   */
+  operatorTickets?: {
+    claim?(code: string, purpose: 'operator'): Promise<{ subject?: string } | null>;
+    peek?(code: string, purpose: 'operator'): Promise<{ subject?: string } | null>;
+  } | null;
 }
 
 /**
@@ -135,7 +150,7 @@ const INSTANCE_TOKEN_PREFIX = 'aura1.';
 
 const ANONYMOUS = Object.freeze({ kind: 'anonymous', verification: 'unverified' }) as Principal;
 
-const seen = (principal: Principal, via: AccessVia): ResolvedPrincipal => ({ principal, via });
+const seen = (principal: CallerPrincipal, via: AccessVia): ResolvedPrincipal => ({ principal, via });
 const rejected = (reason: CredentialRejection, instanceId?: string): ResolvedPrincipal => ({
   principal: ANONYMOUS, via: 'foreign-or-invalid', rejected: { reason, ...(instanceId ? { instanceId } : {}) },
 });
@@ -233,6 +248,34 @@ async function resolveBearer(token: string, deps: PrincipalDeps): Promise<Resolv
   return seen(instancePrincipal(inst, { sidecar: claims.sidecar, userId: claims.userId ?? inst.owner }), 'instance-token');
 }
 
+/** The header the host CLI sends its one-time operator code in (aura-cli `resolveIdentity`). */
+export const OPERATOR_HEADER = 'x-aura-operator';
+const OPERATOR: OperatorPrincipal = Object.freeze({ kind: 'operator', verification: 'verified' });
+const operatorClaims = new WeakMap<Request, Promise<ResolvedPrincipal>>();
+
+/**
+ * The host operator (plan 5.8: `aura` through `docker exec` into the master):
+ * a one-time ticket only a process that can write the master's secrets
+ * directory can create, bound to this request's method and path. The claim
+ * uses it up, so it is made once per request and shared by the gate, the
+ * report and the route. The report only peeks, unless the claim was made.
+ */
+function resolveOperator(request: Request, code: string, deps: PrincipalDeps): Promise<ResolvedPrincipal> {
+  const claimed = operatorClaims.get(request);
+  if (claimed) return claimed;
+  const tickets = deps.operatorTickets;
+  const subject = operatorRequestSubject(request.method, new URL(request.url).pathname);
+  const check = async (find: ((code: string, purpose: 'operator') => Promise<{ subject?: string } | null>) | undefined) => {
+    if (!find) return unverified();
+    const ticket = await find.call(tickets, code, 'operator');
+    return ticket?.subject === subject ? seen(OPERATOR, 'operator-ticket') : rejected('operator-ticket-invalid');
+  };
+  if (!tickets?.claim) return check(tickets?.peek);
+  const result = check(tickets.claim).catch(() => unverified());
+  operatorClaims.set(request, result);
+  return result;
+}
+
 /**
  * THE principal resolver (D36): `authenticate()` and the access observer both
  * ask it, for Astro routes and for the plain servers' surfaces alike.
@@ -246,6 +289,7 @@ async function resolveBearer(token: string, deps: PrincipalDeps): Promise<Resolv
  *   Bearer aura-admin1.…     → admin
  *   Bearer aura-sess1.…      → user (a live password session of the enabled owner)
  *   any other Authorization  → rejected
+ *   X-Aura-Operator: <code>  → operator (the host CLI's one-time ticket for this request)
  *   login cookie             → user; expired, revoked or unreadable → anonymous
  *   nothing                  → anonymous
  *
@@ -262,6 +306,8 @@ export async function resolvePrincipal(
   const token = bearerToken(request);
   if (gatewayClaimOf(request) !== null) return resolveGateway(request, token, deps);
   if (token !== null) return resolveBearer(token, deps);
+  const operatorCode = request.headers.get(OPERATOR_HEADER);
+  if (operatorCode !== null) return resolveOperator(request, operatorCode, deps);
 
   const cookie = deps.login?.cookieToken(request) ?? null;
   if (cookie === null) return seen(ANONYMOUS, 'none');

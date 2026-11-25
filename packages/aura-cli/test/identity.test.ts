@@ -340,10 +340,12 @@ test('setup-code: the real path writes one private ticket and opens no connectio
     return (connect as (...a: unknown[]) => net.Socket).apply(this, args);
   } as typeof net.Socket.prototype.connect;
   try {
+    const dir = join(process.env['AURA_DATA_DIR']!, 'aura', 'secrets', 'setup-tickets');
+    // Earlier calls here left the host operator's request tickets (lib/identity.ts).
+    const earlier = new Set(existsSync(dir) ? readdirSync(dir) : []);
     const { code } = await issueSetupCode({ purpose: 'reset', username: 'owner' });
     assert.equal(connections, 0);
-    const dir = join(process.env['AURA_DATA_DIR']!, 'aura', 'secrets', 'setup-tickets');
-    const files = readdirSync(dir).filter((f) => f.endsWith('.json'));
+    const files = readdirSync(dir).filter((f) => f.endsWith('.json') && !earlier.has(f));
     assert.equal(files.length, 1);
     assert.equal(statSync(join(dir, files[0]!)).mode & 0o777, 0o600);
     const stored = readFileSync(join(dir, files[0]!), 'utf-8');

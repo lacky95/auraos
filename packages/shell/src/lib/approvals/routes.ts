@@ -21,7 +21,8 @@
  * login rate limit, over HTTPS; over HTTP it is the host operator's (D18).
  */
 import * as core from '@aura/core';
-import type { AccessPrincipal, ApprovalAction, Principal } from '@aura/core';
+import type { AccessPrincipal, ApprovalAction } from '@aura/core';
+import type { CallerPrincipal } from '../access/identify.ts';
 import { GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
 import {
   confirmDisplay, confirmPayload, contextDisplay, contextWrite, requesterReason,
@@ -47,7 +48,7 @@ export interface RouteCtx {
 
 export interface ApprovalRouteDeps extends ApprovalServiceDeps {
   /** The shell's principal for a request (lib/auth.ts `authenticate`). */
-  authenticate(request: Request): Promise<Principal | Response>;
+  authenticate(request: Request): Promise<CallerPrincipal | Response>;
   /**
    * The owner's login session from the cookie, on the shell's exact Origin
    * (appHostHandoff `shellOwner`), with the scheme the browser used.
@@ -200,7 +201,7 @@ export async function decideApproval(
   if (decision === 'approve' && record.level === 'fresh') {
     // D18: the password travels only over HTTPS; on HTTP the host operator approves.
     if (shell.scheme !== 'https') {
-      return json({ error: 'operator-required', message: `Over HTTP, approve this on the host: aura approve ${id}` }, 403);
+      return json({ error: 'operator-required', message: `This needs HTTPS, or approve on the host with \`aura approve ${id}\`.` }, 403);
     }
     const password = body[PASSWORD_FIELD];
     if (typeof password !== 'string' || !password || !core.passwordWithinMax(password)) return json({ error: 'password-required' }, 401);

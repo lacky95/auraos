@@ -7,8 +7,6 @@ import {
 } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../lib/appResponse.js';
 
-const OS_API_BASE = process.env['OS_API_BASE'] ?? 'http://localhost:3000';
-
 /**
  * Submit an app to the curated store index by opening a pull request.
  *
@@ -153,7 +151,7 @@ async function readContextToken(): Promise<string | null> {
  */
 async function resolveStoreRepo(): Promise<string> {
   try {
-    const cfg = await loadSourcesConfig(OS_API_BASE);
+    const cfg = await loadSourcesConfig();
     for (const s of cfg.sources) {
       if (s.kind !== 'git-index') continue;
       const withRepo = s as { repo?: string; url?: string };

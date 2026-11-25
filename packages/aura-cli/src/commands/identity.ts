@@ -56,7 +56,8 @@ export function localHints(): Record<string, string> {
     'instance token': process.env['AURA_INSTANCE_TOKEN']
       ? (isRunnerShellUrl(url) ? 'present' : 'present, withheld from this URL')
       : 'none',
-    'credential sent': sent.source,
+    // shellFetch adds the host operator's ticket when nothing else goes (lib/identity.ts).
+    'credential sent': sent.source === 'none' && !inSandbox() && isTrustedShellUrl(url) ? 'operator-ticket' : sent.source,
   };
   const app = process.env['APP_ID'] ?? process.env['AURA_APP_ID'];
   const inst = process.env['APP_INSTANCE_ID'] ?? process.env['AURA_INSTANCE_ID'];

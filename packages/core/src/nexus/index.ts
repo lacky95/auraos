@@ -50,12 +50,12 @@ export {
   DEFAULT_SOURCES_CONFIG, DEFAULT_APP_REPO_PREFIX, OFFICIAL_INDEX_URL,
   OFFICIAL_STORE_REPO,
 } from './SourcesConfig.js';
+export { readOsKey, writeOsKey } from './osKv.js';
 export type {
   SourcesConfig, SourceEntry, SourceKind,
   OciSource, GitIndexSource, GitAppSource, GitAppMeta,
 } from './SourcesConfig.js';
 export {
-  loadRegistryConfig, saveRegistryConfig, seedRegistryConfigIfMissing,
   pickMirror, resolveByName, urlForHost, sorted as sortedRegistries,
   orasHostFromUrl, orasFlagsForUrl, splitOciUrl,
   DEFAULT_REGISTRY_CONFIG, LOCAL_REGISTRY_DEFAULT_URL, LOCAL_REGISTRY_HOST,

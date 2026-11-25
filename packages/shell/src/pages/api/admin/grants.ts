@@ -3,13 +3,17 @@ import * as core from '@aura/core';
 import { jsonResponse } from '../../../lib/appResponse.js';
 import { readJson } from '../../../lib/notificationCaller.js';
 import { adminOf, auditAdmin } from '../../../lib/auth.js';
+import { ownerUiApp } from '../../../../server/gateway-identity.mjs';
 
 /**
  * Admin grants of privileged permissions (core auth `GrantStore`).
  * Every method needs an admin session (`Authorization: Bearer aura-admin1.…`).
  *
  *   GET    → { privileged, grants: GrantRecord[], apps: [{appId, name, scope,
- *             requested: [...], granted: [...], effective: [...]}] }
+ *             requested: [...], granted: [...], effective: [...], asOwner?: [...]}] }
+ *            `asOwner`: what a trusted system UI declares but needs no grant
+ *            for, because the owner acts through it (D45: Settings writes
+ *            `os` KV topics as the owner). Never in `requested`.
  *   POST   {subjectKind:'app'|'apiKey', subjectId, permission} → grant
  *            (app grants are pinned to the app's current install scope)
  *            `notifications.read` (phase 5) also needs `readScope`:
@@ -44,6 +48,16 @@ async function subjectArgs(request: Request, url: URL): Promise<{ kind: string; 
   return { kind, id, permission, src };
 }
 
+/**
+ * D45: the system copy of a trusted UI whose entry covers `kv` (Settings)
+ * writes `os` topics as the owner, so the `system.kv.os.<topic>.write` it
+ * declares is not waiting for a grant.
+ */
+export function asOwnerPermissions(appId: string, scope: string | null, declared: readonly string[]): string[] {
+  if (scope !== 'system' || !ownerUiApp(appId)?.groups.includes('kv')) return [];
+  return declared.filter((x) => core.KV_OS_WRITE_PERMISSION_RE.test(x));
+}
+
 export const GET: APIRoute = async () => {
   const { grants, authorizer } = core.getAuthServices();
   const all = await grants.listAll();
@@ -51,20 +65,24 @@ export const GET: APIRoute = async () => {
   const apps = [];
   for (const m of mgr.registry.getAll()) {
     // Deprecated names in permissions[] count as their current name (desktopModal → systemModal).
-    const requested = [...new Set((m.permissions ?? []).map((x: string) => core.canonicalPermission(x)).filter((x: string) => core.isPrivilegedPermission(x)))];
+    const declared = [...new Set((m.permissions ?? []).map((x: string) => core.canonicalPermission(x)).filter((x: string) => core.isPrivilegedPermission(x)))];
+    const scope = mgr.registry.getScopeId(m.id) ?? null;
+    const asOwner = asOwnerPermissions(m.id, scope, declared);
+    const requested = declared.filter((x) => !asOwner.includes(x));
     const mine = all.filter((g) => g.subject.kind === 'app' && g.subject.id === m.id);
     const granted = mine.map((g) => g.permission);
     const readRec = mine.find((g) => g.permission === 'notifications.read');
-    if (requested.length === 0 && granted.length === 0 && !(m.permissions ?? []).includes('system.notifications')) continue;
+    if (requested.length === 0 && asOwner.length === 0 && granted.length === 0 && !(m.permissions ?? []).includes('system.notifications')) continue;
     const probe = { kind: 'instance', appId: m.id, instanceId: `${m.id}-probe`, verification: 'verified' } as const;
     const effective: string[] = [];
     for (const perm of core.PRIVILEGED_PERMISSIONS) {
       if ((await authorizer.authorize(probe, perm)).allow) effective.push(perm);
     }
     apps.push({
-      appId: m.id, name: m.name, scope: mgr.registry.getScopeId(m.id) ?? null,
+      appId: m.id, name: m.name, scope,
       sends: (m.permissions ?? []).includes('system.notifications'),
       requested, granted, effective,
+      ...(asOwner.length ? { asOwner } : {}),
       // Phase 5: what a notifications.read grant covers ("all", "app:x,sender:y", "+secret").
       ...(readRec?.read ? { read: { ...readRec.read, label: core.GrantStore.describeRead(readRec) } } : {}),
     });

@@ -592,7 +592,9 @@ TO_REV=none
 DRY=${dry}
 PROJECT=${JSON.stringify(o.project)}
 COMPOSE_FILE=${JSON.stringify(o.composeFile)}
-HEALTH=http://aura-shell:3000/api/os/about
+# The public, minimal health probe (the route access manifest allows it
+# without a credential; /api/os/about is the owner's).
+HEALTH=http://aura-shell:3000/api/auth/status
 COMPOSE_VERSION=${COMPOSE_PLUGIN_VERSION}   # keep in step with the Dockerfile ARG
 # A first boot after a rebuild runs pnpm install and builds every package —
 # minutes, sometimes many. So the health wait is NOT a plain timeout: it gives

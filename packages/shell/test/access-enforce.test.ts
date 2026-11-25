@@ -357,10 +357,11 @@ test('guard identifyInstance hints → interface writes need a verified instance
 // ── decide(): the ENFORCED_PERMISSIONS fold ─────────────────────────────────
 
 test('decide: an auto-granted permission counts outside enforce only (strict)', async () => {
+  // Not `system.kv.os.*`: stream C made those privileged (a grant, never an auto-grant).
   const d = createDecide({ authorizer });
   const input = (strict: boolean): DecideInput => ({
     principal: inst('com.other.app'),
-    action: { surface: 'api', subject: '/api/x' as AccessLabel, method: 'POST', variant: null, rule: { allow: ['app-permission'], target: 'system', permissions: ['system.kv.os.zzz.write'] } },
+    action: { surface: 'api', subject: '/api/x' as AccessLabel, method: 'POST', variant: null, rule: { allow: ['app-permission'], target: 'system', permissions: ['apps.zzz'] } },
     resource: { target: 'system' }, transport: 'http', auth: { fresh: false, via: 'instance-token' }, strict,
     accessProfile: 'open', systemMode: 'normal', deployment: 'private',
   });

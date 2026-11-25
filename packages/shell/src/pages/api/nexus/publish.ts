@@ -2,8 +2,6 @@ import type { APIRoute } from 'astro';
 import { getNexusManager } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../lib/appResponse.js';
 
-const OS_API_BASE = process.env['OS_API_BASE'] ?? 'http://localhost:3000';
-
 /**
  * Publish an app from a local path. v1: Git is the working path; OCI
  * shells out to `oras` if available, otherwise returns a clear error
@@ -43,7 +41,7 @@ export const POST: APIRoute = async ({ request }) => {
   const repoTarget     = body.repo ?? (source === 'git' ? body.to : undefined);
   const registryTarget = body.registry ?? (source === 'oci' ? body.to : undefined);
   const nexus = getNexusManager();
-  await nexus.ensureSourcesLoaded(OS_API_BASE);
+  await nexus.ensureSourcesLoaded();
 
   try {
     if (source === 'git') {

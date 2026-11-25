@@ -89,6 +89,7 @@ export interface ObserverServices {
   admin?: { peekSession?(token: string): Promise<{ sessionId: string } | null> };
   loginSessions?: Parameters<typeof ownerSessionOf>[1]['loginSessions'];
   users?: Parameters<typeof ownerSessionOf>[1]['users'];
+  setupTickets?: { peek?(code: string, purpose: 'operator'): Promise<{ subject?: string } | null> };
 }
 
 interface Observed {
@@ -113,6 +114,7 @@ export function observerPrincipalDeps(deps: ObserverDeps): PrincipalDeps {
   const peekSession = svc?.admin?.peekSession;
   const loginSessions = svc?.loginSessions;
   const users = svc?.users;
+  const peekTicket = svc?.setupTickets?.peek;
   return {
     mgr: deps.mgr() as unknown as PrincipalDeps['mgr'],
     apiKeys: peekKey && ready ? { verify: (key) => peekKey.call(svc!.apiKeys, key) } : null,
@@ -124,6 +126,8 @@ export function observerPrincipalDeps(deps: ObserverDeps): PrincipalDeps {
         return found ? { sessionId: found.session.sessionId, userId: found.user.id } : null;
       },
     } : null,
+    // Peek only: the gate or the route uses the ticket up (identify.ts `resolveOperator`).
+    operatorTickets: peekTicket ? { peek: (code, purpose) => peekTicket.call(svc!.setupTickets, code, purpose) } : null,
   };
 }
 

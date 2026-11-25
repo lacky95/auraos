@@ -51,57 +51,6 @@ export const DEFAULT_REGISTRY_CONFIG: RegistryConfig = {
   ],
 };
 
-// ─── KV I/O ─────────────────────────────────────────────────────────────
-const KV_PATH = '/api/kv/os/nexus/registries';
-
-/** GET the stored config; returns a deep copy of DEFAULT_REGISTRY_CONFIG
- *  when the KV entry doesn't exist or the fetch fails. */
-export async function loadRegistryConfig(osApiBase: string): Promise<RegistryConfig> {
-  try {
-    const r = await fetch(`${osApiBase}${KV_PATH}`);
-    if (!r.ok) return cloneDefault();
-    const body = await r.json() as { value?: unknown };
-    const v = body?.value as RegistryConfig | undefined;
-    if (!v || !Array.isArray(v.registries) || v.registries.length === 0) {
-      return cloneDefault();
-    }
-    return v;
-  } catch {
-    return cloneDefault();
-  }
-}
-
-/** PUT the whole config. Replaces any existing value. */
-export async function saveRegistryConfig(osApiBase: string, cfg: RegistryConfig): Promise<void> {
-  const r = await fetch(`${osApiBase}${KV_PATH}`, {
-    method:  'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify({ value: cfg }),
-  });
-  if (!r.ok) {
-    const detail = await r.text().catch(() => '');
-    throw new Error(`saveRegistryConfig: PUT ${KV_PATH} → HTTP ${r.status}${detail ? ` — ${detail}` : ''}`);
-  }
-}
-
-/** Seed the default config IF nothing's stored yet. No-op when a non-empty
- *  config already exists. Returns the resulting (post-seed) config. */
-export async function seedRegistryConfigIfMissing(osApiBase: string): Promise<RegistryConfig> {
-  try {
-    const r = await fetch(`${osApiBase}${KV_PATH}`);
-    if (r.ok) {
-      const body = await r.json() as { value?: unknown };
-      const v = body?.value as RegistryConfig | undefined;
-      if (v && Array.isArray(v.registries) && v.registries.length > 0) return v;
-    }
-  } catch {
-    // fall through to seed
-  }
-  const seed = cloneDefault();
-  await saveRegistryConfig(osApiBase, seed);
-  return seed;
-}
-
 // ─── Lookups ────────────────────────────────────────────────────────────
 /** First mirror in the config, sorted by priority. Null when none configured. */
 export function pickMirror(cfg: RegistryConfig): RegistryEntry | null {
@@ -155,8 +104,4 @@ export function splitOciUrl(url: string): { url: string; prefix?: string } {
  *  extra; plain-HTTP hosts need --plain-http to disable HTTPS upgrade. */
 export function orasFlagsForUrl(url: string): string[] {
   return url.startsWith('http://') ? ['--plain-http'] : [];
-}
-
-function cloneDefault(): RegistryConfig {
-  return JSON.parse(JSON.stringify(DEFAULT_REGISTRY_CONFIG));
 }

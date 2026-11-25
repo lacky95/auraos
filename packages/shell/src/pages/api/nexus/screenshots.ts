@@ -9,8 +9,6 @@ import { jsonResponse, errorResponse } from '../../../lib/appResponse.js';
 import * as core from '@aura/core';
 import { bustCatalog, DATA_DIR, listingTarget } from '../../../lib/nexusListing.js';
 
-const OS_API_BASE = process.env['OS_API_BASE'] ?? 'http://localhost:3000';
-
 /**
  * Add, replace, remove or list the screenshots on a store listing.
  *
@@ -124,7 +122,7 @@ async function readContextToken(): Promise<string | null> {
  *  so both come from the same source entry. */
 async function resolveStore(override?: string): Promise<{ repo: string; indexUrl: string }> {
   try {
-    const cfg = await loadSourcesConfig(OS_API_BASE);
+    const cfg = await loadSourcesConfig();
     for (const s of cfg.sources) {
       if (s.kind !== 'git-index') continue;
       const g = s as { repo?: string; url?: string };

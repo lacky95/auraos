@@ -13,9 +13,8 @@ import { dedupeSeeds, mergeSeeds, parseSeedDoc, type SeedEntry, type SeedEnv, ty
 import { probeGitApp } from './nexusGitApp.js';
 import { credentialsLoaded } from './nexusSourceLogin.js';
 
-const OS_API_BASE = process.env['OS_API_BASE'] ?? 'http://localhost:3000';
 const DATA_DIR    = process.env['AURA_DATA_DIR'] ?? '/data';
-const STATE_KV    = '/api/kv/os/nexus/source-seeds';
+const STATE_KV    = 'nexus/source-seeds';  // os KV, in process (core osKv.ts)
 
 export const SEED_ENV_VAR = 'AURA_NEXUS_SOURCES';
 /** Lowest precedence first. */
@@ -78,17 +77,12 @@ export function readSeeds(): { seeds: SeedEntry[]; files: SeedFileReport[]; prob
 
 async function loadState(): Promise<SeedState> {
   try {
-    const r = await fetch(`${OS_API_BASE}${STATE_KV}`);
-    if (!r.ok) return {};
-    const v = (await r.json() as { value?: unknown }).value;
+    const v = await core.readOsKey(STATE_KV);
     return v && typeof v === 'object' ? v as SeedState : {};
   } catch { return {}; }
 }
 async function saveState(state: SeedState): Promise<void> {
-  await fetch(`${OS_API_BASE}${STATE_KV}`, {
-    method: 'PUT', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ value: state }),
-  });
+  await core.writeOsKey(STATE_KV, state);
 }
 
 // On globalThis: middleware and API routes can load this module in different
@@ -121,7 +115,7 @@ async function applyOnce(): Promise<SeedReport> {
     changes: [],
   };
   try {
-    const cfg = await core.loadSourcesConfig(OS_API_BASE);
+    const cfg = await core.loadSourcesConfig();
     const state = await loadState();
     const res = mergeSeeds(cfg, seeds, state);
     const config: SourcesConfig = res.config;
@@ -141,7 +135,7 @@ async function applyOnce(): Promise<SeedReport> {
 
     const before = JSON.stringify(cfg);
     if (JSON.stringify(config) !== before) {
-      await core.saveSourcesConfig(OS_API_BASE, config);
+      await core.saveSourcesConfig(config);
       core.refreshNexusSources(config);
     }
     for (const a of res.dropAuth) await core.deleteRegistryLogin(DATA_DIR, a).catch(() => undefined);

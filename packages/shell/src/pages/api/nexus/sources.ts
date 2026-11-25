@@ -45,11 +45,10 @@ import { managedMarker } from '../../../lib/nexusSeeds.js';
  * The password is never stored in the config and never returned.
  */
 
-const OS_API_BASE = process.env['OS_API_BASE'] ?? 'http://localhost:3000';
 const DATA_DIR    = process.env['AURA_DATA_DIR'] ?? '/data';
 
 export const GET: APIRoute = async () => {
-  const cfg = await loadSourcesConfig(OS_API_BASE);
+  const cfg = await loadSourcesConfig();
   return jsonResponse(cfg);
 };
 
@@ -67,7 +66,7 @@ export const PUT: APIRoute = async ({ request }) => {
     names.add(s.name);
   }
   const normalised: SourcesConfig = { schema: 1, sources: cfg.sources };
-  const before = await loadSourcesConfig(OS_API_BASE);
+  const before = await loadSourcesConfig();
   for (const s of before.sources) {
     const m = managedMarker(s);
     if (!m) continue;
@@ -76,7 +75,7 @@ export const PUT: APIRoute = async ({ request }) => {
       return jsonResponse({ error: 'managed-source', detail: `${s.name} is managed by ${m.origin} and cannot be changed here` }, 409);
     }
   }
-  await saveSourcesConfig(OS_API_BASE, normalised);
+  await saveSourcesConfig(normalised);
   refreshNexusSources(normalised);
   // Logins of sources that are gone (or no longer reference them) go too.
   const kept = new Set(normalised.sources.flatMap((s) => (s.kind === 'oci' && s.auth ? [s.auth.secret] : [])));
@@ -105,7 +104,7 @@ export const POST: APIRoute = async ({ request }) => {
     return jsonResponse({ error: 'invalid-login', detail: 'a username and password are only supported for oci registries' }, 400);
   }
 
-  const cfg = await loadSourcesConfig(OS_API_BASE);
+  const cfg = await loadSourcesConfig();
   if (cfg.sources.some((s) => s.name === entry.name)) {
     return jsonResponse({ error: 'duplicate-name', detail: entry.name }, 409);
   }
@@ -135,7 +134,7 @@ export const POST: APIRoute = async ({ request }) => {
   }
 
   cfg.sources.push(entry);
-  await saveSourcesConfig(OS_API_BASE, cfg);
+  await saveSourcesConfig(cfg);
   refreshNexusSources(cfg);
   await credentialsLoaded();
   return jsonResponse({ ok: true, config: cfg, ...(apps !== undefined ? { apps } : {}) });

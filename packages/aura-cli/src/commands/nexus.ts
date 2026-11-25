@@ -897,6 +897,12 @@ export async function installWithChoices(
       { ...body, ...(identity ? { identity } : {}), ...(operator ? { operatorCode: operator } : {}) },
       approvalId ? { approvalId } : {},
     );
+    if (res.error === 'access-denied' || res.error === 'unauthenticated') {
+      // D31: only the owner, the System Terminal and the host operator install.
+      fail(`${verb} refused: only the owner may ${verb} apps. Use the Nexus app in the desktop, `
+        + 'run this command in the System Terminal (the owner approves it there), '
+        + 'or run it on the host: docker exec -it aura-shell aura …');
+    }
     if (res.needsIdentityChoice && res.conflict) {
       if (identity) fail('the store asked about the app identity again — giving up');
       const d = await askIdentity(res.conflict, preset);

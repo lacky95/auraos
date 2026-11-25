@@ -2,8 +2,6 @@ import type { APIRoute } from 'astro';
 import { getNexusManager } from '@aura/core';
 import { jsonResponse } from '../../../lib/appResponse.js';
 
-const OS_API_BASE = process.env['OS_API_BASE'] ?? 'http://localhost:3000';
-
 /** Substring search over the aggregated catalog. `?q=` empty returns
  *  everything; `?category=` filters by category slug; `?refresh=1` re-fetches. */
 export const GET: APIRoute = async ({ url }) => {
@@ -11,7 +9,7 @@ export const GET: APIRoute = async ({ url }) => {
   const category = url.searchParams.get('category');
   const refresh = url.searchParams.get('refresh') === '1';
   const nexus = getNexusManager();
-  await nexus.ensureSourcesLoaded(OS_API_BASE);
+  await nexus.ensureSourcesLoaded();
   if (refresh) await nexus.catalog.refresh();
   let hits = await nexus.catalog.search(q);
   if (category) {

@@ -176,11 +176,11 @@ export class NexusManager {
    * catalog to pick up user-registered sources across a shell restart. No-op
    * after the first call or once a route has mutated the config.
    */
-  async ensureSourcesLoaded(osApiBase: string): Promise<void> {
+  async ensureSourcesLoaded(): Promise<void> {
     if (this.sourcesLoaded) return;
     this.sourcesLoaded = true;
     try {
-      const cfg = await loadSourcesConfig(osApiBase);
+      const cfg = await loadSourcesConfig();
       this.sourcesConfig = cfg;
       this.resolver.setRegistryConfig(ociRegistryView(cfg));
       this.catalog.invalidate();

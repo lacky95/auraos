@@ -1,6 +1,6 @@
 import type { APIRoute } from 'astro';
 import { OsEventBus, compileTopicMatcher, getAppManager, parseTopicsParam, createLogger } from '@aura/core';
-import type { Principal } from '@aura/core';
+import type { AccessPrincipal } from '@aura/core';
 import { gatewayEventView, principalEventView, type GatewayEventView } from '../../../lib/access/gatewayEvents.ts';
 import { authenticate } from '../../../lib/auth.ts';
 import { followSession, streamSessionOf } from '../../../lib/streamSession.ts';
@@ -34,7 +34,7 @@ export const GET: APIRoute = async ({ url, request }) => {
     });
   }
   let view: GatewayEventView | null = gateway;
-  let principal: Principal | null = null;
+  let principal: AccessPrincipal | null = null;
   if (!view) {
     const p = await authenticate(request);
     if (p instanceof Response) return p;

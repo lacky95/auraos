@@ -71,13 +71,18 @@ export function approvalReply(kind: ApprovalWaiterKind, requestId: unknown, appr
     : { type: 'aura.approval.result' as const, requestId: rid, approvalId, ok: false, error: outcome };
 }
 
+/** D18: a `fresh` approval on an HTTP page. The server refuses the password there (`operator-required`). */
+export function operatorRequiredText(approvalId: string): string {
+  return `This needs HTTPS, or approve on the host with \`aura approve ${approvalId}\`.`;
+}
+
 /** The dialog's text for a refused decision. */
 export function decisionErrorText(error: string | undefined, approvalId: string): string {
   switch (error) {
     case 'invalid-credentials': return 'The password is wrong.';
     case 'password-required': return 'Enter your password to approve this.';
     case 'rate-limited': return 'Too many attempts. Wait a minute and try again.';
-    case 'operator-required': return `Over HTTP this needs the host: run aura approve ${approvalId} there, or use HTTPS.`;
+    case 'operator-required': return operatorRequiredText(approvalId);
     case 'locked': return 'Unlock the screen first.';
     case 'login-required': return 'Your login session has ended. Sign in again.';
     case 'forbidden-origin': return 'This page may not decide approvals.';

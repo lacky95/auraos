@@ -7,7 +7,6 @@
 import * as core from '@aura/core';
 import { jsonResponse } from './appResponse.js';
 
-const OS_API_BASE = process.env['OS_API_BASE'] ?? 'http://localhost:3000';
 export const DATA_DIR = process.env['AURA_DATA_DIR'] ?? '/data';
 
 const APP_ID_RE = /^[a-z0-9][a-z0-9.-]*[a-z0-9]$/i;
@@ -23,8 +22,8 @@ export async function listingTarget(sourceName: string | undefined, appId: strin
   if (!sourceName || !appId) return jsonResponse({ error: 'missing-param' }, 400);
   if (!APP_ID_RE.test(appId)) return jsonResponse({ error: 'invalid-app-id', detail: appId }, 400);
   const nexus = core.getNexusManager();
-  await nexus.ensureSourcesLoaded(OS_API_BASE);
-  const cfg = await core.loadSourcesConfig(OS_API_BASE);
+  await nexus.ensureSourcesLoaded();
+  const cfg = await core.loadSourcesConfig();
   const src = cfg.sources.find((s) => s.name === sourceName);
   if (!src) return jsonResponse({ error: 'not-found', detail: `no source '${sourceName}'` }, 404);
   if (src.kind !== 'oci') {

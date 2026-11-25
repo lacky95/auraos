@@ -1,6 +1,6 @@
 // Namespace import, as in auth.ts: the running shell may cache an older core build.
 import * as core from '@aura/core';
-import type { Principal } from '@aura/core';
+import type { AccessPrincipal } from '@aura/core';
 import { loadAppHostServices } from '../../server/app-host-auth.mjs';
 import { gatewayClaimOf } from '../../server/gateway-identity.mjs';
 import { bearerToken } from './access/identify.ts';
@@ -43,7 +43,7 @@ const check = (fn: () => Promise<unknown>): StreamSession => ({
 
 /** The session this request's stream follows, or null when it rides on none. */
 export function streamSessionOf(
-  request: Request, principal: Principal | null, deps: StreamSessionDeps = liveDeps,
+  request: Request, principal: AccessPrincipal | null, deps: StreamSessionDeps = liveDeps,
 ): StreamSession | null {
   const claim = gatewayClaimOf(request);
   if (claim) {

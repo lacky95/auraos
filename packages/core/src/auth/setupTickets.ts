@@ -14,7 +14,8 @@
  *
  * An `operator` ticket is the host operator's word on one `subject` (D18,
  * `aura approve <id>`): the CLI creates it and presents it at once over HTTP,
- * which only a process that can write this directory can do.
+ * which only a process that can write this directory can do. The host CLI
+ * also identifies each of its API requests this way (`operatorRequestSubject`).
  */
 import { createHash, randomBytes } from 'node:crypto';
 import { chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
@@ -33,6 +34,15 @@ const TICKET_FILE_RE = /^[0-9a-f]{64}\.json$/;
 const PURPOSES: ReadonlySet<string> = new Set<SetupTicketPurpose>(['setup', 'reset', 'operator']);
 /** `approve:apr_…`, `nexus.install:<sha256>`: printable, no spaces. */
 const SUBJECT_RE = /^[A-Za-z0-9._:-]{1,200}$/;
+
+/**
+ * The subject of an operator ticket that identifies one API request of the
+ * host CLI as the operator (`X-Aura-Operator`): its method and path. The CLI
+ * creates it, the shell resolver claims it; both compute it here.
+ */
+export function operatorRequestSubject(method: string, pathname: string): string {
+  return `request:${createHash('sha256').update(`${method.toUpperCase()} ${pathname}`).digest('hex')}`;
+}
 
 export interface SetupTicketEvent {
   at: number;

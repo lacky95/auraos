@@ -15,8 +15,12 @@
  * Phase 3 (5.8): inside a sandbox, every other call carries this process's
  * instance token (`self`), event streams included, so the shell sees the
  * instance and the user it acts for. An admin route takes the admin session
- * instead when there is one.
+ * instead when there is one. On the host (`docker exec aura-shell aura …`) a
+ * call with no other credential carries a one-time operator ticket for
+ * exactly that request (`X-Aura-Operator`), so the shell sees the operator.
  */
+// The file-only entry: the package root would bundle Valkey and the server runtime.
+import { createSetupTicket, operatorRequestSubject } from '@aura/core/setup-tickets';
 import { DEFAULT_SHELL_URL, shellUrl } from './shell-url.js';
 import { inProcessSession, savedSession } from './admin-session-store.js';
 
@@ -35,10 +39,10 @@ export interface IdentityRequest {
   instanceId?: string;
 }
 
-export type IdentitySource = 'none' | 'instance-token' | 'admin-env' | 'admin-process' | 'admin-saved';
+export type IdentitySource = 'none' | 'instance-token' | 'admin-env' | 'admin-process' | 'admin-saved' | 'operator-ticket';
 
 export interface ResolvedIdentity {
-  kind: 'none' | 'instance' | 'admin';
+  kind: 'none' | 'instance' | 'admin' | 'operator';
   source: IdentitySource;
   headers: Record<string, string>;
   /** The request carries a secret in a header or body: redirects are refused. */
@@ -191,11 +195,33 @@ export interface ShellFetchInit extends Omit<RequestInit, 'redirect'> {
   instanceId?: string;
 }
 
+/**
+ * The host operator (plan 5.8): `aura` in the master container, outside any
+ * sandbox, talking to its own shell. The ticket names this request's method
+ * and path and is used up by the shell; only a process that can write the
+ * master's secrets directory can create one. Null when that fails.
+ */
+function operatorIdentity(target: string, method: string): ResolvedIdentity | null {
+  if (inSandbox() || !isTrustedShellUrl(target)) return null;
+  try {
+    const { code } = createSetupTicket(process.env['AURA_DATA_DIR'] ?? '/data', {
+      purpose: 'operator', subject: operatorRequestSubject(method, new URL(target).pathname),
+    });
+    return { kind: 'operator', source: 'operator-ticket', headers: { 'X-Aura-Operator': code }, credentialed: true, trusted: true };
+  } catch {
+    return null;
+  }
+}
+
 /** The CLI's only route to the shell API. It carries this process's identity unless told otherwise. */
 export function shellFetch(path: string, init: ShellFetchInit = {}): Promise<Response> {
   const { intent = 'self', instanceId, headers, ...rest } = init;
   const url = shellUrl();
-  const identity = resolveIdentity({ url, path, intent, ...(instanceId !== undefined ? { instanceId } : {}) });
+  let identity = resolveIdentity({ url, path, intent, ...(instanceId !== undefined ? { instanceId } : {}) });
+  // Nothing else to send, and a call that may carry an identity: the host operator, if this is the host.
+  if (identity.kind === 'none' && !identity.credentialed && intent !== 'anonymous' && !isProxyPath(`${url}${path}`)) {
+    identity = operatorIdentity(`${url}${path}`, rest.method ?? 'GET') ?? identity;
+  }
   return fetch(`${url}${path}`, {
     ...rest,
     headers: { ...(headers as Record<string, string> | undefined), ...identity.headers },

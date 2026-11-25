@@ -11,16 +11,17 @@ import type { AddressInfo } from 'node:net';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Command } from 'commander';
-import { defaultSetupTicketDir } from '@aura/core/setup-tickets';
+import { defaultSetupTicketDir, FileSetupTickets, operatorRequestSubject } from '@aura/core/setup-tickets';
 import { installWithChoices } from '../src/commands/nexus.js';
 import { registerApprove } from '../src/commands/approve.js';
+import { shellFetch } from '../src/lib/identity.js';
 
-const ENV = ['AURA_SHELL_URL', 'AURA_INSTANCE_TOKEN', 'APP_INSTANCE_ID', 'AURA_INSTANCE_ID', 'AURA_ADMIN_SESSION', 'AURA_ADMIN_CREDENTIAL'];
+const ENV = ['AURA_SHELL_URL', 'OS_API_BASE', 'AURA_OS_URL', 'AURA_INSTANCE_TOKEN', 'APP_INSTANCE_ID', 'AURA_INSTANCE_ID', 'AURA_ADMIN_SESSION', 'AURA_ADMIN_CREDENTIAL'];
 const ID = 'apr_AAAAAAAAAAAAAAAAAAAAAA';
 const DIFF = { appId: 'com.example.notes', versionFrom: null, versionTo: '1.0.0', toolsAdded: ['git'], toolsRemoved: [], permissionsAdded: [], permissionsRemoved: [], dataProviderAdded: false, dataProviderRemoved: false, intentFiltersAdded: [] };
 const DISPLAY = { title: 'Install Notes 1.0.0', details: ['Scope: user'], requestedBy: 'Terminal (t-1)' };
 
-interface Seen { method: string; url: string; body: Record<string, unknown>; approval?: string; auth?: string }
+interface Seen { method: string; url: string; body: Record<string, unknown>; approval?: string; auth?: string; operator?: string }
 type Handler = (r: Seen) => [number, unknown];
 const servers: http.Server[] = [];
 const saved: Record<string, string | undefined> = {};
@@ -35,6 +36,7 @@ async function fakeShell(handler: Handler): Promise<Seen[]> {
       method: req.method ?? '', url: req.url ?? '', body: raw ? JSON.parse(raw) : {},
       ...(typeof req.headers['x-aura-approval'] === 'string' ? { approval: req.headers['x-aura-approval'] } : {}),
       ...(req.headers.authorization ? { auth: req.headers.authorization } : {}),
+      ...(typeof req.headers['x-aura-operator'] === 'string' ? { operator: req.headers['x-aura-operator'] } : {}),
     };
     seen.push(rec);
     const [status, body] = handler(rec);
@@ -138,4 +140,47 @@ test('aura approve is a host command: refused in a sandbox before any request', 
   registerApprove(program);
   await assert.rejects(quiet(() => program.parseAsync(['node', 'aura', 'approve', ID, '-y'])), /exit 1/);
   assert.equal(seen.length, 0);
+});
+
+test('on the host: each call to its own shell carries a one-time operator ticket for exactly that request', async () => {
+  const seen = await fakeShell(() => [200, {}]);
+  process.env['OS_API_BASE'] = process.env['AURA_SHELL_URL'];  // the master's own shell
+  await shellFetch('/api/apps');
+  await shellFetch('/api/nexus/install', { method: 'POST', body: '{}' });
+  await shellFetch('/api/proxy/com.aura.docs/mcp', { method: 'POST', body: '{}' });
+  await shellFetch('/api/auth/status', { intent: 'anonymous' });
+  const [get, post, proxy, anon] = seen;
+  assert.ok(get!.operator && post!.operator && get!.operator !== post!.operator, 'a new code per request');
+  assert.equal(proxy!.operator, undefined, 'nothing goes to an app through the proxy');
+  assert.equal(anon!.operator, undefined);
+  const tickets = new FileSetupTickets({ dir: defaultSetupTicketDir(process.env['AURA_DATA_DIR']) });
+  assert.equal((await tickets.claim(get!.operator!, 'operator'))?.subject, operatorRequestSubject('GET', '/api/apps'));
+  assert.equal((await tickets.claim(post!.operator!, 'operator'))?.subject, operatorRequestSubject('POST', '/api/nexus/install'));
+  assert.equal(await tickets.claim(get!.operator!, 'operator'), null, 'used up');
+});
+
+test('in a sandbox, or to another shell, no operator ticket is made', async () => {
+  const seen = await fakeShell(() => [200, {}]);
+  await shellFetch('/api/apps');  // not this system's shell
+  process.env['OS_API_BASE'] = process.env['AURA_SHELL_URL'];
+  process.env['APP_INSTANCE_ID'] = 'com.example.counter-1';
+  await shellFetch('/api/apps');
+  assert.deepEqual(seen.map((r) => r.operator), [undefined, undefined]);
+});
+
+test('an install the shell refuses (not the owner, D31) says how to install', async () => {
+  process.env['AURA_INSTANCE_TOKEN'] = 'aura1.instance-token';
+  process.env['APP_INSTANCE_ID'] = 'com.example.counter-1';
+  await fakeShell(() => [403, { error: 'access-denied', reason: 'wrong-target' }]);
+  const lines: string[] = [];
+  const err = console.error;
+  console.error = (...a: unknown[]) => { lines.push(a.join(' ')); };
+  try {
+    await assert.rejects(installWithChoices('/api/nexus/install', { ref: 'notes' }, {}, 'install'), /exit 1/);
+  } finally {
+    console.error = err;
+  }
+  assert.match(lines.join('\n'), /only the owner may install apps/);
+  assert.match(lines.join('\n'), /System Terminal/);
+  assert.match(lines.join('\n'), /docker exec -it aura-shell aura/);
 });

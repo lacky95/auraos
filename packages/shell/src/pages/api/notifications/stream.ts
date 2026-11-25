@@ -71,7 +71,7 @@ export const GET: APIRoute = async ({ request, url }) => {
   const principal = await notificationCaller(request);
   if (principal instanceof Response) return principal;
   // The sign-in this stream was opened on (the caller is the one resolver's principal).
-  const session = streamSessionOf(request, principal as core.Principal);
+  const session = streamSessionOf(request, principal as core.AccessPrincipal);
   const since = (request.headers.get('last-event-id') ?? url.searchParams.get('since') ?? '').trim();
   const svc = core.getNotificationService();
   // Access is resolved per event (cached for a second), so a lock / unlock

@@ -16,11 +16,10 @@ import { managedMarker } from '../../../../../lib/nexusSeeds.js';
  *
  * The password is never stored in the sources config and never returned.
  */
-const OS_API_BASE = process.env['OS_API_BASE'] ?? 'http://localhost:3000';
 const DATA_DIR    = process.env['AURA_DATA_DIR'] ?? '/data';
 
 async function ociSourceOr404(name: string | undefined) {
-  const cfg = await core.loadSourcesConfig(OS_API_BASE);
+  const cfg = await core.loadSourcesConfig();
   const src = cfg.sources.find((s) => s.name === name);
   if (!src) return { cfg, res: jsonResponse({ error: 'not-found', detail: name }, 404) };
   if (src.kind !== 'oci') return { cfg, res: jsonResponse({ error: 'not-oci', detail: 'only oci registries take a login' }, 400) };
@@ -42,7 +41,7 @@ export const PUT: APIRoute = async ({ params, request }) => {
   const probe = await probeOciSource(src!.url, login, src!.appRepoPrefix);
   if (!probe.ok) return probeError(probe);
   src!.auth = await core.saveRegistryLogin(DATA_DIR, src!.name, src!.url, login);
-  await core.saveSourcesConfig(OS_API_BASE, cfg);
+  await core.saveSourcesConfig(cfg);
   core.refreshNexusSources(cfg);
   await credentialsLoaded();
   return jsonResponse({ ok: true, source: src, apps: probe.apps });
@@ -54,7 +53,7 @@ export const DELETE: APIRoute = async ({ params }) => {
   if (src!.auth) {
     await core.deleteRegistryLogin(DATA_DIR, src!.auth);
     delete src!.auth;
-    await core.saveSourcesConfig(OS_API_BASE, cfg);
+    await core.saveSourcesConfig(cfg);
     core.refreshNexusSources(cfg);
     await credentialsLoaded();
   }

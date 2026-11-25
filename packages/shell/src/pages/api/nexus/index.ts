@@ -2,8 +2,6 @@ import type { APIRoute } from 'astro';
 import { getNexusManager } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../lib/appResponse.js';
 
-const OS_API_BASE = process.env['OS_API_BASE'] ?? 'http://localhost:3000';
-
 /**
  * GET — the aggregated app-store catalog across every registered source
  * (OCI registries, git-index repos, git-app repos) plus the bundled seed.
@@ -21,7 +19,7 @@ export const GET: APIRoute = async ({ url }) => {
   const refresh = url.searchParams.get('refresh') === '1';
   const nexus = getNexusManager();
   try {
-    await nexus.ensureSourcesLoaded(OS_API_BASE);
+    await nexus.ensureSourcesLoaded();
     const cat = refresh ? await nexus.catalog.refresh() : await nexus.catalog.get();
     const states = nexus.installStates(cat.apps);
     const apps = cat.apps.map((a) => {

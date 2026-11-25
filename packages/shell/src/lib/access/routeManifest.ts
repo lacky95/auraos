@@ -67,7 +67,6 @@ const DATA_ACCESS = why(
 const CONTEXT_Q31 = decide(5,
   'Holds secrets and is never public. The Settings app manages it from an app context today; Q31 gives other apps only keys approved per instance.');
 
-
 const PROXY_ACCESS = why(
   'D28: the owner, and a tokenless call from an app container (Claude Code\'s MCP URLs, the Terminal\'s session calls, the agent hooks), known by its network address. The SDK never sends a token on this path, and a gateway call stays refused. Caller-scoped grants are Phase 5.');
 
@@ -241,8 +240,8 @@ const routes: RouteAccessManifest['routes'] = {
 
   '/api/os/about': {
     methods: {
-      GET: rule(OWNER, 'system', decide(1,
-        'No health route exists. SelfUpdater probes this route anonymously, and it discloses host, git and session details. Add a minimal public health route and repoint the probe before enforcement.')),
+      GET: rule(OWNER, 'system', why(
+        'Discloses host, git and session details: the owner (the About dialog, Settings through D45). SelfUpdater\'s health probe uses the public /api/auth/status.')),
     },
   },
   '/api/os/context': {
@@ -269,7 +268,8 @@ const routes: RouteAccessManifest['routes'] = {
     methods: { POST: rule(OWNER, 'system', why('The signed-in owner unlocks a screen; unlocking is not authentication, so the login is what counts.')) },
   },
   '/api/os/clients': {
-    methods: { POST: rule(OWNER, 'client-session', decide(1, 'A tab registers before it may have logged in. Decide whether the login page needs a client session.')) },
+    methods: { POST: rule(OWNER, 'client-session', why(
+      'The signed-in owner\'s desktop tab. The login and setup pages need none (AuthLayout has no ClientSession), and the desktop renders only for the signed-in owner (D6), so no tab registers before login.')) },
   },
   '/api/os/clients/[sid]/[action]': { methods: { POST: rule(OWNER, 'client-session') } },
 

@@ -1,10 +1,10 @@
 // Namespace import: the running shell may cache a core build without the
 // auth exports; a named import would 500 every route until restart.
 import * as core from '@aura/core';
-import type { AdminPrincipal, AppManager, Principal } from '@aura/core';
+import type { AdminPrincipal, AppManager } from '@aura/core';
 import { errorResponse, jsonResponse } from './appResponse.js';
 import {
-  bearerToken, resolvePrincipal, type CredentialRejection, type GatewayOwnerDeps, type PrincipalDeps,
+  bearerToken, resolvePrincipal, type CallerPrincipal, type CredentialRejection, type GatewayOwnerDeps, type PrincipalDeps,
   type ResolvedPrincipal,
 } from './access/identify.js';
 import { coreAuthServices, ownerSessionOf, sessionCookieToken } from './authSurface.js';
@@ -19,6 +19,8 @@ import { coreAuthServices, ownerSessionOf, sessionCookieToken } from './authSurf
  *   Authorization: Bearer aura_k1_…      → apiKey   (admin-issued key, verified)
  *   Authorization: Bearer aura-admin1.…  → admin    (session from the shared credential)
  *   Authorization: Bearer aura-sess1.…   → user     (the owner's live login session)
+ *   X-Aura-Operator: <one-time code>     → operator (the host CLI in the master, its
+ *                                          ticket for exactly this request)
  *   any other / invalid / expired credential → 401 — NEVER downgraded to anonymous
  *   login cookie (no Authorization)      → user; an expired or revoked one → anonymous
  *   no credentials                       → anonymous (Referer / X-Aura-Instance-Id = hints only)
@@ -47,6 +49,8 @@ export interface AuthDeps {
   admin: { verifySession(token: string): Promise<{ sessionId: string; expiresAt: number } | null> };
   /** The owner's login sessions. Absent: a login cookie is not read, a login bearer is refused. */
   login?: PrincipalDeps['login'];
+  /** The host operator's one-time tickets. Absent: an operator header is not verified. */
+  operatorTickets?: PrincipalDeps['operatorTickets'];
 }
 
 /** The login check of the desktop's sign-in (authSurface), on core's live stores. */
@@ -62,7 +66,7 @@ const coreLogin: NonNullable<PrincipalDeps['login']> = {
 
 export function defaultAuthDeps(): AuthDeps {
   const svc = core.getAuthServices();
-  return { mgr: core.getAppManager(), apiKeys: svc.apiKeys, admin: svc.admin, login: coreLogin };
+  return { mgr: core.getAppManager(), apiKeys: svc.apiKeys, admin: svc.admin, login: coreLogin, operatorTickets: svc.setupTickets };
 }
 
 function unauthorized(error: string, message: string): Response {
@@ -84,6 +88,8 @@ function refusal(rejected: { reason: CredentialRejection; instanceId?: string })
       return errorResponse('unsupported Authorization header — send Authorization: Bearer $AURA_INSTANCE_TOKEN (or an API key / admin session), or no Authorization at all', 401);
     case 'instance-not-running':
       return errorResponse(`token belongs to ${rejected.instanceId}, which is not running`, 401);
+    case 'operator-ticket-invalid':
+      return unauthorized('operator-ticket-invalid', 'operator code invalid, used or expired — run the aura command on the host again');
     case 'credential-invalid':
     default:
       return errorResponse('invalid or expired credential (instance token, API key or admin session)', 401);
@@ -98,10 +104,11 @@ export function resolveCaller(request: Request, deps: AuthDeps = defaultAuthDeps
     admin: deps.admin,
     login: deps.login ?? null,
     ownerServices: deps.ownerServices,
+    operatorTickets: deps.operatorTickets ?? null,
   });
 }
 
-export async function authenticate(request: Request, deps: AuthDeps = defaultAuthDeps()): Promise<Principal | Response> {
+export async function authenticate(request: Request, deps: AuthDeps = defaultAuthDeps()): Promise<CallerPrincipal | Response> {
   const r = await resolveCaller(request, deps);
   if (r.rejected) return refusal(r.rejected);
   if (r.principal.kind !== 'anonymous') return r.principal;

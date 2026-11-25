@@ -16,10 +16,11 @@ import { isIP } from 'node:net';
 // Namespace import: the running shell may cache a core build without these.
 import * as core from '@aura/core';
 import type {
-  LoginSession, LoginSessions, PasswordRule, Principal, SetupTickets, UserAccount, UserPrincipal, UserStore, ValkeyUserStore,
+  LoginSession, LoginSessions, PasswordRule, SetupTickets, UserAccount, UserPrincipal, UserStore, ValkeyUserStore,
 } from '@aura/core';
 import { GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
 import { authenticate } from './auth.js';
+import type { CallerPrincipal } from './access/identify.js';
 import { isTrustedProxy } from '../../server/host-policy.mjs';
 
 export const COOKIE_HTTPS = '__Host-aura_session';
@@ -74,7 +75,7 @@ export interface AuthSurfaceDeps {
   /** Null until stream A's accessors exist on `getAuthServices()`. */
   services: () => AuthSurfaceServices | null;
   /** The shell's bearer authentication. Replaced in tests. */
-  authenticate?: (request: Request) => Promise<Principal | Response>;
+  authenticate?: (request: Request) => Promise<CallerPrincipal | Response>;
   /** D45: the owner acting through a trusted system UI (identify.ts). Replaced in tests. */
   gatewayOwner?: (request: Request) => Promise<UserPrincipal | null>;
 }
@@ -592,7 +593,7 @@ export async function authRevokeOtherSessions(ctx: AuthContext, deps: AuthSurfac
 }
 
 /** The verified class of the caller. Hints, session ids and scopes stay out. */
-function publicPrincipal(p: Principal): Record<string, string> {
+function publicPrincipal(p: CallerPrincipal): Record<string, string> {
   switch (p.kind) {
     case 'instance':
       return {
@@ -602,6 +603,7 @@ function publicPrincipal(p: Principal): Record<string, string> {
     case 'apiKey':
       return { kind: p.kind, verification: p.verification, name: p.name };
     case 'admin':
+    case 'operator':
       return { kind: p.kind, verification: p.verification };
     case 'user':
       return {
@@ -630,7 +632,7 @@ async function observedLogin(ctx: AuthContext, deps: AuthSurfaceDeps): Promise<R
 
 /** The caller as routes see it; the login cookie, if any, is labelled under `login`. */
 export async function authWhoami(ctx: AuthContext, deps: AuthSurfaceDeps = defaultDeps()): Promise<Response> {
-  let principal: Principal | Response;
+  let principal: CallerPrincipal | Response;
   try { principal = await (deps.authenticate ?? authenticate)(ctx.request); }
   catch { return unavailable(); }
   if (principal instanceof Response) return json({ error: 'invalid-credential' }, 401);

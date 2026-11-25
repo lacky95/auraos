@@ -1,4 +1,4 @@
-import type { AppManager, Principal } from '@aura/core';
+import type { AccessPrincipal, AppManager } from '@aura/core';
 import { gatewayInstance } from './identify.ts';
 import { kvEventAllowed } from './kvAccess.ts';
 
@@ -65,7 +65,7 @@ export function gatewayEventView(
  * terminal (D29), where `aura events` and `aura ps -w` run.
  */
 export async function principalEventView(
-  principal: Principal,
+  principal: AccessPrincipal,
   mgr: Pick<AppManager, 'getInstance'>,
   isSystemTerminal: (appId: string) => Promise<boolean>,
 ): Promise<GatewayEventView | null> {

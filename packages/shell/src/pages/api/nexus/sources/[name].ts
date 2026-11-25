@@ -9,7 +9,6 @@ import { jsonResponse } from '../../../../lib/appResponse.js';
 import { managedMarker } from '../../../../lib/nexusSeeds.js';
 import { probeGitApp } from '../../../../lib/nexusGitApp.js';
 
-const OS_API_BASE = process.env['OS_API_BASE'] ?? 'http://localhost:3000';
 const DATA_DIR    = process.env['AURA_DATA_DIR'] ?? '/data';
 
 /**
@@ -32,7 +31,7 @@ export const PATCH: APIRoute = async ({ params, request }) => {
   catch { return jsonResponse({ error: 'invalid-json' }, 400); }
   if (!body || typeof body !== 'object') return jsonResponse({ error: 'invalid-body' }, 400);
 
-  const cfg = await loadSourcesConfig(OS_API_BASE);
+  const cfg = await loadSourcesConfig();
   const idx = cfg.sources.findIndex((s) => s.name === name);
   if (idx < 0) return jsonResponse({ error: 'not-found', detail: name }, 404);
   const cur = cfg.sources[idx]!;
@@ -98,7 +97,7 @@ export const PATCH: APIRoute = async ({ params, request }) => {
   if (next.name !== cur.name) delete next['seed'];
 
   cfg.sources[idx] = next;
-  await saveSourcesConfig(OS_API_BASE, cfg);
+  await saveSourcesConfig(cfg);
   refreshNexusSources(cfg);
   return jsonResponse({ ok: true, source: next, config: cfg });
 };
@@ -108,7 +107,7 @@ export const DELETE: APIRoute = async ({ params }) => {
   if (typeof name !== 'string' || !name) {
     return jsonResponse({ error: 'missing-name' }, 400);
   }
-  const cfg = await loadSourcesConfig(OS_API_BASE);
+  const cfg = await loadSourcesConfig();
   const target = cfg.sources.find((s) => s.name === name);
   if (!target) return jsonResponse({ error: 'not-found', detail: name }, 404);
   const managed = managedMarker(target);
@@ -117,7 +116,7 @@ export const DELETE: APIRoute = async ({ params }) => {
     return jsonResponse({ error: 'last-oci-source', detail: 'cannot remove the only OCI registry' }, 409);
   }
   cfg.sources = cfg.sources.filter((s) => s.name !== name);
-  await saveSourcesConfig(OS_API_BASE, cfg);
+  await saveSourcesConfig(cfg);
   refreshNexusSources(cfg);
   if (target.kind === 'oci' && target.auth) await core.deleteRegistryLogin(DATA_DIR, target.auth);
   return jsonResponse({ ok: true, config: cfg });
