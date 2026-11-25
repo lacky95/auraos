@@ -1,5 +1,5 @@
 import type { APIRoute } from 'astro';
-import { getAppManager, OsEventBus } from '@aura/core';
+import { getAppManager, OsEventBus, previewTitle } from '@aura/core';
 import type { AppActivity } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
 
@@ -68,7 +68,11 @@ export const POST: APIRoute = async ({ params, request }) => {
       activity.history = [...(activity.history ?? []), entry];
     }
     activity.path = normalizedPath;
-    if (typeof opts.title === 'string') activity.title = opts.title;
+    if (typeof opts.title === 'string') {
+      // A preview's window stays marked "Preview" (Track P).
+      const inst = mgr.getInstance(activity.parentInstanceId);
+      activity.title = inst?.preview ? previewTitle(opts.title, mgr.getManifest(inst.appId)?.name ?? inst.appId) : opts.title;
+    }
     activity.lastTransitionAt = new Date();
     OsEventBus.emit('activity:navigated', {
       activityId:       activity.activityId,

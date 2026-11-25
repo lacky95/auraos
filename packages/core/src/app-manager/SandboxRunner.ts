@@ -103,7 +103,10 @@ export interface SandboxRunner {
     address?:   string;
     /** `AURA_LIFECYCLE_TOKEN` from its env — absent on containers from before the token. */
     lifecycleToken?: string;
+    /** `aura.preview` label: a preview instance's workspace (Track P). */
+    preview?: string;
   }> | null>;
+
   registerAdopted?(rec: {
     instanceId: string;
     appId:      string;

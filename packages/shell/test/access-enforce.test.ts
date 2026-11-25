@@ -47,12 +47,15 @@ const scopes: Record<string, string> = {
   'com.acme.notes': 'user', 'com.other.app': 'user', 'com.aura.terminal': 'system', 'com.aura.settings': 'system',
   'com.aura.aurashelld': 'system',
 };
+/** Apps whose installed user copy is an approved overlay (core lifecycle `trustedOverlay`, Track P). */
+const overlaid = new Set<string>();
 const mgr = {
   tokens: { hasNonce: () => false, verify: () => null },
   getInstance: (id: string) => instances[id],
   getInstancesByApp: (appId: string) => Object.values(instances).filter((i) => i.appId === appId),
   getAllInstances: () => Object.values(instances),
   getManifest: (id: string) => (scopes[id] ? { scopeId: scopes[id] } : undefined),
+  isTrustedSystemCopy: (id: string) => scopes[id] === 'system' || (scopes[id] === 'user' && overlaid.has(id)),
   registry: { getById: (id: string) => (scopes[id] ? {} : undefined) },
 } as unknown as ObserverManager;
 
@@ -217,6 +220,24 @@ test('D29: the system Terminal by its own token acts for the owner; not through 
   assert.equal(await gate('enforce', term, { method: 'POST', path: '/api/auth/password', route: '/api/auth/password' }), '403 access-denied');
   // D50: the owner's management routes let the Terminal through; the route asks the owner's approval.
   assert.equal(await gate('enforce', term, { path: '/api/admin/grants', route: '/api/admin/grants' }), 'pass');
+});
+
+test('Track P: the Terminal\'s approved overlay is still the owner\'s agent; an unlinked same-id copy is an ordinary app', async () => {
+  const term = inst('com.aura.terminal', 'com.aura.terminal-1', { userId: 'default' });
+  const enabled = { method: 'POST', path: '/api/admin/apps/enabled', route: '/api/admin/apps/enabled', body: { appId: 'com.acme.notes', enabled: false } };
+  const install = { method: 'POST', path: '/api/nexus/install', route: '/api/nexus/install', body: {} };
+  const activate = { method: 'POST', path: '/api/apps/com.acme.notes/activate', route: '/api/apps/[id]/activate', params: { id: 'com.acme.notes' }, body: {} };
+  scopes['com.aura.terminal'] = 'user';
+  overlaid.add('com.aura.terminal');
+  try {
+    for (const call of [enabled, install, activate]) assert.equal(await gate('enforce', term, call), 'pass', `overlay ${call.path}`);
+    assert.equal(await gate('enforce', term, { method: 'POST', path: '/api/auth/password', route: '/api/auth/password' }), '403 access-denied');
+    overlaid.delete('com.aura.terminal');
+    for (const call of [enabled, install, activate]) assert.equal(await gate('enforce', term, call), '403 access-denied', `unlinked ${call.path}`);
+  } finally {
+    scopes['com.aura.terminal'] = 'system';
+    overlaid.clear();
+  }
 });
 
 test('D29: TerminalX lists the Terminal\'s instances with its terminal.sessions.list grant; other apps\' instances stay the owner\'s', async () => {

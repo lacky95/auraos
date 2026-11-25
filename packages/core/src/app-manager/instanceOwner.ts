@@ -7,6 +7,8 @@
 import { DEFAULT_OWNER_ID } from '../auth/identityContracts.js';
 
 export const OWNER_LABEL = 'aura.owner';
+/** A preview instance (Track P): the label holds its workspace, relative to the root dataDir. */
+export const PREVIEW_LABEL = 'aura.preview';
 const OWNER_ID_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
 /** The owner of an adopted container. Undefined only for an unclaimed pool member. */

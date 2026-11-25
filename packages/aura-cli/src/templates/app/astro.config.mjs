@@ -20,7 +20,7 @@ export default defineConfig({
     // to this server (packages/shell/server/app-hosts.mjs), so Vite's
     // `vite-hmr` socket may well work with this removed — but that is not
     // verified yet. If you turn it on, path-check your own `upgrade`
-    // handlers so they leave Vite's socket alone (see CLAUDE.md).
+    // handlers so they leave Vite's socket alone (see AGENTS.md).
     server: { hmr: false },
   },
 });

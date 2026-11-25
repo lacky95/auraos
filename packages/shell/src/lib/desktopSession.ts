@@ -133,6 +133,7 @@ export async function buildSnapshot(reason: DesktopSnapshot['reason']): Promise<
   } catch { /* no workspaces: instance views unknown */ }
 
   const activities: SessionActivity[] = mgr.getAllActivities()
+    .filter((a: AppActivity) => !mgr.getInstance(a.parentInstanceId)?.preview)
     .map((a: AppActivity) => ({
       activityId: a.activityId,
       parentInstanceId: a.parentInstanceId,
@@ -162,7 +163,8 @@ export function sessionInstances(
 ): SessionInstance[] {
   const instances: SessionInstance[] = [];
   for (const inst of mgr.getAllInstances()) {
-    if (inst.inPool) continue;
+    // A preview (Track P) is not restored after a restart: it is reaped.
+    if (inst.inPool || inst.preview) continue;
     if (inst.state === 'destroyed' || inst.state === 'error') continue;
     const m = mgr.getManifest(inst.appId);
     if (!m || m.componentType === 'service') continue;

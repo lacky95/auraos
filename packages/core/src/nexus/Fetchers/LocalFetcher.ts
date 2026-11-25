@@ -26,7 +26,9 @@ export async function fetchLocal(sourcePath: string, stagingDir: string): Promis
   } catch {
     cpSync(abs, stagingDir, {
       recursive: true,
-      filter: (src) => !/(node_modules|\.next|dist|\.astro|\.turbo|\.cache)$/.test(src),
+      // Whole path segments only: `\.astro$` alone also dropped every
+      // `*.astro` source file when rsync is missing.
+      filter: (src) => !/(^|\/)(node_modules|\.next|dist|\.astro|\.turbo|\.cache)$/.test(src),
     });
   }
 }

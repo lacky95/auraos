@@ -17,7 +17,7 @@ import { MountManager, isSidecarConsumer, parentOfConsumer } from '../dist/app-m
 const INST = 'io.test.app-2';
 const SC = `${INST}--box`;
 
-function world(t, { noCat = new Set(), noMountRoot = new Set(), pidFallbackFails = false } = {}) {
+function world(t, { noCat = new Set(), noMountRoot = new Set(), pidFallbackFails = false, closed = new Set() } = {}) {
   const dataDir = fs.mkdtempSync(join(tmpdir(), 'aura-mm-'));
   const kernel = new Map();   // shell-side dest → 'ro' | 'rw'
   const calls = [];
@@ -76,6 +76,7 @@ function world(t, { noCat = new Set(), noMountRoot = new Set(), pidFallbackFails
     },
     instanceDataDir: (k) => join(dataDir, 'scopes', 'system', 'apps', 'io.test.app', parentOfConsumer(k)),
     fanoutTargets: () => targets,
+    sourceMode: (id) => (closed.has(id) ? 'closed' : 'open'),
   });
   return {
     mm, kernel, calls, dataDir, mountRootDir,
@@ -231,4 +232,101 @@ test('rebindTarget: an app whose dir was replaced is re-bound everywhere, same m
   assert.deepEqual(w.decls(INST), declsBefore, 'declarations unchanged');
   assert.equal(w.decls(SC), null);
   assert.deepEqual(await w.mm.rebindTarget('io.not.mounted'), { rebound: 0, failed: 0 });
+});
+
+// ── Track P: closed sources and patch workspaces ────────────────────────────
+
+test('a closed install mounts its source read-only; a writable request is refused', async (t) => {
+  const w = world(t, { closed: new Set(['io.shop.app']) });
+  const m = await w.mm.add(INST, { targetAppId: 'io.shop.app' });
+  assert.equal(m.mode, 'ro');
+  assert.equal(w.kernel.get(m.hostDest), 'ro', 'bound from a read-only source: writes fail with EROFS');
+  await w.mm.remove(INST, 'io.shop.app');
+  await assert.rejects(w.mm.add(INST, { targetAppId: 'io.shop.app', mode: 'rw' }), /refusing a writable mount: io\.shop\.app is a closed install/);
+  assert.equal(w.kernel.size, 0, 'nothing bound');
+  // Data is not source: --wr on a closed app's data still works.
+  const d = await w.mm.add(INST, { targetAppId: 'io.shop.app', data: true, mode: 'rw' });
+  assert.equal(w.kernel.get(d.hostDest), 'rw');
+});
+
+test('a writable declaration of an app that is closed since comes back read-only', async (t) => {
+  const closed = new Set();
+  const w = world(t, { closed });
+  await w.mm.add(INST, { targetAppId: 'io.shop.app', mode: 'rw' });
+  closed.add('io.shop.app');
+  w.mm.removeAll(INST);
+  const r = await w.mm.reapply(INST);
+  assert.equal(r.restored, 1);
+  assert.equal(w.mm.list(INST)[0].mode, 'ro');
+  // and a re-bind (closing it, or a replaced dir) persists read-only
+  await w.mm.rebindTarget('io.shop.app');
+  assert.equal(w.mm.list(INST)[0].mode, 'ro');
+  assert.equal(w.decls(INST)[0].mode, 'ro');
+});
+
+test('a workspace binds writable at /mnt/aura/work/<app> in the calling consumer only', async (t) => {
+  const w = world(t, { closed: new Set(['io.shop.app']) });
+  w.setTargets([{ consumer: SC, exclude: [], forceRo: false }]);
+  const ws = 'aura/workspaces/default/inst-1234/1';
+  const m = await w.mm.add(INST, { targetAppId: 'io.shop.app', workspace: ws, mode: 'ro' });
+  await w.mm.settled();
+  assert.equal(m.id, 'io.shop.app:work');
+  assert.equal(m.kind, 'work');
+  assert.equal(m.mode, 'rw', 'a workspace is always writable, closed app or not');
+  assert.equal(m.containerPath, '/mnt/aura/work/io.shop.app');
+  assert.equal(m.hostSource, join(w.dataDir, ws), 'from the app-data volume, not the app dir');
+  assert.ok(fs.existsSync(join(w.dataDir, ws)), 'the workspace dir is created');
+  assert.equal(w.kernel.get(join(w.mountRootDir(INST), 'work', 'io.shop.app')), 'rw');
+  assert.equal([...w.kernel.keys()].filter((k) => k.includes('/work/')).length, 1, 'no other consumer, no sidecar mirror');
+  assert.deepEqual(w.decls(INST), [{ targetAppId: 'io.shop.app', mode: 'rw', data: false, declaredAt: m.declaredAt, workspace: ws }]);
+
+  await assert.rejects(w.mm.add(INST, { targetAppId: 'io.other.app', workspace: '../../etc' }), /invalid workspace/);
+
+  // The app's dir being replaced does not move a workspace.
+  await w.mm.rebindTarget('io.shop.app');
+  assert.equal(w.mm.list(INST).find((x) => x.id === 'io.shop.app:work').hostSource, join(w.dataDir, ws));
+
+  // Restart: declared, restored; shell restart: adopted as a work mount.
+  w.mm.removeAll(INST);
+  assert.equal((await w.mm.reapply(INST)).restored, 1);
+  const fresh = new MountManager({ ...w.mm.opts });
+  fresh.reconcile(new Set([INST]));
+  const adopted = fresh.list(INST).find((x) => x.id === 'io.shop.app:work');
+  assert.equal(adopted.kind, 'work');
+  assert.equal(adopted.workspace, ws);
+  assert.equal(adopted.containerPath, '/mnt/aura/work/io.shop.app');
+
+  await w.mm.remove(INST, 'io.shop.app:work');
+  assert.equal(w.kernel.size, 0);
+});
+
+test('the patch repo binds writable at /mnt/aura/patches/<app>: one dir per installation, shared by every Terminal, outliving them', async (t) => {
+  const w = world(t, { closed: new Set(['io.shop.app']) });
+  const OTHER = 'io.test.app-3';
+  const repo = 'aura/patches/inst-1234';
+  const a = await w.mm.add(INST, { targetAppId: 'io.shop.app', patches: repo });
+  const b = await w.mm.add(OTHER, { targetAppId: 'io.shop.app', patches: repo });
+  assert.deepEqual([a.id, a.kind, a.mode, a.containerPath, a.patches], ['io.shop.app:patches', 'patches', 'rw', '/mnt/aura/patches/io.shop.app', repo]);
+  assert.equal(a.hostSource, join(w.dataDir, repo), 'on the app-data volume, not in an instance\'s data');
+  assert.equal(b.hostSource, a.hostSource, 'two Terminals, one repository');
+  assert.equal(w.kernel.get(join(w.mountRootDir(OTHER), 'patches', 'io.shop.app')), 'rw');
+  assert.deepEqual(w.decls(INST), [{ targetAppId: 'io.shop.app', mode: 'rw', data: false, declaredAt: a.declaredAt, patches: repo }]);
+  await assert.rejects(w.mm.add(INST, { targetAppId: 'io.other.app', patches: 'aura/workspaces/x' }), /invalid patch repository/);
+
+  // A workspace and the patch repo of one app live side by side.
+  const ws = await w.mm.add(INST, { targetAppId: 'io.shop.app', workspace: 'aura/workspaces/default/inst-1234/1' });
+  assert.equal(ws.containerPath, '/mnt/aura/work/io.shop.app');
+
+  // The series written through one Terminal survives that Terminal going away.
+  fs.writeFileSync(join(w.dataDir, repo, 'aura-patches.yaml'), 'app: io.shop.app\n');
+  w.mm.removeAll(INST);
+  w.mm.forget(INST);
+  assert.equal(fs.readFileSync(join(w.dataDir, repo, 'aura-patches.yaml'), 'utf-8'), 'app: io.shop.app\n');
+  assert.ok(w.mm.list(OTHER).some((m) => m.id === 'io.shop.app:patches'), 'still bound in the other Terminal');
+
+  // Shell restart: adopted as a patches mount.
+  const fresh = new MountManager({ ...w.mm.opts });
+  fresh.reconcile(new Set([OTHER]));
+  const adopted = fresh.list(OTHER).find((x) => x.id === 'io.shop.app:patches');
+  assert.deepEqual([adopted.kind, adopted.patches, adopted.containerPath], ['patches', repo, '/mnt/aura/patches/io.shop.app']);
 });

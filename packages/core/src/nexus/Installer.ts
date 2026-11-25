@@ -20,7 +20,7 @@ import type { AppManifest } from '../types/manifest.js';
 import type { InstallRecord, ResolvedRef } from './types.js';
 import type { ScopeId } from '../scopes/types.js';
 import { APP_ID_PATTERN, isOriginId, readOriginId } from '../app-manager/AppIdentity.js';
-import { readPublishMarker, type AppSourceInfo } from './AppSource.js';
+import { readPublishMarker, type AppSourceInfo, type SourceMode } from './AppSource.js';
 
 export interface InstallerOpts {
   appsDir: string;
@@ -43,7 +43,10 @@ export class Installer {
   async install(
     stagingDir: string, manifest: AppManifest, resolved: ResolvedRef,
     link: { remoteId?: string; detached?: boolean } = {},
+    opts: { keepProvenance?: boolean } = {},
   ): Promise<InstallRecord> {
+    // Read before anything moves: the record this install replaces.
+    const previous = this.getRecord(manifest.id);
     const targetDir = join(this.opts.appsDir, manifest.id);
     const ts = Date.now();
     const tmpDir = `${targetDir}.tmp.${ts}`;
@@ -86,7 +89,15 @@ export class Installer {
 
     // 4. Write the install record. Stored under data/, NOT in the app
     //    dir (keeps the app dir reproducible across publishes).
-    const record = buildInstallRecord(manifest, resolved, ts, this.opts.scope, link, upstreamOf(targetDir, manifest));
+    let record = buildInstallRecord(manifest, resolved, ts, this.opts.scope, link, upstreamOf(targetDir, manifest));
+    // A patched tree (Track P) is still the release it was built from: keep
+    // where that came from, so the store still knows its source and updates.
+    if (opts.keepProvenance && previous) {
+      const { id, version, updatedAt } = record;
+      record = { ...previous, id, version, updatedAt, scope: this.opts.scope };
+    }
+    // The owner's source-mode choice belongs to the installation, not the release.
+    if (previous?.sourceMode) record.sourceMode = previous.sourceMode;
     const recordPath = join(this.opts.dataDir, 'nexus', 'installed', `${manifest.id}.json`);
     mkdirSync(dirname(recordPath), { recursive: true });
     writeFileSync(recordPath, JSON.stringify(record, null, 2));
@@ -182,6 +193,36 @@ export class Installer {
     mkdirSync(appDir, { recursive: true });
     for (const name of names) moveOrCopy(join(src, name), join(appDir, name));
     removeContained(join(this.retainedRoot(), appId), installationId);
+  }
+
+  /**
+   * The tree an install moved aside for `record` (its rollback tree): the
+   * trash entry named for the same timestamp as the record's `updatedAt`.
+   * Null when the install replaced nothing.
+   */
+  previousTree(record: InstallRecord): string | null {
+    const dir = join(this.opts.dataDir, 'nexus', 'trash', `${record.id}-${Date.parse(record.updatedAt)}`);
+    return existsSync(dir) ? dir : null;
+  }
+
+  /** The newest trash entry of an app (the latest tree an install or uninstall moved aside), or null. */
+  newestTrash(appId: string): string | null {
+    const trashRoot = join(this.opts.dataDir, 'nexus', 'trash');
+    const newest = readdirSafe(trashRoot).filter((n) => isTrashEntryOf(n, appId))
+      .sort((a, b) => Number(b.slice(appId.length + 1)) - Number(a.slice(appId.length + 1)))[0];
+    return newest ? join(trashRoot, newest) : null;
+  }
+
+  /** Record the owner's source-mode choice (`aura dev open`) on the install record. */
+  setSourceMode(appId: string, mode: SourceMode): InstallRecord {
+    // The raw file, not getRecord(): its read-time defaults must not be written back.
+    const recordPath = join(this.opts.dataDir, 'nexus', 'installed', `${appId}.json`);
+    let record: InstallRecord;
+    try { record = JSON.parse(readFileSync(recordPath, 'utf-8')) as InstallRecord; }
+    catch { throw new Error(`${appId} has no install record in scope ${this.opts.scope}`); }
+    record.sourceMode = mode;
+    writeFileSync(recordPath, JSON.stringify(record, null, 2));
+    return record;
   }
 
   /** Lookup the install record for an app, or null. */

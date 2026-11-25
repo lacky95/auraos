@@ -58,15 +58,20 @@ export function ownerUiApp(appId) {
 }
 
 /**
- * Whether this installation is the app's active `system` one (D45). The one
- * rule for "this is the built-in app": a same-id app installed in `global` or
- * `user` (a store update, `aura dev clone`) has its own installation and
- * never passes. The desktop marks such frames from it too (auraChannelShell).
+ * Whether this installation is the app's active `system` one (D45), or the
+ * owner's approved overlay of it (Track P, D52: a patched system app is a
+ * user-scope copy linked to the system installation by an approved
+ * activation; core AppHostStore `approvedOverlay`). The one rule for "this
+ * is the built-in app": a same-id app installed in `global` or `user` (a
+ * store update, `aura dev clone`) has its own installation, no overlay link,
+ * and never passes. The desktop marks such frames from it too (auraChannelShell).
  */
 export async function isSystemInstallation(registry, { appId, installationId }) {
   if (typeof appId !== 'string' || !appId || typeof installationId !== 'string' || !installationId) return false;
   const inst = await registry?.getInstallation?.(installationId);
-  return !!inst && inst.appId === appId && inst.scope === 'system' && inst.state === 'active';
+  if (!inst || inst.appId !== appId || inst.state !== 'active') return false;
+  if (inst.scope === 'system') return true;
+  return typeof registry.approvedOverlay === 'function' && (await registry.approvedOverlay(inst)) === true;
 }
 
 /** Whether this app and installation may act for the owner: an allowlisted id on its system installation. */

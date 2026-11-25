@@ -53,7 +53,7 @@ The grammar is kubectl-style: `aura <verb> <resource> [name]`. Short resource na
 - **Shapes:** `activity` (a window), `activity-bg` (a window that keeps running), `service` (headless).
 - **Sandbox:** `proot` (default) or `container`.
 - **Scope:** `user` (default) or `global`.
-- **Every new app gets its own `CLAUDE.md`.** Read it before changing that app.
+- **Every new app gets its own `AGENTS.md`** (and a one-line `CLAUDE.md` that loads it). Read it before changing that app.
 - **Related:** `aura dev clone` (copy any app, system ones included), `aura dev validate` and `aura dev standalone <app>` (fast UI iteration).
 
 **Grant and manage capabilities.**
@@ -65,8 +65,9 @@ The grammar is kubectl-style: `aura <verb> <resource> [name]`. Short resource na
 
 **Mount another app's files live.**
 - `aura mount` opens a wizard.
-- `aura mount add <app…>` attaches files; add `--wr` to make them writable.
-- `aura mount ls` and `aura mount rm` show and detach mounts.
+- `aura mount <app…>` (or `aura mount add <app…>`) attaches files; add `--wr` to make them writable. `--wr` is refused for a closed install (see "Working on Aura apps").
+- `aura mount <app> --patches` attaches the app's patch repository at `/mnt/aura/patches/<appId>` (writable; one per installation, shared by all your Terminals).
+- `aura mount ls` and `aura mount rm` show and detach mounts of every kind: source, data, patches and work (patch workspaces).
 - Mounts are read-only by default and need no restart.
 - They only work in container sandboxes, and the target app needs the `apps.mount` permission.
 
@@ -83,6 +84,25 @@ The grammar is kubectl-style: `aura <verb> <resource> [name]`. Short resource na
 - Data: `aura data query|write|watch <ref>` reads and writes app content providers.
 - Store: `aura nexus search <q>`, `aura nexus app …` to install, update and publish.
 - Themes: `aura get themes`, `aura set theme <name>`.
+
+<!-- aura:section working-on-aura-apps -->
+## Working on Aura apps
+
+**To work on an app, run `aura dev status <app>` and use the paths it prints.** `<app>` is the app's id or its name. It works from any Terminal, without Docker.
+
+- **Read the source** at `/mnt/aura/<appId>`. `status` binds it into this Terminal.
+- **A closed install** (the default for installed apps, and always for system apps) is read-only. A write fails with "Read-only file system". That is expected: don't work around it.
+- **To change a closed app**, use a patch workspace:
+  1. `aura dev patch start <app>` gives you a writable copy at `/mnt/aura/work/<appId>`: your existing workspace of that app if you have one (from any Terminal), else a fresh one (`--new` always starts fresh). Workspaces are made only this way. Edit and test there.
+  2. `aura dev patch save` saves your change as a versioned patch into the app's patch repository (`/mnt/aura/patches/<appId>`, shared by all your Terminals).
+  3. To try it first: `aura dev patch preview` runs your workspace as a separate "Preview" instance in its own window, on a copy of the app's data (the installed app is untouched, nothing is installed); `--stop` ends it.
+  4. `aura dev patch activate` installs it. The owner approves it in the desktop; the previous version is kept for rollback.
+- **Built-in apps** (Settings, Terminal, …) are read-only: you can read their source, but patching built-in apps comes later. Use a normal app (installed from Nexus, or your own) or Developer Mode.
+- **An open install** (the owner ran `aura dev open <app>`) and **your own apps** (`aura dev new`) are writable: `status` prints the writable path.
+- Never open an app yourself to make a change easier. Opening is the owner's decision.
+- Upstream updates keep your patches: `aura dev update <app>`. If a patch no longer applies, the working version keeps running and the patch is marked "needs repair" (you also get a notification naming the patch, the files and the repair command).
+- Old patch workspaces pile up: `aura dev patch clean [app]` deletes all but the bound one and the newest three (`--keep N`).
+<!-- /aura:section working-on-aura-apps -->
 
 ## Finding out more: docs and interfaces
 
@@ -116,4 +136,4 @@ Your own app can show up in the registry too: add `provides[]` to its manifest (
 
 ## Your notes
 
-AuraOS creates this file only if it is missing, so it is yours to edit. Add your own conventions below.
+AuraOS creates this file only if it is missing, so it is yours to edit. Add your own conventions below. When AuraOS ships a new section (between `<!-- aura:section … -->` markers), it appends that section once and leaves the rest of the file alone.

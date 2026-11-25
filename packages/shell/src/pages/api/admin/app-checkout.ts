@@ -95,6 +95,15 @@ export const POST: APIRoute = async ({ request }) => {
   if (t instanceof Response) return t;
   const manifest = manifestOf(t.appDir);
   if (manifest instanceof Response) return manifest;
+  // A closed install's source is read-only (Track P): a checkout in place
+  // would make it a working tree. The owner opens it first.
+  const def = core.getAppManager().getScopeDefinitions().find((s) => s.id === t.scope);
+  if (def && !core.isDevCheckout(t.appDir) && core.effectiveSourceMode(def, manifest).mode === 'closed') {
+    return json({
+      error: 'source-closed',
+      message: `${t.appId} is a closed install: its source is read-only. Patch it (\`aura dev patch start ${t.appId}\`), or the owner opens it (\`aura dev open ${t.appId}\`).`,
+    }, 409);
+  }
   // The app's own sandbox first: its git and the user's logins (shared HOME)
   // are what the app itself would fetch with. Only the active copy runs.
   const fetchVia: core.FetchPlace[] = [];

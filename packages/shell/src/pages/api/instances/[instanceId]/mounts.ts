@@ -1,12 +1,20 @@
 import type { APIRoute } from 'astro';
 import { getAppManager } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
+import { authenticate } from '../../../../lib/auth.ts';
+import { liveApprovalDeps } from '../../../../lib/approvals/service.ts';
+import { liveOwnerActionDeps } from '../../../../lib/approvals/admin.ts';
+import { liveAppSourceDeps, mountAppVolume } from '../../../../lib/appSource.ts';
 
 /**
  * Cross-app mounts for one instance.
  *
  *   GET  → { capable, reason?, mounts[] }      (?includeSidecars=1 → + sidecarMounts[])
  *   POST → { targetAppId, mode?: 'ro'|'rw', data?: boolean } → { ok, mount }
+ *          { targetAppId, kind: 'patches' }            the installation's patch repo
+ *          { targetAppId, kind: 'work', n?, new? }     a patch workspace of this user
+ *          → { ok, mount, installationId, path, created, n? } (Track P, lib/appSource.ts
+ *          `mountAppVolume`; always writable; `targetAppId` may also be the app's name)
  *
  * `capable` reports whether this host can propagate mounts at all, so a client
  * can explain WHY mounting is unavailable instead of just failing.
@@ -41,9 +49,17 @@ export const POST: APIRoute = async ({ params, request }) => {
   // `apps.mount`: the route access manifest's `targetPermissions`, which the
   // middleware applies in every access mode (routeManifest.ts).
 
-  let body: { targetAppId?: string; mode?: string; data?: boolean };
-  try { body = await request.json(); }
+  let body: { targetAppId?: string; mode?: string; data?: boolean; kind?: string; n?: unknown; new?: unknown };
+  try { body = await request.clone().json(); }
   catch { return errorResponse('Body must be JSON', 400); }
+
+  if (body.kind === 'patches' || body.kind === 'work') {
+    const deps = liveAppSourceDeps((r) => authenticate(r), liveApprovalDeps(), liveOwnerActionDeps());
+    return mountAppVolume(request, instanceId, deps, { app: body.targetAppId, kind: body.kind, n: body.n, new: body.new });
+  }
+  if (body.kind !== undefined && body.kind !== 'source' && body.kind !== 'data') {
+    return errorResponse(`kind must be 'source', 'data', 'patches' or 'work'`, 400);
+  }
 
   const targetAppId = body.targetAppId;
   if (!targetAppId) return errorResponse('targetAppId is required', 400);
@@ -65,7 +81,7 @@ export const POST: APIRoute = async ({ params, request }) => {
     const mount = await mgr.mounts.add(instanceId, {
       targetAppId,
       mode: body.mode === 'rw' ? 'rw' : 'ro',
-      data: body.data === true,
+      data: body.data === true || body.kind === 'data',
     });
     return jsonResponse({ ok: true, mount });
   } catch (err) {

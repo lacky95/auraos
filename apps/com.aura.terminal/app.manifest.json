@@ -11,6 +11,7 @@
     "storage.read",
     "storage.write",
     "network.local",
+    "system.notifications",
     "apps.mount",
     "system.overlay",
     "credentials.request"

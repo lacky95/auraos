@@ -659,6 +659,22 @@ export const AppManifestSchema = z.object({
     commit: z.string().regex(/^([0-9a-f]{7,64})?$/, { message: 'commit must be a git commit hash (or "")' }).optional(),
   }).optional(),
   /**
+   * Who may change the installed copy's source (Track P). `defaultMode` is
+   * the release's default for every installation; the owner's choice per
+   * installation is the install record's `sourceMode` (nexus/AppSource.ts
+   * `effectiveSourceMode`).
+   *   • `closed` — the source is read-only to agents and other apps
+   *                (`aura mount` read-only, `--wr` refused); changes go
+   *                through a patch workspace and an approved activation.
+   *   • `open`   — a writable developer checkout, after the owner's approval
+   *                (`aura dev open`).
+   * An app built here (`aura dev new`, no install record) is its author's
+   * own checkout and is always open.
+   */
+  source: z.object({
+    defaultMode: z.enum(['closed', 'open']).default('closed'),
+  }).optional(),
+  /**
    * Optional Nexus publish metadata. Drives `aura nexus publish` — none of
    * these are runtime fields, they just steer the publisher when an author
    * runs the command without flags.

@@ -163,6 +163,7 @@ const terminalMgr = (scopeId: string) => ({
   ...mgr,
   getInstance: (id: string) => (id === TERMINAL_INSTANCE ? { appId: TERMINAL, instanceId: id } : liveInstances[id]),
   getManifest: (id: string) => (id === TERMINAL ? { scopeId } : mgr.getManifest?.(id)),
+  isTrustedSystemCopy: (id: string) => id === TERMINAL && scopeId === 'system',
 }) as unknown as ObserverManager;
 
 function intentCtx(body: string, appId = record.appId, instanceId = slot.instanceId) {

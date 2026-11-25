@@ -62,6 +62,7 @@ const mgr = {
   getInstancesByApp: (appId: string) => Object.values(instances).filter((i) => i.appId === appId),
   getAllInstances: () => Object.values(instances),
   getManifest: (id: string) => (scopes[id] ? { scopeId: scopes[id] } : undefined),
+  isTrustedSystemCopy: (id: string) => scopes[id] === 'system',
   getActivity: () => undefined,
   registry: { getById: (id: string) => (scopes[id] ? { id } : undefined) },
 } as unknown as ObserverManager;

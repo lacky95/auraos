@@ -1,3 +1,4 @@
+import { effectiveSourceMode, type SourceModeInfo } from '../nexus/AppSource.js';
 import { DEFAULT_OWNER_ID } from '../auth/identityContracts.js';
 import { adoptedInstanceOwner } from './instanceOwner.js';
 
@@ -8,8 +9,8 @@ export interface LaunchUser { userId?: string }
 function hookUser(instances: ReadonlyMap<string, { owner?: string }>, instanceId: string, userId?: string): string | undefined {
   return userId ?? instances.get(instanceId)?.owner;
 }
-import { mkdirSync, readdirSync, readFileSync, lstatSync, writeFileSync, chmodSync, copyFileSync, renameSync, unlinkSync, existsSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { mkdirSync, readdirSync, readFileSync, lstatSync, writeFileSync, chmodSync, copyFileSync, cpSync, renameSync, rmSync, unlinkSync, existsSync } from 'node:fs';
+import { join, dirname, basename } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import { lifecyclePath } from '../types/manifest.js';
 import type { AppLifecycleState } from '../types/lifecycle.js';
@@ -50,6 +51,9 @@ import { ScopeRegistry } from '../scopes/ScopeRegistry.js';
 import type { ScopeDefinition, ScopeId } from '../scopes/types.js';
 import { getAppHostServices } from '../app-hosts/services.js';
 import { appSourceFingerprint } from '../app-hosts/lifecycle.js';
+import { seedHome } from './homeSeed.js';
+import { PREVIEW_IDLE_MS, previewTitle } from './preview.js';
+import { MOUNT_DIR_NAME } from './MountManager.js';
 
 const RECONCILE_INTERVAL_MS = 5_000;
 const ERROR_GRACE_MS        = 30_000;
@@ -75,6 +79,8 @@ export class AppManager {
   private nextInstanceNum = new Map<string, number>();
   private activities = new Map<string, AppActivity>();
   private nextActivityNum = new Map<string, number>();
+  /** Previews (Track P) without a window: since when (reapIdlePreviews). */
+  private readonly previewIdleSince = new Map<string, number>();
   readonly permissions: PermissionManager;
   readonly providers:   ContentProviderRegistry;
   readonly intents:     IntentResolver;
@@ -175,6 +181,7 @@ export class AppManager {
       registry:      this.registry,
       scopeRegistry: this.scopeRegistry,
       runner:        this.runners['container'] as ContainerRunner,
+      sourceMode:    (appId) => this.sourceModeOf(appId)?.mode ?? 'closed',
       // Mirrors spawnInstance's own derivation so a mount lands in exactly the
       // dir the instance has bound at /data. A sidecar consumer key
       // (`<inst>--<sc>`) resolves to its instance's dir.
@@ -556,36 +563,23 @@ export class AppManager {
   }
 
   /**
-   * Copy the onboarding files AuraOS ships for the user home (os/home-seed)
-   * into /home/aura: AGENTS.md + CLAUDE.md, so `claude` / `codex` started in
-   * a fresh terminal know what AuraOS is, and ~/.claude.json +
+   * Seed the user home (/home/aura) from os/home-seed (homeSeed.ts): the
+   * onboarding AGENTS.md and ~/.claude/CLAUDE.md, so `claude` / `codex`
+   * started in any directory know what AuraOS is, and ~/.claude.json +
    * ~/.codex/config.toml, which preconfigure the docs and interface-registry
-   * MCP servers. Subdirectories are mirrored.
-   *
-   * Only-if-missing, per file: once seeded the files are the user's, and an
-   * edited copy is never overwritten. In practice the tool configs therefore
-   * only land on fresh installs — an existing ~/.claude.json is never merged
-   * into. The master home is left alone — it is the OS's own.
+   * MCP servers. Only missing files are copied; an existing ~/AGENTS.md gets
+   * new marked sections appended once. The master home is left alone — it is
+   * the OS's own.
    */
   private seedUserHome(): void {
     const seedDir = [process.env.AURA_HOME_SEED_DIR, '/os/home-seed', '/workspace/os/home-seed']
       .find((dir): dir is string => !!dir && existsSync(dir));
     if (!seedDir) return;
     const target = userHomeDir(this.dataDir);
-    const seeded: string[] = [];
-    for (const name of readdirSync(seedDir, { recursive: true }) as string[]) {
-      const src = join(seedDir, name);
-      const dst = join(target, name);
-      if (!lstatSync(src).isFile() || existsSync(dst)) continue;
-      try {
-        mkdirSync(dirname(dst), { recursive: true });
-        copyFileSync(src, dst);
-        seeded.push(name);
-      } catch (err) {
-        console.warn(`[AppManager] could not seed ${name} into ${target}: ${(err as Error).message}`);
-      }
-    }
-    if (seeded.length) console.log(`[AppManager] seeded user home ${target} (${seeded.join(', ')})`);
+    const r = seedHome(seedDir, target, (msg) => console.warn(`[AppManager] ${msg}`));
+    if (r.copied.length) console.log(`[AppManager] seeded user home ${target} (${r.copied.join(', ')})`);
+    if (r.appended.length) console.log(`[AppManager] ${target}/AGENTS.md: added section(s) ${r.appended.join(', ')}`);
+    if (r.removedLegacyClaudeMd) console.log(`[AppManager] removed ${target}/CLAUDE.md: ~/.claude/CLAUDE.md loads AGENTS.md in every directory`);
   }
 
   /**
@@ -1059,6 +1053,8 @@ export class AppManager {
           inPool:            pooled.has(o.instanceId),
           sandbox:           'container',
           owner:             adoptedInstanceOwner(o.ownerLabel, pooled.has(o.instanceId)),
+          // A preview survives as one: never a provider or interface, reaped when idle.
+          ...(o.preview ? { preview: { workspace: o.preview, startedAt: new Date().toISOString() } } : {}),
         };
         this.instances.set(o.instanceId, inst);
         // The FSM must agree with the record: left at its default
@@ -1084,8 +1080,10 @@ export class AppManager {
           // Without it the instance would stick in `resumed` forever and be
           // unrecoverable via `start`/`restart`.
           this.runners.container.onExit(o.instanceId, (code) => this.handleUnexpectedExit(o.instanceId, o.appId, code));
-          this.providers.registerInstance(inst, manifest);
-          this.interfaces.registerInstance(inst, manifest);
+          if (!inst.preview) {
+            this.providers.registerInstance(inst, manifest);
+            this.interfaces.registerInstance(inst, manifest);
+          }
         } else {
           // Manifest gone (app uninstalled mid-restart). Skip adoption — without
           // a manifest the runner can't build correct lifecycle URLs and the
@@ -1154,6 +1152,68 @@ export class AppManager {
     return instanceId;
   }
 
+  /**
+   * Start a preview (Track P): the prepared tree `appDir` (a patch workspace,
+   * `workspace` relative to the root dataDir) as a separate instance of
+   * `appId` for `owner`, with its own App Host slot, on a copy of that user's
+   * data of the app. The running app and its data are untouched; nothing is
+   * installed. A preview of the same app and user is replaced.
+   */
+  async startPreview(appId: string, opts: { appDir: string; workspace: string; owner: string }): Promise<string> {
+    const manifest = this.registry.getById(appId);
+    if (!manifest) throw new Error(`App not found: ${appId}`);
+    for (const old of this.previewsOf(appId, opts.owner)) await this.stopPreview(old.instanceId);
+    const instanceId = await this.spawnInstance(appId, { inPool: false, preview: { ...opts, dataFrom: this.previewDataSource(appId, opts.owner) } });
+    await this.claimHostSlot(appId, instanceId);
+    return instanceId;
+  }
+
+  /** Running previews of an app (of one user). */
+  previewsOf(appId: string, owner?: string): AppInstance[] {
+    return this.getInstancesByApp(appId).filter((i) => i.preview && (owner === undefined || i.owner === owner));
+  }
+
+  /** Stop a preview and remove its copy of the data. */
+  async stopPreview(instanceId: string): Promise<void> {
+    const inst = this.instances.get(instanceId);
+    if (!inst?.preview) throw new Error(`${instanceId} is not a preview`);
+    const manifest = this.registry.getById(inst.appId);
+    this.previewIdleSince.delete(instanceId);
+    try { await this.stop(instanceId); } catch { this.forceKill(instanceId); }
+    if (this.instances.has(instanceId)) this.forceKill(instanceId);
+    if (manifest) {
+      const dataDir = join(this.scopeRegistry.getById(manifest.scopeId).dataDir, 'apps', inst.appId, instanceId);
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  }
+
+  /** Previews without a window since `idleMs` are stopped. Run by the reconciler. */
+  async reapIdlePreviews(now = Date.now(), idleMs = PREVIEW_IDLE_MS): Promise<string[]> {
+    const reaped: string[] = [];
+    for (const inst of [...this.instances.values()]) {
+      if (!inst.preview) continue;
+      if (this.getActivitiesByInstance(inst.instanceId).length > 0) { this.previewIdleSince.delete(inst.instanceId); continue; }
+      const since = this.previewIdleSince.get(inst.instanceId);
+      if (since === undefined) { this.previewIdleSince.set(inst.instanceId, now); continue; }
+      if (now - since < idleMs) continue;
+      await this.stopPreview(inst.instanceId).catch((err: unknown) => console.warn(`[AppManager] could not reap preview ${inst.instanceId}: ${(err as Error).message}`));
+      reaped.push(inst.instanceId);
+    }
+    return reaped;
+  }
+
+  /** The data a preview starts from: this user's instance of the app (not a preview or pool member), else the singleton's. */
+  private previewDataSource(appId: string, owner: string): string | null {
+    const manifest = this.registry.getById(appId);
+    if (!manifest) return null;
+    const appData = join(this.scopeRegistry.getById(manifest.scopeId).dataDir, 'apps', appId);
+    const mine = this.getInstancesByApp(appId).find((i) => !i.preview && !i.inPool && i.owner === owner);
+    for (const id of [mine?.instanceId, appId]) {
+      if (id && existsSync(join(appData, id))) return join(appData, id);
+    }
+    return null;
+  }
+
   private async launch(appId: string, userId?: string): Promise<string> {
     const manifest = this.registry.getById(appId);
     if (!manifest) throw new Error(`App not found: ${appId}`);
@@ -1168,13 +1228,13 @@ export class AppManager {
       // (Single-instance apps shouldn't have warmPool > 0 in practice, but
       // defending the invariant keeps the code obviously correct.)
       const existing = this.getInstancesByApp(appId).find(
-        (i) => !i.inPool && (i.state === 'resumed' || i.state === 'resuming' || i.state === 'started'),
+        (i) => !i.inPool && !i.preview && (i.state === 'resumed' || i.state === 'resuming' || i.state === 'started'),
       );
       if (existing) return existing.instanceId;
 
       // If a single-instance app is paused/stopped, resume it
       const paused = this.getInstancesByApp(appId).find(
-        (i) => !i.inPool && (i.state === 'paused' || i.state === 'stopped'),
+        (i) => !i.inPool && !i.preview && (i.state === 'paused' || i.state === 'stopped'),
       );
       if (paused) {
         await this.resume(paused.instanceId);
@@ -1184,7 +1244,7 @@ export class AppManager {
       // maxInstances cap counts only USER-OWNED instances. Pool members would
       // otherwise consume the cap and starve user launches.
       const running = this.getInstancesByApp(appId).filter(
-        (i) => !i.inPool && i.state !== 'destroyed' && i.state !== 'error',
+        (i) => !i.inPool && !i.preview && i.state !== 'destroyed' && i.state !== 'error',
       );
       if (manifest.maxInstances > 0 && running.length >= manifest.maxInstances) {
         throw new Error(`App ${appId} reached maxInstances=${manifest.maxInstances}`);
@@ -1439,35 +1499,48 @@ export class AppManager {
    * behavioural difference is whether content-provider routes get registered
    * (pool members don't claim them — see comment below).
    */
-  private async spawnInstance(appId: string, opts: { inPool: boolean; userId?: string }): Promise<string> {
+  private async spawnInstance(
+    appId: string, opts: { inPool: boolean; userId?: string; preview?: { appDir: string; workspace: string; owner: string; dataFrom: string | null } },
+  ): Promise<string> {
     const manifest = this.registry.getById(appId);
     if (!manifest) throw new Error(`App not found: ${appId}`);
 
     const scope = this.scopeRegistry.getById(manifest.scopeId);
-    const instanceId = this.allocateInstanceId(appId, manifest.instanceMode);
+    // A preview is one more instance of the app (`<appId>-<n>`), whatever its instanceMode.
+    const instanceId = this.allocateInstanceId(appId, opts.preview ? 'multi' : manifest.instanceMode);
     const instanceDataDir = join(scope.dataDir, 'apps', appId, instanceId);
     mkdirSync(instanceDataDir, { recursive: true });
+    // The preview's data is a copy: it never writes the real data. Mount roots stay behind.
+    if (opts.preview?.dataFrom) {
+      cpSync(opts.preview.dataFrom, instanceDataDir, { recursive: true, filter: (src) => basename(src) !== MOUNT_DIR_NAME });
+    }
 
     this.transition(instanceId, appId, 'creating', null);
     // Honor manifest.serverPort when present (currently used by
     // com.aura.registry to pin :4090 so RegistryConfig URLs stay stable).
     const port = await this.ports.allocate(instanceId, manifest.serverPort);
     // A pool member belongs to nobody until it is claimed.
-    const owner = opts.inPool ? undefined : opts.userId ?? this.instances.get(instanceId)?.owner ?? DEFAULT_OWNER_ID;
+    const owner = opts.inPool ? undefined : opts.preview?.owner ?? opts.userId ?? this.instances.get(instanceId)?.owner ?? DEFAULT_OWNER_ID;
 
     try {
       const runner = this.runners[manifest.sandbox] ?? this.runners['proot'];
       const pid = await runner.spawn(instanceId, appId, port, manifest, {
-        appDir:          manifest.appDir,
+        appDir:          opts.preview?.appDir ?? manifest.appDir,
         instanceDataDir,
         // Fresh nonce per spawn: tokens of a previous life of a recycled
         // instance id stop verifying the moment this one is minted. An owned
         // instance's token names its owner (`u`); a pool member's names nobody.
         instanceToken:   this.tokens.mint(instanceId, undefined, owner),
         ...(owner ? { owner } : {}),
+        // A preview runs the user's own workspace, not the installed source.
+        sourceMode:      opts.preview ? 'open' : this.sourceModeOf(appId)?.mode ?? 'closed',
+        ...(opts.preview ? { preview: opts.preview.workspace } : {}),
       });
       const lifecycle = runner.lifecycleStatus(instanceId) ?? undefined;
-      this.upsertInstance(instanceId, appId, { pid, port, startedAt: new Date(), inPool: opts.inPool, sandbox: manifest.sandbox, owner, lifecycle });
+      this.upsertInstance(instanceId, appId, {
+        pid, port, startedAt: new Date(), inPool: opts.inPool, sandbox: manifest.sandbox, owner, lifecycle,
+        ...(opts.preview ? { preview: { workspace: opts.preview.workspace, startedAt: new Date().toISOString() } } : {}),
+      });
       if (opts.inPool) this.savePoolIds();
       this.transition(instanceId, appId, 'created', port);
 
@@ -1497,13 +1570,13 @@ export class AppManager {
       // Called unconditionally: InterfaceRegistry applies the warm-pool rule
       // itself, so it is stated once instead of repeated at all four of its
       // register call sites.
-      if (spawned) this.interfaces.registerInstance(spawned, manifest);
+      if (spawned && !opts.preview) this.interfaces.registerInstance(spawned, manifest);
       // Register content providers ONLY for user-owned instances. If pool
       // members claimed /api/data/<authority>/* routes, multiple pool entries
       // would compete and the route would point at an instance the user
       // doesn't own. Pool claim registers providers after the hand-off.
       if (!opts.inPool) {
-        if (spawned) this.providers.registerInstance(spawned, manifest);
+        if (spawned && !opts.preview) this.providers.registerInstance(spawned, manifest);
       } else {
         // Pool warm-up: pre-compile the iframe entry point (`/`) so the user's
         // FIRST iframe load after claim doesn't trigger Vite's on-demand compile
@@ -1796,6 +1869,16 @@ export class AppManager {
   }
 
   /** All three scope definitions. Used by NexusManager singleton. */
+  /** The root dataDir (`/data`): scopes, mounts and patch workspaces live under it. */
+  get rootDataDir(): string { return this.dataDir; }
+
+  /** Who may change the active copy's source (nexus/AppSource.ts). Null: not installed. */
+  sourceModeOf(appId: string): SourceModeInfo | null {
+    const manifest = this.registry.getById(appId);
+    if (!manifest) return null;
+    return effectiveSourceMode(this.scopeRegistry.getById(manifest.scopeId), manifest);
+  }
+
   getScopeDefinitions(): ScopeDefinition[] {
     return this.scopeRegistry.getAll();
   }
@@ -2013,6 +2096,8 @@ export class AppManager {
       }
     }
 
+    // A preview's window says so (`aura dev patch preview`).
+    if (inst.preview) title = previewTitle(title, manifest.name);
     const activity: AppActivity = {
       activityId,
       parentInstanceId: instanceId,
@@ -2473,6 +2558,22 @@ export class AppManager {
   }
 
   /**
+   * Whether the copy of `appId` that runs now is the system app as the owner
+   * approved it: its `system` copy, or an approved user-scope overlay of it
+   * (Track P: a patched system app keeps its trust, D29 and D45). Never by
+   * the id alone: a same-id copy from a store or `aura dev` has no overlay
+   * link (AppHostStore `approvedOverlay`).
+   */
+  isTrustedSystemCopy(appId: string): boolean {
+    const m = this.registry.getById(appId);
+    if (!m) return false;
+    if (m.scopeId === 'system') return true;
+    if (m.scopeId !== 'user') return false;
+    try { return getAppHostServices().lifecycle.trustedOverlay(appId) !== null; }
+    catch { return false; }
+  }
+
+  /**
    * @deprecated Use getInstance(instanceId) or getInstancesByApp(appId).
    * Backward-compat lookup: tries instanceId match first, then first instance of appId.
    */
@@ -2559,6 +2660,7 @@ export class AppManager {
       console.log('[AppManager] reconcile: surviving containers adopted');
       await this.reconcileSurvivors();
     }
+    await this.reapIdlePreviews().catch((err: unknown) => console.warn(`[AppManager] preview reaper failed: ${(err as Error).message}`));
     // 1) Tracked-instance liveness: any pid we believe is alive but isn't
     //    must be flagged error, port released, view dropped.
     //

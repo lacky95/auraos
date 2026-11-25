@@ -6,7 +6,7 @@
  */
 import type { AppManifest } from '../types/manifest.js';
 import type { ScopeId } from '../scopes/types.js';
-import type { AppSourceInfo } from './AppSource.js';
+import type { AppSourceInfo, SourceMode } from './AppSource.js';
 
 /** Where an app came from. Stored in the install record per app. */
 export type NexusSource = 'oci' | 'git' | 'index' | 'local';
@@ -65,6 +65,10 @@ export interface InstallRecord {
   /** Source repo + commit the release was built from (its publish marker,
    *  else manifest.repository) — what `aura dev checkout` uses. */
   upstream?:   AppSourceInfo;
+  /** The owner's source-mode choice for this installation (`aura dev open`).
+   *  Absent: the release's `source.defaultMode` (AppSource `effectiveSourceMode`).
+   *  Kept across updates and patch activations. */
+  sourceMode?: SourceMode;
 }
 
 /** How the user resolved an identity conflict (re-sent with the install). */
@@ -155,7 +159,9 @@ export interface IndexDocument {
  * permission needs a new approval.
  */
 export interface InstallBinding {
-  action:      'nexus.install' | 'nexus.update';
+  /** `app.patch.activate`: a prepared app tree from a patch workspace (or
+   *  its rollback tree) installed through the same pipeline (Track P). */
+  action:      'nexus.install' | 'nexus.update' | 'app.patch.activate';
   appId:       string;
   name:        string;
   version:     string;

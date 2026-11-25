@@ -42,6 +42,14 @@ export interface AppInstance {
    * when not measured (an instance adopted from a previous shell).
    */
   lifecycle?: LifecycleStatus;
+  /**
+   * A preview (Track P, `aura dev patch preview`): this instance runs a patch
+   * workspace (`workspace`, relative to the root dataDir) instead of the
+   * installed tree, on a copy of the app's data, with its own App Host slot.
+   * It is never reused for launches, intents, content providers or
+   * interfaces, never restored after a restart, and reaped when idle.
+   */
+  preview?: { workspace: string; startedAt: string };
 }
 
 export type SidecarState = 'running' | 'starting' | 'stopped' | 'error' | 'unknown';

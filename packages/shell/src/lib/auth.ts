@@ -41,7 +41,7 @@ import { coreAuthServices, ownerSessionOf, sessionCookieToken } from './authSurf
  */
 
 export interface AuthDeps {
-  mgr: Pick<AppManager, 'tokens' | 'getInstance' | 'getManifest'>;
+  mgr: Pick<AppManager, 'tokens' | 'getInstance' | 'getManifest' | 'isTrustedSystemCopy'>;
   /** App Host services for the D45 owner check; loaded when absent. */
   ownerServices?: GatewayOwnerDeps['services'];
   apiKeys: { verify(key: string): Promise<{ id: string; name: string; scopes: string[] } | null> };
