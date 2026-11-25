@@ -554,30 +554,50 @@ test('the runtime refuses to start on a host that is not its own label', () => {
 
 // ── theme in the runtime ────────────────────────────────────────────────────
 
+type FakeLink = { href: string; rel?: string; getAttribute: (n: string) => string; setAttribute: (n: string, v: string) => void };
+function fakeLink(href: string): FakeLink {
+  const l: FakeLink = { href, getAttribute: () => l.href, setAttribute: (_, v) => { l.href = v; } };
+  return l;
+}
+/** A document whose head is `links`; `querySelector` finds a theme link by `href*=`. */
+function fakeDoc(links: FakeLink[], appended: Array<{ href?: string }> = []) {
+  const make = () => { const l = fakeLink(''); delete (l as { href?: string }).href; return l; };
+  return {
+    head: { appendChild: (e: FakeLink) => { appended.push(e); if (e.href) links.push(e); } },
+    documentElement: {},
+    createElement: make,
+    querySelector: (s: string) => {
+      const m = /^link\[.*href\*="([^"]+)"\]$/.exec(s);
+      return s.startsWith('link[') ? links.find((l) => !m || l.href.includes(m[1]!)) ?? null : null;
+    },
+    querySelectorAll: (s: string) => (s.startsWith('link[') ? links : []),
+  };
+}
+
 function bootThemed(opts: { links?: string[]; parsing?: boolean; strategy?: 'inherit' | 'override' }) {
-  const links = (opts.links ?? []).map((href) => {
-    const l = { href, getAttribute: () => l.href, setAttribute: (_: string, v: string) => { l.href = v; } };
-    return l;
-  });
+  const links = (opts.links ?? []).map(fakeLink);
   const written: string[] = [];
   const appended: Array<{ href?: string }> = [];
   const listeners: Array<(ev: unknown) => void> = [];
+  const docListeners: Record<string, Array<(ev: unknown) => void>> = {};
+  const observers: Array<{ fn: () => void; target: unknown; init: unknown }> = [];
   const top = {};
+  const document = {
+    ...fakeDoc(links, appended),
+    readyState: opts.parsing ? 'loading' : 'complete',
+    currentScript: opts.parsing ? { async: false, defer: false } : null,
+    write: (html: string) => written.push(html),
+    addEventListener: (type: string, fn: (ev: unknown) => void) => { (docListeners[type] ??= []).push(fn); },
+  };
+  class MutationObserver {
+    constructor(private fn: () => void) {}
+    observe(target: unknown, init: unknown) { observers.push({ fn: this.fn, target, init }); }
+  }
   const sandbox: Record<string, unknown> = {
     location: { host: `${slot.label}--desk.example:3000`, protocol: 'http:', origin: ORIGIN, search: '' },
-    document: {
-      readyState: opts.parsing ? 'loading' : 'complete',
-      currentScript: opts.parsing ? { async: false, defer: false } : null,
-      head: { appendChild: (e: { href?: string }) => appended.push(e) },
-      documentElement: {},
-      write: (html: string) => written.push(html),
-      createElement: () => ({}),
-      querySelector: (s: string) => (s.startsWith('link[') && links.length ? links[0] : null),
-      querySelectorAll: (s: string) => (s.startsWith('link[') ? links : []),
-      addEventListener() {},
-    },
+    document,
     addEventListener: (type: string, fn: (ev: unknown) => void) => { if (type === 'message') listeners.push(fn); },
-    top, URLSearchParams, Date,
+    top, URLSearchParams, Date, MutationObserver,
   };
   sandbox.window = sandbox;
   vm.runInContext(buildAppRuntimeJs({
@@ -590,7 +610,9 @@ function bootThemed(opts: { links?: string[]; parsing?: boolean; strategy?: 'inh
     histories: {},
   }), vm.createContext(sandbox));
   const fire = (type: string, source: unknown, origin: string) => { for (const l of listeners) l({ data: { type }, source, origin }); };
-  return { links, written, appended, fire, top, sandbox };
+  const fireDoc = (type: string, ev: unknown) => { for (const l of docListeners[type] ?? []) l(ev); };
+  const mutate = () => { for (const o of observers) o.fn(); };
+  return { links, written, appended, fire, fireDoc, docListeners, observers, mutate, document, top, sandbox };
 }
 const SHELL_ORIGIN = 'http://desk.example:3000';
 const GATEWAY_THEME = '/_aura/os/api/os/theme.css';
@@ -642,6 +664,50 @@ test('only the verified Shell can refresh the theme, and only theme links change
   assert.match(links[0]!.href, /^\/api\/os\/theme\.css\?t=\d+$/);
   assert.match(links[1]!.href, /^\/_aura\/os\/api\/os\/theme\.css\?t=\d+$/);
   assert.equal(links[2]!.href, '/own.css');
+});
+
+test('an Astro swap carries the theme link into a next page that lacks it', () => {
+  const { links, fireDoc, written } = bootThemed({ parsing: true });
+  assert.equal(written.length, 1);
+  links.push(fakeLink(GATEWAY_THEME));                          // what document.write parsed
+  const next: FakeLink[] = [fakeLink('/_astro/page.css')];
+  fireDoc('astro:before-swap', { newDocument: fakeDoc(next) });
+  assert.deepEqual(next.map((l) => l.href), ['/_astro/page.css', GATEWAY_THEME]);
+  // After a refresh the loaded link is `…?t=`; the copy must match it exactly for Astro to keep it.
+  links[0]!.href = `${GATEWAY_THEME}?t=1`;
+  const after: FakeLink[] = [];
+  fireDoc('astro:before-swap', { newDocument: fakeDoc(after) });
+  assert.deepEqual(after.map((l) => l.href), [`${GATEWAY_THEME}?t=1`]);
+});
+
+test('an Astro swap leaves a next page that links the theme itself alone', () => {
+  const { fireDoc } = bootThemed({});
+  const next = [fakeLink('/api/os/theme.css')];
+  const appended: Array<{ href?: string }> = [];
+  fireDoc('astro:before-swap', { newDocument: fakeDoc(next, appended) });
+  assert.deepEqual(appended, []);
+  assert.deepEqual(next.map((l) => l.href), ['/api/os/theme.css']);
+});
+
+test('the head observer puts the theme back after a router empties the head', () => {
+  const { links, observers, mutate, document, appended } = bootThemed({});
+  assert.equal(observers.length, 1);
+  assert.equal(observers[0]!.target, document.head);
+  assert.deepEqual(JSON.parse(JSON.stringify(observers[0]!.init)), { childList: true });
+  assert.equal(appended.filter((e) => e.href === GATEWAY_THEME).length, 1);
+  mutate();                                                    // link still there: nothing added
+  assert.equal(appended.length, 1);
+  links.splice(0);                                             // the swap dropped every head child
+  mutate();
+  assert.deepEqual(links.map((l) => l.href), [GATEWAY_THEME]);
+  mutate();
+  assert.equal(appended.length, 2);
+});
+
+test('an override app neither watches the head nor hooks Astro swaps', () => {
+  const { observers, docListeners } = bootThemed({ parsing: true, strategy: 'override' });
+  assert.deepEqual(observers, []);
+  assert.equal(docListeners['astro:before-swap'], undefined);
 });
 
 test('the theme and icons are public through the gateway', async () => {
