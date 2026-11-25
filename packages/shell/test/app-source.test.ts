@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import * as core from '@aura/core';
 import type { ApprovalClaim, ApprovalDecider, ApprovalRecord, ApprovalRequest, ApprovalResult, AuraMount } from '@aura/core';
 import type { CallerPrincipal } from '../src/lib/access/identify.ts';
+import { mountedSourcePath } from '../src/lib/appSource.ts';
 import {
   activatePrepared, appSourceStatus, bindWorkspace, startPreview, stopPreviews, cleanWorkspaces, detachWorkspace, mountAppVolume, setSourceMode, type AppSourceDeps, type ScopedApp,
 } from '../src/lib/appSource.ts';
@@ -445,4 +446,20 @@ test('preview: the caller\'s own workspace runs as a separate instance, no appro
   assert.equal((await read(await startPreview(req('POST', { workspace: 2 }), 'io.shop.app', deps()))).status, 422);
   assert.equal((await read(await startPreview(req('POST', {}), 'io.shop.app', deps()))).status, 400);
   assert.equal((await read(await startPreview(req('POST', { workspace: 1 }), 'com.aura.terminal', deps()))).body.error, 'system-app-later');
+});
+
+test('a sandbox path in its own source mount is the app dir in the shell (dev publish in the app dir)', () => {
+  const mounts = [
+    { kind: 'source', containerPath: '/mnt/aura/com.example.a', targetAppId: 'com.example.a' },
+    { kind: 'work', containerPath: '/mnt/aura/work/com.example.a', targetAppId: 'com.example.a' },
+  ];
+  const dirs: Record<string, string> = { 'com.example.a': '/data/scopes/users/default/apps/com.example.a' };
+  const map = (p: string) => mountedSourcePath(p, mounts, (id) => dirs[id]);
+  assert.equal(map('/mnt/aura/com.example.a'), '/data/scopes/users/default/apps/com.example.a');
+  assert.equal(map('/mnt/aura/com.example.a/'), '/data/scopes/users/default/apps/com.example.a');
+  assert.equal(map('/mnt/aura/com.example.a/src'), '/data/scopes/users/default/apps/com.example.a/src');
+  assert.equal(map('/mnt/aura/com.example.a/../com.example.b'), '/mnt/aura/com.example.a/../com.example.b', '.. leaves the mount: not mapped');
+  assert.equal(map('/mnt/aura/com.example.ab'), '/mnt/aura/com.example.ab', 'a prefix is not the mount');
+  assert.equal(map('/mnt/aura/work/com.example.a'), '/mnt/aura/work/com.example.a', 'only source mounts');
+  assert.equal(map('relative/dir'), 'relative/dir');
 });

@@ -1,6 +1,16 @@
 import type { APIRoute } from 'astro';
-import { getNexusManager } from '@aura/core';
+import { getAppManager, getNexusManager } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../lib/appResponse.js';
+import { resolveCaller } from '../../../lib/auth.ts';
+import { mountedSourcePath } from '../../../lib/appSource.ts';
+
+/** The path to publish, in the shell: a sandbox's view of its own source mount maps to the app's dir. */
+async function shellPath(request: Request, path: string): Promise<string> {
+  const caller = (await resolveCaller(request)).principal;
+  if (caller.kind !== 'instance') return path;
+  const mgr = getAppManager();
+  return mountedSourcePath(path, mgr.mounts.list(caller.instanceId), (id) => mgr.getManifest(id)?.appDir);
+}
 
 /**
  * Publish an app from a local path. v1: Git is the working path; OCI
@@ -36,6 +46,7 @@ export const POST: APIRoute = async ({ request }) => {
     branch?:  string;
   };
   if (!body.path) return errorResponse('missing `path`', 400);
+  const appPath = await shellPath(request, body.path);
 
   const source = body.kind ?? body.source ?? 'git';
   const repoTarget     = body.repo ?? (source === 'git' ? body.to : undefined);
@@ -46,7 +57,7 @@ export const POST: APIRoute = async ({ request }) => {
   try {
     if (source === 'git') {
       const it = nexus.publishGit({
-        appPath: body.path,
+        appPath,
         repo:    repoTarget,
         branch:  body.branch,
         tag:     body.tag,
@@ -69,7 +80,7 @@ export const POST: APIRoute = async ({ request }) => {
     // OCI
     if (!registryTarget) return errorResponse('missing `registry`/`to` for OCI publish', 400);
     const it = nexus.publishOci({
-      appPath:  body.path,
+      appPath,
       registry: registryTarget,
       tag:      body.tag ?? 'latest',
       channel:  body.channel,

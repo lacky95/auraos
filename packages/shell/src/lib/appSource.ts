@@ -21,7 +21,7 @@
  * respects it.
  */
 import { existsSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, posix } from 'node:path';
 import * as core from '@aura/core';
 import type {
   AccessPrincipal, AppManifest, AuraMount, InstallRecord, NexusManager, ScopeDefinition, SourceModeInfo,
@@ -566,4 +566,26 @@ export async function stopPreviews(request: Request, appId: string | undefined, 
     catch (err) { return json({ error: 'stop-failed', message: (err as Error).message, stopped }, 409); }
   }
   return json({ ok: true, stopped });
+}
+
+/**
+ * A path a sandbox gives in its own view of a source mount it holds
+ * (`/mnt/aura/<app>/…`; Track P: `aura dev publish` in the app dir) is that
+ * app's directory in the shell. Only the given (the caller's own) source
+ * mounts; anything else comes back as given. Normalised first, so `..`
+ * cannot leave the mount.
+ */
+export function mountedSourcePath(
+  path: string,
+  mounts: ReadonlyArray<{ kind: string; containerPath: string; targetAppId: string }>,
+  appDirOf: (appId: string) => string | undefined,
+): string {
+  if (!path.startsWith('/')) return path;
+  const p = posix.normalize(path).replace(/\/+$/, '') || '/';
+  for (const m of mounts) {
+    if (m.kind !== 'source' || (p !== m.containerPath && !p.startsWith(`${m.containerPath}/`))) continue;
+    const dir = appDirOf(m.targetAppId);
+    if (dir) return dir + p.slice(m.containerPath.length);
+  }
+  return path;
 }
