@@ -181,6 +181,7 @@ const S = {
 
   <script>
     import { osUrl } from '@aura/app-sdk';
+    import { ownerFetch } from '../scripts/os.ts';
     // The shell's own endpoint, never this app's backend: an OS-level
     // operation has no business going through an app. On the proxy route the
     // page's origin is the shell; on an App Host osUrl() is the same-origin
@@ -487,14 +488,12 @@ const S = {
       for (const b of [btn, rebuildBtn, restartBtn]) b.disabled = true;
       note.textContent = `Starting ${label}…`;
       try {
-        const r = await fetch(api, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ mode, restore: document.getElementById('upd-restore')?.checked !== false }),
-        });
+        // The owner decides (D50, D60): the Shell's dialog asks for one click.
+        const r = await ownerFetch('/api/admin/self-update', 'POST',
+          { mode, restore: (document.getElementById('upd-restore') as HTMLInputElement | null)?.checked !== false });
         const body = await r.json().catch(() => ({}));
         if (!r.ok) {
-          note.textContent = body.error || `Could not start ${label} (HTTP ${r.status}).`;
+          note.textContent = body.message || body.error || `Could not start ${label} (HTTP ${r.status}).`;
           for (const b of [btn, rebuildBtn, restartBtn]) b.disabled = false;
           return;
         }
@@ -527,14 +526,10 @@ const S = {
       btn.disabled = true;
       btn.textContent = 'Starting…';
       try {
-        const r = await fetch(api, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ branch: 'main' }),
-        });
+        const r = await ownerFetch('/api/admin/self-update', 'POST', { branch: 'main' });
         const body = await r.json().catch(() => ({}));
         if (!r.ok) {
-          note.textContent = body.error || `Could not start the update (HTTP ${r.status}).`;
+          note.textContent = body.message || body.error || `Could not start the update (HTTP ${r.status}).`;
           for (const b of [btn, rebuildBtn, restartBtn]) b.disabled = false;
           btn.textContent = 'Update AuraOS';
           return;

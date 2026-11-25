@@ -159,7 +159,12 @@ export class SelfUpdater {
 
   /** The marker os/boot.sh looks for (BUILD_REQUEST there); removed after the build. */
   bootBuildRequestFile(): string { return join(this.dataDir, 'aura', 'boot', 'build-requested'); }
-  private requestBootBuild(reason: string): void {
+  /**
+   * Ask the next boot to build what changed (os/boot.sh). Update and Rebuild
+   * do it themselves; a shell-mode switch and `aura dev rebuild` ask before a
+   * plain restart. Never throws.
+   */
+  requestBootBuild(reason: string): void {
     try {
       mkdirSync(join(this.dataDir, 'aura', 'boot'), { recursive: true });
       writeFileSync(this.bootBuildRequestFile(), `${reason} ${new Date().toISOString()}\n`);

@@ -51,9 +51,18 @@ export function registerStatus(program: Command): void {
       const appsDir   = process.env['AURA_APPS_DIR']      ?? '/workspace/apps';
       const dataDir   = process.env['AURA_DATA_DIR']      ?? '/data';
       const toolchainBins = countBinaries(join(toolchain, 'bin'));
+      // D60: the system mode (the owner's view; '-' for a caller that may not read it).
+      let systemMode = '-';
+      if (shellOk) {
+        try {
+          const m = await api.get<{ mode: string; normalEnforced?: boolean }>('/api/admin/system-mode');
+          systemMode = m.mode === 'developer' ? color.yellow('developer') : `normal${m.normalEnforced ? '' : color.dim(' (recorded; enforced from Phase 6)')}`;
+        } catch { /* not the owner's */ }
+      }
 
       console.log(color.bold('AuraOS') + ' ' + color.dim('v0.1.0'));
       console.log('  Shell:        ' + (shellOk ? color.green(shellUrl()) : color.red(`${shellUrl()} (unreachable)`)));
+      console.log(`  System mode:  ${systemMode}`);
       console.log(`  Apps:         ${installed} installed, ${running} running (${instances} instances, ${activities} activities)`);
       console.log(`  Toolchain:    ${toolchain}/bin (${toolchainBins} binaries)`);
       console.log(`  Base-Rootfs:  ${rootfs} (${dirSize(rootfs)})`);

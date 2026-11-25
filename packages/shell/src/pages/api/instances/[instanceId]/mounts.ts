@@ -1,12 +1,24 @@
 import type { APIRoute } from 'astro';
 import { getAppManager } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
+import { auditOwner, ownerAction } from '../../../../lib/approvals/admin.ts';
+import { authenticate } from '../../../../lib/auth.ts';
+import { isDeveloperMode } from '../../../../lib/systemMode.ts';
+
+/** The System Terminal: the only app the AuraOS checkout is ever mounted into (D60). */
+const SYSTEM_TERMINAL = 'com.aura.terminal';
 
 /**
  * Cross-app mounts for one instance.
  *
  *   GET  → { capable, reason?, mounts[] }      (?includeSidecars=1 → + sidecarMounts[])
  *   POST → { targetAppId, mode?: 'ro'|'rw', data?: boolean } → { ok, mount }
+ *   POST { kind: 'workspace' } → `aura mount workspace` (D60): /workspace,
+ *        read-write, at /mnt/aura/workspace of the CALLING System Terminal
+ *        instance, by its own token. Developer Mode only; the owner approves
+ *        it with one click; never into any other app or a sidecar. It lasts
+ *        until `aura mount rm workspace`, the instance stops, or Developer
+ *        Mode is switched off.
  *
  * `capable` reports whether this host can propagate mounts at all, so a client
  * can explain WHY mounting is unavailable instead of just failing.
@@ -29,13 +41,22 @@ export const GET: APIRoute = ({ params, url }) => {
   return jsonResponse({ capable: cap.ok, reason: cap.reason, mounts: mgr.mounts.list(instanceId), ...(sidecarMounts ? { sidecarMounts } : {}) });
 };
 
-export const POST: APIRoute = async ({ params, request }) => {
+export const POST: APIRoute = async (ctx) => {
+  const { params, request } = ctx;
   const instanceId = params['instanceId'];
   if (!instanceId) return errorResponse('Missing instance id', 400);
 
   const mgr = getAppManager();
   const instance = mgr.getInstance(instanceId);
   if (!instance) return errorResponse(`Instance not found: ${instanceId}`, 404);
+
+  if (request.headers.get('content-type')?.includes('json')) {
+    const peek = await request.clone().json().catch(() => null) as { kind?: unknown } | null;
+    if (peek?.kind !== undefined) {
+      if (peek.kind !== 'workspace') return errorResponse(`kind must be 'workspace'`, 400);
+      return mountWorkspace(ctx, instanceId, instance.sandbox);
+    }
+  }
 
   // The CONSUMER app (from the instance record, never the body) must hold
   // `apps.mount`: the route access manifest's `targetPermissions`, which the
@@ -75,3 +96,43 @@ export const POST: APIRoute = async ({ params, request }) => {
     return errorResponse(message, conflict ? 409 : 500);
   }
 };
+
+/** `aura mount workspace`: the checks are the route's, the bind is MountManager's. */
+async function mountWorkspace(
+  ctx: Parameters<APIRoute>[0], instanceId: string, sandbox: string | undefined,
+): Promise<Response> {
+  if (!isDeveloperMode()) {
+    return errorResponse('aura mount workspace needs Developer Mode (Settings → System, or aura mode developer on the host)', 409);
+  }
+  const caller = await authenticate(ctx.request);
+  if (caller instanceof Response) return caller;
+  const mgr = getAppManager();
+  // Only the System Terminal instance itself, by its own token: not the
+  // owner naming one, not a sidecar, not another Terminal instance, not a
+  // copy of the Terminal installed in another scope.
+  if (caller.kind !== 'instance' || caller.appId !== SYSTEM_TERMINAL || caller.instanceId !== instanceId
+    || caller.sidecar || mgr.registry.getScopeId(SYSTEM_TERMINAL) !== 'system') {
+    return errorResponse('the AuraOS checkout is mounted only into the System Terminal that asks for it: run aura mount workspace there', 403);
+  }
+  if (sandbox && sandbox !== 'container') {
+    return errorResponse(`${instanceId} runs in a '${sandbox}' sandbox; the workspace mount requires sandbox: container`, 409);
+  }
+  const actor = await ownerAction(ctx, {
+    action: 'admin.change', level: 'session', payload: { op: 'mount.workspace', instanceId },
+    title: 'Mount the AuraOS source writable into the System Terminal',
+    details: [
+      `/workspace appears read-write at /mnt/aura/workspace in ${instanceId}.`,
+      'Every session and agent in that Terminal can change the running AuraOS source until it is detached or Developer Mode is switched off.',
+    ],
+  });
+  if (actor instanceof Response) return actor;
+  try {
+    const mount = await mgr.mounts.addWorkspace(instanceId);
+    await auditOwner(actor, 'mount.workspace', { target: instanceId });
+    return jsonResponse({ ok: true, mount });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await auditOwner(actor, 'mount.workspace', { target: instanceId, outcome: 'failed', detail: { error: message } });
+    return errorResponse(message, /already mounted|unavailable|refusing|never/i.test(message) ? 409 : 500);
+  }
+}

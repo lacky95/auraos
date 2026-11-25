@@ -43,6 +43,15 @@
  *  - INHERITED from its app (`inheritMounts`), mirrored by fan-out whenever
  *    the app's set changes — never persisted, always derived from the app's.
  * Sidecars never use the legacy `/data/.mnt` root.
+ *
+ * ## The AuraOS checkout (`workspace` kind, Developer Mode)
+ *
+ * `aura mount workspace` binds `/workspace`, the live AuraOS source,
+ * read-write at `/mnt/aura/workspace` of one System Terminal instance (D60).
+ * Who may ask, and only in Developer Mode, is the shell route's decision; here
+ * it is just a mount that is never declared (it ends with the instance, or
+ * when Developer Mode is switched off), never mirrored into sidecars and
+ * never made into a sidecar.
  */
 import { execFileSync, execSync } from 'node:child_process';
 import { mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -67,7 +76,11 @@ export const MOUNT_ROOT_PATH = '/mnt/aura';
 export const MOUNT_DIR_NAME = '.mnt';
 
 export type MountMode = 'ro' | 'rw';
-export type MountKind = 'source' | 'data';
+export type MountKind = 'source' | 'data' | 'workspace';
+/** Id (and mount dir name) of the `workspace` kind. App ids always contain a dot, so it never names an app. */
+export const WORKSPACE_MOUNT_ID = 'workspace';
+/** The AuraOS checkout, as the shell sees it. */
+const WORKSPACE_DIR = '/workspace';
 /**
  * How a mount came to exist in this shell generation:
  *  - `added`    — attached via the API (`aura mount add`) in this life of the instance
@@ -107,10 +120,11 @@ function containerNameFor(instanceId: string): string {
 }
 
 export interface AuraMount {
-  /** `<targetAppId>` for a source mount, `<targetAppId>:data` for a data mount. */
+  /** `<targetAppId>` for a source mount, `<targetAppId>:data` for a data mount, `workspace` for the checkout. */
   id: string;
   /** The CONSUMER — the instance the files are mounted INTO. */
   instanceId: string;
+  /** The mounted app; `workspace` for the AuraOS checkout. */
   targetAppId: string;
   kind: MountKind;
   mode: MountMode;
@@ -188,8 +202,9 @@ export class MountManager {
   /** Persist the current mount set as declarations. Never throws: a failed
    *  write must not fail the mount the user just asked for. */
   private writeDecls(instanceId: string): void {
-    // Inherited mounts are derived from the parent's set, never declared.
-    this.writeDeclFile(instanceId, this.list(instanceId).filter((m) => m.origin !== 'inherited').map((m) => ({
+    // Inherited mounts are derived from the parent's set, never declared; the
+    // checkout lives as long as the instance (or Developer Mode) does.
+    this.writeDeclFile(instanceId, this.list(instanceId).filter((m) => m.origin !== 'inherited' && m.kind !== 'workspace').map((m) => ({
       targetAppId: m.targetAppId, mode: m.mode, data: m.kind === 'data', declaredAt: m.declaredAt,
     })));
   }
@@ -315,6 +330,7 @@ export class MountManager {
 
   /** Shell-side path of what we'd mount FROM, for a target app. */
   private resolveSource(targetAppId: string, kind: MountKind): string {
+    if (kind === 'workspace') return WORKSPACE_DIR;
     const manifest = this.opts.registry.getById(targetAppId);
     if (!manifest) throw new Error(`App not found: ${targetAppId}`);
     if (kind === 'source') return manifest.appDir;
@@ -334,6 +350,7 @@ export class MountManager {
   }
 
   private mountId(targetAppId: string, kind: MountKind): string {
+    if (kind === 'workspace') return WORKSPACE_MOUNT_ID;
     return kind === 'data' ? `${targetAppId}:data` : targetAppId;
   }
 
@@ -364,6 +381,7 @@ export class MountManager {
   }
 
   private dirName(targetAppId: string, kind: MountKind): string {
+    if (kind === 'workspace') return WORKSPACE_MOUNT_ID;
     return kind === 'data' ? `${targetAppId}.data` : targetAppId;
   }
 
@@ -380,6 +398,34 @@ export class MountManager {
     const kind: MountKind = spec.data ? 'data' : 'source';
     const mode: MountMode = spec.mode ?? 'ro';
     const id = this.mountId(spec.targetAppId, kind);
+    return this.bind(instanceId, { targetAppId: spec.targetAppId, kind, mode, id, declaredAt: spec.declaredAt }, opts);
+  }
+
+  /**
+   * Bind the AuraOS checkout read-write into one consumer (`aura mount
+   * workspace`, D60). The caller has checked Developer Mode and that the
+   * consumer is the asking System Terminal. Never declared, never mirrored.
+   */
+  async addWorkspace(instanceId: string): Promise<AuraMount> {
+    const cap = this.capable();
+    if (!cap.ok) throw new Error(`mount propagation unavailable: ${cap.reason}`);
+    if (isSidecarConsumer(instanceId)) throw new Error('the AuraOS checkout is never mounted into a sidecar');
+    return this.bind(instanceId, {
+      targetAppId: WORKSPACE_MOUNT_ID, kind: 'workspace', mode: 'rw', id: WORKSPACE_MOUNT_ID,
+    }, { persist: false });
+  }
+
+  /** Every live mount of the AuraOS checkout, in every consumer. */
+  workspaceMounts(): AuraMount[] {
+    return [...this.mounts.values()].flatMap((set) => [...set.values()].filter((m) => m.kind === 'workspace'));
+  }
+
+  private async bind(
+    instanceId: string,
+    spec: { targetAppId: string; kind: MountKind; mode: MountMode; id: string; declaredAt?: string },
+    opts: { persist?: boolean; origin?: MountOrigin },
+  ): Promise<AuraMount> {
+    const { kind, mode, id } = spec;
 
     if (this.mounts.get(instanceId)?.has(id)) {
       throw new Error(`${id} is already mounted into ${instanceId}`);
@@ -446,7 +492,7 @@ export class MountManager {
     this.mounts.get(instanceId)!.set(id, mount);
     // `persist: false` while reapply() is replaying what is already on disk.
     if (opts.persist !== false) this.writeDecls(instanceId);
-    if (!isSidecarConsumer(instanceId)) this.queueFanout(() => this.fanoutAdd(instanceId, mount));
+    if (!isSidecarConsumer(instanceId) && kind !== 'workspace') this.queueFanout(() => this.fanoutAdd(instanceId, mount));
     return mount;
   }
 
@@ -461,7 +507,7 @@ export class MountManager {
     this.writeDecls(instanceId);   // an explicit detach is a change of intent
     if (this.mounts.get(instanceId)!.size === 0) this.mounts.delete(instanceId);
     this.pruneStale(instanceId);
-    if (!isSidecarConsumer(instanceId)) this.queueFanout(() => this.fanoutRemove(instanceId, mountId));
+    if (!isSidecarConsumer(instanceId) && mount.kind !== 'workspace') this.queueFanout(() => this.fanoutRemove(instanceId, mountId));
   }
 
   /**
@@ -516,7 +562,7 @@ export class MountManager {
     if (!this.capable().ok) return { rebound, failed };
     for (const [consumer, set] of [...this.mounts]) {
       for (const old of [...set.values()]) {
-        if (old.targetAppId !== targetAppId) continue;
+        if (old.targetAppId !== targetAppId || old.kind === 'workspace') continue;
         // A parent's re-add fans out into its sidecars and may already have
         // replaced their inherited copy.
         if (set.get(old.id) !== old) continue;
@@ -585,7 +631,7 @@ export class MountManager {
     }
     if (opts.inherit) {
       for (const m of this.list(parentOfConsumer(consumer))) {
-        if (opts.exclude.includes(m.id) || have().has(m.id)) continue;
+        if (m.kind === 'workspace' || opts.exclude.includes(m.id) || have().has(m.id)) continue;
         try {
           await this.add(consumer, {
             targetAppId: m.targetAppId, data: m.kind === 'data', declaredAt: m.declaredAt,
@@ -730,10 +776,11 @@ export class MountManager {
       // previous shell asked for, only what actually exists now.
       const isData = dirName.endsWith('.data');
       const targetAppId = isData ? dirName.slice(0, -'.data'.length) : dirName;
+      const kind: MountKind = dirName === WORKSPACE_MOUNT_ID ? 'workspace' : isData ? 'data' : 'source';
       const mount: AuraMount = {
-        id: isData ? `${targetAppId}:data` : targetAppId,
+        id: this.mountId(targetAppId, kind),
         instanceId, targetAppId,
-        kind: isData ? 'data' : 'source',
+        kind,
         mode: this.readModeAt(path),
         containerPath: path.includes(`/${MOUNT_DIR_NAME}/`)
           ? `/data/${MOUNT_DIR_NAME}/${dirName}`

@@ -1,0 +1,57 @@
+---
+import { systemMode } from '../../lib/systemMode.ts';
+
+/**
+ * The permanent "Developer mode" indicator (D3, D60): shown while AuraOS runs
+ * in Developer Mode, whatever the bars do (auto-hide included). It follows
+ * the `os:systemModeChanged` OS event, so switching in Settings → System or
+ * with `aura mode` shows or hides it without a reload.
+ *
+ * Placement: the top edge's centre, over the status bar's empty middle. It
+ * takes no pointer events, so it never blocks a click, and it sits below the
+ * shell's own layers (App Host setup bar 1880, system modals 1900, lock
+ * screen 2000); the trusted dialogs (approvals, password) are native modal
+ * <dialog>s in the browser's top layer, above every z-index.
+ *
+ * `data-system-mode` on the badge is the mode the desktop shows (auraos-e2e
+ * diagnose/system-mode compares it with GET /api/admin/system-mode).
+ */
+const mode = systemMode();
+---
+<div id="aura-dev-mode-badge" class="dev-mode-badge" role="status" data-system-mode={mode} hidden={mode !== 'developer'}>
+  Developer mode
+</div>
+
+<script>
+  import { osEvents } from '../../lib/osEvents.ts';
+
+  const badge = document.getElementById('aura-dev-mode-badge');
+  if (badge) {
+    osEvents?.subscribe('os:systemModeChanged', (ev) => {
+      const mode = ev['mode'] === 'normal' ? 'normal' : 'developer';
+      badge.dataset['systemMode'] = mode;
+      badge.hidden = mode !== 'developer';
+    });
+  }
+</script>
+
+<style>
+  .dev-mode-badge {
+    position: fixed;
+    top: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 1870;
+    pointer-events: none;
+    padding: 1px 10px 2px;
+    font-size: 0.6rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--aura-color-bg);
+    background: var(--aura-color-warning);
+    border-radius: 0 0 4px 4px;
+    opacity: 0.9;
+    white-space: nowrap;
+  }
+  .dev-mode-badge[hidden] { display: none; }
+</style>

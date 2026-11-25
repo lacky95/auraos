@@ -13,6 +13,7 @@ import {
   type ScopeId, type SelectableScope,
 } from '../lib/appid.js';
 import { registerDevClone } from './dev-clone.js';
+import { registerDevRestart } from './systemMode.js';
 
 const TEMPLATE_DIR = (() => {
   if (process.env['AURA_TEMPLATE_DIR']) return process.env['AURA_TEMPLATE_DIR'];
@@ -866,6 +867,7 @@ Skips node_modules, dist, .astro and .next. ${DOCS_HINT}.`)
 
   registerDevOrigin(dev);
   registerDevCheckout(dev);
+  registerDevRestart(dev);
 
   dev
     .command('standalone <appId>')

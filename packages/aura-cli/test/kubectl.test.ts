@@ -217,7 +217,7 @@ test('completion: commands, resources per verb, subresource, classic subcommands
   assert.ok((await completions(program, ['install'])).includes('sdk'));
   assert.ok(!(await completions(program, ['stop'])).includes('sc'), 'stop does not take sidecars');
   assert.deepEqual(await completions(program, ['get', 'inst', 'x']), ['sidecars']);
-  assert.deepEqual(await completions(program, ['mount']), ['ls', 'add', 'rm']);
+  assert.deepEqual(await completions(program, ['mount']), ['ls', 'add', 'workspace', 'rm']);
   assert.deepEqual(await completions(program, ['get', '-o', 'wide']), forGet, 'option values are skipped');
 });
 

@@ -194,6 +194,7 @@ See [Cross-App Mounts](/docs/cross-app-mounts). `--instance` defaults to
 | `aura mount` | Wizard: target app → instance → the set of apps mounted into it. | — |
 | `aura mount ls` | What is mounted into an instance (incl. its OS sidecars' mounts and the OS context volumes). | `--instance <id>` |
 | `aura mount add [appId...]` | Mount one or more apps into the target instance. No ids → picker over every installed app (system/global/user — switch scope with `m`). | `--wr` (write), `--data` (the target's data dir instead of its source), `--instance <id>` |
+| `aura mount workspace` | [Developer Mode](/docs/developer-mode): the AuraOS source `/workspace`, read-write at `/mnt/aura/workspace` of this System Terminal only. One click in the desktop. | — |
 | `aura mount rm [appId...]` | Detach. A bare app id detaches both its source and data mounts; `<appId>:data` just the data one. No args → picker. | `--all`, `--instance <id>` |
 
 ```bash
@@ -323,6 +324,7 @@ Ref shapes `install` / `info` accept:
 | `aura dev origin [appId]` | List app `originId`s, or set them. | `--assign [--all]`, `--reassign` (the owner's), `--origin-id <uuid>`, `--scope`, `--json` |
 | `aura dev checkout <appId>` | Make an installed app a git checkout of its source repo, in place (files untouched), at the release's commit. Nexus then stops updating it. | `--repo <url>`, `--ref <ref>`, `--branch <name>`, `--scope`, `--dry-run`, `--json` |
 | `aura dev clean-manifest [path]` | Strip manifest fields equal to the schema default. | `--all`, `--dry-run` |
+| `aura dev rebuild` / `aura dev restart` | [Developer Mode](/docs/developer-mode): build the changed packages and restart AuraOS / restart it; the desktop comes back. | `--no-restore` |
 | `aura dev standalone <appId>` | Run an app directly with `astro dev` (no sandbox, no shell wrapper) for fast UI iteration. | — |
 
 ```bash
@@ -336,6 +338,7 @@ aura dev validate --all
 
 | Command | What it does | Key flags |
 |---|---|---|
+| `aura mode [developer\|normal\|export-patches]` | Show or switch the [system mode](/docs/developer-mode). On asks for your password (on the host: directly); off runs the clean-tree check. | `--move-to-branch` (off: the automatic clean-up) |
 | `aura set theme <name>` | Switch the active theme for a tone slot; updates the shell and apps live. Theme ids from `aura get themes`. | `--tone dark\|light` (default `dark`) |
 | `aura completion bash\|zsh` | Print a completion script: commands, resource types, and live names (apps, instances). | — |
 | `aura api-resources` | All resource types, short names, verbs. | — |

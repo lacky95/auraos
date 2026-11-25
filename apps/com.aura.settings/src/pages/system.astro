@@ -1,0 +1,219 @@
+---
+import '../styles/settings.css';
+import Icon from '../components/Icon.astro';
+
+/**
+ * Settings → System → Developer mode (D1, D3, D4, D60).
+ *
+ * Developer Mode: AuraOS runs from its /workspace checkout and the owner
+ * develops it (`aura dev rebuild|restart`, `aura mount workspace` in the
+ * System Terminal). Turning it on asks for the owner's password in AuraOS's
+ * own dialog (over plain HTTP the host operator confirms it: `aura approve`).
+ * Turning it off runs the clean-tree flow: when /workspace differs from the
+ * release, this page lists what differs and recommends, in order, to clean
+ * up, to save the changes as patch files, or (the owner's explicit choice)
+ * the automatic clean-up to a dev/<date> branch.
+ *
+ * Normal mode is recorded and shown, not enforced: AuraOS keeps running from
+ * /workspace until Phase 6. Every call goes to the shell's
+ * /api/admin/system-mode through the gateway as the owner acting through
+ * Settings (D45); a change opens the Shell's approval dialog.
+ */
+---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Settings · System — AuraOS</title>
+  <link rel="stylesheet" href="/api/os/theme.css" />
+  <style is:global>
+    /* Global: the lists below are built at runtime (no astro cid on them). */
+    .sys-section { border: var(--aura-border); padding: 14px 16px; margin-bottom: 14px; display: flex; flex-direction: column; gap: 10px; }
+    .sys-head { display: flex; align-items: center; gap: 10px; }
+    .sys-title { flex: 1; display: inline-flex; align-items: center; gap: 6px; font-size: var(--aura-font-size-sm); letter-spacing: 0.1em; text-transform: uppercase; color: var(--aura-color-primary); }
+    .sys-note { font-size: 0.65rem; color: var(--aura-color-text-dim); letter-spacing: 0.04em; line-height: 1.5; margin: 0; }
+    .sys-facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; font-size: 0.72rem; margin: 0; }
+    .sys-facts dt { color: var(--aura-color-text-dim); letter-spacing: 0.08em; font-size: 0.62rem; text-transform: uppercase; }
+    .sys-facts dd { margin: 0; }
+    .sys-mode { color: var(--aura-color-primary); }
+    .sys-mode[data-mode="developer"] { color: var(--aura-color-warning); }
+    .sys-list { margin: 0; padding-left: 18px; font-size: 0.68rem; line-height: 1.6; }
+    .sys-list code { font-family: var(--aura-font-mono, monospace); font-size: 0.65rem; }
+    .sys-steps { margin: 0; padding-left: 18px; font-size: 0.68rem; line-height: 1.6; }
+    .sys-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .btn { font: inherit; font-size: 0.65rem; letter-spacing: 0.08em; padding: 3px 9px; background: var(--aura-color-surface); color: var(--aura-color-text); border: var(--aura-border); cursor: pointer; }
+    .btn:hover:not(:disabled) { color: var(--aura-color-primary); }
+    .btn:disabled { opacity: 0.4; cursor: default; }
+    .btn.danger:hover:not(:disabled) { color: var(--aura-color-danger); }
+    #status { font-size: 0.65rem; letter-spacing: 0.06em; color: var(--aura-color-text-dim); }
+    #status[data-tone="error"] { color: var(--aura-color-danger); }
+  </style>
+</head>
+<body>
+  <main class="settings-body">
+    <p id="status"></p>
+
+    <section class="sys-section">
+      <div class="sys-head">
+        <span class="sys-title"><Icon name="terminal" /> Developer mode</span>
+        <button class="btn" id="btn-toggle" type="button" disabled>…</button>
+      </div>
+      <dl class="sys-facts">
+        <dt>Mode</dt><dd><span class="sys-mode" id="sys-mode">—</span> <span class="sys-note" id="sys-source"></span></dd>
+        <dt>Workspace mounts</dt><dd id="sys-mounts">—</dd>
+      </dl>
+      <p class="sys-note">
+        In Developer Mode AuraOS runs from its <code>/workspace</code> checkout and you develop it: <code>aura dev rebuild</code>
+        and <code>aura dev restart</code>, and <code>aura mount workspace</code> in the System Terminal mounts the source
+        writable there. The desktop shows a "Developer mode" indicator while it is on. Turning it on asks for your
+        password in AuraOS's own dialog (over plain HTTP: <code>aura approve</code> on the host).
+      </p>
+      <p class="sys-note">
+        Normal mode is recorded and shown, but not enforced yet: AuraOS keeps running from <code>/workspace</code> until
+        Phase 6 ships the locked release.
+      </p>
+    </section>
+
+    <section class="sys-section" id="sys-tree-section" hidden>
+      <div class="sys-head">
+        <span class="sys-title"><Icon name="alert-triangle" /> /workspace differs from the release</span>
+      </div>
+      <p class="sys-note" id="sys-tree-summary"></p>
+      <ul class="sys-list" id="sys-tree-list"></ul>
+      <p class="sys-note">Developer Mode stays on until the tree is clean. Recommended, in this order:</p>
+      <ol class="sys-steps">
+        <li>Make the tree clean: commit and push your work, or discard it — then turn it off again.</li>
+        <li>Save the changes as patch files in <code>/data/aura/dev-patches/&lt;date&gt;/</code>, then clean up.</li>
+        <li>Automatic clean-up, only if you choose it: everything moves to a <code>dev/&lt;date&gt;</code> branch, a backup is
+          kept for 30 days, and <code>/workspace</code> is reset to the release (asks for your password).</li>
+      </ol>
+      <div class="sys-actions">
+        <button class="btn" id="btn-recheck" type="button">CHECK AGAIN</button>
+        <button class="btn" id="btn-patches" type="button">SAVE AS PATCH FILES</button>
+        <button class="btn danger" id="btn-branch" type="button">MOVE TO A BRANCH AND TURN OFF…</button>
+      </div>
+    </section>
+  </main>
+
+  <footer class="settings-foot">PROVIDER · /api/admin/system-mode</footer>
+
+  <script>
+    import { OsClient } from '@aura/app-sdk';
+    import { osUrl } from '@aura/app-sdk';
+    import { ownerFetch } from '../scripts/os.ts';
+
+    type Tree = {
+      git: boolean; clean: boolean; release: { ref: string } | null;
+      uncommitted: string[]; untracked: string[]; localCommits: Array<{ sha: string; subject: string }>;
+      counts: { uncommitted: number; untracked: number; localCommits: number };
+    };
+    type State = {
+      mode: 'normal' | 'developer'; configured: string | null; env: string | null;
+      workspaceMounts?: Array<{ instanceId: string; containerPath: string }>;
+    };
+
+    const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+    const statusEl = $('status');
+    const toggle = $<HTMLButtonElement>('btn-toggle');
+    const treeSection = $('sys-tree-section');
+    let state: State | null = null;
+
+    const setStatus = (msg: string, tone?: 'error') => {
+      statusEl.textContent = msg;
+      if (tone) statusEl.dataset['tone'] = tone; else delete statusEl.dataset['tone'];
+    };
+
+    function paint(s: State): void {
+      state = s;
+      const mode = $('sys-mode');
+      mode.textContent = s.mode === 'developer' ? 'Developer' : 'Normal';
+      mode.dataset['mode'] = s.mode;
+      $('sys-source').textContent = s.env ? '(set on the container: AURA_SYSTEM_MODE)' : s.configured ? '' : '(default)';
+      const mounts = s.workspaceMounts ?? [];
+      $('sys-mounts').textContent = mounts.length
+        ? mounts.map((m) => `${m.instanceId} at ${m.containerPath} (read-write)`).join(', ')
+        : 'none';
+      toggle.textContent = s.mode === 'developer' ? 'TURN OFF…' : 'TURN ON…';
+      toggle.disabled = !!s.env;
+      toggle.title = s.env ? 'AURA_SYSTEM_MODE on the container decides the mode' : '';
+    }
+
+    function paintTree(t: Tree | null): void {
+      treeSection.hidden = !t || t.clean;
+      if (!t || t.clean) return;
+      const parts = [
+        t.counts.uncommitted ? `${t.counts.uncommitted} file(s) with uncommitted changes` : '',
+        t.counts.untracked ? `${t.counts.untracked} untracked file(s)` : '',
+        t.counts.localCommits ? `${t.counts.localCommits} local commit(s) not in ${t.release?.ref ?? 'the release'}` : '',
+      ].filter(Boolean);
+      $('sys-tree-summary').textContent = `${parts.join(', ')}.`;
+      const list = $('sys-tree-list');
+      list.replaceChildren();
+      const item = (label: string, text: string) => {
+        const li = document.createElement('li');
+        const code = document.createElement('code');
+        code.textContent = text;
+        li.append(`${label} `, code);
+        list.append(li);
+      };
+      for (const f of t.uncommitted.slice(0, 20)) item('changed', f);
+      for (const f of t.untracked.slice(0, 20)) item('new', f);
+      for (const c of t.localCommits.slice(0, 20)) item('commit', `${c.sha} ${c.subject}`);
+    }
+
+    async function load(withTree = false): Promise<Tree | null> {
+      const r = await fetch(osUrl(`/api/admin/system-mode${withTree ? '?tree=1' : ''}`), { cache: 'no-store' });
+      const data = await r.json().catch(() => ({})) as State & { tree?: Tree; error?: string };
+      if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+      paint(data);
+      return data.tree ?? null;
+    }
+
+    async function change(method: 'PUT' | 'POST', body: unknown): Promise<Record<string, unknown> & { ok?: boolean }> {
+      const r = await ownerFetch('/api/admin/system-mode', method, body);
+      const data = await r.json().catch(() => ({})) as Record<string, unknown> & { tree?: Tree; message?: string; error?: string };
+      if (r.status === 409 && data.error === 'tree-not-clean') { paintTree(data.tree ?? null); throw new Error(String(data.message)); }
+      if (!r.ok) throw new Error(String(data.message || data.error || `HTTP ${r.status}`));
+      return data;
+    }
+
+    async function run(label: string, fn: () => Promise<string>): Promise<void> {
+      for (const b of document.querySelectorAll<HTMLButtonElement>('.btn')) b.disabled = true;
+      setStatus(`${label}…`);
+      try { setStatus(await fn()); }
+      catch (err) { setStatus((err as Error).message, 'error'); }
+      finally {
+        for (const b of document.querySelectorAll<HTMLButtonElement>('.btn')) b.disabled = false;
+        try { paintTree(await load(state?.mode === 'developer')); } catch (err) { setStatus(`Could not read the system mode: ${(err as Error).message}`, 'error'); }
+      }
+    }
+
+    toggle.addEventListener('click', () => {
+      if (state?.mode === 'developer') {
+        void run('Turning Developer Mode off', async () => {
+          await change('PUT', { mode: 'normal' });
+          return 'Developer Mode is off. AuraOS keeps running from /workspace until Phase 6.';
+        });
+      } else {
+        void run('Turning Developer Mode on', async () => {
+          await change('PUT', { mode: 'developer' });
+          return 'Developer Mode is on.';
+        });
+      }
+    });
+    $('btn-recheck').addEventListener('click', () => void run('Checking /workspace', async () => 'Checked.'));
+    $('btn-patches').addEventListener('click', () => void run('Saving patch files', async () => {
+      const d = await change('POST', { action: 'export-patches' });
+      return d['dir'] ? `Saved to ${String(d['dir'])}.` : String(d['message'] ?? 'Nothing to save.');
+    }));
+    $('btn-branch').addEventListener('click', () => void run('Moving the changes to a branch', async () => {
+      const d = await change('PUT', { mode: 'normal', cleanup: 'branch' });
+      const c = d['cleanup'] as { branch?: string; backup?: string } | undefined;
+      return `Developer Mode is off. Your work is on ${c?.branch ?? 'a dev branch'}; backup: ${c?.backup ?? '—'} (30 days).`;
+    }));
+
+    load(true).then(paintTree).catch((err) => setStatus(`Could not read the system mode: ${(err as Error).message}`, 'error'));
+    new OsClient().nav.installGridNav({ selector: '#btn-toggle, #btn-recheck, #btn-patches, #btn-branch' });
+  </script>
+</body>
+</html>

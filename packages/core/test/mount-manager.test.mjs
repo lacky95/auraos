@@ -232,3 +232,44 @@ test('rebindTarget: an app whose dir was replaced is re-bound everywhere, same m
   assert.equal(w.decls(SC), null);
   assert.deepEqual(await w.mm.rebindTarget('io.not.mounted'), { rebound: 0, failed: 0 });
 });
+
+// ── the AuraOS checkout (`aura mount workspace`, D60) ───────────────────────
+
+test('workspace: /workspace read-write at /mnt/aura/workspace, never declared, never mirrored', async (t) => {
+  const w = world(t);
+  w.setTargets([{ consumer: SC, exclude: [], forceRo: false }]);
+  await w.mm.add(INST, { targetAppId: 'com.aura.docs' });
+  const m = await w.mm.addWorkspace(INST);
+  await w.mm.settled();
+  assert.equal(m.id, 'workspace');
+  assert.equal(m.kind, 'workspace');
+  assert.equal(m.mode, 'rw');
+  assert.equal(m.containerPath, '/mnt/aura/workspace');
+  assert.equal(w.kernel.get(m.hostDest), 'rw');
+  assert.ok(w.calls.some((a) => Array.isArray(a) && a.includes('/workspace:/src')), 'bound from /workspace, writable');
+  assert.deepEqual(w.decls(INST).map((d) => d.targetAppId), ['com.aura.docs'], 'the checkout is not declared');
+  assert.deepEqual(w.mm.list(SC).map((x) => x.id), ['com.aura.docs'], 'not mirrored into the sidecar');
+  assert.deepEqual(w.mm.workspaceMounts().map((x) => x.instanceId), [INST]);
+  await assert.rejects(w.mm.addWorkspace(INST), /already mounted/);
+  await assert.rejects(w.mm.addWorkspace(SC), /never mounted into a sidecar/);
+
+  const r = await w.mm.reapplyConsumer(SC, { inherit: true, exclude: [], forceRo: false });
+  assert.equal(r.failed, 0);
+  assert.ok(!w.mm.list(SC).some((x) => x.kind === 'workspace'), 'a sidecar start does not inherit it');
+
+  await w.mm.remove(INST, 'workspace');
+  assert.equal(w.kernel.has(m.hostDest), false);
+  assert.deepEqual(w.mm.workspaceMounts(), []);
+});
+
+test('workspace: reconcile adopts a live checkout bind as the workspace kind and does not declare it', async (t) => {
+  const w = world(t);
+  await w.mm.addWorkspace(INST);
+  const fresh = new MountManager({ ...w.mm.opts });
+  fresh.reconcile(new Set([INST]));
+  const [m] = fresh.workspaceMounts();
+  assert.equal(m?.kind, 'workspace');
+  assert.equal(m?.id, 'workspace');
+  assert.equal(w.decls(INST), null, 'still not declared');
+  assert.deepEqual(fresh.reconcile(new Set()), { adopted: 0, reaped: 1 }, 'a dead instance\'s bind is reaped');
+});

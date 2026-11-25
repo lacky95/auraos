@@ -11,6 +11,7 @@ import {
 } from './identify.ts';
 import { refererProxyId } from './legacyReferer.ts';
 import { followSocket } from '../streamSession.ts';
+import { systemMode } from '../systemMode.ts';
 import { AccessReport, type ReportRedis } from './report.ts';
 import { candidateRules, handlersOf, manifestRoute, normalizeMethod } from './resolve.ts';
 import { ROUTE_ACCESS_MANIFEST } from './routeManifest.ts';
@@ -328,7 +329,7 @@ export function decideRule(
     auth: { fresh: req.snapshot.approval === true, via: req.via },
     strict: req.strict,
     accessProfile: 'open',
-    systemMode: 'normal',
+    systemMode: systemMode(),
     deployment: 'private',
   });
 }
@@ -415,7 +416,7 @@ export function createObserver({ deps, report, manifest = ROUTE_ACCESS_MANIFEST,
     auth: { fresh: false, via },
     strict: true,
     accessProfile: 'open',
-    systemMode: 'normal',
+    systemMode: systemMode(),
     deployment: 'private',
   });
 

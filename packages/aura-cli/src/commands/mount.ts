@@ -181,8 +181,8 @@ function printMounts(instanceId: string, mounts: AuraMount[], apps: AppDto[]): v
     .sort((a, b) => a.id.localeCompare(b.id))
     .map((m) => ({
       TARGET: m.targetAppId,
-      SCOPE:  scopeColor(scopeOf(apps, m.targetAppId)),
-      KIND:   m.kind === 'data' ? color.yellow(m.kind) : m.kind,
+      SCOPE:  m.kind === 'workspace' ? color.dim('os') : scopeColor(scopeOf(apps, m.targetAppId)),
+      KIND:   m.kind === 'data' ? color.yellow(m.kind) : m.kind === 'workspace' ? color.red(m.kind) : m.kind,
       MODE:   modeSign(m.mode),
       PATH:   m.containerPath,
       ORIGIN: originLabel(m),
@@ -940,6 +940,14 @@ export function registerMount(program: Command): void {
     }));
 
   mount
+    .command('workspace')
+    .description(
+      'Developer Mode: mount the AuraOS source (/workspace) read-write at /mnt/aura/workspace of THIS System Terminal. ' +
+      'The owner approves it with one click; it lasts until `aura mount rm workspace`, the Terminal stops, or Developer Mode is switched off.',
+    )
+    .action(guard(async () => { await mountWorkspace(); }));
+
+  mount
     .command('rm [appId...]')
     .alias('remove')
     .description(
@@ -951,4 +959,18 @@ export function registerMount(program: Command): void {
     .action(guard(async (tokens: string[], _opts: MountOpts, cmd: Command) => {
       await removeMounts(tokens ?? [], effectiveOpts(cmd));
     }));
+}
+
+/** `aura mount workspace` (D60): only ever into the System Terminal this runs in. */
+async function mountWorkspace(): Promise<void> {
+  const instanceId = process.env['APP_INSTANCE_ID'];
+  if (!instanceId) fail('aura mount workspace runs in the System Terminal (Developer Mode): it mounts the AuraOS source into that Terminal only.');
+  let res: AddResponse;
+  try {
+    res = await api.post<AddResponse>(`/api/instances/${encodeURIComponent(instanceId)}/mounts`, { kind: 'workspace' });
+  } catch (err) {
+    fail(apiError(err));
+  }
+  ok(`/workspace is mounted read-write at ${color.bold(res!.mount.containerPath)} in ${instanceId}`);
+  console.log(color.dim('  Changes there change the running AuraOS. Rebuild and restart: aura dev rebuild. Detach: aura mount rm workspace.'));
 }
