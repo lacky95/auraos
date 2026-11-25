@@ -8,7 +8,7 @@
  * approval is created and where it is consumed, so the hashes can only match
  * for the same request.
  */
-import { normaliseInject } from '@aura/core';
+import { normaliseInject, SENSITIVE_APPS } from '@aura/core';
 import type { ApprovalDisplay, ApprovalLevel, ApprovalRequester, InstallBinding, PermissionDiff } from '@aura/core';
 
 /** Tools and permissions that hand over the host or its container runtime: `fresh` (5.10). */
@@ -53,13 +53,18 @@ export function installLevel(binding: InstallBinding): ApprovalLevel {
 
 export function installDisplay(binding: InstallBinding, diff: PermissionDiff, requestedBy: string): ApprovalDisplay {
   const update = binding.action === 'nexus.update' || diff.versionFrom !== null;
-  const title = `${update ? 'Update' : 'Install'} ${binding.name} ${diff.versionFrom ? `${diff.versionFrom} → ` : ''}${binding.version}`;
+  const title = binding.action === 'app.patch.activate'
+    ? `Activate patched ${binding.name} ${binding.version}${binding.scope === 'user' && diff.versionFrom === null ? ' (as your own copy)' : ''}`
+    : `${update ? 'Update' : 'Install'} ${binding.name} ${diff.versionFrom ? `${diff.versionFrom} → ` : ''}${binding.version}`;
   const details = [
     `App: ${binding.appId}`,
     `Scope: ${binding.scope}`,
     `Source: ${binding.source} ${binding.address}`,
     `Artifact: ${binding.digest}`,
   ];
+  if (binding.action === 'app.patch.activate') {
+    details.push('Replaces the installed source with this prepared tree; the previous tree is kept for rollback.');
+  }
   if (binding.identity) details.push(`Identity: ${binding.identity.action}${binding.identity.appId ? ` as ${binding.identity.appId}` : ''}`);
   if (diff.toolsAdded.length) details.push(`Tools it gains: ${list(diff.toolsAdded)}`);
   if (diff.permissionsAdded.length) details.push(`Permissions it gains: ${list(diff.permissionsAdded)}`);
@@ -73,6 +78,29 @@ export function installDisplay(binding: InstallBinding, diff: PermissionDiff, re
   else if (binding.tools.includes('*')) details.push('Warning: * grants every tool AuraOS can provide.');
   if (binding.permissions.some(isRiskyPermission)) details.push('Warning: it may start privileged or arbitrary sidecar images.');
   return { title: clip(title), details: details.map((d) => clip(d)), requestedBy };
+}
+
+// ── app.patch.activate / app.source.open (Track P, D9) ──────────────────────
+
+/**
+ * An app patch: one click, but the password for a sensitive app (Settings,
+ * Terminal, Nexus), for a patch that changes the app's tools or permissions,
+ * and for Docker or every tool.
+ */
+export function patchLevel(appId: string, binding: InstallBinding, diff: PermissionDiff): ApprovalLevel {
+  const changes = diff.toolsAdded.length + diff.toolsRemoved.length + diff.permissionsAdded.length + diff.permissionsRemoved.length > 0;
+  return SENSITIVE_APPS.has(appId) || changes ? 'fresh' : installLevel(binding);
+}
+
+/** Opening an app's source: one click, the password for a sensitive app. */
+export const sourceOpenLevel = (appId: string): ApprovalLevel => (SENSITIVE_APPS.has(appId) ? 'fresh' : 'session');
+
+export function sourceOpenDetails(appId: string, scope: string): string[] {
+  return [
+    `App: ${appId} (${scope} scope)`,
+    'Its installed source becomes writable to agents and the Terminal (`aura mount --wr`, `aura dev checkout`).',
+    'Updates no longer go through patches you can review; close it again with `aura dev close`.',
+  ];
 }
 
 // ── os.context.write ────────────────────────────────────────────────────────

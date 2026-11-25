@@ -17,8 +17,11 @@ export { compareVersions } from './version.js';
 export { publishGit, publishOci } from './Publisher.js';
 export {
   checkoutApp, cloneUrl, isDevCheckout, readAppSource, readPublishMarker, resolveAppRepository, shellFetchPlace, stampManifest, PUBLISH_MARKER,
+  effectiveSourceMode, installRecordPath, listWorkspaces, workspaceRoot, workspaceSubpath, withoutCredentials, SENSITIVE_APPS,
 } from './AppSource.js';
-export type { AppSourceInfo, CheckoutOpts, CheckoutResult, CheckoutStatus, FetchPlace, PublishMarker } from './AppSource.js';
+export type {
+  AppSourceInfo, CheckoutOpts, CheckoutResult, CheckoutStatus, FetchPlace, PublishMarker, SourceMode, SourceModeInfo,
+} from './AppSource.js';
 export { isOrasAvailable } from './Fetchers/OciFetcher.js';
 export { getNexusManager, initNexusManager, refreshNexusSources } from './singleton.js';
 export {

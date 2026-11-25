@@ -410,6 +410,10 @@ export class NexusManager {
 
       yield { type: 'fetch.start' };
       await this.fetch(resolved, stagingDir);
+      // A prepared tree comes from a patch workspace, which is a git work
+      // tree: its history is the patch repo's, not the release's, and a
+      // `.git` would make the installed app a dev checkout.
+      if (opts.action === 'app.patch.activate') rmSync(join(stagingDir, '.git'), { recursive: true, force: true });
       yield { type: 'fetch.done', stagingDir };
 
       let manifest = validateStagedDir(stagingDir);
@@ -423,10 +427,12 @@ export class NexusManager {
       // need the user's choice and are never resolved silently (AppIdentity).
       const remoteId = manifest.id;
       const installed = this.installedIdentities();
-      const verdict = classifyIdentity(
-        { appId: manifest.id, originId: manifest.originId ?? null, rawRef: resolved.rawRef, sourceName: resolved.sourceName },
-        installed,
-      );
+      const verdict = opts.action === 'app.patch.activate'
+        ? patchTarget(manifest, installed)
+        : classifyIdentity(
+          { appId: manifest.id, originId: manifest.originId ?? null, rawRef: resolved.rawRef, sourceName: resolved.sourceName },
+          installed,
+        );
       let link: { remoteId?: string; detached?: boolean } = {};
       const taken = new Set(installed.map((i) => i.appId));
       const suggestedAppId = suggestFreeAppId(remoteId, taken);
@@ -586,7 +592,7 @@ export class NexusManager {
         } else if (restore.kind === 'restore' || (restore.kind === 'confirm' && restore.installation)) {
           installer.restoreRetainedData(manifest.id, restore.installation!.installationId);
         }
-        record = await installer.install(stagingDir, manifest, resolved, link);
+        record = await installer.install(stagingDir, manifest, resolved, link, { keepProvenance: opts.action === 'app.patch.activate' });
         // Before the registry reload below, so its host guard accepts this manifest.
         try {
           await this.hostLifecycle?.completeInstall(hostFacts, restore, manifest.hosts.map((h) => h.name));
@@ -681,6 +687,25 @@ export class NexusManager {
     });
     this.bus?.emit('nexus:update.complete', { id: appId, record: result });
     return result;
+  }
+
+  /**
+   * The owner's source-mode choice for an installed app (`aura dev open`),
+   * on its install record in the scope it is installed in.
+   */
+  setSourceMode(appId: string, mode: 'closed' | 'open'): InstallRecord {
+    const current = this.getRecord(appId);
+    if (!current || !current.scope || current.scope === 'system') throw new Error(`'${appId}' has no install record`);
+    return this.installerFor(current.scope).setSourceMode(appId, mode);
+  }
+
+  /**
+   * Rollback trees of an app in a scope (the Installer's trash): the one the
+   * install of `record` moved aside, and the newest one there is.
+   */
+  rollbackTrees(appId: string, scope: 'global' | 'user', record?: InstallRecord): { previous: string | null; newest: string | null } {
+    const installer = this.installerFor(scope);
+    return { previous: record ? installer.previousTree(record) : null, newest: installer.newestTrash(appId) };
   }
 
   async uninstall(appId: string, opts: { purge?: boolean } = {}): Promise<void> {
@@ -836,6 +861,21 @@ export class NexusManager {
       }
     }
   }
+}
+
+/**
+ * A prepared tree (Track P) is a new build of the installed app under its
+ * own id, never another app and never a source switch: it lands on the
+ * copy that runs now (a system app's: as the user's overlay).
+ */
+function patchTarget(manifest: AppManifest, installed: InstalledIdentity[]): { kind: 'update'; target: InstalledIdentity } {
+  const target = installed.find((i) => i.appId === manifest.id);
+  if (!target) throw new Error(`${manifest.id} is not installed — a patch activates over an installed app`);
+  const have = target.originId ?? target.record?.originId ?? null;
+  if (have && manifest.originId && have !== manifest.originId) {
+    throw new Error(`refusing to activate: the prepared tree is a different app than the installed ${manifest.id} (originId ${manifest.originId}, installed ${have})`);
+  }
+  return { kind: 'update', target };
 }
 
 function cloneDefaultSources(): SourcesConfig {

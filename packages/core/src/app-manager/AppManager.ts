@@ -1,3 +1,4 @@
+import { effectiveSourceMode, type SourceModeInfo } from '../nexus/AppSource.js';
 import { DEFAULT_OWNER_ID } from '../auth/identityContracts.js';
 import { adoptedInstanceOwner } from './instanceOwner.js';
 import { mkdirSync, readdirSync, readFileSync, lstatSync, writeFileSync, chmodSync, copyFileSync, renameSync, unlinkSync, existsSync } from 'node:fs';
@@ -160,6 +161,7 @@ export class AppManager {
       registry:      this.registry,
       scopeRegistry: this.scopeRegistry,
       runner:        this.runners['container'] as ContainerRunner,
+      sourceMode:    (appId) => this.sourceModeOf(appId)?.mode ?? 'closed',
       // Mirrors spawnInstance's own derivation so a mount lands in exactly the
       // dir the instance has bound at /data. A sidecar consumer key
       // (`<inst>--<sc>`) resolves to its instance's dir.
@@ -1404,6 +1406,7 @@ export class AppManager {
         // instance's token names its owner (`u`); a pool member's names nobody.
         instanceToken:   this.tokens.mint(instanceId, undefined, owner),
         ...(owner ? { owner } : {}),
+        sourceMode:      this.sourceModeOf(appId)?.mode ?? 'closed',
       });
       this.upsertInstance(instanceId, appId, { pid, port, startedAt: new Date(), inPool: opts.inPool, sandbox: manifest.sandbox, owner });
       if (opts.inPool) this.savePoolIds();
@@ -1722,6 +1725,16 @@ export class AppManager {
   }
 
   /** All three scope definitions. Used by NexusManager singleton. */
+  /** The root dataDir (`/data`): scopes, mounts and patch workspaces live under it. */
+  get rootDataDir(): string { return this.dataDir; }
+
+  /** Who may change the active copy's source (nexus/AppSource.ts). Null: not installed. */
+  sourceModeOf(appId: string): SourceModeInfo | null {
+    const manifest = this.registry.getById(appId);
+    if (!manifest) return null;
+    return effectiveSourceMode(this.scopeRegistry.getById(manifest.scopeId), manifest);
+  }
+
   getScopeDefinitions(): ScopeDefinition[] {
     return this.scopeRegistry.getAll();
   }

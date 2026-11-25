@@ -30,7 +30,8 @@ import {
   actionGate, json, liveApprovalDeps, presentedApproval, requesterSummary, type ApprovalServiceDeps,
 } from './service.ts';
 
-export type AdminApprovalAction = Extract<ApprovalAction, `admin.${string}`>;
+/** The owner's management actions, and opening an app's source (Track P, same flow). */
+export type AdminApprovalAction = Extract<ApprovalAction, `admin.${string}` | 'app.source.open'>;
 
 /** One owner-management request, as its route validated it. */
 export interface AdminRequest {

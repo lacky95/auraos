@@ -59,10 +59,17 @@ export const FINAL_APPROVAL_STATES: ReadonlySet<ApprovalState> = new Set(['denie
  *   admin.change       any other owner change: release system modals, reset
  *                      onboarding, reassign an app's origin, overwrite an app
  *                      (`clone-app` / `scaffold` with `force`)
+ *
+ * App patches (Track P, D9):
+ *   app.patch.activate install a prepared app tree from a patch workspace, or
+ *                      its rollback tree (`/api/apps/<id>/activate`)
+ *   app.source.open    open an installed app's source for direct development
+ *                      (`/api/apps/<id>/source-mode`, `aura dev open`)
  */
 export const APPROVAL_ACTIONS = [
   'nexus.install', 'nexus.update', 'os.context.write', 'user.confirm', 'terminal.agent-hooks',
   'admin.grant', 'admin.revoke', 'admin.api-key', 'admin.manifest-edit', 'admin.read', 'admin.change',
+  'app.patch.activate', 'app.source.open',
 ] as const;
 export type ApprovalAction = (typeof APPROVAL_ACTIONS)[number];
 
