@@ -10,6 +10,7 @@
  *   POST /api/instances/<inst>/mounts {kind}         `patches` / `work` binds (mountAppVolume); R2 is a thin call into it
  *   POST /api/apps/<id>/source-mode                 open (owner approval) or close
  *   POST /api/apps/<id>/activate                    install a workspace or the rollback tree
+ *   POST|DELETE /api/apps/<id>/preview              run a workspace as a separate preview instance / stop it
  *
  * The contract is in `aura-work/trackp-streams.md` ("## Routes"). The
  * handlers take their services as `AppSourceDeps`; the route files bind the
@@ -50,6 +51,10 @@ export interface AppSourceDeps {
     instancesOf(appId: string): string[];
     /** AppManager `isTrustedSystemCopy`: the system copy, or the owner's approved overlay of it. */
     trustedSystemCopy(appId: string): boolean;
+    /** AppManager previews (Track P): start one from a prepared tree, list them, stop one. */
+    startPreview(appId: string, opts: { appDir: string; workspace: string; owner: string }): Promise<string>;
+    previewsOf(appId: string, owner?: string): Array<{ instanceId: string; owner?: string }>;
+    stopPreview(instanceId: string): Promise<void>;
   };
   mounts: {
     capable(): { ok: boolean; reason?: string };
@@ -78,6 +83,9 @@ export function liveAppSourceDeps(authenticate: AppSourceDeps['authenticate'], a
       instance: (id) => mgr.getInstance(id),
       instancesOf: (appId) => mgr.getInstancesByApp(appId).map((i) => i.instanceId),
       trustedSystemCopy: (appId) => mgr.isTrustedSystemCopy(appId),
+      startPreview: (appId, opts) => mgr.startPreview(appId, opts),
+      previewsOf: (appId, owner) => mgr.previewsOf(appId, owner),
+      stopPreview: (instanceId) => mgr.stopPreview(instanceId),
     },
     mounts: mgr.mounts,
     installationId: async (appId, scope) => (await core.getAppHostServices().registry.findInstallation(appId, scope))?.installationId ?? null,
@@ -173,7 +181,7 @@ function workspaceOwner(principal: AccessPrincipal, requested: unknown): string 
   if (requested === undefined || requested === own) return own;
   if (typeof requested !== 'string' || !requested) return json({ error: 'invalid-user', message: 'user must be a user id' }, 400);
   const owner = principal.kind === 'operator' || (principal.kind === 'user' && principal.role === 'owner');
-  if (!owner) return json({ error: 'forbidden', message: 'only the owner activates another user\'s workspace' }, 403);
+  if (!owner) return json({ error: 'forbidden', message: 'only the owner acts on another user\'s workspace' }, 403);
   return requested;
 }
 
@@ -494,4 +502,68 @@ export async function activatePrepared(request: Request, appId: string | undefin
     rollbackTree: deps.nexus.rollbackTrees(app.id, scope, result.record).previous,
     running: deps.apps.instancesOf(app.id),
   });
+}
+
+// ── R5: preview a workspace ─────────────────────────────────────────────────
+
+/**
+ * `aura dev patch preview`: the caller's own workspace `n` of the app runs as
+ * a separate instance (its own App Host slot and address, D19) on a copy of
+ * the user's data of the app; the running app and its data are untouched.
+ * Nothing is installed, so no approval. Only the workspace's user: the
+ * workspace is looked up under the caller's own user, never another's. A
+ * previous preview of the app by this user is replaced.
+ *   200 { ok, appId, instanceId, workspace: n }
+ */
+export async function startPreview(request: Request, appId: string | undefined, deps: AppSourceDeps): Promise<Response> {
+  const principal = await deps.authenticate(request);
+  if (principal instanceof Response) return principal;
+  const app = appId ? deps.apps.get(appId) : undefined;
+  if (!app) return json({ error: 'app-not-found' }, 404);
+  if ((app.scopeId === 'system' || isOverlay(deps, app)) && !core.SYSTEM_APP_OVERLAYS) {
+    return json({ error: core.SYSTEM_APP_LATER, message: `${app.id} is a built-in app. ${core.SYSTEM_APP_LATER_MESSAGE}.` }, 409);
+  }
+  const body = await readJson(request);
+  if (body instanceof Response) return body;
+  const n = body['workspace'];
+  if (!Number.isInteger(n)) return json({ error: 'invalid-workspace', message: 'pass workspace: <n>' }, 400);
+  const { key } = await patchInstallation(deps, app);
+  if (!key) return json({ error: 'no-installation', message: `${app.id} has no installation record` }, 409);
+  const user = actingUser(principal);
+  let subpath: string;
+  try { subpath = core.workspaceSubpath(user, key, n as number); }
+  catch (err) { return json({ error: 'invalid-workspace', message: (err as Error).message }, 400); }
+  const tree = join(deps.dataDir, subpath);
+  if (!existsSync(tree)) return json({ error: 'no-workspace', message: `you have no workspace ${String(n)} of ${app.id}` }, 404);
+  let candidate: AppManifest;
+  try { candidate = core.validateStagedDir(tree); }
+  catch (err) { return json({ error: 'invalid-tree', message: (err as Error).message }, 422); }
+  if (candidate.id !== app.id) return json({ error: 'invalid-tree', message: `the workspace is ${candidate.id}, not ${app.id}` }, 422);
+  try {
+    const instanceId = await deps.apps.startPreview(app.id, { appDir: tree, workspace: subpath, owner: user });
+    return json({ ok: true, appId: app.id, instanceId, workspace: n });
+  } catch (err) {
+    return json({ error: 'preview-failed', message: (err as Error).message }, 409);
+  }
+}
+
+/**
+ * `aura dev patch preview --stop` (and activation): stop the caller's previews
+ * of the app, removing their data copies. The owner may name `?user=`.
+ *   200 { ok, stopped: instanceId[] }
+ */
+export async function stopPreviews(request: Request, appId: string | undefined, deps: AppSourceDeps): Promise<Response> {
+  const principal = await deps.authenticate(request);
+  if (principal instanceof Response) return principal;
+  const app = appId ? deps.apps.get(appId) : undefined;
+  if (!app) return json({ error: 'app-not-found' }, 404);
+  const asked = new URL(request.url).searchParams.get('user') ?? undefined;
+  const user = workspaceOwner(principal, asked);
+  if (user instanceof Response) return user;
+  const stopped: string[] = [];
+  for (const p of deps.apps.previewsOf(app.id, user)) {
+    try { await deps.apps.stopPreview(p.instanceId); stopped.push(p.instanceId); }
+    catch (err) { return json({ error: 'stop-failed', message: (err as Error).message, stopped }, 409); }
+  }
+  return json({ ok: true, stopped });
 }

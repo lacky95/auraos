@@ -244,7 +244,7 @@ export class InterfaceRegistry {
    * claim an address — it would advertise an instance no user owns.
    */
   registerInstance(instance: AppInstance, manifest: AppManifest | undefined): void {
-    if (instance.inPool) return;
+    if (instance.inPool || instance.preview) return;
     // A record is created even when the manifest declares nothing: the record
     // IS the instance's slot, and an app whose interfaces only exist at
     // runtime (address not known until it is up) has nothing to declare.
@@ -325,7 +325,7 @@ export class InterfaceRegistry {
     }
 
     for (const [instanceId, { instance, manifest }] of live) {
-      if (!manifest || instance.inPool || manifest.provides.length === 0) continue;
+      if (!manifest || instance.inPool || instance.preview || manifest.provides.length === 0) continue;
       const rec = this.live.get(instanceId);
       const missing = manifest.provides.filter((i) => rec?.entries.get(i.name)?.source !== 'manifest');
       if (missing.length === 0) continue;

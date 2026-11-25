@@ -23,6 +23,8 @@ export interface InstanceDto {
   pid?: number | null;
   startedAt?: string | null;
   inPool?: boolean;
+  /** A preview of a patch workspace (Track P, `aura dev patch preview`). */
+  preview?: { workspace: string; startedAt: string };
   sandbox?: 'proot' | 'container';
 }
 
@@ -212,7 +214,7 @@ const instances: ResourceDef<InstanceRow> = {
       })));
   },
   columns: [
-    { header: 'INSTANCE', value: (i) => i.instanceId },
+    { header: 'INSTANCE', value: (i) => (i.preview ? `${i.instanceId} ${color.yellow('Preview')}` : i.instanceId) },
     { header: 'APP', value: (i) => i.appId },
     { header: 'STATE', value: (i) => stateColor(i.state) },
     { header: 'PORT', value: (i) => i.port?.toString() ?? '-' },

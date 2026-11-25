@@ -16,7 +16,9 @@ import { Command } from 'commander';
 import { registerDev } from '../src/commands/dev.js';
 import { registerMount } from '../src/commands/mount.js';
 import { appFromArgOrCwd, bindWorkspace, WORKSPACE_MARKER } from '../src/commands/dev-source.js';
-import { activateRevision, cleanApp, notifyNeedsRepair, saveWorkspace, startWorkspace, updateSeries } from '../src/commands/dev-patch.js';
+import {
+  activateRevision, cleanApp, notifyNeedsRepair, previewWorkspace, saveWorkspace, startWorkspace, stopPreview, updateSeries,
+} from '../src/commands/dev-patch.js';
 
 const ENV = ['AURA_SHELL_URL', 'OS_API_BASE', 'AURA_OS_URL', 'AURA_INSTANCE_TOKEN', 'APP_INSTANCE_ID', 'AURA_INSTANCE_ID', 'AURA_ADMIN_SESSION', 'AURA_ADMIN_CREDENTIAL'];
 const INST = 'com.aura.terminal-1';
@@ -537,4 +539,32 @@ test('aura dev patch start binds through the same mount kinds: patches (the repo
   } finally {
     if (override !== undefined) process.env['AURA_PATCHES_DIR'] = override;
   }
+});
+
+test('patch preview: runs your workspace as a preview instance in its own window; --stop and activation stop it; build output never enters a patch', async () => {
+  const w = world();
+  const seen = await fakeShell((r) => {
+    if (r.method === 'POST' && r.url === `/api/apps/${APP}/preview`) return [200, { ok: true, appId: APP, instanceId: `${APP}-9`, workspace: r.body['workspace'] }];
+    if (r.method === 'DELETE' && r.url === `/api/apps/${APP}/preview`) return [200, { ok: true, stopped: [`${APP}-9`] }];
+    if (r.method === 'POST' && r.url === `/api/instances/${APP}-9/activities`) return [200, { activityId: `${APP}-9#1` }];
+    if (r.method === 'POST' && r.url === `/api/apps/${APP}/activate`) return [200, { ok: true, running: [] }];
+    return w.routes(r);
+  });
+  const { ws } = await savedChange(w);
+  const out = await quiet(() => previewWorkspace(APP));
+  assert.deepEqual(out, { instanceId: `${APP}-9`, n: ws.n, window: `${APP}-9#1` });
+  assert.deepEqual(seen.find((r) => r.url === `/api/apps/${APP}/preview`)!.body, { workspace: ws.n }, 'the bound workspace, no approval asked');
+  assert.equal(seen.some((r) => r.approval), false);
+  // What a preview run writes into the workspace is no patch content.
+  mkdirSync(join(ws.path, 'node_modules', 'x'), { recursive: true });
+  writeFileSync(join(ws.path, 'node_modules', 'x', 'i.js'), '');
+  assert.equal(git(ws.path, 'status', '--porcelain'), '');
+
+  assert.equal((await quiet(() => previewWorkspace(APP, { work: 7 }))).n, 7);
+  assert.deepEqual(await quiet(() => stopPreview(APP)), { stopped: [`${APP}-9`] });
+
+  const deletes = () => seen.filter((r) => r.method === 'DELETE' && r.url === `/api/apps/${APP}/preview`).length;
+  const before = deletes();
+  assert.equal((await quiet(() => activateRevision(APP))).status, 'installed');
+  assert.equal(deletes(), before + 1, 'an activation stops the preview');
 });

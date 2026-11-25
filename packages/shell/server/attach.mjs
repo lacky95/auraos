@@ -179,8 +179,8 @@ export function attachWsProxy(httpServer) {
         const app = apps.find((a) => a.manifest.id === instanceId);
         const candidates = app?.instances ?? [];
         dbg('WS-PROXY', 'candidates', JSON.stringify(candidates.map((i) => ({ id: i.instanceId, port: i.port, state: i.state, inPool: i.inPool, sandbox: i.sandbox }))));
-        chosen = candidates.find((i) => !i.inPool && (i.state === 'resumed' || i.state === 'started'))
-              ?? candidates.find((i) => i.state === 'resumed' || i.state === 'started')
+        chosen = candidates.find((i) => !i.inPool && !i.preview && (i.state === 'resumed' || i.state === 'started'))
+              ?? candidates.find((i) => !i.preview && (i.state === 'resumed' || i.state === 'started'))
               ?? null;
       }
       return chosen?.port != null ? chosen : null;

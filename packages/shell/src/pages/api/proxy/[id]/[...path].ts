@@ -103,11 +103,12 @@ const forward = async ({ params, request }: APIContext): Promise<Response> => {
   //     only happens when something inside the AppManager hands the id out,
   //     e.g. immediately after claimFromPool returns).
   //   - Bare appId match: pick a USER-OWNED live instance (skip inPool=true),
-  //     never a pool member that hasn't been handed over yet.
+  //     never a pool member that hasn't been handed over yet, nor a preview
+  //     (Track P: it is reached by its own instance id and App Host only).
   const exact = mgr.getInstance(id);
   let instance = exact && isLive(exact.state)
     ? exact
-    : mgr.getInstancesByApp(id).find((i) => !i.inPool && isLive(i.state) && i.port != null);
+    : mgr.getInstancesByApp(id).find((i) => !i.inPool && !i.preview && isLive(i.state) && i.port != null);
 
   if (!instance?.port) {
     // Cold-start: a bare-appId request for a path the app's manifest declares
@@ -126,7 +127,7 @@ const forward = async ({ params, request }: APIContext): Promise<Response> => {
       try {
         await ensureInstance(mgr, id);
         instance = mgr.getInstancesByApp(id)
-          .find((i) => !i.inPool && isLive(i.state) && i.port != null);
+          .find((i) => !i.inPool && !i.preview && isLive(i.state) && i.port != null);
       } catch (err) {
         console.error(`[proxy] cold-start of ${id} failed: ${(err as Error).message}`);
       }

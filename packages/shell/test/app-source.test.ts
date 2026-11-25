@@ -13,7 +13,7 @@ import * as core from '@aura/core';
 import type { ApprovalClaim, ApprovalDecider, ApprovalRecord, ApprovalRequest, ApprovalResult, AuraMount } from '@aura/core';
 import type { CallerPrincipal } from '../src/lib/access/identify.ts';
 import {
-  activatePrepared, appSourceStatus, bindWorkspace, cleanWorkspaces, detachWorkspace, mountAppVolume, setSourceMode, type AppSourceDeps, type ScopedApp,
+  activatePrepared, appSourceStatus, bindWorkspace, startPreview, stopPreviews, cleanWorkspaces, detachWorkspace, mountAppVolume, setSourceMode, type AppSourceDeps, type ScopedApp,
 } from '../src/lib/appSource.ts';
 
 class MemoryStore {
@@ -57,6 +57,8 @@ let kernel: AuraMount[];
 let audits: unknown[];
 /** User-scope copies an approved activation linked to their system app (core lifecycle `trustedOverlay`). */
 let overlays: Set<string>;
+/** Previews the fake AppManager started: instanceId → { appId, appDir, workspace, owner }. */
+let previews: Map<string, { appId: string; appDir: string; workspace: string; owner: string }>;
 
 const put = (p: string, text: string) => { mkdirSync(join(p, '..'), { recursive: true }); writeFileSync(p, text); };
 const writeApp = (dir: string, m: Record<string, unknown>, body = 'v1\n') => {
@@ -101,6 +103,15 @@ function deps(): AppSourceDeps {
       instance: (id) => (id.startsWith('com.aura.terminal') || id.startsWith('io.lakner.terminalx')
         ? { appId: id.replace(/-\d+$/, ''), sandbox: 'container' } : id === 'io.proot.app' ? { appId: id, sandbox: 'proot' } : undefined),
       instancesOf: (appId) => (appId === 'io.shop.app' ? ['io.shop.app'] : []),
+      startPreview: async (appId, opts) => {
+        for (const [id, p] of previews) if (p.appId === appId && p.owner === opts.owner) previews.delete(id);
+        const id = `${appId}-p${previews.size + 1}`;
+        previews.set(id, { appId, ...opts });
+        return id;
+      },
+      previewsOf: (appId, owner) => [...previews].filter(([, p]) => p.appId === appId && (owner === undefined || p.owner === owner))
+        .map(([instanceId, p]) => ({ instanceId, owner: p.owner })),
+      stopPreview: async (id) => { previews.delete(id); },
       trustedSystemCopy: (appId) => {
         const a = apps().find((x) => x.id === appId);
         return !!a && (a.scopeId === 'system' || (a.scopeId === 'user' && overlays.has(appId)));
@@ -145,6 +156,7 @@ beforeEach(async () => {
   kernel = [];
   audits = [];
   overlays = new Set();
+  previews = new Map();
   root = mkdtempSync(join(tmpdir(), 'aura-src-'));
   const scope = (id: core.ScopeId, priority: number, immutable: boolean) =>
     ({ id, appsDir: join(root, id, 'apps'), dataDir: join(root, id, 'data'), immutable, priority }) as core.ScopeDefinition;
@@ -397,4 +409,40 @@ test('mount kind patches: one repository per installation on the volume, the sam
   const viaR2 = await read(await bindWorkspace(req('POST', { app: 'io.shop.app', new: true }), 'com.aura.terminal-2', deps()));
   assert.deepEqual([viaR2.body.n, viaR2.body.mount.workspace], [2, 'aura/workspaces/default/inst-global-io-shop-app/2']);
   assert.equal((await read(await mountAppVolume(req('POST'), 'io.proot.app', deps(), { app: 'io.shop.app', kind: 'patches' }))).status, 409, 'containers only');
+});
+
+test('preview: the caller\'s own workspace runs as a separate instance, no approval; another user can\'t preview it; stop is per user', async () => {
+  const ws = join(root, 'root', 'aura', 'workspaces', 'default', 'inst-global-io-shop-app', '1');
+  writeApp(ws, { id: 'io.shop.app', originId: O1, name: 'Shop', version: '1.0.1' }, 'patched\n');
+  const appDir = join(scopes[1]!.appsDir, 'io.shop.app');
+  const before = readFileSync(join(appDir, 'src', 'index.astro'), 'utf-8');
+
+  const r = await read(await startPreview(req('POST', { workspace: 1 }), 'io.shop.app', deps()));
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.deepEqual([r.body.appId, r.body.workspace], ['io.shop.app', 1]);
+  assert.deepEqual(previews.get(r.body.instanceId), {
+    appId: 'io.shop.app', appDir: ws, workspace: 'aura/workspaces/default/inst-global-io-shop-app/1', owner: 'default',
+  });
+  assert.equal(store.records.size, 0, 'no approval: nothing is installed');
+  assert.equal(readFileSync(join(appDir, 'src', 'index.astro'), 'utf-8'), before, 'the installed tree is untouched');
+
+  // Bob (his own Terminal) looks up HIS workspace 1 — he has none: default's is not reachable.
+  caller = { ...TERMINAL, instanceId: 'com.aura.terminal-2', userId: 'bob' };
+  const bob = await read(await startPreview(req('POST', { workspace: 1 }), 'io.shop.app', deps()));
+  assert.deepEqual([bob.status, bob.body.error], [404, 'no-workspace']);
+  const bobStop = await read(await stopPreviews(req('DELETE', undefined, {}, 'http://shell.test/x'), 'io.shop.app', deps()));
+  assert.deepEqual(bobStop.body.stopped, [], 'bob stops only his own previews');
+  assert.equal((await read(await stopPreviews(req('DELETE', undefined, {}, 'http://shell.test/x?user=default'), 'io.shop.app', deps()))).status, 403);
+  assert.equal(previews.size, 1);
+
+  caller = TERMINAL;
+  const stop = await read(await stopPreviews(req('DELETE', undefined, {}, 'http://shell.test/x'), 'io.shop.app', deps()));
+  assert.deepEqual(stop.body.stopped, [r.body.instanceId]);
+  assert.equal(previews.size, 0);
+
+  // A tree of another app, no workspace number, a built-in app: refused.
+  writeApp(join(root, 'root', 'aura', 'workspaces', 'default', 'inst-global-io-shop-app', '2'), { id: 'io.other.app', name: 'Other', version: '1.0.0' });
+  assert.equal((await read(await startPreview(req('POST', { workspace: 2 }), 'io.shop.app', deps()))).status, 422);
+  assert.equal((await read(await startPreview(req('POST', {}), 'io.shop.app', deps()))).status, 400);
+  assert.equal((await read(await startPreview(req('POST', { workspace: 1 }), 'com.aura.terminal', deps()))).body.error, 'system-app-later');
 });

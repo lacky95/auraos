@@ -8,6 +8,8 @@ interface AppInstanceDto {
   state: string;
   port: number | null;
   startedAt: string | null;
+  /** A preview of a patch workspace (Track P). */
+  preview?: { workspace: string };
 }
 
 interface AppActivityDto {
@@ -28,7 +30,7 @@ async function renderPs(): Promise<void> {
     for (const inst of app.instances) {
       const acts = app.activities.filter((a) => a.parentInstanceId === inst.instanceId).length;
       rows.push({
-        INSTANCE:   inst.instanceId,
+        INSTANCE:   inst.preview ? `${inst.instanceId} ${color.yellow('Preview')}` : inst.instanceId,
         APP:        inst.appId,
         STATE:      stateColor(inst.state),
         PORT:       inst.port?.toString() ?? '-',

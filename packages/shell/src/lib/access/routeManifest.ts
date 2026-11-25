@@ -473,6 +473,9 @@ const routes: RouteAccessManifest['routes'] = {
   // Track P: installing a patched tree and opening an app's source are the
   // owner's decision (D9); the System Terminal asks for each.
   '/api/apps/[id]/activate': { methods: { POST: TERMINAL_ASKS } },
+  // Track P: a preview runs the caller's own workspace as a separate instance
+  // (nothing installed, no approval); the owner or the System Terminal.
+  '/api/apps/[id]/preview': { methods: { POST: TERMINAL_ASKS, DELETE: TERMINAL_ASKS } },
   '/api/apps/[id]/source-mode': { methods: { POST: TERMINAL_ASKS } },
   '/api/nexus/update/[id]': { methods: { POST: TERMINAL_ASKS } },
 

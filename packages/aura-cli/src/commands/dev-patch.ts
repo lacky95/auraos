@@ -14,6 +14,9 @@
  *        when it does not come up
  *   aura dev update [app] [--ref]    the series on a new upstream; a patch that
  *        no longer applies is named, the owner notified, and nothing is installed
+ *   aura dev patch preview [app] [--work n] [--stop]  run a workspace as a
+ *        separate preview instance and window (a copy of the data; nothing
+ *        installed); --stop (or an activation) removes it
  *   aura dev patch clean [app] [--keep N] [--force]  delete old workspaces:
  *        never the bound one or the newest N; one in use in another Terminal
  *        or with unsaved work only with --force (which says what is lost)
@@ -26,7 +29,7 @@
  */
 import type { Command } from 'commander';
 import { execFileSync } from 'node:child_process';
-import { existsSync, readdirSync, rmSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   applySeries, baseCommitIn, buildTree, exportPatches, gitError, readPatches, readSeries, safeDirectoryArgs, saveSeries,
@@ -37,7 +40,7 @@ import { color, fail, info, ok, warn } from '../lib/format.js';
 import { installWithChoices } from './nexus.js';
 import type { RestartResult } from './app.js';
 import {
-  ACTIVE_REF, appFromArgOrCwd, bindWorkspace, cleanWorkspaces, detachWorkspace, findWorkspace, getAppSource, gitOut,
+  ACTIVE_REF, apiOrBody, appFromArgOrCwd, bindWorkspace, cleanWorkspaces, detachWorkspace, findWorkspace, getAppSource, gitOut,
   patchRepoOf, readWorkspaceMarker, refuseBuiltIn, upstreamBase, writeWorkspaceMarker, type AppSourceView, type WorkspaceMarker,
 } from './dev-source.js';
 
@@ -120,6 +123,7 @@ export async function startWorkspace(app: string, opts: { base?: string; new?: b
     if (err instanceof SeriesError) fail(err.message);
     throw err;
   }
+  ignoreBuildOutput(ws.path);
   const patchesRev = series ? gitOut(repo, ['rev-parse', 'HEAD']) : null;
   const marker: WorkspaceMarker = { appId: v.appId, installationId: v.installationId, n: ws.n, base: target, baseCommit, patchesRev };
   writeWorkspaceMarker(ws.path, marker);
@@ -127,6 +131,60 @@ export async function startWorkspace(app: string, opts: { base?: string; new?: b
     ? applySeries(ws.path, readPatches(repo, series, 'HEAD'), { keepConflict: true })
     : null;
   return { path: ws.path, n: ws.n, created: true, marker, apply };
+}
+
+/**
+ * What running the workspace (a preview, a local build) writes is never part
+ * of a patch: excluded in the workspace's own `.git/info/exclude`, whatever
+ * the app's `.gitignore` says.
+ */
+export const BUILD_OUTPUT = ['node_modules/', 'dist/', '.astro/'];
+export function ignoreBuildOutput(wsRoot: string): void {
+  const file = join(wsRoot, '.git', 'info', 'exclude');
+  let have = '';
+  try { have = readFileSync(file, 'utf-8'); } catch { mkdirSync(join(wsRoot, '.git', 'info'), { recursive: true }); }
+  const lines = new Set(have.split('\n'));
+  const missing = BUILD_OUTPUT.filter((p) => !lines.has(p));
+  if (missing.length) appendFileSync(file, `${have && !have.endsWith('\n') ? '\n' : ''}${missing.join('\n')}\n`);
+}
+
+// ─── preview ────────────────────────────────────────────────────────────────
+
+export interface PreviewResult { instanceId: string; n: number; window: string | null; windowError?: string }
+
+/**
+ * Run workspace `work` (default: the one bound here, else your newest) as a
+ * separate instance of the app with its own window and App Host address, on
+ * a copy of the app's data. No approval: nothing is installed.
+ */
+export async function previewWorkspace(app: string, opts: { work?: number } = {}): Promise<PreviewResult> {
+  const v = await getAppSource(app);
+  refuseBuiltIn(v);
+  const repo = await patchRepoOf(v);
+  const scratch = Number(gitOut(repo, ['config', '--get', scratchKey(v)]));
+  const n = opts.work ?? v.workspace?.n ?? [...v.workspaces].reverse().find((x) => x !== scratch);
+  if (n === undefined) fail(`you have no workspace of ${v.appId} — aura dev patch start ${v.appId}`);
+  if (v.workspace?.n === n && existsSync(join(v.workspace.path, '.git'))) ignoreBuildOutput(v.workspace.path);
+  const r = await apiOrBody<{ ok?: boolean; instanceId?: string; error?: string; message?: string }>(
+    () => api.post(`/api/apps/${encodeURIComponent(v.appId)}/preview`, { workspace: n }));
+  if (!r.ok || !r.instanceId) fail(`preview of ${v.appId}: ${r.message ?? r.error ?? 'failed'}`);
+  try {
+    const w = await api.post<{ activityId?: string }>(`/api/instances/${encodeURIComponent(r.instanceId!)}/activities`, {});
+    return { instanceId: r.instanceId!, n: n!, window: w?.activityId ?? null };
+  } catch (err) {
+    return { instanceId: r.instanceId!, n: n!, window: null, windowError: (err as Error).message.split('\n')[0] };
+  }
+}
+
+/** Stop this user's previews of the app (`--stop`, and after an activation). Never exits: the caller decides. */
+export async function stopPreview(appId: string): Promise<{ stopped: string[] } | { error: string }> {
+  try {
+    const r = await apiOrBody<{ ok?: boolean; stopped?: string[]; error?: string; message?: string }>(
+      () => api.del(`/api/apps/${encodeURIComponent(appId)}/preview`));
+    return r.ok ? { stopped: r.stopped ?? [] } : { error: r.message ?? r.error ?? 'failed' };
+  } catch (err) {
+    return { error: (err as Error).message.split('\n')[0]! };
+  }
 }
 
 // ─── save ───────────────────────────────────────────────────────────────────
@@ -256,6 +314,8 @@ export async function installWorkspace(v: AppSourceView, n: number, rev: string)
   const repo = await patchRepoOf(v);
   const previous = gitOut(repo, ['rev-parse', '-q', '--verify', ACTIVE_REF]);
   git(repo, ['update-ref', ACTIVE_REF, rev]);
+  // Installed: a preview of it has done its job.
+  await stopPreview(v.appId);
   if (!res.running?.length) return { status: 'installed', rev, restarted: null, workspace: n };
   if (v.appId === 'com.aura.terminal' && process.env['APP_ID'] === 'com.aura.terminal') {
     warn('restarting the Terminal ends this session — run `aura restart app com.aura.terminal` when ready');
@@ -529,6 +589,28 @@ export function registerDevPatch(dev: Command): void {
         catch (err) { fail(`push failed: ${gitError(err)}`); }
         ok('pushed main');
       }
+    });
+
+  patch
+    .command('preview [app]')
+    .option('--work <n>', 'The workspace to preview (default: the one bound here, else your newest)')
+    .option('--stop',     'Stop your preview of the app (its copy of the data goes with it)')
+    .description('Run a workspace as a separate "Preview" instance and window, on a copy of the app\'s data; nothing is installed, no approval.')
+    .action(async (app: string | undefined, o: { work?: string; stop?: boolean }) => {
+      const appId = appFromArgOrCwd(app);
+      if (o.stop) {
+        const r = await stopPreview(appId);
+        if ('error' in r) fail(`stop the preview of ${appId}: ${r.error}`);
+        else if (r.stopped.length) ok(`stopped ${r.stopped.join(', ')}`);
+        else info(`no preview of ${appId} is running`);
+        return;
+      }
+      const work = o.work === undefined ? undefined : Number(o.work);
+      if (work !== undefined && (!Number.isInteger(work) || work < 1)) fail('--work takes a workspace number');
+      const r = await previewWorkspace(appId, work === undefined ? {} : { work });
+      ok(`preview of workspace ${r.n} runs as ${color.bold(r.instanceId)}${r.window ? ' in its own window' : ''} — on a copy of the data; the installed app is untouched`);
+      if (!r.window) warn(`no window opened${r.windowError ? ` (${r.windowError})` : ''} — open it with aura open inst ${r.instanceId}`);
+      info(`stop it: ${color.cyan(`aura dev patch preview ${appId} --stop`)} (activating also stops it; idle previews are reaped)`);
     });
 
   patch

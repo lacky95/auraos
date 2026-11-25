@@ -16,7 +16,7 @@ import type { SandboxExecOpts, SandboxRunner, SandboxRunnerOpts } from './Sandbo
 import type { ResourceUsage, SidecarInfo } from '../types/instance.js';
 import { SIDECAR_PS_FORMAT, USAGE_STATS_FORMAT, parseSidecarPs, parseUsageStats } from './sidecars.js';
 import type { InstanceSpawnContext } from './SandboxRunner.js';
-import { OWNER_LABEL } from './instanceOwner.js';
+import { OWNER_LABEL, PREVIEW_LABEL } from './instanceOwner.js';
 import { ContextStore } from '../context/ContextStore.js';
 import { VolumeStore, type VolumeEntry } from '../context/VolumeStore.js';
 import {
@@ -618,6 +618,8 @@ export class ContainerRunner implements SandboxRunner {
       // orphan adoption must skip.
       ...(ctx.instanceToken ? ['--label', `aura.token.nonce=${ctx.instanceToken.nonce}`] : []),
       ...(ctx.owner ? ['--label', `${OWNER_LABEL}=${ctx.owner}`] : []),
+      // A preview (Track P) is known again after a shell restart, and reaped.
+      ...(ctx.preview ? ['--label', `${PREVIEW_LABEL}=${ctx.preview}`] : []),
       '--workdir', `/workspace/apps/${appId}`,
       // Per-app slice of /workspace. Sibling apps in apps/<other> are not
       // visible — the individual app folder is bound directly, with no parent
@@ -973,6 +975,7 @@ export class ContainerRunner implements SandboxRunner {
     pid:        number;
     tokenNonce?: string;
     ownerLabel?: string;
+    preview?: string;
   }>> {
     type DockerPsRow = { Names: string };
     type DockerInspect = { Config: { Env: string[]; Labels?: Record<string, string> }; State: { Pid: number } };
@@ -1030,6 +1033,7 @@ export class ContainerRunner implements SandboxRunner {
         pid: inspect.State?.Pid ?? 0,
         tokenNonce: inspect.Config?.Labels?.['aura.token.nonce'],
         ownerLabel: inspect.Config?.Labels?.[OWNER_LABEL],
+        ...(inspect.Config?.Labels?.[PREVIEW_LABEL] ? { preview: inspect.Config.Labels[PREVIEW_LABEL] } : {}),
       });
     }
     return out;

@@ -91,6 +91,8 @@ export interface SandboxRunner {
     tokenNonce?: string;
     /** `aura.owner` label — absent on containers from before owners and on pool members. */
     ownerLabel?: string;
+    /** `aura.preview` label: a preview instance's workspace (Track P). */
+    preview?: string;
   }>>;
   registerAdopted?(rec: {
     instanceId: string;
