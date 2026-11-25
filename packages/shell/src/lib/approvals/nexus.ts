@@ -7,24 +7,35 @@
  * whose dialog shows the binding and the PermissionDiff. Nothing in the
  * request body can approve an install: `autoApprove` is gone.
  */
-import type { AccessPrincipal, InstallBinding, InstallRecord, NexusProgressEvent, PermissionDiff } from '@aura/core';
+import type { AccessPrincipal, ApprovalLevel, InstallBinding, InstallRecord, NexusProgressEvent, PermissionDiff } from '@aura/core';
 import { installDisplay, installLevel } from './display.ts';
 import { actionGate, json, presentedApproval, type ApprovalServiceDeps } from './service.ts';
 
 type InstallGenerator = AsyncGenerator<NexusProgressEvent, InstallRecord | null, { approve: boolean } | void>;
 
-/** The gate for one install request, to pass as core's `approval` option. */
-export function installGate(deps: ApprovalServiceDeps, principal: AccessPrincipal, request: Request, operatorCode: unknown) {
+/**
+ * The gate for one install request, to pass as core's `approval` option.
+ * `override`: a patch activation (Track P) names its own level and the diff
+ * against the running copy, which core's record-based diff can't see for a
+ * system-app overlay.
+ */
+export function installGate(
+  deps: ApprovalServiceDeps, principal: AccessPrincipal, request: Request, operatorCode: unknown,
+  override?: { level: (binding: InstallBinding) => ApprovalLevel; diff: PermissionDiff },
+) {
   const gate = actionGate(deps, principal, {
     approvalId: presentedApproval(request),
     ...(operatorCode !== undefined ? { operatorCode } : {}),
   });
   return {
     approval: (binding: InstallBinding) => gate.allows(binding.action, binding),
-    needsApproval: (binding: InstallBinding, diff: PermissionDiff) => gate.needsApproval({
-      action: binding.action, payload: binding, level: installLevel(binding),
-      display: (by) => installDisplay(binding, diff, by),
-    }, { diff }),
+    needsApproval: (binding: InstallBinding, coreDiff: PermissionDiff) => {
+      const diff = override?.diff ?? coreDiff;
+      return gate.needsApproval({
+        action: binding.action, payload: binding, level: override ? override.level(binding) : installLevel(binding),
+        display: (by) => installDisplay(binding, diff, by),
+      }, { diff });
+    },
   };
 }
 

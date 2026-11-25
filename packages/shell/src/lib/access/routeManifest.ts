@@ -332,6 +332,20 @@ const routes: RouteAccessManifest['routes'] = {
       }),
     }],
   },
+  // Track P: the source view and patch workspace land in the calling instance
+  // only (its own token, or the owner), like `aura mount`.
+  '/api/instances/[instanceId]/app-source': {
+    methods: on(['GET', 'POST'], rule(INSTANCE, 'instance', {
+      targetPermissions: ['apps.mount'], guard: 'target-permissions',
+      ...why('Track P: an agent finds an app\'s source. Read-only for a closed install; writable only for an open one and only in the owner\'s Terminal (the handler).'),
+    })),
+  },
+  '/api/instances/[instanceId]/app-workspace': {
+    methods: on(['POST', 'DELETE'], rule(INSTANCE, 'instance', {
+      targetPermissions: ['apps.mount'], guard: 'target-permissions',
+      ...why('Track P: a writable patch workspace (a copy, never the installed source), bound into the calling instance only.'),
+    })),
+  },
   '/api/instances/[instanceId]/mounts/[mountId]': {
     methods: { DELETE: rule(INSTANCE, 'instance', { targetPermissions: ['apps.mount'], guard: 'target-permissions' }) },
   },
@@ -450,6 +464,10 @@ const routes: RouteAccessManifest['routes'] = {
   // only with the owner's approval of the exact artifact, scope and
   // permissions, consumed once (lib/approvals/nexus.ts).
   '/api/nexus/install': { methods: { POST: TERMINAL_ASKS } },
+  // Track P: installing a patched tree and opening an app's source are the
+  // owner's decision (D9); the System Terminal asks for each.
+  '/api/apps/[id]/activate': { methods: { POST: TERMINAL_ASKS } },
+  '/api/apps/[id]/source-mode': { methods: { POST: TERMINAL_ASKS } },
   '/api/nexus/update/[id]': { methods: { POST: TERMINAL_ASKS } },
 
   '/api/nexus/assets/[source]/[appId]/[digest]': {

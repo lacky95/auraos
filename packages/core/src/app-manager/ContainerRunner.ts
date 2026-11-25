@@ -561,7 +561,7 @@ export class ContainerRunner implements SandboxRunner {
     //     volume's storage dir isn't a stable host path — so we use the
     //     same volume-subpath pattern already used for /data, /aura/*-tools,
     //     /home/aura below.
-    const appDirMount = this.buildAppDirMount(ctx.appDir, appId, appDataVolume);
+    const appDirMount = this.buildAppDirMount(ctx.appDir, appId, appDataVolume, undefined, ownSourceReadOnly(ctx, manifest));
     // Cap allowlist mounts. We can't bind host paths here: /os/toolchain and
     // /data/... only exist inside the aura-shell mount namespace, but
     // sibling-container binds go through the HOST docker daemon, which would
@@ -792,24 +792,26 @@ export class ContainerRunner implements SandboxRunner {
    *    and /home/aura below.
    *
    *  Both paths produce the same in-container view: `/workspace/apps/<id>`. */
-  private buildAppDirMount(ctxAppDir: string, appId: string, appDataVolume: string, target = `/workspace/apps/${appId}`): string[] {
+  private buildAppDirMount(
+    ctxAppDir: string, appId: string, appDataVolume: string, target = `/workspace/apps/${appId}`, ro = false,
+  ): string[] {
     if (ctxAppDir.startsWith('/workspace/')) {
       // toHostPath rewrites the /workspace prefix to AURA_HOST_WORKSPACE so the
       // bind source resolves on the HOST daemon (no-op on Linux, required for
       // Mac VM-based daemons).
       const hostPath = this.toHostPath(ctxAppDir);
-      return ['-v', `${hostPath}:${target}`];
+      return ['-v', `${hostPath}:${target}${ro ? ':ro' : ''}`];
     }
     if (ctxAppDir.startsWith(`${this.dataDir}/`) || ctxAppDir.startsWith('/data/')) {
       // Strip the dataDir prefix to get the volume-internal path.
       const prefix = ctxAppDir.startsWith(this.dataDir + '/') ? this.dataDir : '/data';
       const subpath = ctxAppDir.slice(prefix.length).replace(/^\/+/, '');
-      return ['--mount', `type=volume,source=${appDataVolume},target=${target},volume-subpath=${subpath}`];
+      return ['--mount', `type=volume,source=${appDataVolume},target=${target},volume-subpath=${subpath}${ro ? ',readonly' : ''}`];
     }
     // Unrecognised prefix — fall back to the plain bind and log. Most likely
     // a misconfigured scope; the bind will probably fail at container start.
     console.warn(`[ContainerRunner] unrecognised appDir prefix for ${appId}: ${ctxAppDir} — falling back to plain bind`);
-    return ['-v', `${ctxAppDir}:${target}`];
+    return ['-v', `${ctxAppDir}:${target}${ro ? ':ro' : ''}`];
   }
 
   private containerName(instanceId: string): string {
@@ -1416,4 +1418,20 @@ export class ContainerRunner implements SandboxRunner {
     } catch { /* not in a container / no procfs */ }
     return this.shellHostname || hostname() || null;
   }
+}
+
+/**
+ * Whether an app's own source is mounted read-only into its container (Track
+ * P): a closed install that is an agent workspace — granted every tool (`*`),
+ * like the System Terminal, where Claude and Codex run — and that serves its
+ * build. Other apps keep writing their own dir (`.data/`, astro dev's
+ * `.astro/` and vite cache), and so does an agent workspace in dev mode
+ * (no matching build), which could not start otherwise.
+ *
+ * Known limit: the System Terminal holds the Docker socket, so read-only is
+ * a guardrail for agents until Phase 5 removes the socket (D30).
+ */
+export function ownSourceReadOnly(ctx: { appDir: string; sourceMode?: 'closed' | 'open' }, manifest: AppManifest): boolean {
+  if (ctx.sourceMode !== 'closed' || !(manifest.tools ?? []).includes('*')) return false;
+  return serveState(ctx.appDir, manifest).mode === 'prod';
 }

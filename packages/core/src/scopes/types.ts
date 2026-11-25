@@ -29,4 +29,9 @@ export interface SpawnContext {
    * (`aura.token.nonce`) so it survives a shell restart.
    */
   instanceToken?: { token: string; nonce: string };
+  /**
+   * The app's effective source mode (nexus/AppSource.ts). A closed agent
+   * workspace gets its own source read-only (ContainerRunner). Absent: open.
+   */
+  sourceMode?: 'closed' | 'open';
 }

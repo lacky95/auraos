@@ -24,7 +24,7 @@
  */
 import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
-import { appendFileSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 
@@ -366,4 +366,92 @@ export async function checkoutApp(appDir: string, manifest: AppManifest, opts: C
     rmSync(join(appDir, '.git'), { recursive: true, force: true });
     throw err;
   }
+}
+
+// ─── Source mode (Track P) ──────────────────────────────────────────────────
+//
+// The system knows one thing about who may change an installed app's source:
+// its effective mode. Everything else about patching (the patch repository,
+// the series, workspaces' contents) is app-side, driven by `aura dev`.
+
+export type SourceMode = 'closed' | 'open';
+
+export interface SourceModeInfo {
+  mode:        SourceMode;
+  /** The release's default (`manifest.source.defaultMode`, else closed). */
+  defaultMode: SourceMode;
+  /**
+   * What decided `mode`: a system app (always closed), an app built here
+   * with no install record (its author's own checkout, always open), the
+   * owner's choice on the install record, a developer checkout made before
+   * (`aura dev checkout`, has `.git`: open), or the release's default.
+   */
+  from:        'system' | 'local' | 'record' | 'checkout' | 'manifest' | 'default';
+}
+
+/** The install record path of an app in a scope (what Installer writes). */
+export function installRecordPath(scopeDataDir: string, appId: string): string {
+  return join(scopeDataDir, 'nexus', 'installed', `${appId}.json`);
+}
+
+/**
+ * Who may change this installed copy's source. `scope` is the scope the copy
+ * lives in; `manifest` its manifest (only `source` is read).
+ */
+export function effectiveSourceMode(
+  scope: { id: string; immutable?: boolean; dataDir: string; appsDir?: string },
+  manifest: { id: string; source?: { defaultMode?: SourceMode } },
+): SourceModeInfo {
+  const declared = manifest.source?.defaultMode;
+  const defaultMode: SourceMode = declared ?? 'closed';
+  if (scope.immutable || scope.id === 'system') return { mode: 'closed', defaultMode, from: 'system' };
+  let record: { sourceMode?: unknown } | null = null;
+  try { record = JSON.parse(readFileSync(installRecordPath(scope.dataDir, manifest.id), 'utf-8')) as { sourceMode?: unknown }; }
+  catch { record = null; }
+  if (!record) return { mode: 'open', defaultMode, from: 'local' };
+  if (record.sourceMode === 'open' || record.sourceMode === 'closed') return { mode: record.sourceMode, defaultMode, from: 'record' };
+  // A checkout needs an open install since Track P; one made before stays the owner's working tree.
+  if (scope.appsDir && isDevCheckout(join(scope.appsDir, manifest.id))) return { mode: 'open', defaultMode, from: 'checkout' };
+  return { mode: defaultMode, defaultMode, from: declared ? 'manifest' : 'default' };
+}
+
+/** Apps whose source mode changes need the owner's password (D9). */
+export const SENSITIVE_APPS: ReadonlySet<string> = new Set(['com.aura.settings', 'com.aura.terminal', 'com.aura.nexus']);
+
+// ─── Patch workspaces (Track P) ─────────────────────────────────────────────
+//
+// A workspace is a plain writable directory on the app-data volume,
+// `aura/workspaces/<userId>/<installationId>/<n>`, live-bound into the
+// Terminal that asked for it (MountManager `work` mounts). The system only
+// creates and binds it; `aura dev` fills it.
+
+const SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+/** Root of one user's workspaces of one installation, under the root dataDir. */
+export function workspaceRoot(dataDir: string, userId: string, installationId: string): string {
+  if (!SEGMENT.test(userId) || !SEGMENT.test(installationId)) {
+    throw new Error(`invalid workspace owner: ${JSON.stringify(userId)}/${JSON.stringify(installationId)}`);
+  }
+  return join(dataDir, 'aura', 'workspaces', userId, installationId);
+}
+
+/** Workspace `n` (1…9999), as a path relative to the root dataDir. */
+export function workspaceSubpath(userId: string, installationId: string, n: number): string {
+  if (!Number.isInteger(n) || n < 1 || n > 9999) throw new Error(`invalid workspace number: ${String(n)}`);
+  if (!SEGMENT.test(userId) || !SEGMENT.test(installationId)) {
+    throw new Error(`invalid workspace owner: ${JSON.stringify(userId)}/${JSON.stringify(installationId)}`);
+  }
+  return `aura/workspaces/${userId}/${installationId}/${n}`;
+}
+
+/** The existing workspace numbers, ascending. */
+export function listWorkspaces(dataDir: string, userId: string, installationId: string): number[] {
+  let names: string[] = [];
+  try { names = readdirSync(workspaceRoot(dataDir, userId, installationId)); } catch { return []; }
+  return names.filter((n) => /^[1-9]\d{0,3}$/.test(n)).map(Number).sort((a, b) => a - b);
+}
+
+/** A git remote URL without any user or password in it (safe to show). */
+export function withoutCredentials(url: string): string {
+  return url.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^@/]*@/i, '$1');
 }

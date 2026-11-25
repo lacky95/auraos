@@ -53,7 +53,7 @@ The grammar is kubectl-style: `aura <verb> <resource> [name]`. Short resource na
 - **Shapes:** `activity` (a window), `activity-bg` (a window that keeps running), `service` (headless).
 - **Sandbox:** `proot` (default) or `container`.
 - **Scope:** `user` (default) or `global`.
-- **Every new app gets its own `CLAUDE.md`.** Read it before changing that app.
+- **Every new app gets its own `AGENTS.md`** (and a one-line `CLAUDE.md` that loads it). Read it before changing that app.
 - **Related:** `aura dev clone` (copy any app, system ones included), `aura dev validate` and `aura dev standalone <app>` (fast UI iteration).
 
 **Grant and manage capabilities.**
@@ -65,7 +65,7 @@ The grammar is kubectl-style: `aura <verb> <resource> [name]`. Short resource na
 
 **Mount another app's files live.**
 - `aura mount` opens a wizard.
-- `aura mount add <app…>` attaches files; add `--wr` to make them writable.
+- `aura mount add <app…>` attaches files; add `--wr` to make them writable. `--wr` is refused for a closed install (see "Working on Aura apps").
 - `aura mount ls` and `aura mount rm` show and detach mounts.
 - Mounts are read-only by default and need no restart.
 - They only work in container sandboxes, and the target app needs the `apps.mount` permission.
@@ -83,6 +83,21 @@ The grammar is kubectl-style: `aura <verb> <resource> [name]`. Short resource na
 - Data: `aura data query|write|watch <ref>` reads and writes app content providers.
 - Store: `aura nexus search <q>`, `aura nexus app …` to install, update and publish.
 - Themes: `aura get themes`, `aura set theme <name>`.
+
+## Working on Aura apps
+
+**To work on an app, run `aura dev status <app>` and use the paths it prints.** `<app>` is the app's id or its name. It works from any Terminal, without Docker.
+
+- **Read the source** at `/mnt/aura/<appId>`. `status` binds it into this Terminal.
+- **A closed install** (the default for installed apps, and always for system apps) is read-only. A write fails with "Read-only file system". That is expected: don't work around it.
+- **To change a closed app**, use a patch workspace:
+  1. `aura dev patch start <app>` gives you a writable copy at `/mnt/aura/work/<appId>`. Edit and test there.
+  2. `aura dev patch save` saves your change as a versioned patch.
+  3. `aura dev patch activate` installs it. The owner approves it in the desktop; the previous version is kept for rollback.
+- **A system app** (Settings, Terminal, …) is patched the same way. Activation installs your own copy of it; the AuraOS checkout stays as released.
+- **An open install** (the owner ran `aura dev open <app>`) and **your own apps** (`aura dev new`) are writable: `status` prints the writable path.
+- Never open an app yourself to make a change easier. Opening is the owner's decision.
+- Upstream updates keep your patches: `aura dev update <app>`. If a patch no longer applies, the working version keeps running and the patch is marked "needs repair".
 
 ## Finding out more: docs and interfaces
 
