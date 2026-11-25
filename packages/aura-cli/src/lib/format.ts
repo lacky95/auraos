@@ -80,6 +80,11 @@ export function warn(msg: string): void {
   console.error(`${color.yellow('!')} ${msg}`);
 }
 
+/** An error that doesn't end the command (`fail` does). */
+export function error(msg: string): void {
+  console.error(`${color.red('✗')} ${msg}`);
+}
+
 export function fail(msg: string): never {
   console.error(`${color.red('✗')} ${msg}`);
   process.exit(1);
