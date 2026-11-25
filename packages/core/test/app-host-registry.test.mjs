@@ -654,3 +654,86 @@ test('nexus: a copy installs without the hosts it may not claim, and keeps its o
   assert.ok(foreign.error, 'a different app claiming a taken host is still refused');
   assert.equal(existsSync(join(w.user.appsDir, 'com.other.claimer')), false);
 });
+
+// ── Track P: a patched system app's overlay keeps its trust ─────────────────
+
+test('overlay: an approved patch activation links the user copy to the system installation; nothing else does', async () => {
+  const w = nexusWorld();
+  const id = 'com.aura.settings';
+  const originId = randomUUID();
+  putApp(w.defs[0], id, { originId, entry: 'src/index.ts' });
+  const system = (await lifecycle.sync({ appId: id, originId, scope: 'system', source: { kind: 'system', ref: id } })).installation;
+
+  // The first activation of a patched tree: the user-scope overlay, linked.
+  const first = await w.run({ ref: w.source('ws1', { id, originId }), action: 'app.patch.activate' });
+  assert.ok(first.record, String(first.error));
+  let overlay = await registry.findInstallation(id, 'user');
+  assert.notEqual(overlay.installationId, system.installationId);
+  assert.equal(overlay.overlay?.of, system.installationId);
+  assert.equal(await registry.approvedOverlay(overlay), true);
+  assert.equal(lifecycle.trustedOverlay(id), overlay.installationId);
+
+  // A re-activation (another workspace) keeps the link, on the same installation.
+  const again = await w.run({ ref: w.source('ws2', { id, originId, version: '1.0.1' }), action: 'app.patch.activate' });
+  assert.ok(again.record, String(again.error));
+  const kept = await registry.findInstallation(id, 'user');
+  assert.equal(kept.installationId, overlay.installationId);
+  assert.equal(await registry.approvedOverlay(kept), true);
+  // ...and a later sync (the boot migration) reads the same source back: still linked.
+  await lifecycle.migrate(w.defs);
+  assert.equal(await registry.approvedOverlay(await registry.findInstallation(id, 'user')), true);
+  assert.equal(lifecycle.trustedOverlay(id), overlay.installationId);
+
+  // An ordinary install of a same-id tree over it (a store update, a local copy) drops the link.
+  // (another source: the owner confirms replacing the copy, as the store's identity question asks)
+  const store = await w.run({ ref: w.source('store', { id, originId, version: '2.0.0' }), identity: { action: 'update-existing' } });
+  assert.ok(store.record, String(store.error));
+  overlay = await registry.findInstallation(id, 'user');
+  assert.equal(overlay.overlay, undefined);
+  assert.equal(lifecycle.trustedOverlay(id), null);
+  // ...and a patch activation over that copy does not make it the system app's again.
+  const patched = await w.run({ ref: w.source('ws3', { id, originId, version: '2.0.1' }), action: 'app.patch.activate' });
+  assert.ok(patched.record, String(patched.error));
+  assert.equal(await registry.approvedOverlay(await registry.findInstallation(id, 'user')), false);
+  assert.equal(lifecycle.trustedOverlay(id), null);
+});
+
+test('overlay: a same-id user app is never linked, and a link breaks with its source or its system installation', async () => {
+  const w = nexusWorld();
+  const id = 'com.aura.nexus';
+  const originId = randomUUID();
+  putApp(w.defs[0], id, { originId, entry: 'src/index.ts' });
+  const system = (await lifecycle.sync({ appId: id, originId, scope: 'system', source: { kind: 'system', ref: id } })).installation;
+
+  // A plain install of the same id (a store app reusing the id) gets no link.
+  const plain = await w.run({ ref: w.source('shop', { id, originId }) });
+  assert.ok(plain.record, String(plain.error));
+  const own = await registry.findInstallation(id, 'user');
+  assert.equal(own.overlay, undefined);
+  assert.equal(await registry.approvedOverlay(own), false);
+  // A link written by hand onto another source never counts.
+  const forged = await registry.updateInstallation(own.installationId, {
+    overlay: { of: system.installationId, approvedAt: Date.now(), source: { kind: 'local', ref: '/elsewhere' } },
+  });
+  assert.equal(await registry.approvedOverlay(forged), false);
+
+  // An approved link holds only while the source is the approved one...
+  const linked = await registry.updateInstallation(own.installationId, {
+    overlay: { of: system.installationId, approvedAt: Date.now(), source: own.source },
+  });
+  assert.equal(await registry.approvedOverlay(linked), true);
+  const moved = await registry.updateInstallation(own.installationId, { source: { kind: 'local', ref: '/replaced' } });
+  assert.equal(moved.overlay, undefined, 'a source change removes the link');
+  // ...and while its system installation is active.
+  const relinked = await registry.updateInstallation(own.installationId, {
+    overlay: { of: system.installationId, approvedAt: Date.now(), source: moved.source },
+  });
+  await registry.reserve(system.installationId);
+  assert.equal(await registry.approvedOverlay(relinked), false);
+  // An overlay link naming another app's system installation never counts.
+  const other = (await lifecycle.sync({ appId: 'com.aura.settings', originId: randomUUID(), scope: 'system', source: { kind: 'system', ref: 'com.aura.settings' } })).installation;
+  const wrong = await registry.updateInstallation(own.installationId, {
+    overlay: { of: other.installationId, approvedAt: Date.now(), source: moved.source },
+  });
+  assert.equal(await registry.approvedOverlay(wrong), false);
+});

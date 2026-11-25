@@ -84,6 +84,7 @@ The grammar is kubectl-style: `aura <verb> <resource> [name]`. Short resource na
 - Store: `aura nexus search <q>`, `aura nexus app …` to install, update and publish.
 - Themes: `aura get themes`, `aura set theme <name>`.
 
+<!-- aura:section working-on-aura-apps -->
 ## Working on Aura apps
 
 **To work on an app, run `aura dev status <app>` and use the paths it prints.** `<app>` is the app's id or its name. It works from any Terminal, without Docker.
@@ -94,10 +95,12 @@ The grammar is kubectl-style: `aura <verb> <resource> [name]`. Short resource na
   1. `aura dev patch start <app>` gives you a writable copy at `/mnt/aura/work/<appId>`. Edit and test there.
   2. `aura dev patch save` saves your change as a versioned patch.
   3. `aura dev patch activate` installs it. The owner approves it in the desktop; the previous version is kept for rollback.
-- **A system app** (Settings, Terminal, …) is patched the same way. Activation installs your own copy of it; the AuraOS checkout stays as released.
+- **A system app** (Settings, Terminal, …) is patched the same way. Activation installs your own copy of it (an overlay that keeps the system app's rights, because the owner approved it); the AuraOS checkout stays as released.
 - **An open install** (the owner ran `aura dev open <app>`) and **your own apps** (`aura dev new`) are writable: `status` prints the writable path.
 - Never open an app yourself to make a change easier. Opening is the owner's decision.
-- Upstream updates keep your patches: `aura dev update <app>`. If a patch no longer applies, the working version keeps running and the patch is marked "needs repair".
+- Upstream updates keep your patches: `aura dev update <app>`. If a patch no longer applies, the working version keeps running and the patch is marked "needs repair" (you also get a notification naming the patch, the files and the repair command).
+- Old patch workspaces pile up: `aura dev patch clean [app]` deletes all but the bound one and the newest three (`--keep N`).
+<!-- /aura:section working-on-aura-apps -->
 
 ## Finding out more: docs and interfaces
 
@@ -131,4 +134,4 @@ Your own app can show up in the registry too: add `provides[]` to its manifest (
 
 ## Your notes
 
-AuraOS creates this file only if it is missing, so it is yours to edit. Add your own conventions below.
+AuraOS creates this file only if it is missing, so it is yours to edit. Add your own conventions below. When AuraOS ships a new section (between `<!-- aura:section … -->` markers), it appends that section once and leaves the rest of the file alone.

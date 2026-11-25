@@ -19,7 +19,7 @@ import type { Command } from 'commander';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { initRepo, readSeries, type SeriesBase } from '@aura/core';
+import { initRepo, patchesRoot, readSeries, safeDirectoryArgs, type SeriesBase } from '@aura/core';
 import { api } from '../lib/client.js';
 import { color, fail, info, ok, warn } from '../lib/format.js';
 
@@ -37,15 +37,19 @@ export interface AppSourceView {
   overlay:              boolean;
   mode:                 'closed' | 'open';
   defaultMode:          'closed' | 'open';
-  modeFrom:             'system' | 'local' | 'record' | 'manifest' | 'default';
+  modeFrom:             'system' | 'local' | 'record' | 'checkout' | 'manifest' | 'default';
   upstream:             { repository?: string; branch?: string; commit?: string; dirty?: boolean } | null;
   source:               { path: string; writable: boolean; mounted: boolean };
   workspace:            { n: number; path: string } | null;
   workspaces:           number[];
+  /** The user the caller acts for (workspaces are per user). */
+  user?:                string;
   next:                 string;
 }
 
 export interface WorkspaceBind { ok: true; appId: string; installationId: string; n: number; path: string; created: boolean }
+
+export interface WorkspaceClean { ok: true; appId: string; installationId: string; kept: number[]; deleted: number[]; detached: number }
 
 /** The calling instance: routes bind into it, so only itself (or the owner) may ask. */
 export function callerInstance(): string {
@@ -93,6 +97,23 @@ export async function bindWorkspace(app: string, opts: { n?: number; new?: boole
   return r;
 }
 
+/** R2 DELETE: detach the workspace of `app` bound here (its directory stays). */
+export async function detachWorkspace(app: string): Promise<void> {
+  const inst = encodeURIComponent(callerInstance());
+  const r = await apiOrBody<{ ok?: boolean } & RouteError>(() => api.del(`/api/instances/${inst}/app-workspace?app=${encodeURIComponent(app)}`));
+  if (r.error) routeFail(`workspace for ${app}`, r);
+}
+
+/** Delete old workspaces of `app` (this user, this installation): all but the bound one and the newest `keep`. */
+export async function cleanWorkspaces(app: string, keep?: number): Promise<WorkspaceClean> {
+  const inst = encodeURIComponent(callerInstance());
+  const r = await apiOrBody<WorkspaceClean & RouteError>(() => api.post(`/api/instances/${inst}/app-workspace/clean`, {
+    app, ...(keep !== undefined ? { keep } : {}),
+  }));
+  if (r.error) routeFail(`clean workspaces of ${app}`, r);
+  return r;
+}
+
 // ─── where things are ───────────────────────────────────────────────────────
 
 /** What a workspace remembers about itself, in `.git/` (never part of a patch). */
@@ -106,6 +127,8 @@ export interface WorkspaceMarker {
   baseCommit:     string;
   /** Patch repo revision applied when the workspace was made or last saved. */
   patchesRev:     string | null;
+  /** The build workspace activate and update reuse (never edited, never saved from). */
+  scratch?:       true;
 }
 
 export const WORKSPACE_MARKER = 'aura-workspace.json';
@@ -155,7 +178,7 @@ export function appFromArgOrCwd(app: string | undefined, cwd = process.cwd()): s
 /** Where an installation's patch repo lives (local git, created on the first save). */
 export function patchRepoDir(installationId: string): string {
   if (!/^[0-9a-f-]{8,64}$/i.test(installationId)) fail(`unexpected installation id '${installationId}'`);
-  return join(process.env['AURA_PATCHES_DIR'] ?? '/data/patches', installationId);
+  return join(patchesRoot(), installationId);
 }
 
 /** The patch repo revision that is installed now (set by a successful activate). */
@@ -163,7 +186,7 @@ export const ACTIVE_REF = 'refs/aura/active';
 
 export function gitOut(cwd: string, args: string[]): string | null {
   try {
-    return execFileSync('git', ['-C', cwd, ...args], { stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 }).toString().trim() || null;
+    return execFileSync('git', [...safeDirectoryArgs(cwd), '-C', cwd, ...args], { stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 }).toString().trim() || null;
   } catch { return null; }
 }
 

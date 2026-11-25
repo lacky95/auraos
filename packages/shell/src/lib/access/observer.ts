@@ -74,6 +74,8 @@ export interface ObserverManager {
   getInstancesByApp(appId: string): ReadonlyArray<{ appId: string; instanceId: string }>;
   getActivity?(id: string): { appId?: string; parentInstanceId?: string; instanceId?: string } | undefined;
   getManifest?(id: string): unknown;
+  /** AppManager `isTrustedSystemCopy`: the system copy, or an approved overlay of it (Track P). */
+  isTrustedSystemCopy?(appId: string): boolean;
   registry?: { getById(id: string): unknown };
   providers?: {
     resolveProvider(authority: string, path: string): {
@@ -235,8 +237,8 @@ function provider(s: RequestSnapshot, mgr: ObserverManager | null) {
 export function resourceFor(rule: AccessRule, s: RequestSnapshot, mgr: ObserverManager | null): PolicyResource {
   const r: PolicyResource = { target: rule.target };
   if (rule.systemApp) {
-    const installed = mgr?.getManifest?.(rule.systemApp) as { scopeId?: string } | undefined;
-    if (installed?.scopeId === 'system') r.appId = rule.systemApp;
+    // The system app as the owner approved it: its system copy or approved overlay.
+    if (mgr?.isTrustedSystemCopy?.(rule.systemApp)) r.appId = rule.systemApp;
     return r;
   }
   const { instanceId, activityId, id, name } = s.params;
@@ -585,7 +587,7 @@ export const liveDeps: ObserverDeps = {
     },
   },
   mgr: liveMgr,
-  ownerAgent: (p) => isTrustedOwnerAgent(p, liveMgr() as unknown as Pick<AppManager, 'getManifest'> | null),
+  ownerAgent: (p) => isTrustedOwnerAgent(p, liveMgr() as unknown as Pick<AppManager, 'isTrustedSystemCopy'> | null),
   network: liveNetworkIdentity(() => liveMgr() as unknown as Pick<AppManager, 'getAllInstances'> | null),
   // Read, never created: creating them has side effects of its own.
   services: () => ((globalThis as Record<string, unknown>)[AUTH_SERVICES] as ObserverServices | undefined) ?? null,

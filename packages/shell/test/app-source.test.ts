@@ -13,7 +13,7 @@ import * as core from '@aura/core';
 import type { ApprovalClaim, ApprovalDecider, ApprovalRecord, ApprovalRequest, ApprovalResult, AuraMount } from '@aura/core';
 import type { CallerPrincipal } from '../src/lib/access/identify.ts';
 import {
-  activatePrepared, appSourceStatus, bindWorkspace, detachWorkspace, setSourceMode, type AppSourceDeps, type ScopedApp,
+  activatePrepared, appSourceStatus, bindWorkspace, cleanWorkspaces, detachWorkspace, setSourceMode, type AppSourceDeps, type ScopedApp,
 } from '../src/lib/appSource.ts';
 
 class MemoryStore {
@@ -55,6 +55,8 @@ let scopes: core.ScopeDefinition[];
 let nexus: core.NexusManager;
 let kernel: AuraMount[];
 let audits: unknown[];
+/** User-scope copies an approved activation linked to their system app (core lifecycle `trustedOverlay`). */
+let overlays: Set<string>;
 
 const put = (p: string, text: string) => { mkdirSync(join(p, '..'), { recursive: true }); writeFileSync(p, text); };
 const writeApp = (dir: string, m: Record<string, unknown>, body = 'v1\n') => {
@@ -67,7 +69,7 @@ function apps(): ScopedApp[] {
   // The active copy of each id: user over global over system.
   const out = new Map<string, ScopedApp>();
   for (const s of [...scopes].sort((a, b) => a.priority - b.priority)) {
-    for (const id of ['io.shop.app', 'com.aura.terminal', 'io.lakner.terminalx']) {
+    for (const id of ['io.shop.app', 'com.aura.terminal', 'io.lakner.terminalx', 'io.local.app']) {
       const dir = join(s.appsDir, id);
       if (!existsSync(join(dir, 'app.manifest.json'))) continue;
       out.set(id, { ...core.validateStagedDir(dir), scopeId: s.id, appDir: dir } as ScopedApp);
@@ -99,6 +101,10 @@ function deps(): AppSourceDeps {
       instance: (id) => (id.startsWith('com.aura.terminal') || id.startsWith('io.lakner.terminalx')
         ? { appId: id.replace(/-\d+$/, ''), sandbox: 'container' } : id === 'io.proot.app' ? { appId: id, sandbox: 'proot' } : undefined),
       instancesOf: (appId) => (appId === 'io.shop.app' ? ['io.shop.app'] : []),
+      trustedSystemCopy: (appId) => {
+        const a = apps().find((x) => x.id === appId);
+        return !!a && (a.scopeId === 'system' || (a.scopeId === 'user' && overlays.has(appId)));
+      },
     },
     mounts: {
       capable: () => ({ ok: true }),
@@ -121,6 +127,7 @@ function deps(): AppSourceDeps {
         return m;
       },
       remove: async (inst, id) => { kernel = kernel.filter((m) => !(m.instanceId === inst && m.id === id)); },
+      workspaceBinds: (sub) => kernel.filter((m) => m.kind === 'work' && m.workspace === sub).map((m) => ({ instanceId: m.instanceId, mountId: m.id })),
       rebindTarget: async (appId) => {
         for (const m of kernel) if (m.targetAppId === appId && m.kind === 'source' && deps().apps.sourceMode(appId)?.mode === 'closed') m.mode = 'ro';
       },
@@ -135,6 +142,7 @@ beforeEach(async () => {
   caller = TERMINAL;
   kernel = [];
   audits = [];
+  overlays = new Set();
   root = mkdtempSync(join(tmpdir(), 'aura-src-'));
   const scope = (id: core.ScopeId, priority: number, immutable: boolean) =>
     ({ id, appsDir: join(root, id, 'apps'), dataDir: join(root, id, 'data'), immutable, priority }) as core.ScopeDefinition;
@@ -272,7 +280,73 @@ test('a system app activates as a user-scope overlay, `fresh` for the Terminal; 
   assert.equal(readFileSync(join(scopes[2]!.appsDir, 'com.aura.terminal', 'src', 'index.astro'), 'utf-8'), 'status line\n');
   assert.equal(readFileSync(join(scopes[0]!.appsDir, 'com.aura.terminal', 'src', 'index.astro'), 'utf-8'), 'v1\n');
 
+  // The lifecycle links the approved activation to the system installation
+  // (core app-host-registry test "overlay"); this fake registry has no lifecycle.
+  overlays.add('com.aura.terminal');
   // The overlay keeps the system app's workspaces and patches (same key).
   const s = await read(await appSourceStatus(req('GET', undefined, {}, 'http://shell.test/x?app=com.aura.terminal'), 'com.aura.terminal', deps(), false));
   assert.deepEqual([s.body.scope, s.body.overlay, s.body.installationId, s.body.mode], ['user', true, 'inst-system-com-aura-terminal', 'closed']);
+});
+
+test('a same-id user copy without the overlay link is its own app: own patch key, and not the owner\'s Terminal', async () => {
+  // An open app (built here, no install record) to ask for a writable view of.
+  writeApp(join(scopes[2]!.appsDir, 'io.local.app'), { id: 'io.local.app', name: 'Local', version: '1.0.0' });
+  const writable = async () => (await read(await appSourceStatus(req('POST', { app: 'io.local.app' }), 'com.aura.terminal', deps(), true))).body.source.writable;
+  assert.equal(await writable(), true, 'the system Terminal gets the writable view of an open app');
+
+  // A user-scope com.aura.terminal that no approved activation linked (a store or `aura dev` copy).
+  writeApp(join(scopes[2]!.appsDir, 'com.aura.terminal'), { id: 'com.aura.terminal', name: 'Terminal', version: '9.0.0', tools: ['*'] });
+  const s = await read(await appSourceStatus(req('GET', undefined, {}, 'http://shell.test/x?app=com.aura.terminal'), 'com.aura.terminal', deps(), false));
+  assert.deepEqual([s.body.scope, s.body.overlay, s.body.installationId], ['user', false, 'inst-user-com-aura-terminal']);
+  kernel = [];
+  assert.equal(await writable(), false, 'an unlinked same-id copy is no trusted Terminal');
+
+  // Linked by an approved activation: the owner's Terminal again, patched under the system key.
+  overlays.add('com.aura.terminal');
+  const o = await read(await appSourceStatus(req('GET', undefined, {}, 'http://shell.test/x?app=com.aura.terminal'), 'com.aura.terminal', deps(), false));
+  assert.deepEqual([o.body.overlay, o.body.installationId], [true, 'inst-system-com-aura-terminal']);
+  kernel = [];
+  assert.equal(await writable(), true);
+});
+
+test('activate installs the calling user\'s workspace; only the owner names another user\'s', async () => {
+  const ws = (user: string) => join(root, 'root', 'aura', 'workspaces', user, 'inst-global-io-shop-app', '1');
+  writeApp(ws('default'), { id: 'io.shop.app', originId: O1, name: 'Shop', version: '1.0.1' }, 'mine\n');
+  writeApp(ws('bob'), { id: 'io.shop.app', originId: O1, name: 'Shop', version: '1.0.2' }, 'bob\n');
+
+  // A Terminal of user `default` can't reach bob's workspace.
+  const denied = await read(await activatePrepared(req('POST', { workspace: 1, user: 'bob' }), 'io.shop.app', deps()));
+  assert.deepEqual([denied.status, denied.body.error], [403, 'forbidden']);
+  // Bob's own Terminal activates his own workspace (the approval names that tree).
+  caller = { ...TERMINAL, instanceId: 'com.aura.terminal-2', userId: 'bob' };
+  const bob = await read(await activatePrepared(req('POST', { workspace: 1 }), 'io.shop.app', deps()));
+  assert.equal(bob.status, 202);
+  assert.match(JSON.stringify(bob.body.display), /workspaces\/bob\//);
+  // The owner may name any user's workspace.
+  caller = { kind: 'user', userId: 'default', role: 'owner', sessionId: 'sess-desk-0001', verification: 'verified' } as CallerPrincipal;
+  const owner = await read(await activatePrepared(req('POST', { workspace: 1, user: 'bob' }), 'io.shop.app', deps()));
+  assert.notEqual(owner.status, 403);
+  assert.notEqual(owner.status, 404);
+});
+
+test('patch clean: deletes this user\'s old workspaces, keeps the bound one and the newest N, detaches before deleting', async () => {
+  const wsDir = (user: string, n: number) => join(root, 'root', 'aura', 'workspaces', user, 'inst-global-io-shop-app', String(n));
+  for (let n = 1; n <= 6; n++) mkdirSync(wsDir('default', n), { recursive: true });
+  mkdirSync(wsDir('bob', 1), { recursive: true });
+  // Bound here: 2. Bound in another Terminal of this user: 3.
+  await bindWorkspace(req('POST', { app: 'io.shop.app', n: 2 }), 'com.aura.terminal', deps());
+  await bindWorkspace(req('POST', { app: 'io.shop.app', n: 3 }), 'com.aura.terminal-2', deps());
+
+  const r = await read(await cleanWorkspaces(req('POST', { app: 'shop', keep: 2 }), 'com.aura.terminal', deps()));
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.deepEqual([r.body.kept, r.body.deleted, r.body.detached], [[2, 5, 6], [1, 3, 4], 1]);
+  assert.deepEqual([1, 2, 3, 4, 5, 6].map((n) => existsSync(wsDir('default', n))), [false, true, false, false, true, true]);
+  assert.ok(existsSync(wsDir('bob', 1)), 'another user\'s workspaces are not touched');
+  assert.deepEqual(kernel.filter((m) => m.kind === 'work').map((m) => [m.instanceId, m.workspace]),
+    [['com.aura.terminal', 'aura/workspaces/default/inst-global-io-shop-app/2']], 'detached in the other Terminal, still bound here');
+
+  // Default keep 3; nothing more to delete. keep 0 keeps only the bound one.
+  assert.deepEqual((await read(await cleanWorkspaces(req('POST', { app: 'io.shop.app' }), 'com.aura.terminal', deps()))).body.deleted, []);
+  assert.deepEqual((await read(await cleanWorkspaces(req('POST', { app: 'io.shop.app', keep: 0 }), 'com.aura.terminal', deps()))).body.deleted, [5, 6]);
+  assert.equal((await read(await cleanWorkspaces(req('POST', { app: 'io.shop.app', keep: -1 }), 'com.aura.terminal', deps()))).status, 400);
 });

@@ -139,6 +139,7 @@ test('an app\'s explicit intent target: never a system app or a trusted system U
   const mgr = {
     getInstance: (id: string) => instances[id],
     getManifest: (id: string) => (scopes[id] ? { scopeId: scopes[id] } : undefined),
+    isTrustedSystemCopy: (id: string) => scopes[id] === 'system',
   };
   const app = { appId: 'com.acme.notes' };
   const VIEW = 'aura.intent.action.VIEW';

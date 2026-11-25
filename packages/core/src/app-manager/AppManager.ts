@@ -43,6 +43,7 @@ import { ScopeRegistry } from '../scopes/ScopeRegistry.js';
 import type { ScopeDefinition, ScopeId } from '../scopes/types.js';
 import { getAppHostServices } from '../app-hosts/services.js';
 import { appSourceFingerprint } from '../app-hosts/lifecycle.js';
+import { seedHome } from './homeSeed.js';
 
 const RECONCILE_INTERVAL_MS = 5_000;
 const ERROR_GRACE_MS        = 30_000;
@@ -532,36 +533,23 @@ export class AppManager {
   }
 
   /**
-   * Copy the onboarding files AuraOS ships for the user home (os/home-seed)
-   * into /home/aura: AGENTS.md + CLAUDE.md, so `claude` / `codex` started in
-   * a fresh terminal know what AuraOS is, and ~/.claude.json +
+   * Seed the user home (/home/aura) from os/home-seed (homeSeed.ts): the
+   * onboarding AGENTS.md and ~/.claude/CLAUDE.md, so `claude` / `codex`
+   * started in any directory know what AuraOS is, and ~/.claude.json +
    * ~/.codex/config.toml, which preconfigure the docs and interface-registry
-   * MCP servers. Subdirectories are mirrored.
-   *
-   * Only-if-missing, per file: once seeded the files are the user's, and an
-   * edited copy is never overwritten. In practice the tool configs therefore
-   * only land on fresh installs — an existing ~/.claude.json is never merged
-   * into. The master home is left alone — it is the OS's own.
+   * MCP servers. Only missing files are copied; an existing ~/AGENTS.md gets
+   * new marked sections appended once. The master home is left alone — it is
+   * the OS's own.
    */
   private seedUserHome(): void {
     const seedDir = [process.env.AURA_HOME_SEED_DIR, '/os/home-seed', '/workspace/os/home-seed']
       .find((dir): dir is string => !!dir && existsSync(dir));
     if (!seedDir) return;
     const target = userHomeDir(this.dataDir);
-    const seeded: string[] = [];
-    for (const name of readdirSync(seedDir, { recursive: true }) as string[]) {
-      const src = join(seedDir, name);
-      const dst = join(target, name);
-      if (!lstatSync(src).isFile() || existsSync(dst)) continue;
-      try {
-        mkdirSync(dirname(dst), { recursive: true });
-        copyFileSync(src, dst);
-        seeded.push(name);
-      } catch (err) {
-        console.warn(`[AppManager] could not seed ${name} into ${target}: ${(err as Error).message}`);
-      }
-    }
-    if (seeded.length) console.log(`[AppManager] seeded user home ${target} (${seeded.join(', ')})`);
+    const r = seedHome(seedDir, target, (msg) => console.warn(`[AppManager] ${msg}`));
+    if (r.copied.length) console.log(`[AppManager] seeded user home ${target} (${r.copied.join(', ')})`);
+    if (r.appended.length) console.log(`[AppManager] ${target}/AGENTS.md: added section(s) ${r.appended.join(', ')}`);
+    if (r.removedLegacyClaudeMd) console.log(`[AppManager] removed ${target}/CLAUDE.md: ~/.claude/CLAUDE.md loads AGENTS.md in every directory`);
   }
 
   /**
@@ -2406,6 +2394,22 @@ export class AppManager {
 
   getManifest(appId: string): AppManifest | undefined {
     return this.registry.getById(appId);
+  }
+
+  /**
+   * Whether the copy of `appId` that runs now is the system app as the owner
+   * approved it: its `system` copy, or an approved user-scope overlay of it
+   * (Track P: a patched system app keeps its trust, D29 and D45). Never by
+   * the id alone: a same-id copy from a store or `aura dev` has no overlay
+   * link (AppHostStore `approvedOverlay`).
+   */
+  isTrustedSystemCopy(appId: string): boolean {
+    const m = this.registry.getById(appId);
+    if (!m) return false;
+    if (m.scopeId === 'system') return true;
+    if (m.scopeId !== 'user') return false;
+    try { return getAppHostServices().lifecycle.trustedOverlay(appId) !== null; }
+    catch { return false; }
   }
 
   /**

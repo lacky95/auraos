@@ -346,6 +346,12 @@ const routes: RouteAccessManifest['routes'] = {
       ...why('Track P: a writable patch workspace (a copy, never the installed source), bound into the calling instance only.'),
     })),
   },
+  '/api/instances/[instanceId]/app-workspace/clean': {
+    methods: { POST: rule(INSTANCE, 'instance', {
+      targetPermissions: ['apps.mount'], guard: 'target-permissions',
+      ...why('Track P: deletes the caller\'s own old patch workspaces of one app (never the one bound in the caller); the owner or the instance itself.'),
+    }) },
+  },
   '/api/instances/[instanceId]/mounts/[mountId]': {
     methods: { DELETE: rule(INSTANCE, 'instance', { targetPermissions: ['apps.mount'], guard: 'target-permissions' }) },
   },

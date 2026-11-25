@@ -13,17 +13,22 @@
  *        installed through the system (owner approval), restarted, rolled back
  *        when it does not come up
  *   aura dev update [app] [--ref]    the series on a new upstream; a patch that
- *        no longer applies is named and nothing is installed
+ *        no longer applies is named, the owner notified, and nothing is installed
+ *   aura dev patch clean [app] [--keep N]  delete old workspaces (keeps the
+ *        bound one and the newest N)
+ *
+ * Activate and update build in one scratch workspace per user and
+ * installation (its number in the patch repo's config), emptied each time.
  *
  * The series library is core patches/series.ts; the system routes are in
  * dev-source.ts. Git runs here, with this Terminal's credentials.
  */
 import type { Command } from 'commander';
 import { execFileSync } from 'node:child_process';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  applySeries, baseCommitIn, buildTree, exportPatches, gitError, readPatches, readSeries, saveSeries,
+  applySeries, baseCommitIn, buildTree, exportPatches, gitError, readPatches, readSeries, safeDirectoryArgs, saveSeries,
   SeriesError, type ApplyResult, type Series, type SeriesBase,
 } from '@aura/core';
 import { api } from '../lib/client.js';
@@ -31,14 +36,14 @@ import { color, fail, info, ok, warn } from '../lib/format.js';
 import { installWithChoices } from './nexus.js';
 import type { RestartResult } from './app.js';
 import {
-  ACTIVE_REF, appFromArgOrCwd, bindWorkspace, findWorkspace, getAppSource, gitOut, patchRepoDir,
-  readWorkspaceMarker, upstreamBase, writeWorkspaceMarker, type AppSourceView, type WorkspaceMarker,
+  ACTIVE_REF, appFromArgOrCwd, bindWorkspace, cleanWorkspaces, detachWorkspace, findWorkspace, getAppSource, gitOut,
+  patchRepoDir, readWorkspaceMarker, upstreamBase, writeWorkspaceMarker, type AppSourceView, type WorkspaceMarker,
 } from './dev-source.js';
 
 const GIT_ENV = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
 
 function git(cwd: string, args: string[], timeout = 120_000): string {
-  return execFileSync('git', ['-C', cwd, ...args], { stdio: ['ignore', 'pipe', 'pipe'], timeout, env: GIT_ENV }).toString().trim();
+  return execFileSync('git', [...safeDirectoryArgs(cwd), '-C', cwd, ...args], { stdio: ['ignore', 'pipe', 'pipe'], timeout, env: GIT_ENV }).toString().trim();
 }
 
 function identity(cwd: string): string[] {
@@ -82,7 +87,9 @@ export async function startWorkspace(app: string, opts: { base?: string; new?: b
     fail(`${v.appId} does not say where its source lives (no upstream repository${v.upstream?.commit ? '' : ' or commit'}) — `
       + 'its author publishes with `aura dev publish --repo <url>`; until then it cannot be patched');
   }
-  const ws = await bindWorkspace(v.appId, opts.new ? { new: true } : {});
+  let ws = await bindWorkspace(v.appId, opts.new ? { new: true } : {});
+  // The build workspace of activate/update is no place to edit: a fresh one instead.
+  if (readWorkspaceMarker(ws.path)?.scratch) ws = await bindWorkspace(v.appId, { new: true });
   const existing = readWorkspaceMarker(ws.path);
   if (existing) {
     if (opts.base) fail(`workspace ${ws.n} already exists at ${ws.path} — pass --new for a fresh one on ${opts.base}`);
@@ -123,6 +130,7 @@ export interface SavedPatches { repo: string; commit: string; changed: boolean; 
 export function saveWorkspace(wsRoot: string, message?: string): SavedPatches {
   const marker = readWorkspaceMarker(wsRoot);
   if (!marker) fail(`${wsRoot} is not a patch workspace`);
+  if (marker!.scratch) fail(`${wsRoot} is the build workspace of activate/update — edit in your own (aura dev patch start)`);
   if (existsSync(join(wsRoot, '.git', 'rebase-apply'))) {
     fail('a patch is still being applied here — resolve the conflict, `git add` the files and run `git am --continue` (or `git am --skip` to drop it), then save');
   }
@@ -148,7 +156,7 @@ export type ActivateOutcome =
   | { status: 'installed'; rev: string; restarted: string | null; workspace: number }
   | { status: 'rolled-back'; rev: string; reason: string }
   | { status: 'not-approved' | 'failed'; reason: string }
-  | { status: 'needs-repair'; failure: Extract<ApplyResult, { ok: false }>; base: SeriesBase };
+  | { status: 'needs-repair'; failure: Extract<ApplyResult, { ok: false }>; base: SeriesBase; name?: string };
 
 interface ActivateResponse { ok?: boolean; error?: string; message?: string; running?: string[]; rollbackTree?: string | null; overlay?: boolean }
 
@@ -188,20 +196,52 @@ export async function installWorkspace(v: AppSourceView, n: number, rev: string)
   }
 }
 
-/** A fresh workspace with `base` + the series' patches. The bound workspace is restored afterwards by the caller. */
-async function candidate(v: AppSourceView, base: SeriesBase, patches: Parameters<typeof applySeries>[1]) {
-  const ws = await bindWorkspace(v.appId, { new: true });
-  if (!isEmptyDir(ws.path)) fail(`new workspace ${ws.path} is not empty`);
+/** The patch-repo config key of this user's scratch workspace number. */
+const scratchKey = (v: AppSourceView) => `aura.${v.user ?? 'default'}.scratch`;
+
+/**
+ * This user's scratch workspace, bound and emptied: the one recorded in the
+ * patch repo's config while it still exists and is not the workspace being
+ * edited here, else a new one (recorded).
+ */
+async function scratchWorkspace(v: AppSourceView) {
+  const repo = patchRepoDir(v.installationId);
+  const known = Number(gitOut(repo, ['config', '--get', scratchKey(v)]));
+  const reuse = Number.isInteger(known) && v.workspaces.includes(known) && known !== v.workspace?.n;
+  const ws = await bindWorkspace(v.appId, reuse ? { n: known } : { new: true });
+  if (reuse && !readWorkspaceMarker(ws.path)?.scratch && !isEmptyDir(ws.path)) {
+    // Recorded, but someone made it a working workspace since: leave it alone.
+    return bindScratch(v, repo, await bindWorkspace(v.appId, { new: true }));
+  }
+  return bindScratch(v, repo, ws);
+}
+
+function bindScratch(v: AppSourceView, repo: string, ws: Awaited<ReturnType<typeof bindWorkspace>>) {
+  // Its contents, not the directory: that is the bind's mount point.
+  for (const name of readdirSync(ws.path)) rmSync(join(ws.path, name), { recursive: true, force: true });
+  if (existsSync(join(repo, '.git'))) git(repo, ['config', scratchKey(v), String(ws.n)]);
+  return ws;
+}
+
+/** `base` + the series' patches, built in the scratch workspace. The bound workspace is restored afterwards by the caller. */
+async function candidate(v: AppSourceView, base: SeriesBase, patches: Parameters<typeof applySeries>[1], rev: string | null) {
+  const ws = await scratchWorkspace(v);
+  let built: ReturnType<typeof buildTree>;
   try {
-    return { ws, built: buildTree(ws.path, base, patches) };
+    built = buildTree(ws.path, base, patches);
   } catch (err) {
     if (err instanceof SeriesError) fail(err.message);
     throw err;
   }
+  writeWorkspaceMarker(ws.path, {
+    appId: v.appId, installationId: v.installationId, n: ws.n, base, baseCommit: built.baseCommit, patchesRev: rev, scratch: true,
+  });
+  return { ws, built };
 }
 
+/** Bind back the workspace this Terminal had, or detach the scratch one. */
 async function rebind(v: AppSourceView): Promise<void> {
-  if (v.workspace) await bindWorkspace(v.appId, { n: v.workspace.n }).catch(() => undefined);
+  await (v.workspace ? bindWorkspace(v.appId, { n: v.workspace.n }) : detachWorkspace(v.appId)).catch(() => undefined);
 }
 
 /** `dev patch activate [rev]`: base + series at `rev` (default: the last save), built fresh and installed. */
@@ -218,7 +258,7 @@ export async function activateRevision(app: string, rev?: string): Promise<Activ
   if (v.upstream?.commit && v.upstream.commit !== series.base.commit) {
     warn(`the series is based on ${series.base.commit.slice(0, 12)}, the install on ${v.upstream.commit.slice(0, 12)} — after an upstream update use aura dev update`);
   }
-  const { ws, built } = await candidate(v, series.base, readPatches(repo, series, commit!));
+  const { ws, built } = await candidate(v, series.base, readPatches(repo, series, commit!), commit!);
   try {
     if (!built.ok) return { status: 'needs-repair', failure: built, base: series.base };
     return await installWorkspace(v, ws.n, commit!);
@@ -268,9 +308,9 @@ export async function updateSeries(app: string, opts: { ref?: string; activate?:
       : resolveRemoteRef(base.repository!, v.upstream?.branch ?? 'HEAD');
   if (target === base.commit) return { status: 'current', commit: target };
   const newBase: SeriesBase = { ...base, commit: target };
-  const { ws, built } = await candidate(v, newBase, readPatches(repo, series!, 'HEAD'));
+  const { ws, built } = await candidate(v, newBase, readPatches(repo, series!, 'HEAD'), gitOut(repo, ['rev-parse', 'HEAD']));
   try {
-    if (!built.ok) return { status: 'needs-repair', failure: built, base: newBase };
+    if (!built.ok) return { status: 'needs-repair', failure: built, base: newBase, name: v.name };
     // Patch files regenerated on the new base (context lines moved), one commit.
     const r = saveSeries(repo, {
       app: series!.app, base: newBase, patches: exportPatches(ws.path, built.baseCommit),
@@ -280,6 +320,35 @@ export async function updateSeries(app: string, opts: { ref?: string; activate?:
     return await installWorkspace(v, ws.n, r.commit);
   } finally {
     await rebind(v);
+  }
+}
+
+const repairCommand = (appId: string, base: SeriesBase) => `aura dev patch start ${appId} --new --base ${base.commit.slice(0, 12)}`;
+
+/**
+ * Tell the owner an update left a patch in need of repair (D7): a
+ * notification in the desktop through the notifications API, sent with this
+ * Terminal's instance token. Best effort: the CLI output says it all too.
+ */
+export async function notifyNeedsRepair(appId: string, out: Extract<ActivateOutcome, { status: 'needs-repair' }>): Promise<boolean> {
+  const f = out.failure;
+  const n = String(f.failed.index + 1).padStart(4, '0');
+  const app = out.name && out.name !== appId ? `${out.name} (${appId})` : appId;
+  try {
+    await api.post('/api/notifications', {
+      title: `Patch needs repair: ${out.name ?? appId}`,
+      text: [
+        `${app}: patch ${n} "${f.failed.subject}" (${f.failed.file}) no longer applies to upstream ${out.base.commit.slice(0, 12)}.`,
+        f.conflicts.length ? `Conflicts in ${f.conflicts.join(', ')}.` : '',
+        'Nothing was installed; the current version keeps running.',
+        `Repair in a Terminal: ${repairCommand(appId, out.base)}, fix the conflict, git am --continue, aura dev patch save, aura dev patch activate.`,
+      ].filter(Boolean).join(' '),
+      priority: 'high',
+    });
+    return true;
+  } catch (err) {
+    warn(`could not notify the owner: ${(err as Error).message.split('\n')[0]}`);
+    return false;
   }
 }
 
@@ -297,7 +366,7 @@ function reportOutcome(appId: string, out: Awaited<ReturnType<typeof updateSerie
       process.exitCode = 1;
       warn(`needs repair: ${describeFailure(out.failure)}`);
       info(`nothing was installed; ${appId} keeps running as it is.`);
-      info(`repair: ${color.cyan(`aura dev patch start ${appId} --new --base ${out.base.commit.slice(0, 12)}`)}, fix the conflict, git am --continue, aura dev patch save, then activate`);
+      info(`repair: ${color.cyan(repairCommand(appId, out.base))}, fix the conflict, git am --continue, aura dev patch save, then activate`);
   }
 }
 
@@ -382,6 +451,19 @@ export function registerDevPatch(dev: Command): void {
     });
 
   patch
+    .command('clean [app]')
+    .option('--keep <n>', 'How many of the newest workspaces to keep, besides the bound one', '3')
+    .description('Delete old patch workspaces of the app (yours): all but the one bound here and the newest N.')
+    .action(async (app: string | undefined, o: { keep: string }) => {
+      const keep = Number(o.keep);
+      if (!Number.isInteger(keep) || keep < 0) fail('--keep takes a whole number from 0');
+      const appId = appFromArgOrCwd(app);
+      const r = await cleanWorkspaces(appId, keep);
+      if (!r.deleted.length) info(`nothing to delete — kept ${r.kept.join(', ') || '(none)'}`);
+      else ok(`deleted workspace(s) ${r.deleted.join(', ')} of ${r.appId}; kept ${r.kept.join(', ') || '(none)'}${r.detached ? ` (${r.detached} detached first)` : ''}`);
+    });
+
+  patch
     .command('activate [rev]')
     .option('--app <app>', 'The app (default: from this directory)')
     .description('Build base + the series at <rev> (default: the last save) fresh, install it (owner approval), restart, roll back on failure.')
@@ -397,6 +479,8 @@ export function registerDevPatch(dev: Command): void {
     .description('Apply the saved patches to a new upstream and activate; a patch that no longer applies is named and nothing is installed.')
     .action(async (app: string | undefined, o: { ref?: string; activate?: boolean }) => {
       const appId = appFromArgOrCwd(app);
-      reportOutcome(appId, await updateSeries(appId, o));
+      const out = await updateSeries(appId, o);
+      reportOutcome(appId, out);
+      if (out.status === 'needs-repair' && await notifyNeedsRepair(appId, out)) info('the owner was notified');
     });
 }

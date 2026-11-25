@@ -9,12 +9,13 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Command } from 'commander';
 import { registerDev } from '../src/commands/dev.js';
-import { appFromArgOrCwd, WORKSPACE_MARKER } from '../src/commands/dev-source.js';
-import { activateRevision, saveWorkspace, startWorkspace, updateSeries } from '../src/commands/dev-patch.js';
+import { appFromArgOrCwd, bindWorkspace, WORKSPACE_MARKER } from '../src/commands/dev-source.js';
+import { activateRevision, notifyNeedsRepair, saveWorkspace, startWorkspace, updateSeries } from '../src/commands/dev-patch.js';
 
 const ENV = ['AURA_SHELL_URL', 'OS_API_BASE', 'AURA_OS_URL', 'AURA_INSTANCE_TOKEN', 'APP_INSTANCE_ID', 'AURA_INSTANCE_ID', 'AURA_ADMIN_SESSION', 'AURA_ADMIN_CREDENTIAL'];
 const INST = 'com.aura.terminal-1';
@@ -81,7 +82,8 @@ function world() {
   git(upstream, 'init', '-q', '-b', 'main');
   git(upstream, 'add', '-A');
   git(upstream, 'commit', '-qm', 'one');
-  const installationId = `0000000${Math.floor(Math.random() * 9)}-1111-4222-8333-444444444444`;
+  // Unique per world: worlds share one patch-repo root.
+  const installationId = randomUUID();
   const wsRoot = join(root, 'workspaces');
   let highest = 0;
   let bound: number | null = null;
@@ -277,6 +279,66 @@ test('update: a compatible upstream keeps the patch and installs; a conflict nam
   assert.deepEqual(bad.failure.conflicts, ['status.js']);
   assert.equal(seen.filter((r) => r.url === `/api/apps/${APP}/activate`).length, activations, 'nothing was installed');
   assert.equal(git(repo, 'rev-parse', 'HEAD'), head, 'the saved series is unchanged');
-  assert.ok(readdirSync(w.wsRoot).length >= 3);
+  assert.deepEqual(readdirSync(w.wsRoot).sort(), ['1', '2'], 'both updates built in the one scratch workspace');
   assert.ok(existsSync(join(repo, 'patches', '0001-Status-shows-busy.patch')));
+});
+
+test('update conflict: the owner gets a notification naming the app, the patch, the conflict files and the repair command', async () => {
+  const w = world();
+  const seen = await fakeShell((r) => {
+    if (r.method === 'POST' && r.url === `/api/apps/${APP}/activate`) return [200, { ok: true, running: [] }];
+    if (r.method === 'POST' && r.url === '/api/notifications') return [201, { ok: true, notification: { id: 'n1' }, warnings: [] }];
+    return w.routes(r);
+  });
+  await savedChange(w);
+  const target = w.commitUpstream(STATUS.replace('"idle"', '"waiting"'), 'status waiting');
+  const bad = await quiet(() => updateSeries(APP));
+  assert.equal(bad.status, 'needs-repair');
+  if (bad.status !== 'needs-repair') return;
+  assert.equal(await quiet(() => notifyNeedsRepair(APP, bad)), true);
+  const sent = seen.filter((r) => r.url === '/api/notifications');
+  assert.equal(sent.length, 1);
+  const { title, text, priority } = sent[0]!.body as { title: string; text: string; priority: string };
+  assert.equal(title, 'Patch needs repair: Status');
+  assert.equal(priority, 'high');
+  assert.match(text, new RegExp(`Status \\(${APP.replace(/\./g, '\\.')}\\)`));
+  assert.match(text, /patch 0001 "Status shows busy" \(patches\/0001-Status-shows-busy\.patch\)/);
+  assert.match(text, /Conflicts in status\.js\./);
+  assert.match(text, new RegExp(`aura dev patch start ${APP.replace(/\./g, '\\.')} --new --base ${target.slice(0, 12)}`));
+});
+
+test('activate and update reuse one scratch build workspace; patch start never hands it out for editing', async () => {
+  const w = world();
+  const seen = await fakeShell((r) => {
+    if (r.method === 'POST' && r.url === `/api/apps/${APP}/activate`) return [200, { ok: true, running: [] }];
+    if (r.method === 'DELETE' && r.url.startsWith(`/api/instances/${INST}/app-workspace`)) return [200, { ok: true, removed: true }];
+    return w.routes(r);
+  });
+  await savedChange(w);
+  for (let i = 0; i < 3; i++) assert.equal((await quiet(() => activateRevision(APP))).status, 'installed');
+  const used = seen.filter((r) => r.url === `/api/apps/${APP}/activate`).map((r) => r.body['workspace']);
+  assert.deepEqual(used, [2, 2, 2]);
+  assert.deepEqual(readdirSync(w.wsRoot).sort(), ['1', '2']);
+  assert.match(readFileSync(join(w.wsRoot, '2', 'status.js'), 'utf-8'), /"busy"/, 'rebuilt from scratch each time');
+  const marker = JSON.parse(readFileSync(join(w.wsRoot, '2', '.git', WORKSPACE_MARKER), 'utf-8'));
+  assert.equal(marker.scratch, true);
+  assert.equal(w.bound(), 1, 'the working workspace is bound again');
+
+  // The scratch one bound here (as a Terminal without its own would get the highest): start makes a fresh one.
+  const repo = join(process.env['AURA_PATCHES_DIR']!, w.installationId);
+  assert.equal(git(repo, 'config', '--get', 'aura.default.scratch'), '2');
+  await bindWorkspace(APP, { n: 2 });
+  const fresh = await quiet(() => startWorkspace(APP));
+  assert.deepEqual([fresh.n, fresh.created], [3, true]);
+  assert.match(readFileSync(join(fresh.path, 'status.js'), 'utf-8'), /"busy"/);
+});
+
+test('patch clean: calls the clean route with --keep and the app', async () => {
+  const seen = await fakeShell((r) => (r.url === `/api/instances/${INST}/app-workspace/clean`
+    ? [200, { ok: true, appId: APP, installationId: 'x', kept: [4, 5], deleted: [1, 2, 3], detached: 0 }] : undefined));
+  const program = new Command();
+  program.exitOverride();
+  registerDev(program);
+  await quiet(() => program.parseAsync(['node', 'aura', 'dev', 'patch', 'clean', APP, '--keep', '1']));
+  assert.deepEqual(seen.map((r) => [r.method, r.url, r.body]), [['POST', `/api/instances/${INST}/app-workspace/clean`, { app: APP, keep: 1 }]]);
 });

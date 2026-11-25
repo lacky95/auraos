@@ -17,7 +17,7 @@ const ROWS = ['✻ Thinking… (esc to interrupt)', 'secret: hunter2'];
 function route(opts: { grants?: Record<string, string[]>; listed?: string[] | null; now?: () => number } = {}) {
   const grants = opts.grants ?? { [TX]: ['terminal.sessions.list', 'terminal.screen.read'] };
   const access = createTerminalAccess({
-    scopeOf: async (appId: string) => (appId === TERMINAL ? 'system' : 'user'),
+    systemCopy: async (appId: string) => appId === TERMINAL,
     authorize: async (appId: string, permission: string) => (grants[appId] ?? []).includes(permission),
     sessionGrant: async () => null,
     sessionLife: async () => null,

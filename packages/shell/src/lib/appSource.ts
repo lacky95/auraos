@@ -6,6 +6,7 @@
  *
  *   GET|POST /api/instances/<inst>/app-source      status (+ the source view in the caller)
  *   POST|DELETE /api/instances/<inst>/app-workspace  bind / detach a writable workspace
+ *   POST /api/instances/<inst>/app-workspace/clean  delete old workspaces (keep the bound one + newest N)
  *   POST /api/apps/<id>/source-mode                 open (owner approval) or close
  *   POST /api/apps/<id>/activate                    install a workspace or the rollback tree
  *
@@ -17,7 +18,7 @@
  * guardrail for agents, not a boundary, until Phase 5 (D30). The API itself
  * respects it.
  */
-import { existsSync } from 'node:fs';
+import { existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import * as core from '@aura/core';
 import type {
@@ -46,6 +47,8 @@ export interface AppSourceDeps {
     sourceMode(appId: string): SourceModeInfo | null;
     instance(instanceId: string): { appId: string; sandbox?: string } | undefined;
     instancesOf(appId: string): string[];
+    /** AppManager `isTrustedSystemCopy`: the system copy, or the owner's approved overlay of it. */
+    trustedSystemCopy(appId: string): boolean;
   };
   mounts: {
     capable(): { ok: boolean; reason?: string };
@@ -53,6 +56,8 @@ export interface AppSourceDeps {
     add(instanceId: string, spec: { targetAppId: string; mode?: 'ro' | 'rw'; workspace?: string }): Promise<AuraMount>;
     remove(instanceId: string, mountId: string): Promise<void>;
     rebindTarget(appId: string): Promise<unknown>;
+    /** Live binds of a workspace dir (relative to dataDir), in every instance. */
+    workspaceBinds(subpath: string): Array<{ instanceId: string; mountId: string }>;
   };
   /** The App Host installation of an app in a scope (`apphost:install:*`), or null. */
   installationId(appId: string, scope: string): Promise<string | null>;
@@ -71,6 +76,7 @@ export function liveAppSourceDeps(authenticate: AppSourceDeps['authenticate'], a
       sourceMode: (id) => mgr.sourceModeOf(id),
       instance: (id) => mgr.getInstance(id),
       instancesOf: (appId) => mgr.getInstancesByApp(appId).map((i) => i.instanceId),
+      trustedSystemCopy: (appId) => mgr.isTrustedSystemCopy(appId),
     },
     mounts: mgr.mounts,
     installationId: async (appId, scope) => (await core.getAppHostServices().registry.findInstallation(appId, scope))?.installationId ?? null,
@@ -92,11 +98,14 @@ export function resolveApp(deps: AppSourceDeps, ref: unknown): ScopedApp | Respo
   return json({ error: 'app-not-found', message: `no installed app has the id or name "${ref}"` }, 404);
 }
 
-/** Whether the active copy is a user-scope overlay of a system app. */
+/**
+ * Whether the active copy is the owner's overlay of a system app: a user-scope
+ * copy an approved activation linked to the system installation (core
+ * AppHostStore `approvedOverlay`). A same-id copy from a store or `aura dev`
+ * is its own app, with its own patches.
+ */
 function isOverlay(deps: AppSourceDeps, app: ScopedApp): boolean {
-  if (app.scopeId === 'system') return false;
-  const system = deps.apps.scopes().find((s) => s.id === 'system');
-  return !!system && existsSync(join(system.appsDir, app.id, 'app.manifest.json'));
+  return app.scopeId === 'user' && deps.apps.trustedSystemCopy(app.id);
 }
 
 /**
@@ -143,12 +152,28 @@ function consumer(deps: AppSourceDeps, instanceId: string | undefined): string |
 /**
  * A writable source view of an open app goes only to the owner's own
  * Terminal (or the owner): write access to another app's files is the
- * owner's (Q30), as for `aura mount --wr`.
+ * owner's (Q30), as for `aura mount --wr`. The Terminal's approved overlay
+ * is still the owner's Terminal.
  */
 function mayWrite(principal: AccessPrincipal, deps: AppSourceDeps): boolean {
   if (principal.kind === 'user' || principal.kind === 'operator') return true;
   return principal.kind === 'instance' && principal.appId === 'com.aura.terminal'
-    && deps.apps.get('com.aura.terminal')?.scopeId === 'system';
+    && deps.apps.trustedSystemCopy('com.aura.terminal');
+}
+
+/**
+ * Whose workspace an activation installs (multi-user rule): a caller
+ * activates its own user's workspaces; the owner (the owner's login or the
+ * host operator) may name any user's. Workspaces are keyed by the
+ * installation and that user, as R2 creates them.
+ */
+function workspaceOwner(principal: AccessPrincipal, requested: unknown): string | Response {
+  const own = actingUser(principal);
+  if (requested === undefined || requested === own) return own;
+  if (typeof requested !== 'string' || !requested) return json({ error: 'invalid-user', message: 'user must be a user id' }, 400);
+  const owner = principal.kind === 'operator' || (principal.kind === 'user' && principal.role === 'owner');
+  if (!owner) return json({ error: 'forbidden', message: 'only the owner activates another user\'s workspace' }, 403);
+  return requested;
 }
 
 const sourcePath = (appId: string) => `${core.MOUNT_ROOT_PATH}/${appId}`;
@@ -219,6 +244,7 @@ export async function appSourceStatus(request: Request, instanceId: string | und
     source: { path, writable: view?.mode === 'rw', mounted: !!view },
     workspace: work ? { n: workNumber(work), path: work.containerPath } : null,
     workspaces,
+    user: userId,
     next,
   });
 }
@@ -274,6 +300,48 @@ export async function detachWorkspace(request: Request, instanceId: string | und
   try { await deps.mounts.remove(inst, bound.id); }
   catch (err) { return json({ error: 'mount-failed', message: (err as Error).message }, 409); }
   return json({ ok: true, removed: true });
+}
+
+/**
+ * `aura dev patch clean`: delete this user's old workspaces of the app's
+ * installation. Kept: the one bound in the calling instance and the newest
+ * `keep` (default 3) by number. A workspace bound in another instance is
+ * detached there first; then its directory goes. Nothing else is touched.
+ */
+export async function cleanWorkspaces(request: Request, instanceId: string | undefined, deps: AppSourceDeps): Promise<Response> {
+  const principal = await deps.authenticate(request);
+  if (principal instanceof Response) return principal;
+  const inst = consumer(deps, instanceId);
+  if (inst instanceof Response) return inst;
+  const body = await readJson(request);
+  if (body instanceof Response) return body;
+  const app = resolveApp(deps, body['app']);
+  if (app instanceof Response) return app;
+  const keep = body['keep'] ?? 3;
+  if (!Number.isInteger(keep) || (keep as number) < 0 || (keep as number) > 9999) {
+    return json({ error: 'invalid-keep', message: 'keep must be a whole number from 0' }, 400);
+  }
+  const { key } = await patchInstallation(deps, app);
+  if (!key) return json({ error: 'no-installation', message: `${app.id} has no installation record` }, 409);
+  const userId = actingUser(principal);
+  const all = core.listWorkspaces(deps.dataDir, userId, key);
+  const bound = deps.mounts.list(inst).find((m) => m.id === `${app.id}:work`);
+  const boundHere = bound?.workspace?.startsWith(`aura/workspaces/${userId}/${key}/`) ? workNumber(bound) : null;
+  const kept = new Set<number>([...(boundHere ? [boundHere] : []), ...(keep ? all.slice(-(keep as number)) : [])]);
+  const deleted: number[] = [];
+  let detached = 0;
+  for (const n of all) {
+    if (kept.has(n)) continue;
+    const subpath = core.workspaceSubpath(userId, key, n);
+    try {
+      for (const b of deps.mounts.workspaceBinds(subpath)) { await deps.mounts.remove(b.instanceId, b.mountId); detached++; }
+      rmSync(join(deps.dataDir, subpath), { recursive: true, force: true });
+      deleted.push(n);
+    } catch (err) {
+      return json({ error: 'clean-failed', message: `workspace ${n}: ${(err as Error).message}`, deleted, detached }, 409);
+    }
+  }
+  return json({ ok: true, appId: app.id, installationId: key, kept: all.filter((n) => kept.has(n)), deleted, detached });
 }
 
 // ── R3: open and close ──────────────────────────────────────────────────────
@@ -340,9 +408,11 @@ export async function activatePrepared(request: Request, appId: string | undefin
   } else {
     const n = body['workspace'];
     if (!Number.isInteger(n)) return json({ error: 'invalid-workspace', message: 'pass workspace: <n>, or rollback: true' }, 400);
+    const user = workspaceOwner(principal, body['user']);
+    if (user instanceof Response) return user;
     const { key } = await patchInstallation(deps, app);
     if (!key) return json({ error: 'no-installation', message: `${app.id} has no installation record` }, 409);
-    try { tree = join(deps.dataDir, core.workspaceSubpath(actingUser(principal), key, n as number)); }
+    try { tree = join(deps.dataDir, core.workspaceSubpath(user, key, n as number)); }
     catch (err) { return json({ error: 'invalid-workspace', message: (err as Error).message }, 400); }
     if (!existsSync(tree)) return json({ error: 'no-workspace', message: `workspace ${String(n)} of ${app.id} does not exist` }, 404);
   }

@@ -584,6 +584,12 @@ export class NexusManager {
       }
 
       yield { type: 'install.start' };
+      // An approved patch activation of a system app (or of its overlay) is
+      // its overlay: linked to the system installation, it keeps that app's
+      // trust (D29, D45). Decided before the files move; anything else clears it.
+      const overlayOf = opts.action === 'app.patch.activate' && this.hostLifecycle
+        ? await this.hostLifecycle.overlayLinkFor(manifest.id, targetScope, existsSync(join(installer.appsDir, manifest.id)))
+        : null;
       let record: InstallRecord;
       this.hostLifecycle?.beginInstall(manifest.id, targetScope);
       try {
@@ -593,9 +599,14 @@ export class NexusManager {
           installer.restoreRetainedData(manifest.id, restore.installation!.installationId);
         }
         record = await installer.install(stagingDir, manifest, resolved, link, { keepProvenance: opts.action === 'app.patch.activate' });
+        // A patch activation keeps the release's provenance on the record: the
+        // installation's source is that record's, as every later sync reads it.
+        const landed: AppIdentityFacts = opts.action === 'app.patch.activate'
+          ? { ...hostFacts, source: { kind: record.source, ref: record.ref, ...(record.digest ? { digest: record.digest } : {}) } }
+          : hostFacts;
         // Before the registry reload below, so its host guard accepts this manifest.
         try {
-          await this.hostLifecycle?.completeInstall(hostFacts, restore, manifest.hosts.map((h) => h.name));
+          await this.hostLifecycle?.completeInstall(landed, restore, manifest.hosts.map((h) => h.name), { overlayOf });
         } catch (err) {
           console.warn(`[nexus] app host update for ${manifest.id} failed: ${(err as Error).message}`);
         }

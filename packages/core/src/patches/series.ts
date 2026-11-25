@@ -24,9 +24,10 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { parse, stringify } from 'yaml';
 import { z } from 'zod';
+import { MOUNT_ROOT_PATH, WORK_DIR_NAME } from '../app-manager/MountManager.js';
 
 export const SERIES_FILE = 'aura-patches.yaml';
 export const PATCHES_DIR = 'patches';
@@ -60,8 +61,27 @@ export class SeriesError extends Error {}
 // Nobody can answer a credential prompt here.
 const GIT_ENV = { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' };
 
+/** Where app patch repos live (`aura dev`, one per installation). */
+export const patchesRoot = (): string => process.env['AURA_PATCHES_DIR'] ?? '/data/patches';
+
+/**
+ * Git refuses a repo another user owns ("dubious ownership"). The shell
+ * creates workspace directories (as root, on the app-data volume) that the
+ * Terminal's git then works in, and either side may open a patch repo the
+ * other made. Exactly these trees are trusted, each by its own path on the
+ * command line (`-c safe.directory=<top>`: protected config, written nowhere):
+ * a patch repo, a workspace bound into a Terminal (`/mnt/aura/work/<app>`)
+ * and a workspace in the shell (`<dataDir>/aura/workspaces/...`). Any other
+ * repo keeps git's check.
+ */
+export function safeDirectoryArgs(dir: string): string[] {
+  const top = resolve(dir);
+  const roots = [patchesRoot(), join(MOUNT_ROOT_PATH, WORK_DIR_NAME), join(process.env['AURA_DATA_DIR'] ?? '/data', 'aura', 'workspaces')];
+  return roots.some((r) => top.startsWith(`${resolve(r)}/`)) ? ['-c', `safe.directory=${top}`] : [];
+}
+
 function git(cwd: string, args: string[], opts: { timeout?: number; env?: NodeJS.ProcessEnv } = {}): string {
-  return execFileSync('git', ['-C', cwd, ...args], {
+  return execFileSync('git', [...safeDirectoryArgs(cwd), '-C', cwd, ...args], {
     stdio: ['ignore', 'pipe', 'pipe'], timeout: opts.timeout ?? 60_000, env: opts.env ?? GIT_ENV, maxBuffer: 64 * 1024 * 1024,
   }).toString();
 }

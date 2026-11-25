@@ -7,13 +7,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { chownSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
   applySeries, baseCommitIn, buildTree, checkoutBase, exportPatches, formatSeries, initRepo, parseSeries,
-  readPatches, readSeries, saveSeries, SERIES_FILE, SeriesError,
+  readPatches, readSeries, safeDirectoryArgs, saveSeries, SERIES_FILE, SeriesError,
 } from '../dist/patches/series.js';
 
 const git = (cwd, ...args) => execFileSync('git', ['-C', cwd, '-c', 'user.name=t', '-c', 'user.email=t@t', ...args],
@@ -150,4 +150,40 @@ test('a base with path: the subdirectory is the root, the same base gives the sa
   const r = buildTree(join(u.root, 'cand'), { ...base, commit: next }, patches);
   assert.equal(r.ok, true);
   assert.match(readFileSync(join(u.root, 'cand', 'status.js'), 'utf-8'), /"busy"[\s\S]*"v3"/);
+});
+
+// Repos the shell creates (as root) and the Terminal opens, or the other way
+// round: git trusts the patch repos and workspaces, each by its own path, and
+// nothing else (safe.directory on the command line, never in a config file).
+test('git ownership: a patch repo or workspace another user owns works; any other repo keeps git\'s check', { skip: process.getuid?.() !== 0 && 'needs root to chown' }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'aura-own-'));
+  const before = process.env.AURA_PATCHES_DIR;
+  process.env.AURA_PATCHES_DIR = join(root, 'patches');
+  try {
+    const chownAll = (dir) => execFileSync('chown', ['-R', '4321:4321', dir]);
+    const u = upstream();
+    // A patch repo made by someone else (uid 4321).
+    const repo = join(root, 'patches', '00000000-1111-4222-8333-444444444444');
+    mkdirSync(repo, { recursive: true });
+    const ws = join(root, 'ws');
+    checkoutBase(ws, { repository: u.repo, commit: u.base });
+    git(ws, 'checkout', '-q', '-b', 'patches');
+    writeFileSync(join(ws, 'status.js'), readFileSync(join(ws, 'status.js'), 'utf-8').replace('"idle"', '"busy"'));
+    git(ws, 'commit', '-qam', 'busy');
+    saveSeries(repo, { app: 'io.test.app', base: { repository: u.repo, commit: u.base }, patches: exportPatches(ws, u.base), message: 'save' });
+    chownAll(repo);
+    const plain = () => execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    assert.throws(plain, /dubious ownership/, 'git refuses it by default');
+    assert.deepEqual(safeDirectoryArgs(repo), ['-c', `safe.directory=${repo}`]);
+    assert.equal(readSeries(repo, 'HEAD').patches.length, 1, 'the series library opens it');
+
+    // The same repo outside the trusted roots stays refused.
+    assert.deepEqual(safeDirectoryArgs(ws), []);
+    chownAll(ws);
+    assert.throws(() => exportPatches(ws, u.base), /dubious ownership/);
+    assert.deepEqual(safeDirectoryArgs(join(root, 'patches')), [], 'the root itself is no repo');
+    assert.deepEqual(safeDirectoryArgs(join(root, 'patches-evil', 'x')), [], 'a sibling with the same prefix');
+  } finally {
+    if (before === undefined) delete process.env.AURA_PATCHES_DIR; else process.env.AURA_PATCHES_DIR = before;
+  }
 });

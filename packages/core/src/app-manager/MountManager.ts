@@ -328,6 +328,15 @@ export class MountManager {
     return [...(this.mounts.get(instanceId)?.values() ?? [])];
   }
 
+  /** The live binds of a patch workspace (`work` mounts of `subpath`), in every consumer. */
+  workspaceBinds(subpath: string): Array<{ instanceId: string; mountId: string }> {
+    const out: Array<{ instanceId: string; mountId: string }> = [];
+    for (const [consumer, set] of this.mounts) {
+      for (const m of set.values()) if (m.kind === 'work' && m.workspace === subpath) out.push({ instanceId: consumer, mountId: m.id });
+    }
+    return out;
+  }
+
   /**
    * The live truth, read from the kernel rather than our cache. The shell's own
    * `/data` is the volume root, so every instance's `.mnt/<app>` bind is visible

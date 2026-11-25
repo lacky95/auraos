@@ -29,6 +29,7 @@ const mgr = {
   getInstance: (id: string) => instances[id],
   getInstancesByApp: (appId: string) => Object.values(instances).filter((i) => i.appId === appId),
   getManifest: (id: string) => (id === 'com.aura.settings' ? { scopeId: 'system' } : { scopeId: 'user' }),
+  isTrustedSystemCopy: (id: string) => id === 'com.aura.settings',
 };
 
 // One live owner login session; the rest are expired, revoked or forged.
