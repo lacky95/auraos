@@ -46,7 +46,7 @@ function fakeManager() {
     savePoolIds() {},
     interfaces: { registerInstance: (i) => registered.interfaces.push(i.instanceId) },
     providers: { registerInstance: (i) => registered.providers.push(i.instanceId) },
-    runners: { container: { spawn: async (id, appId, port, m, ctx) => { spawned.push({ id, ctx }); return 1000 + spawned.length; } } },
+    runners: { container: { spawn: async (id, appId, port, m, ctx) => { spawned.push({ id, ctx }); return 1000 + spawned.length; }, lifecycleStatus: () => null } },
     runnerOf: () => ({ callLifecycle: async () => undefined, getHost: () => '127.0.0.1', onExit() {} }),
     // D19: every instance claims its own slot (lifecycle.claimSlot); the label is per slot.
     async claimHostSlot(appId, instanceId) { slots.set(instanceId, `shopx${slots.size + 1}`); },

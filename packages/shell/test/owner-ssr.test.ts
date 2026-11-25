@@ -236,11 +236,19 @@ const deps = {
     tokens: { verify: (t: string) => TOKENS[t] ?? null },
     getInstance: (id: string) => instances[id],
     getManifest: (id: string) => (installedScope[id] ? { scopeId: installedScope[id] } : undefined),
+    // Track P: the system copy (no approved overlay here; overlays are off in v1).
+    isTrustedSystemCopy: (id: string) => installedScope[id] === 'system',
   },
   ownerServices: (async () => svc) as unknown as GatewayOwnerDeps['services'],
   apiKeys: { verify: async () => null },
 } as unknown as AuthDeps;
 
+/** Flip the signature's first character: 6 full MAC bits (the last one is mostly padding and could still verify). */
+const forgedSig = (claim: string) => {
+  const [prefix, payload, sig = ''] = claim.split('.');
+  assert.ok(sig.length > 1);
+  return `${prefix}.${payload}.${sig[0] === 'A' ? 'B' : 'A'}${sig.slice(1)}`;
+};
 const settingsClaim = (over: Record<string, string> = {}) =>
   signOwnerSsrClaim({ appId: SETTINGS, installationId: 'inst-settings', instanceId: 'com.aura.settings-1', ...OWNER, ...over });
 const shellRequest = (path: string, headers: Record<string, string>, method = 'GET') =>
@@ -281,7 +289,7 @@ test('authenticate(): the claim is ignored without the right token, session, sco
     ['the user-scope installation', '/api/apps', { authorization: 'Bearer aura1.settings', [OWNER_SSR_HEADER]: settingsClaim({ installationId: 'inst-settings-user' }) }, 'GET', 'instance'],
     ['a mutation', '/api/admin/apps/enabled', { authorization: 'Bearer aura1.settings', [OWNER_SSR_HEADER]: settingsClaim() }, 'POST', 'instance'],
     ['a path outside Settings\' scope', '/api/nexus/installed', { authorization: 'Bearer aura1.settings', [OWNER_SSR_HEADER]: settingsClaim() }, 'GET', 'instance'],
-    ['a forged signature', '/api/apps', { authorization: 'Bearer aura1.settings', [OWNER_SSR_HEADER]: settingsClaim().replace(/.$/, (c) => (c === 'A' ? 'B' : 'A')) }, 'GET', 'instance'],
+    ['a forged signature', '/api/apps', { authorization: 'Bearer aura1.settings', [OWNER_SSR_HEADER]: forgedSig(settingsClaim()) }, 'GET', 'instance'],
   ];
   for (const [why, path, headers, method, kind] of cases) {
     assert.equal((await who(path, headers, method)).kind, kind, why);

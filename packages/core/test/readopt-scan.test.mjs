@@ -87,7 +87,7 @@ test('a failed scan is null ("unknown"), never an empty list ("no survivors")', 
 // ── AppManager.adoptOrphans ────────────────────────────────────────────────
 
 function fakeManager(records, { pooled = [], running = [] } = {}) {
-  const calls = { registered: [], tokens: [], exits: [], providers: [] };
+  const calls = { registered: [], tokens: [], exits: [], providers: [], measured: [] };
   const fake = {
     instances: new Map(),
     nextInstanceNum: new Map(),
@@ -106,6 +106,7 @@ function fakeManager(records, { pooled = [], running = [] } = {}) {
     },
     loadPoolIds: () => new Set(pooled),
     handleUnexpectedExit: () => {},
+    measureAdopted: async (id) => { calls.measured.push(id); },
   };
   return { fake, calls, adopt: () => AppManager.prototype.adoptOrphans.call(fake) };
 }
@@ -137,6 +138,7 @@ test('owner label cases: labelled, unlabelled (pre-owner or claimed pool member)
   assert.deepEqual(calls.tokens, [['com.aura.terminal-3', 'n3']]);
   assert.equal(calls.registered.length, 4);
   assert.equal(calls.exits.length, 4, 'every adopted container has its exit watcher');
+  assert.equal(calls.measured.length, 4, 'every adopted container gets the lifecycle checks again (F0a)');
   assert.equal(fake.nextInstanceNum.get('com.aura.terminal'), 5, 'new spawns never reuse an adopted name');
 });
 
@@ -152,6 +154,7 @@ test('a late pass (reconciler) skips instances already tracked or still the runn
   assert.equal(fake.instances.get('com.aura.docs'), tracked, 'untouched');
   assert.equal(fake.instances.has('com.aura.terminal-2'), false, 'mid-stop: not adopted back');
   assert.deepEqual(calls.registered, ['com.aura.notepad']);
+  assert.deepEqual(calls.measured, ['com.aura.notepad']);
 });
 
 test('while the survivors are unknown, sidecars are never reaped', async () => {

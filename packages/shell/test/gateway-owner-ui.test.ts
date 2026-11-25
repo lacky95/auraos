@@ -406,7 +406,7 @@ test('gateway: no owner claim and no Authorization for anyone else', async () =>
     gatewayCtx(SETTINGS, 'inst-settings-user'),
     gatewayCtx(SETTINGS, 'inst-settings', 's-revoked'),
   ]) {
-    const forged = signGatewayClaim(claim(settings, 'GET', '/api/admin/grants', { owner: OWNER })).replace(/.$/, 'x');
+    const forged = signGatewayClaim(claim(settings, 'GET', '/api/admin/grants', { owner: OWNER })).replace(/\.([^.])([^.]*)$/, (_m, c: string, rest: string) => `.${c === 'A' ? 'B' : 'A'}${rest}`); // first signature char: the last one is partly padding bits
     const out = await forwarded(c, {
       authorization: 'Bearer aura-admin1.abc.def', [GATEWAY_IDENTITY_HEADER]: forged, 'x-aura-owner': 'u-owner',
     });
