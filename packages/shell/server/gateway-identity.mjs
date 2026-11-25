@@ -25,7 +25,8 @@ export const GATEWAY_CLAIM_TTL_S = 30;
  */
 export const OWNER_UI_APPS = Object.freeze({
   'com.aura.settings': Object.freeze({
-    groups: Object.freeze(['activities', 'admin', 'apps', 'instances', 'interfaces', 'kv', 'os', 'scopes']),
+    // `notifications`: the owner reads them through Settings (core notifications `OwnerCaller`).
+    groups: Object.freeze(['activities', 'admin', 'apps', 'instances', 'interfaces', 'kv', 'notifications', 'os', 'scopes']),
     // Users & Identities. Never the `auth` group: password routes stay in the shell's dialog.
     routes: Object.freeze(['/api/auth/account', '/api/auth/sessions/revoke-others']),
   }),

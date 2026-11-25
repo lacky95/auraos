@@ -12,6 +12,7 @@ import { handleAppGateway } from '../server/app-gateway.mjs';
 import { ownerUiCovers, signGatewayClaim, verifyGatewayClaim } from '../server/gateway-identity.mjs';
 import { createDecide } from '../src/lib/access/decide.ts';
 import { enforceGateway } from '../src/lib/access/gatewayCaller.ts';
+import { runAfterResponse } from '../src/lib/afterResponse.ts';
 import type { GatewayOwnerDeps } from '../src/lib/access/identify.ts';
 import type { ObserverManager } from '../src/lib/access/observer.ts';
 import type { RouteAccessManifest } from '../src/lib/access/types.ts';
@@ -97,15 +98,35 @@ const OWNER_ROUTES: Array<[string, string, string]> = [
 test('owner through system Settings: owner routes are allowed, and the audit names owner and app', async () => {
   audits.length = 0;
   for (const [method, path, route] of OWNER_ROUTES) {
-    assert.equal(await enforce(apiCtx(settings, method, path, route)), null, `${method} ${path}`);
+    const c = apiCtx(settings, method, path, route);
+    assert.equal(await enforce(c), null, `${method} ${path}`);
+    runAfterResponse(c.request, 200);
   }
+  await new Promise((r) => setImmediate(r));
   assert.equal(audits.length, 1, 'mutations only');
   assert.deepEqual(audits[0], {
     by: { kind: 'user', userId: OWNER.userId, session: 's-live' },
     action: 'gateway.owner-ui',
     target: '/api/admin/apps/enabled',
-    detail: { method: 'POST', through: SETTINGS, instance: 'com.aura.settings-1' },
+    outcome: 'ok',
+    detail: { method: 'POST', status: 200, through: SETTINGS, instance: 'com.aura.settings-1' },
   });
+});
+
+test('the owner-action audit is written after the route, with its final status', async () => {
+  audits.length = 0;
+  const [method, path, route] = OWNER_ROUTES[1]!;
+  const refused = apiCtx(settings, method, path, route);
+  assert.equal(await enforce(refused), null);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(audits.length, 0, 'nothing is recorded before the route answers');
+  runAfterResponse(refused.request, 403);
+  runAfterResponse(refused.request, 200);   // once per request
+  const failed = apiCtx(settings, method, path, route);
+  assert.equal(await enforce(failed), null);
+  runAfterResponse(failed.request, 500);
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(audits.map((a) => [a.outcome, a.detail?.['status']]), [['denied', 403], ['failed', 500]]);
 });
 
 test('the same call from an ordinary app is refused, even with an owner claim', async () => {

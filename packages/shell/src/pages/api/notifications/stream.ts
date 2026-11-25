@@ -3,6 +3,7 @@ import type { APIRoute } from 'astro';
 import * as core from '@aura/core';
 import { viewerFor } from '../../../lib/clientSession.js';
 import { notificationCaller } from '../../../lib/notificationCaller.js';
+import { followSession, streamSessionOf } from '../../../lib/streamSession.ts';
 
 /**
  * Live notification feed (SSE) with catch-up.
@@ -40,6 +41,10 @@ import { notificationCaller } from '../../../lib/notificationCaller.js';
  *     with heartbeats only);
  *   - admin sessions: everything.
  * An invalid credential → 401.
+ *
+ * A stream opened on a sign-in (the desktop's login, an App Host frame, an
+ * admin session) ends when that sign-in is revoked or expires
+ * (lib/streamSession.ts); the client reconnects through the checks above.
  */
 const EVENT_NAMES = [
   'created', 'updated', 'displayed', 'seen', 'resolved', 'removed', 'interacted',
@@ -65,6 +70,8 @@ let nextStreamNo = 1;
 export const GET: APIRoute = async ({ request, url }) => {
   const principal = await notificationCaller(request);
   if (principal instanceof Response) return principal;
+  // The sign-in this stream was opened on (the caller is the one resolver's principal).
+  const session = streamSessionOf(request, principal as core.Principal);
   const since = (request.headers.get('last-event-id') ?? url.searchParams.get('since') ?? '').trim();
   const svc = core.getNotificationService();
   // Access is resolved per event (cached for a second), so a lock / unlock
@@ -125,9 +132,17 @@ export const GET: APIRoute = async ({ request, url }) => {
         return [`notification:${event}`, fn] as const;
       });
 
-      const heartbeat = setInterval(() => write(': hb\n\n'), 10_000);
+      const end = () => {
+        if (closed) return;
+        cleanup();
+        try { controller.close(); } catch { /* already closed */ }
+      };
+      // The sign-in this stream was opened on: revoked or expired ends it.
+      const following = session ? followSession(session, end) : null;
+      const heartbeat = setInterval(() => { following?.recheck(); write(': hb\n\n'); }, 10_000);
       cleanup = () => {
         closed = true;
+        following?.stop();
         clearInterval(heartbeat);
         for (const [type, fn] of handlers) bus.off(type, fn);
       };

@@ -349,12 +349,21 @@ export function viewFor(rec: StoredNotification, access: Access): NotificationVi
 }
 
 /** Access without any lookups — for principals that need none (tests, in-process). */
+/**
+ * The owner's read access: everything, unless a screen came along (the
+ * desktop's own client session), which keeps its lock view.
+ */
+export function ownerAccess(v: NotificationViewer, settings: NotificationSettings = DEFAULT_NOTIFICATION_SETTINGS): Access {
+  return v.screen ? { kind: 'screen', lock: v.screen.lock, lockscreen: settings.lockscreen } : { kind: 'full' };
+}
+
 export function staticAccess(viewer: ViewerInput, settings: NotificationSettings = DEFAULT_NOTIFICATION_SETTINGS, grant: ReadGrant | null = null): Access {
   if (viewer === undefined) return { kind: 'full' };
   const v: NotificationViewer = isViewer(viewer) ? viewer : { principal: viewer };
   const p = v.principal;
   if (p.kind === 'system') return isSystemCaller(p) ? { kind: 'full' } : { kind: 'none' };
   if (p.kind === 'admin') return { kind: 'full' };
+  if (p.kind === 'user') return ownerAccess(v, settings);
   if (p.kind === 'instance') return { kind: 'principal', own: `app:${p.appId}`, grant };
   if (p.kind === 'apiKey') return { kind: 'principal', own: `key:${p.keyId}`, grant };
   if (v.screen) return { kind: 'screen', lock: v.screen.lock, lockscreen: settings.lockscreen };

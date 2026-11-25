@@ -2,6 +2,7 @@ import * as core from '@aura/core';
 import type { AccessPrincipal, AdminPrincipal, AuditInput, UserPrincipal } from '@aura/core';
 import { accessMode } from '../../../server/access-mode.mjs';
 import { gatewayClaimOf } from '../../../server/gateway-identity.mjs';
+import { afterResponse } from '../afterResponse.ts';
 import { decide as liveDecide } from './decide.ts';
 import { readJsonBody, refused, TOO_LARGE } from './enforce.ts';
 import { gatewayInstance, gatewayOwner, type GatewayOwnerDeps } from './identify.ts';
@@ -21,6 +22,8 @@ import type { AccessLabel, AccessTarget, AccessVia, Decide, RequestSnapshot, Rou
  *
  * A trusted system UI (D45, identify.ts `gatewayOwner`) is checked a second
  * time, as the owner acting through it, when its instance rules refuse a call.
+ * Its mutations are audited once the route has answered, with that outcome
+ * (lib/afterResponse.ts, run by the middleware).
  * `gatewayOwner` holds the one scope decision (the API groups and routes its
  * OWNER_UI_APPS entry lists), and here it never reaches a login session, a
  * shell screen or another app's upstream. Freshness and approvals on a rule
@@ -148,20 +151,28 @@ export async function enforceGateway(
   // gateway forwards that bearer for a trusted UI alone), it is that session.
   const admin = await gatewayAdmin(ctx.request, deps);
   if (!allowed(await (admin ? decideAs(admin, 'admin-session') : decideAs(owner)))) return refused(403, 'gateway-denied');
-  if (method !== 'GET' && method !== 'HEAD') await recordOwnerAction(deps.audit ?? liveAudit, owner, route, method);
+  if (method !== 'GET' && method !== 'HEAD') {
+    const audit = deps.audit ?? liveAudit;
+    afterResponse(ctx.request, (status) => recordOwnerAction(audit, owner, route, method, status));
+  }
   return null;
 }
 
-/** Audit: who (the owner's session) and through which app. Never blocks the call. */
+/** The audit outcome of a route's final status. */
+const outcomeOf = (status: number): 'ok' | 'denied' | 'failed' =>
+  status < 400 ? 'ok' : status === 401 || status === 403 ? 'denied' : 'failed';
+
+/** Audit: who (the owner's session), through which app, and how the route answered. Never blocks the call. */
 async function recordOwnerAction(
-  audit: NonNullable<GatewayEnforceDeps['audit']>, owner: UserPrincipal, route: string, method: string,
+  audit: NonNullable<GatewayEnforceDeps['audit']>, owner: UserPrincipal, route: string, method: string, status: number,
 ): Promise<void> {
   try {
     await audit({
       by: core.userAttribution(owner),
       action: 'gateway.owner-ui',
       target: route,
-      detail: { method, through: owner.through?.appId, instance: owner.through?.instanceId },
+      outcome: outcomeOf(status),
+      detail: { method, status, through: owner.through?.appId, instance: owner.through?.instanceId },
     });
   } catch (err) {
     console.warn(`[gateway] audit write failed: ${(err as Error).message}`);

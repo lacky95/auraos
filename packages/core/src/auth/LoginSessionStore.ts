@@ -16,6 +16,7 @@
  */
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { Redis } from '@aura/kv-store';
+import { OsEventBus } from '../ipc/OsEventBus.js';
 import { deriveIdentitySubkey } from './identityKey.js';
 import {
   LOGIN_SESSION_PREFIX,
@@ -182,7 +183,9 @@ export class LoginSessionStore implements LoginSessions {
 
   async revoke(sessionId: string): Promise<boolean> {
     if (typeof sessionId !== 'string' || !SESSION_ID_RE.test(sessionId)) return false;
-    return (await this.redis().del(loginSessionKey(sessionId))) > 0;
+    const removed = (await this.redis().del(loginSessionKey(sessionId))) > 0;
+    if (removed) this.emitRevoked(1);
+    return removed;
   }
 
   revokeByUser(userId: string, opts: { except?: string } = {}): Promise<number> {
@@ -214,7 +217,13 @@ export class LoginSessionStore implements LoginSessions {
       const doomed = batch.filter(({ key, nonce }) => match(nonce, key)).map(({ key }) => key);
       if (doomed.length) removed += await this.redis().del(...doomed);
     });
+    if (removed > 0) this.emitRevoked(removed);
     return removed;
+  }
+
+  /** Tell session holders (open event streams) to check theirs again. Never breaks a revoke. */
+  private emitRevoked(count: number): void {
+    try { OsEventBus.emit('auth:sessionsRevoked', { count }); } catch { /* the bus must never break a revoke */ }
   }
 
   /** Every stored session nonce, a SCAN batch at a time. Unparseable values are skipped. */

@@ -29,6 +29,11 @@ import { adminOf, auditAdmin } from '../../../lib/auth.js';
  * is audited as "admin (shared credential)". Declaring a privileged
  * permission here (notifications.locked / popup) only REQUESTS it — the grant
  * is separate (POST /api/admin/grants).
+ *
+ * A system app's permissions are part of the release and are not edited in
+ * place (`aura grant/revoke perms` on one → 409 `system-scope`); changing
+ * them comes with the system overlay (Phase 6). Its tools stay editable
+ * (`aura cap grant`), as before.
  */
 
 const APP_ID_RE = /^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/;
@@ -90,6 +95,13 @@ export const POST: APIRoute = async ({ request, locals }) => {
   // system dir — otherwise user/global-scoped apps 404.
   const { getAppManager } = await import('@aura/core');
   const mgr = getAppManager();
+  if (PERMISSION_ACTIONS.has(action) && mgr.registry.getScopeId(appId) === 'system') {
+    return json({
+      error: 'system-scope',
+      message: `${appId} is a system app: its permissions ship with AuraOS and are not edited in place. `
+        + 'Changing them comes with the system overlay (Phase 6). Privileged permissions it already requests are granted with `aura grant notif-perms`.',
+    }, 409);
+  }
   const path = join(mgr.registry.getAppDir(appId), 'app.manifest.json');
   if (!existsSync(path)) {
     return json({ error: 'manifest-not-found', appId, path }, 404);

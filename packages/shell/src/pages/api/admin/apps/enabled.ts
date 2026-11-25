@@ -1,5 +1,5 @@
 import type { APIRoute } from 'astro';
-import { getAppManager } from '@aura/core';
+import { APP_ID_PATTERN, getAppManager } from '@aura/core';
 import { defaultKv } from '@aura/kv-store';
 
 /**
@@ -23,21 +23,31 @@ export const GET: APIRoute = () => {
   return json({ enabled: mgr.getEnabledState() });
 };
 
+/**
+ * Who may call this is the route access manifest's decision (the owner, also
+ * through system Settings, D45); this body checks only what it is asked:
+ * a known app id, and never a `critical` app disabled (409).
+ */
 export const POST: APIRoute = async ({ request }) => {
-  let body: { appId?: string; enabled?: boolean };
-  try { body = await request.json() as { appId?: string; enabled?: boolean }; }
+  let body: unknown;
+  try { body = await request.json(); }
   catch { return json({ error: 'invalid-json' }, 400); }
 
-  const { appId, enabled } = body;
-  if (typeof appId !== 'string' || typeof enabled !== 'boolean') {
-    return json({ error: 'bad-request', message: 'Expected { appId: string, enabled: boolean }.' }, 400);
+  const { appId, enabled } = (body && typeof body === 'object' ? body : {}) as { appId?: unknown; enabled?: unknown };
+  if (typeof appId !== 'string' || !APP_ID_PATTERN.test(appId) || typeof enabled !== 'boolean') {
+    return json({ error: 'bad-request', message: 'Expected { appId: string (reverse-domain), enabled: boolean }.' }, 400);
   }
 
   const mgr = getAppManager();
+  const manifest = mgr.getManifest(appId);
+  if (!manifest) return json({ error: 'not-found', message: `Unknown app: ${appId}` }, 404);
+  if (!enabled && manifest.critical) {
+    return json({ error: 'critical', message: `App ${appId} is marked critical and cannot be disabled. Use \`aura stop app ${appId}\` for a one-shot stop instead.` }, 409);
+  }
   try {
     await mgr.setEnabled(appId, enabled);
   } catch (err) {
-    return json({ error: 'failed', message: (err as Error).message }, 400);
+    return json({ error: 'failed', message: (err as Error).message }, 500);
   }
 
   // Persist the WHOLE enabled map (cheap — ~5 entries), not just the delta.

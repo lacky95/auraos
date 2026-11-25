@@ -39,6 +39,8 @@ const apps = new Map([
   ['com.example.legacy', { permissions: ['system.notifications', 'notifications.desktopModal'], scope: 'user' }],
   // D25: an app that requests the owner's Terminal grants.
   ['com.example.embedder', { permissions: ['terminal.embed', 'terminal.sessions.list'], scope: 'user' }],
+  // Phase 3: an app that declares an OS-wide KV write.
+  ['com.example.themer', { permissions: ['system.kv.os.theme.write'], scope: 'user' }],
 ]);
 const inst = (appId, n = 1) => ({ kind: 'instance', appId, instanceId: `${appId}-${n}`, verification: 'verified' });
 const ANON = { kind: 'anonymous', verification: 'unverified' };
@@ -556,4 +558,27 @@ test('an ended Terminal session takes every grant of it along, and nothing else'
   await grants.revoke(a, 'terminal.embed');
   assert.deepEqual(await grants.listFor(a), []);
   assert.deepEqual(await grants.listFor(b), []);
+});
+
+// ── Phase 3: system.kv.os.<topic>.write needs a grant, not just a declaration ──
+
+test('declaring system.kv.os.<topic>.write grants nothing; an admin grant does', async () => {
+  const themer = inst('com.example.themer');
+  const subject = { kind: 'app', id: 'com.example.themer' };
+  const before = await authz.authorize(themer, 'system.kv.os.theme.write');
+  assert.equal(before.allow, false, before.reason);
+  assert.match(before.reason, /not granted/);
+  // Not requested: a grant alone is nothing.
+  assert.equal((await authz.authorize(themer, 'system.kv.os.keymap.write')).allow, false);
+  await grants.grant(subject, 'system.kv.os.theme.write', { by, appScope: 'user' });
+  assert.equal((await authz.authorize(themer, 'system.kv.os.theme.write')).allow, true);
+  await grants.grant(subject, 'system.kv.os.keymap.write', { by, appScope: 'user' });
+  assert.equal((await authz.authorize(themer, 'system.kv.os.keymap.write')).allow, false, 'still not requested');
+  await grants.revoke(subject, 'system.kv.os.theme.write');
+  await grants.revoke(subject, 'system.kv.os.keymap.write');
+  assert.equal((await authz.authorize(themer, 'system.kv.os.theme.write')).allow, false);
+  // Only the topic family is grantable, never a lookalike.
+  for (const bad of ['system.kv.os..write', 'system.kv.os.theme.read', 'system.kv.app.theme.write', 'system.kv.os.a.b.write']) {
+    await assert.rejects(grants.grant(subject, bad, { by }), (e) => e instanceof GrantError && e.status === 400, bad);
+  }
 });

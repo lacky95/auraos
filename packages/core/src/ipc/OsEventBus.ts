@@ -211,6 +211,13 @@ export interface OsEvents {
     change: 'granted' | 'revoked';
   };
   /**
+   * Login sessions were revoked (logout, "sign out other sessions", a
+   * password reset, a credential rotation). No ids: whoever holds a session
+   * reference (an open event stream) checks its own again (core auth
+   * `LoginSessionStore`). Never relayed to apps.
+   */
+  'auth:sessionsRevoked': { count: number };
+  /**
    * A command for the shell's browser UI from a server-side caller — the Aura
    * Shell Daemon's MCP, through the shell's uiCommandBroker. Imperative,
    * unlike every other event here: the browser tab that CLAIMS `id`

@@ -3,9 +3,10 @@ import { getAppManager, IntentError } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../lib/appResponse.js';
 import { isOwnerCaller, verifiedAppCaller } from '../../../lib/terminalCaller.ts';
 import {
-  OPEN_TERMINAL_ACTION, TERMINAL_APP_ID, grantSession, isSystemTerminal, openTerminalCommand, openTerminalRefusal,
+  OPEN_TERMINAL_ACTION, TERMINAL_APP_ID, grantSession, isSystemTerminal, openTerminalNeedsProof, openTerminalRefusal,
   terminalSessionInstance,
 } from '../../../../server/terminal-embed.mjs';
+import { explicitTargetRefusal } from '../../../lib/intentTarget.ts';
 
 interface IntentBody {
   action?:   unknown;
@@ -40,8 +41,14 @@ interface IntentBody {
  * OPEN_TERMINAL (D29, 5.16): `command` needs the System Terminal (its
  * instance token) or the owner (the desktop's own page, or an admin session);
  * from an app, `background` needs the owner's `terminal.embed` grant and
- * `sessionId` a session the app was granted (403 `terminal-not-granted`). A
- * session an app creates with `background` is granted to it here.
+ * `sessionId` a session the app was granted (403 `terminal-not-granted`); a
+ * caller that is no verified app needs the owner for all three. A session an
+ * app creates with `background` is granted to it here.
+ *
+ * An app may not name a system app or a trusted system UI (D45) as the
+ * target (`appId`, or `instanceId` of one) of its intent: 403
+ * `target-not-allowed`. Implicit resolution, its own app, and OPEN_TERMINAL
+ * to the System Terminal (held by the rules above) stay open.
  */
 export const POST: APIRoute = async (ctx) => {
   const { request } = ctx;
@@ -67,7 +74,11 @@ export const POST: APIRoute = async (ctx) => {
   }
   const caller = verifiedAppCaller(request, getAppManager());
   if (caller === 'invalid') return errorResponse('The caller identity did not verify', 401);
-  const asking = caller ?? (openTerminalCommand(intent) && await isOwnerCaller(ctx) ? { owner: true } : null);
+  if (caller) {
+    const blocked = explicitTargetRefusal(intent, caller, getAppManager());
+    if (blocked) return jsonResponse({ kind: 'error', code: 'target-not-allowed', error: blocked }, 403);
+  }
+  const asking = caller ?? (openTerminalNeedsProof(intent) && await isOwnerCaller(ctx) ? { owner: true } : null);
   const refusal = await openTerminalRefusal(intent, asking);
   if (refusal) return jsonResponse({ kind: 'error', code: 'terminal-not-granted', error: refusal }, 403);
   try {
@@ -93,3 +104,4 @@ export const POST: APIRoute = async (ctx) => {
     return errorResponse(String(err), 500);
   }
 };
+

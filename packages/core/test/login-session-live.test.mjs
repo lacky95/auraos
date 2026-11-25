@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { kvServer, createRedis } from '@aura/kv-store';
 import { AdminAuth, defaultIdentityKeyFile, loginSessionKey } from '../dist/auth/index.js';
+import { OsEventBus } from '../dist/ipc/OsEventBus.js';
 
 const DATA_DIR = mkdtempSync(join(tmpdir(), 'aura-session-live-'));
 let clock = 1_800_000_000_000;
@@ -50,4 +51,24 @@ test('a shared-key (admin) session never counts as a user session', async () => 
   const sid = 'b'.repeat(32);
   await redis.set(loginSessionKey(sid), JSON.stringify({ m: 'shared-key', u: 'default', createdAt: clock, expiresAt: clock + 60_000 }));
   assert.equal(await sessions.isLive(sid, 'default'), false);
+});
+
+test('every revocation tells session holders (open event streams) to check theirs again', async () => {
+  const seen = [];
+  const on = (ev) => seen.push(ev.count);
+  OsEventBus.on('auth:sessionsRevoked', on);
+  try {
+    const a = await sessions.issue({ method: 'password', userId: 'default', ttlMs: 60_000 });
+    const b = await sessions.issue({ method: 'password', userId: 'default', ttlMs: 60_000 });
+    const c = await sessions.issue({ method: 'password', userId: 'default', ttlMs: 60_000 });
+    assert.equal(await sessions.revoke(a.session.sessionId), true);
+    assert.equal(await sessions.revoke(a.session.sessionId), false, 'already gone: nothing to tell');
+    const n = await sessions.revokeByUser('default', { except: c.session.sessionId });
+    assert.ok(n >= 1);
+    assert.deepEqual(seen, [1, n], 'one event per revoke call that removed something');
+    assert.equal(await sessions.isLive(b.session.sessionId, 'default'), false);
+    assert.equal(await sessions.isLive(c.session.sessionId, 'default'), true);
+  } finally {
+    OsEventBus.off('auth:sessionsRevoked', on);
+  }
 });

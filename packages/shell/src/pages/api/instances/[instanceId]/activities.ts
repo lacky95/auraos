@@ -31,6 +31,16 @@ export const POST: APIRoute = async ({ params, request }) => {
       hint: 'If you need a UI, change componentType to "activity" (with activityMode "multi") and re-install the app. backgroundService=true is the right flag for "UI app that survives last-window close".',
     }, 409);
   }
+  // The same OS rule for an app that opens no further windows here
+  // (activityMode 'none', or 'single'; AppManager.openActivity).
+  if (manifest.activityMode !== 'multi') {
+    return jsonResponse({
+      error: 'no-activities',
+      message: `App ${inst.appId} does not support activities (activityMode='${manifest.activityMode}').`,
+      appId: inst.appId,
+      instanceId,
+    }, 409);
+  }
 
   // Body shape: `{ data?, stackParent? }`. Tolerate the legacy form where the
   // whole body IS the data bag — only treat top-level `data`/`stackParent`
