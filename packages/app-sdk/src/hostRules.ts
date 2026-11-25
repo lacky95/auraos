@@ -393,6 +393,14 @@ export function isAuraReservedPath(path: string): boolean {
 /** Header carrying the signed app identity from the gateway to the shell API. */
 export const GATEWAY_IDENTITY_HEADER = 'x-aura-gateway-identity';
 
+/**
+ * Header carrying the signed owner claim from the router to a trusted system
+ * UI's own server (D45), which sends it back to the shell API with its
+ * instance token on the reads its pages make. Removed from every inbound
+ * request and every response.
+ */
+export const OWNER_SSR_HEADER = 'x-aura-owner-ssr';
+
 /** The host-only app cookie. `__Host-` on HTTPS stops a sibling planting it. */
 export function appHostCookieName(secure: boolean): string {
   return secure ? '__Host-aura_app' : 'aura_app';

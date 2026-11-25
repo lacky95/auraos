@@ -6,11 +6,11 @@ import { afterResponse } from '../afterResponse.ts';
 import { presentsApproval } from '../approvals/service.ts';
 import { decide as liveDecide } from './decide.ts';
 import { readJsonBody, refused, TOO_LARGE } from './enforce.ts';
-import { gatewayInstance, gatewayOwner, type GatewayOwnerDeps } from './identify.ts';
+import { OWNER_UI_EXCLUDED_TARGETS, gatewayInstance, gatewayOwner, type GatewayOwnerDeps } from './identify.ts';
 import { combineCandidates, concreteRule, kvNamespace, resourceFor, type ObserverManager } from './observer.ts';
 import { candidateRules, handlersOf, manifestRoute, normalizeMethod, readsBody as routeReadsBody } from './resolve.ts';
 import { ROUTE_ACCESS_MANIFEST } from './routeManifest.ts';
-import type { AccessLabel, AccessTarget, Decide, RequestSnapshot, RouteAccessManifest } from './types.ts';
+import type { AccessLabel, Decide, RequestSnapshot, RouteAccessManifest } from './types.ts';
 
 /**
  * The enforcement of `/_aura/os/*`. The gateway proves who is calling; this
@@ -42,13 +42,6 @@ export interface GatewayEnforceDeps {
   /** The access mode (server/access-mode.mjs) when absent. */
   mode?: () => string;
 }
-
-/**
- * Targets the owner never reaches through an app, whatever the rule says: its
- * login session and handoff, a shell screen's client session, and another
- * app's upstream (which includes the Terminal, D23, D29).
- */
-const OWNER_UI_EXCLUDED_TARGETS: ReadonlySet<AccessTarget> = new Set(['session', 'client-session', 'proxy-upstream']);
 
 const liveAudit = (entry: AuditInput): Promise<unknown> => core.getAuthServices().audit.record(entry);
 

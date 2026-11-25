@@ -1,6 +1,7 @@
 ---
 import '../styles/settings.css';
 import Icon from '../components/Icon.astro';
+import { shellFetch } from '../lib/shellClient';
 
 /**
  * Settings → Notifications & access.
@@ -22,12 +23,11 @@ import Icon from '../components/Icon.astro';
  * need the password there (D9). The page never holds a credential. Changes
  * are audited with the owner who approved them.
  */
-const osBase = process.env['OS_API_BASE'] ?? 'http://127.0.0.1:3000';
 
 interface AppRow { id: string; name: string; permissions: string[] }
 let apps: AppRow[] = [];
 try {
-  const r = await fetch(`${osBase}/api/apps`, { signal: AbortSignal.timeout(2500) });
+  const r = await shellFetch(Astro.request, `/api/apps`, 2500);
   if (r.ok) {
     const list = await r.json() as Array<{ manifest: { id: string; name?: string; permissions?: string[] } }>;
     apps = list

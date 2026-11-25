@@ -1,5 +1,6 @@
 ---
 import '../styles/settings.css';
+import { shellFetch } from '../lib/shellClient';
 
 // View of the Interface Registry: what apps offer, what they need, and whether
 // those needs are actually met. The only writable rows are custom ones —
@@ -30,7 +31,7 @@ let interfaces: InterfaceView[] = [];
 let consumers:  ConsumerView[]  = [];
 let reachable = true;
 try {
-  const r = await fetch(`${osBase}/api/interfaces`, { signal: AbortSignal.timeout(2000) });
+  const r = await shellFetch(Astro.request, `/api/interfaces`, 2000);
   if (r.ok) {
     const body = await r.json() as { interfaces?: InterfaceView[]; consumers?: ConsumerView[] };
     interfaces = body.interfaces ?? [];

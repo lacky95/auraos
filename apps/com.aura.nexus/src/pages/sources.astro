@@ -32,14 +32,14 @@ interface Catalog { sources?: SourceStatus[]; }
 let cfg: SourcesConfig = { schema: 1, sources: [] };
 let status: Record<string, SourceStatus> = {};
 try {
-  cfg = await shellGet<SourcesConfig>('/api/nexus/sources');
+  cfg = await shellGet<SourcesConfig>(Astro.request, '/api/nexus/sources');
 } catch { /* empty */ }
 let seedsInfo: SeedsInfo | null = null;
 try {
-  seedsInfo = await shellGet<SeedsInfo>('/api/nexus/sources/seeds');
+  seedsInfo = await shellGet<SeedsInfo>(Astro.request, '/api/nexus/sources/seeds');
 } catch { /* older shell */ }
 try {
-  const cat = await shellGet<Catalog>('/api/nexus');
+  const cat = await shellGet<Catalog>(Astro.request, '/api/nexus');
   for (const s of cat.sources ?? []) status[s.name] = s;
 } catch { /* no status */ }
 

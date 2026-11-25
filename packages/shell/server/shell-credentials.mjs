@@ -7,14 +7,15 @@
  *   - the session cookie (`aura_session`, `__Host-aura_session`)
  *   - bearers starting `aura-sess1.`, or the retired `aura-admin1.` (D50: worthless, still never forwarded)
  *   - the internal service label
- *   - the gateway's signed identity claim
+ *   - the gateway's signed identity claim, and the owner SSR claim (D45)
  *
  * App cookies and app-owned auth pass through byte for byte. Instance tokens
  * and API keys are still forwarded and only counted: Phase 3 decides them.
  */
-import { GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
+import { GATEWAY_IDENTITY_HEADER, OWNER_SSR_HEADER } from '@aura/core/host-rules';
 import { INTERNAL_SERVICE_HEADER, SESSION_COOKIES, countCredential } from './access-bridge.mjs';
 
+const SHELL_ONLY_HEADERS = new Set([INTERNAL_SERVICE_HEADER, GATEWAY_IDENTITY_HEADER, OWNER_SSR_HEADER]);
 const SHELL_BEARER = /(?:^|,)\s*Bearer\s+aura-(sess1|admin1)\./i;
 const INSTANCE_BEARER = /(?:^|,)\s*Bearer\s+aura1\./i;
 const API_KEY_BEARER = /(?:^|,)\s*Bearer\s+aura_k1_/i;
@@ -49,7 +50,7 @@ function cleanAuthorization(value, surface) {
 }
 
 function cleanValue(name, value, surface) {
-  if (name === INTERNAL_SERVICE_HEADER || name === GATEWAY_IDENTITY_HEADER) return null;
+  if (SHELL_ONLY_HEADERS.has(name)) return null;
   if (name === 'cookie') return cleanCookie(value, surface);
   if (name === 'authorization') return cleanAuthorization(value, surface);
   return value;
@@ -70,7 +71,7 @@ export function stripShellCredentials(headers, surface) {
     return out;
   }
   if (typeof headers?.get === 'function') {
-    for (const name of ['cookie', 'authorization', INTERNAL_SERVICE_HEADER, GATEWAY_IDENTITY_HEADER]) {
+    for (const name of ['cookie', 'authorization', ...SHELL_ONLY_HEADERS]) {
       const current = headers.get(name);
       if (current === null) continue;
       const value = cleanValue(name, current, surface);
@@ -81,7 +82,7 @@ export function stripShellCredentials(headers, surface) {
   }
   for (const key of Object.keys(headers ?? {})) {
     const name = key.toLowerCase();
-    if (name !== 'cookie' && name !== 'authorization' && name !== INTERNAL_SERVICE_HEADER && name !== GATEWAY_IDENTITY_HEADER) continue;
+    if (name !== 'cookie' && name !== 'authorization' && !SHELL_ONLY_HEADERS.has(name)) continue;
     const current = headers[key];
     if (Array.isArray(current)) {
       const kept = current.map((v) => cleanValue(name, v, surface)).filter((v) => v !== null);

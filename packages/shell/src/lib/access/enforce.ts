@@ -3,7 +3,7 @@ import { GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
 import { accessMode } from '../../../server/access-mode.mjs';
 import { createDecide, targetPermissionsHeld } from './decide.ts';
 import { snapshotOf, type AccessContext } from './guard.ts';
-import { actingInstance, type ResolvedPrincipal } from './identify.ts';
+import { OWNER_UI_EXCLUDED_TARGETS, actingInstance, type ResolvedPrincipal } from './identify.ts';
 import { resolveCaller } from '../auth.ts';
 import {
   combineCandidates, concreteRule, decideRule, isInternalCall, kvNamespace, liveDeps, resourceFor, withNetworkCaller,
@@ -94,14 +94,16 @@ const allowed = (reason: AccessReason = 'public'): DecideResult => ({ outcome: '
 
 /**
  * `decide()`; as at the gateway, a user acting through an app (D45, App
- * Hosts) also has that app's instance rules when its own do not allow.
+ * Hosts) also has that app's instance rules when its own do not allow, and
+ * never reaches a target the owner keeps out of apps (OWNER_UI_EXCLUDED_TARGETS).
  */
 async function decideActing(
   decideFn: ReturnType<typeof createDecide>, mgr: ReturnType<GateDeps['mgr']>, rule: AccessRule, variant: string | null,
   req: CandidateRequest,
 ): Promise<DecideResult> {
-  const result = await decideRule(decideFn, mgr, rule, variant, req);
   const app = req.principal.kind === 'user' ? actingInstance(req.principal) : null;
+  if (app && OWNER_UI_EXCLUDED_TARGETS.has(rule.target)) return decideRule(decideFn, mgr, rule, variant, req, app);
+  const result = await decideRule(decideFn, mgr, rule, variant, req);
   return result.outcome === 'allow' || !app ? result : decideRule(decideFn, mgr, rule, variant, req, app);
 }
 

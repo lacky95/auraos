@@ -1,9 +1,9 @@
 ---
 import '../styles/settings.css';
 import Icon from '../components/Icon.astro';
+import { shellFetch } from '../lib/shellClient';
 
 // SSR-read the current context entries + volumes from the OS.
-const osBase = process.env['OS_API_BASE'] ?? 'http://127.0.0.1:3000';
 type Kind = 'secret' | 'variable';
 type Inject = 'env' | 'file';
 interface ContextEntry { key: string; kind: Kind; inject: Inject[]; updatedAt: number; value: string | null }
@@ -12,11 +12,11 @@ interface VolumeEntry { name: string; mountPath: string; mode: 'rw' | 'ro'; crea
 let entries: ContextEntry[] = [];
 let volumes: VolumeEntry[] = [];
 try {
-  const r = await fetch(`${osBase}/api/os/context`, { signal: AbortSignal.timeout(1500) });
+  const r = await shellFetch(Astro.request, `/api/os/context`, 1500);
   if (r.ok) entries = ((await r.json()) as { entries?: ContextEntry[] }).entries ?? [];
 } catch { /* OS unreachable at SSR time — client will refetch */ }
 try {
-  const r = await fetch(`${osBase}/api/os/volumes`, { signal: AbortSignal.timeout(1500) });
+  const r = await shellFetch(Astro.request, `/api/os/volumes`, 1500);
   if (r.ok) volumes = ((await r.json()) as { volumes?: VolumeEntry[] }).volumes ?? [];
 } catch { /* client will refetch */ }
 ---

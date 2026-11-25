@@ -9,13 +9,22 @@
  * A claim is bound to one method and path and lives for seconds. No request
  * from outside can produce one, and shell-credentials.mjs removes it from
  * anything leaving for an app.
+ *
+ * The same signer makes the owner SSR claim (`OWNER_SSR_HEADER`, D45): the
+ * router hands it to a trusted system UI's own server with each page request
+ * on a live owner session, so the page's server-side reads of the shell act
+ * for the owner too. It names the instance, not a call, and is accepted only
+ * next to that instance's token (identify.ts `resolvePrincipal`).
  */
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import { GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
+import { GATEWAY_IDENTITY_HEADER, OWNER_SSR_HEADER } from '@aura/core/host-rules';
 
 const KEY = Symbol.for('aura.gateway.key');
 const PREFIX = 'agw1';
 export const GATEWAY_CLAIM_TTL_S = 30;
+/** An owner SSR claim covers one page render and the reads it makes. */
+export const OWNER_SSR_CLAIM_TTL_S = 60;
+const OWNER_SSR_USE = 'owner-ssr';
 
 /**
  * Trusted system UIs (D45): the owner acts through these apps, and through no
@@ -130,24 +139,65 @@ export function signGatewayClaim(claim) {
 const validOwner = (o) => !!o && typeof o === 'object'
   && typeof o.userId === 'string' && !!o.userId && typeof o.sid === 'string' && !!o.sid;
 
+/** The signed payload of an `agw1` token, or null. Checks the MAC only. */
+function openClaim(token) {
+  const parts = String(token).split('.');
+  if (parts.length !== 3 || parts[0] !== PREFIX) return null;
+  const given = Buffer.from(parts[2], 'base64url');
+  const want = mac(parts[1]);
+  if (given.length !== want.length || !timingSafeEqual(given, want)) return null;
+  const claim = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8'));
+  return claim?.v === 1 && typeof claim.appId === 'string' && !!claim.appId ? claim : null;
+}
+
+const current = (claim, now) => {
+  const seconds = now / 1000;
+  return typeof claim.exp === 'number' && claim.exp >= seconds && !(claim.iat > seconds + 5);
+};
+
 /** The claim, if the token is genuine, current and for this method and path. Never throws. */
 export function verifyGatewayClaim(token, { method, path, now = Date.now() }) {
   try {
-    const parts = String(token).split('.');
-    if (parts.length !== 3 || parts[0] !== PREFIX) return null;
-    const given = Buffer.from(parts[2], 'base64url');
-    const want = mac(parts[1]);
-    if (given.length !== want.length || !timingSafeEqual(given, want)) return null;
-    const claim = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8'));
-    if (claim?.v !== 1 || typeof claim.appId !== 'string' || !claim.appId) return null;
+    const claim = openClaim(token);
+    if (!claim || claim.use !== undefined) return null;
     if (claim.owner !== undefined && !validOwner(claim.owner)) return null;
-    const seconds = now / 1000;
-    if (typeof claim.exp !== 'number' || claim.exp < seconds || claim.iat > seconds + 5) return null;
+    if (!current(claim, now)) return null;
     if (claim.method !== method || canonicalPath(claim.path) !== canonicalPath(path)) return null;
     return claim;
   } catch {
     return null;
   }
+}
+
+/**
+ * The owner SSR claim for a page request to a trusted system UI's instance
+ * (D45). The router signs it only after `isOwnerUiInstallation` and a live
+ * owner session; the shell checks both again.
+ */
+export function signOwnerSsrClaim({ appId, installationId, instanceId, userId, sid }) {
+  const iat = Math.floor(Date.now() / 1000);
+  return signGatewayClaim({
+    v: 1, use: OWNER_SSR_USE, appId, installationId, instanceId, userId, owner: { userId, sid },
+    iat, exp: iat + OWNER_SSR_CLAIM_TTL_S,
+  });
+}
+
+/** The owner SSR claim, if the token is genuine, current and one. Never a gateway claim. Never throws. */
+export function verifyOwnerSsrClaim(token, { now = Date.now() } = {}) {
+  try {
+    const claim = openClaim(token);
+    if (!claim || claim.use !== OWNER_SSR_USE || !validOwner(claim.owner) || claim.owner.userId !== claim.userId) return null;
+    if (typeof claim.instanceId !== 'string' || !claim.instanceId || typeof claim.installationId !== 'string') return null;
+    return current(claim, now) ? claim : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The owner SSR claim on a web `Request`: null without the header or when it doesn't verify. */
+export function ownerSsrClaimOf(request) {
+  const token = request.headers.get(OWNER_SSR_HEADER);
+  return token === null ? null : verifyOwnerSsrClaim(token);
 }
 
 const verified = new WeakMap();

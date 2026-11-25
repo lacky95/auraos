@@ -16,8 +16,8 @@ import { join } from 'node:path';
 import { Authorizer } from '@aura/core';
 import type { AccessPrincipal, GatewayIdentityClaim, InstallBinding } from '@aura/core';
 import { createSetupTicket, defaultSetupTicketDir, FileSetupTickets, operatorRequestSubject } from '@aura/core/setup-tickets';
-import { GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
-import { signGatewayClaim } from '../server/gateway-identity.mjs';
+import { GATEWAY_IDENTITY_HEADER, OWNER_SSR_HEADER } from '@aura/core/host-rules';
+import { signGatewayClaim, signOwnerSsrClaim } from '../server/gateway-identity.mjs';
 import { ACCESS_MODE_ENV } from '../server/access-mode.mjs';
 import { createDecide } from '../src/lib/access/decide.ts';
 import { accessGate, type GateDeps } from '../src/lib/access/enforce.ts';
@@ -49,10 +49,12 @@ const declared: Record<string, string[]> = {
 };
 const TOKENS: Record<string, string> = {
   'aura1.terminal': `${TERMINAL}-1`, 'aura1.aurashelld': `${AURASHELLD}-1`, 'aura1.counter': `${COUNTER}-1`,
-  'aura1.terminalx': `${TERMINALX}-1`,
+  'aura1.terminalx': `${TERMINALX}-1`, 'aura1.settings': `${SETTINGS}-1`,
 };
+// A sidecar of Settings' instance (never the owner, D45).
+const SIDECAR_TOKENS: Record<string, { instanceId: string; sidecar: string }> = { 'aura1.settings-db': { instanceId: `${SETTINGS}-1`, sidecar: 'db' } };
 const mgr = {
-  tokens: { verify: (t: string) => (TOKENS[t] ? { instanceId: TOKENS[t] } : null) },
+  tokens: { verify: (t: string) => SIDECAR_TOKENS[t] ?? (TOKENS[t] ? { instanceId: TOKENS[t] } : null) },
   getInstance: (id: string) => instances[id],
   getInstancesByApp: (appId: string) => Object.values(instances).filter((i) => i.appId === appId),
   getAllInstances: () => Object.values(instances),
@@ -389,4 +391,73 @@ test('enforce: TerminalX\'s agent watch by its list grant; another app none, in 
     assert.equal(await inReport(c), '401 unauthenticated');
     assert.equal(await inReport({ ...c, headers: bearer('aura1.terminalx') }), 'pass');
   }
+});
+
+// ── D45: a trusted system UI's server-side page reads ───────────────────────
+
+/** What the router hands Settings' server with a page request on the owner's live session (app-hosts.mjs `ownerSsrHeader`). */
+const ownerSsr = (over: Partial<{ appId: string; installationId: string; instanceId: string; userId: string; sid: string }> = {}) => ({
+  [OWNER_SSR_HEADER]: signOwnerSsrClaim({
+    appId: SETTINGS, installationId: 'inst-settings', instanceId: `${SETTINGS}-1`, userId: 'default', sid: OWNER_SID, ...over,
+  }),
+});
+const SSR_READS: Call[] = [
+  APPS,
+  { path: '/api/apps/serve', route: '/api/apps/serve' },
+  { path: '/api/os/context', route: '/api/os/context' },
+  { path: '/api/os/volumes', route: '/api/os/volumes' },
+  { path: '/api/scopes', route: '/api/scopes' },
+  { path: '/api/os/about', route: '/api/os/about' },
+];
+
+test('enforce: Settings\' page render reads as the owner with its token and the router\'s owner claim (D45)', async () => {
+  for (const c of SSR_READS) {
+    assert.equal(await middleware({ ...c, headers: { ...bearer('aura1.settings'), ...ownerSsr() } }), 'pass', c.path);
+    // What it got before: nothing (401), and its token alone does not make the owner.
+    assert.equal(await middleware(c), '401 unauthenticated', `anonymous ${c.path}`);
+    assert.equal(await middleware({ ...c, headers: bearer('aura1.settings') }), '403 access-denied', `token alone ${c.path}`);
+  }
+  const resolved = await resolveCaller(ctx({ ...APPS, headers: { ...bearer('aura1.settings'), ...ownerSsr() } }).request, authDeps());
+  assert.deepEqual(resolved.principal, {
+    kind: 'user', userId: 'default', role: 'owner', sessionId: OWNER_SID, verification: 'verified',
+    through: { appId: SETTINGS, instanceId: `${SETTINGS}-1` },
+  });
+});
+
+test('enforce: the owner SSR claim grants nothing on its own, replayed, stale, for a mutation or another app', async () => {
+  const expired = (() => {
+    const iat = Math.floor(Date.now() / 1000) - 120;
+    return {
+      [OWNER_SSR_HEADER]: signGatewayClaim({
+        v: 1, use: 'owner-ssr', appId: SETTINGS, installationId: 'inst-settings', instanceId: `${SETTINGS}-1`,
+        userId: 'default', owner: { userId: 'default', sid: OWNER_SID }, iat, exp: iat + 60,
+      } as unknown as GatewayIdentityClaim),
+    };
+  })();
+  const forged = { [OWNER_SSR_HEADER]: ownerSsr()[OWNER_SSR_HEADER].replace(/.$/, (ch) => (ch === 'A' ? 'B' : 'A')) };
+  for (const c of SSR_READS) {
+    const cases: Array<[string, Record<string, string>, string]> = [
+      ['no instance token', ownerSsr(), '401 unauthenticated'],
+      ['on the desktop login it is ignored too', { ...desktop, ...ownerSsr({ sid: 's-gone' }) }, 'pass'],
+      ['expired', { ...bearer('aura1.settings'), ...expired }, '403 access-denied'],
+      ['forged signature', { ...bearer('aura1.settings'), ...forged }, '403 access-denied'],
+      ['replayed by another instance', { ...bearer('aura1.counter'), ...ownerSsr() }, '403 access-denied'],
+      ['Counter\'s own claim', { ...bearer('aura1.counter'), ...ownerSsr({ appId: COUNTER, instanceId: `${COUNTER}-1`, installationId: `inst-${COUNTER}` }) }, '403 access-denied'],
+      ['a sidecar\'s token', { ...bearer('aura1.settings-db'), ...ownerSsr() }, '403 access-denied'],
+      ['session no longer live', { ...bearer('aura1.settings'), ...ownerSsr({ sid: 's-gone' }) }, '403 access-denied'],
+      ['a user-scope copy\'s installation', { ...bearer('aura1.settings'), ...ownerSsr({ installationId: 'inst-settings-user' }) }, '403 access-denied'],
+    ];
+    for (const [why, headers, want] of cases) {
+      assert.equal(await middleware({ ...c, headers }), want, `${why}: ${c.path}`);
+    }
+  }
+  // Reads only: a mutation stays on Settings' instance rules, even on an owner route Settings covers.
+  const enable: Call = { method: 'POST', path: '/api/admin/apps/enabled', route: '/api/admin/apps/enabled', body: { appId: COUNTER, enabled: false } };
+  assert.equal(await middleware({ ...enable, headers: { ...bearer('aura1.settings'), ...ownerSsr() } }), '403 access-denied');
+  // Never a target the owner keeps out of apps, though the route is in Settings' D45 scope.
+  const approvals: Call = { path: '/api/approvals', route: '/api/approvals' };
+  assert.equal(await middleware({ ...approvals, headers: desktop }), 'pass');
+  assert.equal(await middleware({ ...approvals, headers: { ...bearer('aura1.settings'), ...ownerSsr() } }), '403 access-denied');
+  // Nor a path outside Settings' D45 scope.
+  assert.equal(await middleware({ ...INSTALL, headers: { ...bearer('aura1.settings'), ...ownerSsr() } }), '403 access-denied');
 });

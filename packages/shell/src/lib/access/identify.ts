@@ -6,8 +6,8 @@ import { operatorRequestSubject } from '@aura/core/setup-tickets';
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { loadAppHostServices, type AppHostServices } from '../../../server/app-host-auth.mjs';
-import { gatewayClaimOf, ownerUiActs, ownerUiApp } from '../../../server/gateway-identity.mjs';
-import type { AccessVia, VerifiedIdentity } from './types.ts';
+import { gatewayClaimOf, ownerSsrClaimOf, ownerUiActs, ownerUiApp } from '../../../server/gateway-identity.mjs';
+import type { AccessTarget, AccessVia, VerifiedIdentity } from './types.ts';
 
 /**
  * The instance a signed App Host gateway claim names (server/app-gateway.mjs).
@@ -34,6 +34,24 @@ export interface GatewayOwnerDeps {
 
 const owners = new WeakMap<Request, Promise<UserPrincipal | null>>();
 
+/** One owner check per request: the middleware and the route both ask. */
+function cachedOwner(request: Request, resolve: () => Promise<UserPrincipal | null>): Promise<UserPrincipal | null> {
+  let found = owners.get(request);
+  if (!found) {
+    found = resolve().catch(() => null);
+    owners.set(request, found);
+  }
+  return found;
+}
+
+/**
+ * Targets the owner never reaches through an app, whatever the rule says: its
+ * login session and handoff, a shell screen's client session, and another
+ * app's upstream (which includes the Terminal, D23, D29). The gateway
+ * (gatewayCaller.ts) and the access gate (enforce.ts) both apply it.
+ */
+export const OWNER_UI_EXCLUDED_TARGETS: ReadonlySet<AccessTarget> = new Set(['session', 'client-session', 'proxy-upstream']);
+
 /**
  * D45: the owner acting through a trusted system UI, or null. The gateway
  * signs an `owner` claim only for such a UI; this checks it again against the
@@ -50,28 +68,48 @@ const owners = new WeakMap<Request, Promise<UserPrincipal | null>>();
  * The principal is the user, carrying the app it acts through. Cached per request.
  */
 export function gatewayOwner(request: Request, deps: GatewayOwnerDeps): Promise<UserPrincipal | null> {
-  let found = owners.get(request);
-  if (!found) {
-    found = resolveGatewayOwner(request, deps).catch(() => null);
-    owners.set(request, found);
-  }
-  return found;
+  return cachedOwner(request, async () => {
+    const claim = gatewayClaimOf(request);
+    if (!claim || !claim.owner || claim.owner.userId !== claim.userId) return null;
+    const inst = gatewayInstance(request, deps.mgr);
+    if (!inst || inst === 'invalid') return null;
+    return ownerThrough(request, inst, { installationId: claim.installationId, ...claim.owner }, deps);
+  });
 }
 
-async function resolveGatewayOwner(request: Request, deps: GatewayOwnerDeps): Promise<UserPrincipal | null> {
-  const claim = gatewayClaimOf(request);
-  if (!claim || !claim.owner || claim.owner.userId !== claim.userId) return null;
-  const inst = gatewayInstance(request, deps.mgr);
-  if (!inst || inst === 'invalid' || !ownerUiApp(inst.appId)) return null;
+/**
+ * D45 for a trusted system UI's own server: the owner SSR claim the router
+ * handed its page request (app-hosts.mjs `ownerSsrHeader`), sent back on a
+ * GET or HEAD next to the instance token of the very instance it names.
+ * `inst` is the running instance that token verified as; then the same
+ * checks as `gatewayOwner`.
+ * Anything else ignores the claim. Cached per request.
+ */
+function ssrOwner(
+  request: Request, inst: Pick<AppInstance, 'appId' | 'instanceId'>, deps: GatewayOwnerDeps,
+): Promise<UserPrincipal | null> {
+  return cachedOwner(request, async () => {
+    if (request.method !== 'GET' && request.method !== 'HEAD') return null;
+    const claim = ownerSsrClaimOf(request);
+    if (!claim || claim.instanceId !== inst.instanceId || claim.appId !== inst.appId) return null;
+    return ownerThrough(request, inst, { installationId: claim.installationId, ...claim.owner }, deps);
+  });
+}
+
+/** The owner through `inst`, if its `system` copy acts for that live owner session on this path (D45). */
+async function ownerThrough(
+  request: Request, inst: Pick<AppInstance, 'appId' | 'instanceId'>,
+  ref: { installationId: string; userId: string; sid: string }, deps: GatewayOwnerDeps,
+): Promise<UserPrincipal | null> {
+  if (!ownerUiApp(inst.appId)) return null;
   const installed = deps.mgr.getManifest(inst.appId) as { scopeId?: string } | undefined;
   if (installed?.scopeId !== 'system') return null;
   const svc = await (deps.services ?? loadAppHostServices)();
   if (!svc) return null;
   const path = new URL(request.url).pathname;
-  const ref = { appId: inst.appId, installationId: claim.installationId, sid: claim.owner.sid, userId: claim.owner.userId, path };
-  if (!(await ownerUiActs(ref, svc))) return null;
+  if (!(await ownerUiActs({ appId: inst.appId, path, ...ref }, svc))) return null;
   return {
-    kind: 'user', userId: claim.owner.userId, role: 'owner', sessionId: claim.owner.sid,
+    kind: 'user', userId: ref.userId, role: 'owner', sessionId: ref.sid,
     verification: 'verified', through: { appId: inst.appId, instanceId: inst.instanceId },
   };
 }
@@ -262,7 +300,8 @@ function resolveOperator(request: Request, code: string, deps: PrincipalDeps): P
  *   App Host cookie session (verified by app-hosts.mjs) → user, through that app
  *   signed gateway claim     → user through a trusted system UI (D45); else the
  *                              instance, acting for the claim's session user
- *   Bearer aura1.…           → instance, acting for its `u` claim or owner
+ *   Bearer aura1.…           → instance, acting for its `u` claim or owner;
+ *     + owner SSR claim        user through that trusted system UI (D45, `ssrOwner`)
  *   Bearer aura_k1_…         → apiKey
  *   Bearer aura-sess1.…      → user (a live password session of the enabled owner)
  *   any other Authorization  → rejected
@@ -282,7 +321,13 @@ export async function resolvePrincipal(
   }
   const token = bearerToken(request);
   if (gatewayClaimOf(request) !== null) return resolveGateway(request, deps);
-  if (token !== null) return resolveBearer(token, deps);
+  if (token !== null) {
+    const r = await resolveBearer(token, deps);
+    // A trusted system UI's server reading for the owner (D45, `ssrOwner`): never a sidecar's token.
+    if (r.principal.kind !== 'instance' || r.principal.sidecar || !deps.mgr) return r;
+    const owner = await ssrOwner(request, r.principal, { mgr: deps.mgr, services: deps.ownerServices });
+    return owner ? seen(owner, r.via) : r;
+  }
   const operatorCode = request.headers.get(OPERATOR_HEADER);
   if (operatorCode !== null) return resolveOperator(request, operatorCode, deps);
 
