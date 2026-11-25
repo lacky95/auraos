@@ -33,7 +33,7 @@
   }
 
   /** The notice before the move, with a way to stay. Falls back to the plain bar. */
-  function countdown(plan: SetupBarPlan & { kind: 'link' }): void {
+  function countdown(plan: Extract<SetupBarPlan, { kind: 'link' }>): void {
     paint(plan);
     if (!text || !stayBtn) return;
     const target = autoSwitchTarget(plan.href, location.search, location.hash);
