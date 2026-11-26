@@ -87,3 +87,11 @@ test('store: sealed; tampering or a swapped key means the defaults, reported onc
   assert.deepEqual(await store.get(), {});
   assert.equal(tampered, 1);
 });
+
+test('Phase 5 entries (D64): the runtimes record and the reserved aura-root switch', () => {
+  const runtimes = securityOption('runtimes');
+  assert.deepEqual([runtimes.source, runtimes.record, runtimes.type, runtimes.change], ['record', 'user:policy:runtimes', 'record', 'fresh']);
+  const root = securityOption('aura-root');
+  assert.deepEqual([root.source, root.type, root.default, [...root.values]], ['reserved', 'enum', 'enabled', ['enabled', 'disabled']]);
+  assert.equal(securityOption('session-file-caps'), undefined, 'P5-2: no session capabilities, so no switch');
+});

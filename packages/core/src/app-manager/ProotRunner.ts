@@ -4,9 +4,11 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync 
 import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import { lifecyclePath } from '../types/manifest.js';
-import { toolsGrant } from './tool-allowlist.js';
-import { ALL_TOOLS_PATH, MY_TOOLS_PATH, SHARED_HOME_PATH, currentToolsMode, provisionAllowlist } from './tool-provision.js';
-import { userHomeDir } from '../scopes/home.js';
+import { ALL_TOOLS_PATH, MY_TOOLS_PATH, currentToolsMode, provisionAllowlist } from './tool-provision.js';
+import { PROOT_HOME_ENV, prootHomeBind } from './spawn/homeArgs.js';
+import { prootContextBinds } from './spawn/contextArgs.js';
+import { prootSocketBinds } from './spawn/socketArgs.js';
+import type { RuntimeCapabilities } from '../runtimes/types.js';
 import type { SandboxExecOpts, SandboxRunner, SandboxRunnerOpts } from './SandboxRunner.js';
 import type { SpawnContext } from '../scopes/types.js';
 import { ContextStore } from '../context/ContextStore.js';
@@ -90,6 +92,26 @@ export class ProotRunner implements SandboxRunner {
   }
 
   /**
+   * Today's PRoot runtime on the master (ARI §2.3): ptrace isolation, no
+   * enforced read-only binds (ARI-4), no mounts, port expose or sidecars, and
+   * its processes die with the shell. Never a Private Home boundary (D65).
+   */
+  public capabilities(): RuntimeCapabilities {
+    return {
+      isolation: 'ptrace',
+      privateHomeSession: false,
+      sessionExec: false,
+      identity: 'none',
+      readOnlyBinds: false,
+      mounts: false,
+      portExpose: false,
+      sidecars: false,
+      warmPool: true,
+      survivesShellRestart: false,
+    };
+  }
+
+  /**
    * Recreate the per-instance allowlist so it holds exactly the binaries this
    * app's `tools[]` grants — hardlinks from the toolchain mirror by default,
    * symlinks into /aura/all-tools on filesystems that can't hardlink. See
@@ -169,7 +191,7 @@ export class ProotRunner implements SandboxRunner {
       // master container, where /home/aura is a symlink to the same dir (see
       // Dockerfile). Set unconditionally — inheriting the master's $HOME here
       // would leak OS-operator state into an app and write app state into it.
-      HOME: SHARED_HOME_PATH,
+      HOME: PROOT_HOME_ENV,
       APP_ID: appId,
       APP_INSTANCE_ID: instanceId,
       APP_PORT: String(port),
@@ -332,23 +354,15 @@ export class ProotRunner implements SandboxRunner {
       // ships Node 18 in its package archive, which is too old for our apps.
       '--bind=/usr/local/bin/node:/usr/local/bin/node',
       // The user's HOME — the SAME `aura/home/<userId>` dir ContainerRunner
-      // mounts at /home/aura in every app container. (The master container's
-      // own home is deliberately elsewhere — see scopes/home.ts.) Without this
-      // bind a PRoot's HOME resolves inside the base-rootfs
-      // (/os/base-rootfs/root), which is an
-      // IMAGE LAYER: every `claude` login, `gh auth`, ssh key and tool dotfile
-      // written there is destroyed by the next `compose up --build` or
-      // container recreate. The base-rootfs was already a home shared by all
-      // proots, so this changes nothing about isolation — it only moves that
-      // shared home onto the app-data volume, where it survives.
-      `--bind=${userHomeDir(this.dataDir)}:${SHARED_HOME_PATH}`,
-      // OS Context files. The master writes decrypted values here; binding the
-      // dir at /run/context mirrors changes live (no respawn to pick up a file
-      // edit — mirrors the ContainerRunner volume-subpath mount).
-      `--bind=${this.contextStore.systemDir}:/run/context`,
-      // OS-managed shared Context Volumes — bind each volume's subpath dir at
-      // the user-chosen mount path (proot binds are RW regardless of mode).
-      ...contextVolumes.map((v) => `--bind=${join(this.volumeStore.volumesDir, v.name)}:${v.mountPath}`),
+      // mounts at /home/aura in every app container (spawn/homeArgs.ts). (The
+      // master container's own home is deliberately elsewhere — see
+      // scopes/home.ts.) Without this bind a PRoot's HOME resolves inside the
+      // base-rootfs (/os/base-rootfs/root), which is an IMAGE LAYER: every
+      // `claude` login, `gh auth`, ssh key and tool dotfile written there is
+      // destroyed by the next `compose up --build` or container recreate.
+      prootHomeBind({ dataDir: this.dataDir }),
+      // OS Context: /run/context and the shared Context Volumes (spawn/contextArgs.ts).
+      ...prootContextBinds({ systemDir: this.contextStore.systemDir, volumesDir: this.volumeStore.volumesDir, volumes: contextVolumes }),
       // Expose the app's own source dir at its real absolute path. Required for
       // user/global-scope apps, whose appDir lives UNDER /data (e.g.
       // /data/scopes/users/<u>/apps/<id>): the `${dataDir}:/data` bind above
@@ -393,15 +407,8 @@ export class ProotRunner implements SandboxRunner {
       args.push(`--bind=${myTools}:${MY_TOOLS_PATH}`);
     }
 
-    // Bind the host docker socket if the manifest asks for it (explicit
-    // 'docker' in tools[] or the wildcard '*' allowlist). Required so that
-    // `docker` invocations from inside the proot — e.g. `aura jump` from
-    // the terminal app dropping into a sibling-container app via
-    // `docker exec` — reach the same daemon the shell uses.
-    const wantsDocker = toolsGrant(manifest.tools ?? [], 'docker');
-    if (wantsDocker && existsSync('/var/run/docker.sock')) {
-      args.push('--bind=/var/run/docker.sock:/var/run/docker.sock');
-    }
+    // The Docker socket when `tools[]` grants `docker` (spawn/socketArgs.ts).
+    args.push(...prootSocketBinds(manifest.tools));
 
     args.push(...entrypointArgv);
     return args;

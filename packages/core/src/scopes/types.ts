@@ -1,4 +1,6 @@
 import type { AppManifest } from '../types/manifest.js';
+import type { ResolvedHome } from '../homes/types.js';
+import type { SpawnIdentity } from '../identity/types.js';
 
 export type ScopeId = 'system' | 'global' | 'user';
 
@@ -36,4 +38,13 @@ export interface SpawnContext {
   sourceMode?: 'closed' | 'open';
   /** A preview instance (Track P): `appDir` is this workspace (relative to dataDir); labelled on the container. */
   preview?: string;
+  /**
+   * Phase 5 (ARI §9.4): what the kernel decided, from AppManager's
+   * `spawnContext` seam. Runners ignore these until their stream lands
+   * (home: H, identity: A, env: the kernel-built app env) and keep computing
+   * today's values; the golden spawn-args test pins that.
+   */
+  home?: ResolvedHome;
+  identity?: SpawnIdentity;
+  env?: Record<string, string>;
 }

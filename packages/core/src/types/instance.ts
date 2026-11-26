@@ -28,9 +28,11 @@ export interface AppInstance {
    * Which sandbox runner owns this instance. Latched at spawn time from the
    * manifest's `sandbox` field; needed at call sites (kill, lifecycle hooks)
    * because the manifest may change between spawn and teardown and we need
-   * to dispatch to the runner that ACTUALLY launched the process.
+   * to dispatch to the runner that ACTUALLY launched the process. A runtime
+   * id (ARI §9.1), always the resolved one, never omitted for a spawned
+   * instance.
    */
-  sandbox?: 'proot' | 'container';
+  sandbox?: string;
   /**
    * The user this instance runs for. Set on spawn and on warm-pool claim;
    * undefined only while the instance is an unclaimed pool member.

@@ -92,7 +92,7 @@ function world() {
   let bound: number | null = null;
   const view = () => ({
     appId: APP, name: 'Status', version: '1.0.0', scope: 'user', installationId, activeInstallationId: installationId,
-    overlay: false, mode: 'closed', defaultMode: 'closed', modeFrom: 'manifest',
+    mode: 'closed', defaultMode: 'closed', modeFrom: 'manifest',
     upstream: { repository: upstream, branch: 'main', commit: git(upstream, 'rev-parse', 'HEAD^0') },
     source: { path: `/mnt/aura/${APP}`, writable: false, mounted: true },
     workspace: bound ? { n: bound, path: join(wsRoot, String(bound)) } : null,
@@ -251,7 +251,7 @@ test('activate: builds a fresh tree, calls the install route, 202 → owner appr
   const seen = await fakeShell((r) => {
     if (r.method === 'POST' && r.url === `/api/apps/${APP}/activate`) {
       return r.approval === APPROVAL
-        ? [200, { ok: true, record: { id: APP, version: '1.0.0' }, scope: 'user', overlay: false, rollbackTree: '/data/nexus/trash/x', running: [] }]
+        ? [200, { ok: true, record: { id: APP, version: '1.0.0' }, scope: 'user', rollbackTree: '/data/nexus/trash/x', running: [] }]
         : [202, { ok: false, error: 'needs-approval', needsApproval: true, approvalId: APPROVAL, level: 'session', display: { title: `Activate patches for ${APP}`, details: [], requestedBy: 'Terminal' } }];
     }
     if (r.method === 'GET' && r.url === `/api/approvals/${APPROVAL}`) return [200, { id: APPROVAL, state: ++polls < 1 ? 'pending' : 'approved' }];
@@ -412,10 +412,10 @@ test('patch clean (command): passes --keep and --force', async () => {
 test('Track P v1: patch start / activate / update refuse a built-in app with the reason; status shows its read-only source and says so', async () => {
   const view = {
     appId: 'com.aura.terminal', name: 'Terminal', version: '1.0.0', scope: 'system', installationId: '00000000-1111-4222-8333-444444444444',
-    activeInstallationId: '00000000-1111-4222-8333-444444444444', overlay: false, mode: 'closed', defaultMode: 'closed', modeFrom: 'system',
+    activeInstallationId: '00000000-1111-4222-8333-444444444444', mode: 'closed', defaultMode: 'closed', modeFrom: 'system',
     upstream: { repository: 'https://example.invalid/auraos.git', commit: 'a'.repeat(40) },
     source: { path: '/mnt/aura/com.aura.terminal', writable: false, mounted: true }, workspace: null, workspaces: [],
-    next: 'Read the source at /mnt/aura/com.aura.terminal (read-only). Patching built-in apps comes later; use a normal app or Developer Mode.',
+    next: 'Read the source at /mnt/aura/com.aura.terminal (read-only). Built-in apps are patched by system patches (Phase 7) or in Developer Mode.',
   };
   const seen = await fakeShell((r) => (r.url.startsWith(`/api/instances/${INST}/app-source`) ? [200, view] : undefined));
   const said = async (fn: () => Promise<unknown>) => {
@@ -429,7 +429,7 @@ test('Track P v1: patch start / activate / update refuse a built-in app with the
   for (const run of [() => startWorkspace('com.aura.terminal'), () => activateRevision('com.aura.terminal'), () => updateSeries('com.aura.terminal')]) {
     const out = await said(run);
     assert.equal(out.ok, false);
-    assert.match(out.text, /com\.aura\.terminal is a built-in app\. Patching built-in apps comes later; use a normal app or Developer Mode\./);
+    assert.match(out.text, /com\.aura\.terminal is a built-in app\. Built-in apps are patched by system patches \(Phase 7\) or in Developer Mode\./);
   }
   assert.deepEqual(seen.filter((r) => !r.url.includes('/app-source')), [], 'no workspace was bound, nothing activated');
 
@@ -439,7 +439,7 @@ test('Track P v1: patch start / activate / update refuse a built-in app with the
   const status = await said(() => program.parseAsync(['node', 'aura', 'dev', 'status', 'com.aura.terminal']));
   assert.equal(status.ok, true);
   assert.match(status.text, /\/mnt\/aura\/com\.aura\.terminal\s+.*read-only/);
-  assert.match(status.text, /built-in app — Patching built-in apps comes later/);
+  assert.match(status.text, /built-in app — Built-in apps are patched by system patches \(Phase 7\) or in Developer Mode/);
 });
 
 test('the patch repo is the installation\'s, bound from the volume (no AURA_PATCHES_DIR): two Terminals share the series, and it outlives the one that saved it', async () => {

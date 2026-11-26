@@ -1,12 +1,12 @@
 // Track P, the shell side of app patching (lib/appSource.ts): where an agent
 // finds an app's source, the patch workspace bound into the calling Terminal,
 // opening an app (owner approval), and activating a prepared tree through the
-// Nexus install pipeline (owner approval, swap, rollback tree, overlay).
+// Nexus install pipeline (owner approval, swap, rollback tree); built-in apps refused.
 //
 //   node tools/run-tests.mjs --only=shell
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as core from '@aura/core';
@@ -56,8 +56,6 @@ let scopes: core.ScopeDefinition[];
 let nexus: core.NexusManager;
 let kernel: AuraMount[];
 let audits: unknown[];
-/** User-scope copies an approved activation linked to their system app (core lifecycle `trustedOverlay`). */
-let overlays: Set<string>;
 /** Previews the fake AppManager started: instanceId → { appId, appDir, workspace, owner }. */
 let previews: Map<string, { appId: string; appDir: string; workspace: string; owner: string }>;
 
@@ -115,7 +113,7 @@ function deps(): AppSourceDeps {
       stopPreview: async (id) => { previews.delete(id); },
       trustedSystemCopy: (appId) => {
         const a = apps().find((x) => x.id === appId);
-        return !!a && (a.scopeId === 'system' || (a.scopeId === 'user' && overlays.has(appId)));
+        return a?.scopeId === 'system';
       },
     },
     mounts: {
@@ -156,7 +154,6 @@ beforeEach(async () => {
   caller = TERMINAL;
   kernel = [];
   audits = [];
-  overlays = new Set();
   previews = new Map();
   root = mkdtempSync(join(tmpdir(), 'aura-src-'));
   const scope = (id: core.ScopeId, priority: number, immutable: boolean) =>
@@ -267,7 +264,7 @@ test('activate without approval answers 202; with it the tree is swapped, the ro
   await store.approve(id, DECIDER);
   const done = await read(await activatePrepared(req('POST', { workspace: 1 }, { 'x-aura-approval': id }), 'io.shop.app', deps()));
   assert.equal(done.status, 200, JSON.stringify(done.body));
-  assert.deepEqual([done.body.scope, done.body.overlay, done.body.running], ['global', false, ['io.shop.app']]);
+  assert.deepEqual([done.body.scope, done.body.running], ['global', ['io.shop.app']]);
   assert.equal(readFileSync(join(appDir, 'src', 'index.astro'), 'utf-8'), 'patched\n');
   assert.equal(readFileSync(join(appDir, 'io.shop.app', 'orders.json'), 'utf-8'), '[42]');
   assert.ok(done.body.rollbackTree && existsSync(done.body.rollbackTree));
@@ -281,50 +278,38 @@ test('activate without approval answers 202; with it the tree is swapped, the ro
   assert.equal((await read(await activatePrepared(req('POST', { workspace: 9 }), 'io.shop.app', deps()))).status, 404);
 });
 
-test('Track P v1: a built-in app is not patched — R4 answers 409 system-app-later; status says so; nothing is installed', async () => {
+test('built-in: a built-in app is not patched — R4 answers 409 system-app-later; status says so; nothing is installed', async () => {
   const ws = join(root, 'root', 'aura', 'workspaces', 'default', 'inst-system-com-aura-terminal', '1');
   writeApp(ws, { id: 'com.aura.terminal', originId: O2, name: 'Terminal', version: '1.0.0', tools: ['*'] }, 'status line\n');
   const r = await read(await activatePrepared(req('POST', { workspace: 1 }), 'com.aura.terminal', deps()));
   assert.deepEqual([r.status, r.body.error], [409, 'system-app-later']);
-  assert.equal(r.body.message, 'com.aura.terminal is a built-in app. Patching built-in apps comes later; use a normal app or Developer Mode.');
+  assert.equal(r.body.message, 'com.aura.terminal is a built-in app. Built-in apps are patched by system patches (Phase 7) or in Developer Mode.');
   assert.equal([...store.records.values()].length, 0, 'the owner is never asked');
   assert.equal(existsSync(join(scopes[2]!.appsDir, 'com.aura.terminal')), false);
   assert.equal(readFileSync(join(scopes[0]!.appsDir, 'com.aura.terminal', 'src', 'index.astro'), 'utf-8'), 'v1\n');
-  // Rollback too, and an overlay that exists from before (it keeps its trust, but is not patched).
+  // Rollback too.
   assert.equal((await read(await activatePrepared(req('POST', { rollback: true }), 'com.aura.terminal', deps()))).status, 409);
-  writeApp(join(scopes[2]!.appsDir, 'com.aura.terminal'), { id: 'com.aura.terminal', originId: O2, name: 'Terminal', version: '1.0.0', tools: ['*'] });
-  overlays.add('com.aura.terminal');
-  assert.equal((await read(await activatePrepared(req('POST', { workspace: 1 }), 'com.aura.terminal', deps()))).body.error, 'system-app-later');
 
   // Status: the read-only source, and the reason.
-  overlays.clear();
-  rmSync(join(scopes[2]!.appsDir, 'com.aura.terminal'), { recursive: true });
   const s = await read(await appSourceStatus(req('POST', { app: 'com.aura.terminal' }), 'com.aura.terminal', deps(), true));
   assert.deepEqual([s.body.scope, s.body.mode, s.body.source.writable, s.body.source.mounted], ['system', 'closed', false, true]);
-  assert.equal(s.body.next, 'Read the source at /mnt/aura/com.aura.terminal (read-only). Patching built-in apps comes later; use a normal app or Developer Mode.');
+  assert.equal(s.body.next, 'Read the source at /mnt/aura/com.aura.terminal (read-only). Built-in apps are patched by system patches (Phase 7) or in Developer Mode.');
   // A normal app's status is unchanged.
   assert.match((await read(await appSourceStatus(req('GET', undefined, {}, 'http://shell.test/x?app=io.shop.app'), 'com.aura.terminal', deps(), false))).body.next, /aura dev patch start io\.shop\.app/);
 });
 
-test('a same-id user copy without the overlay link is its own app: own patch key, and not the owner\'s Terminal', async () => {
+test('a same-id user copy is its own app: own patch key, and never the owner\'s Terminal (Q6)', async () => {
   // An open app (built here, no install record) to ask for a writable view of.
   writeApp(join(scopes[2]!.appsDir, 'io.local.app'), { id: 'io.local.app', name: 'Local', version: '1.0.0' });
   const writable = async () => (await read(await appSourceStatus(req('POST', { app: 'io.local.app' }), 'com.aura.terminal', deps(), true))).body.source.writable;
   assert.equal(await writable(), true, 'the system Terminal gets the writable view of an open app');
 
-  // A user-scope com.aura.terminal that no approved activation linked (a store or `aura dev` copy).
+  // A user-scope com.aura.terminal (a store or `aura dev` copy).
   writeApp(join(scopes[2]!.appsDir, 'com.aura.terminal'), { id: 'com.aura.terminal', name: 'Terminal', version: '9.0.0', tools: ['*'] });
   const s = await read(await appSourceStatus(req('GET', undefined, {}, 'http://shell.test/x?app=com.aura.terminal'), 'com.aura.terminal', deps(), false));
-  assert.deepEqual([s.body.scope, s.body.overlay, s.body.installationId], ['user', false, 'inst-user-com-aura-terminal']);
+  assert.deepEqual([s.body.scope, s.body.installationId, 'overlay' in s.body], ['user', 'inst-user-com-aura-terminal', false]);
   kernel = [];
-  assert.equal(await writable(), false, 'an unlinked same-id copy is no trusted Terminal');
-
-  // Linked by an approved activation: the owner's Terminal again, patched under the system key.
-  overlays.add('com.aura.terminal');
-  const o = await read(await appSourceStatus(req('GET', undefined, {}, 'http://shell.test/x?app=com.aura.terminal'), 'com.aura.terminal', deps(), false));
-  assert.deepEqual([o.body.overlay, o.body.installationId], [true, 'inst-system-com-aura-terminal']);
-  kernel = [];
-  assert.equal(await writable(), true);
+  assert.equal(await writable(), false, 'a same-id copy is no trusted Terminal');
 });
 
 test('activate installs the calling user\'s workspace; only the owner names another user\'s', async () => {

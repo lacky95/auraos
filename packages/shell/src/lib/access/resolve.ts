@@ -1,5 +1,5 @@
 import { HTTP_METHODS, ROUTE_METHODS } from './types.ts';
-import type { AccessRule, RouteAccessManifest, RouteMethod } from './types.ts';
+import type { AccessRule, RouteAccessManifest, RouteMethod, RouteRefinement } from './types.ts';
 
 /**
  * Pure lookups over the route access manifest. No I/O, so the audit test and
@@ -22,6 +22,10 @@ export function dispatchedMethods(handlers: readonly string[]): RouteMethod[] {
 
 const spellings = new WeakMap<RouteAccessManifest, Map<string, string>>();
 
+/** A route's refinement: its `routes` row, else its `reserved` row (deny until implemented). */
+export const refinementOf = (manifest: RouteAccessManifest, route: string): RouteRefinement | undefined =>
+  manifest.routes[route] ?? manifest.reserved?.[route];
+
 /**
  * The manifest's spelling of a route pattern. Astro hands `routePattern`
  * lowercased (`/api/instances/[instanceid]/sidecars`), while the manifest
@@ -32,7 +36,7 @@ const spellings = new WeakMap<RouteAccessManifest, Map<string, string>>();
 export function manifestRoute(manifest: RouteAccessManifest, pattern: string): string {
   let byLower = spellings.get(manifest);
   if (!byLower) {
-    byLower = new Map(Object.keys(manifest.routes).map((r) => [r.toLowerCase(), r]));
+    byLower = new Map([...Object.keys(manifest.reserved ?? {}), ...Object.keys(manifest.routes)].map((r) => [r.toLowerCase(), r]));
     spellings.set(manifest, byLower);
   }
   return byLower.get(pattern.toLowerCase()) ?? pattern;
@@ -47,7 +51,7 @@ export function effectiveRule(
   info: RouteHandlers,
   method: RouteMethod,
 ): AccessRule | undefined {
-  const methods = manifest.routes[info.route]?.methods;
+  const methods = refinementOf(manifest, info.route)?.methods;
   const own = methods?.[method];
   if (own) return own;
   if (method === 'HEAD' && !info.handlers.includes('ALL') && !info.handlers.includes('HEAD') && methods?.GET) return methods.GET;
@@ -71,7 +75,7 @@ export function normalizeMethod(method: string): RouteMethod {
  * falls back to its group.
  */
 export function handlersOf(manifest: RouteAccessManifest, route: string): string[] {
-  const methods = manifest.routes[route]?.methods;
+  const methods = refinementOf(manifest, route)?.methods;
   if (!methods) return [];
   const names = Object.keys(methods);
   return ROUTE_METHODS.every((m) => names.includes(m)) ? ['ALL'] : names;
@@ -107,7 +111,7 @@ export function bodyFieldMatches(body: unknown, field: string, equals?: string |
 
 /** Whether some body variant of this route that applies to `method` is to be read. */
 export function readsBody(manifest: RouteAccessManifest, info: RouteHandlers, method: RouteMethod): boolean {
-  return (manifest.routes[info.route]?.variants ?? []).some((v) =>
+  return (refinementOf(manifest, info.route)?.variants ?? []).some((v) =>
     v.match.on === 'body' && v.match.read === true && variantApplies(v.methods, method, info));
 }
 
@@ -125,7 +129,7 @@ export function candidateRules(
   manifest: RouteAccessManifest, info: RouteHandlers, method: RouteMethod, facts: VariantFacts,
 ): RuleCandidate[] {
   const out: RuleCandidate[] = [];
-  for (const v of manifest.routes[info.route]?.variants ?? []) {
+  for (const v of refinementOf(manifest, info.route)?.variants ?? []) {
     if (!variantApplies(v.methods, method, info)) continue;
     const m = v.match;
     if (m.on === 'body') {

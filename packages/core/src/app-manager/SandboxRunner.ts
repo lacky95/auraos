@@ -3,6 +3,7 @@ import type { AppManifest } from '../types/manifest.js';
 import type { SpawnContext } from '../scopes/types.js';
 import type { ResourceUsage, SidecarInfo } from '../types/instance.js';
 import type { LifecycleStatus } from './lifecycleGate.js';
+import type { RuntimeCapabilities, RuntimeSettings } from '../runtimes/types.js';
 
 /**
  * Shared abstraction for "spawn an isolated bash process that runs an app".
@@ -25,6 +26,14 @@ import type { LifecycleStatus } from './lifecycleGate.js';
 export type InstanceSpawnContext = SpawnContext & { owner?: string };
 
 export interface SandboxRunner {
+  /**
+   * What this runner can do under the given settings (ARI §2.3, §9.5). The
+   * Phase 5 fail-closed checks gate on these flags, never on the runner's id.
+   * Declared honestly for today's behaviour; a stream that adds a capability
+   * flips its flag in the same change.
+   */
+  capabilities(settings?: RuntimeSettings): RuntimeCapabilities;
+
   /** Resolve the per-instance toolchain allowlist directory on the host. */
   toolsDir(instanceId: string): string;
   /**

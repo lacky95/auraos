@@ -9,7 +9,7 @@ import {
   combineCandidates, concreteRule, decideRule, isInternalCall, kvNamespace, liveDeps, resourceFor, withNetworkCaller,
   type CandidateRequest, type ObserverDeps,
 } from './observer.ts';
-import { candidateRules, handlersOf, manifestRoute, normalizeMethod, readsBody, type RuleCandidate } from './resolve.ts';
+import { candidateRules, handlersOf, manifestRoute, normalizeMethod, readsBody, refinementOf, type RuleCandidate } from './resolve.ts';
 import { ROUTE_ACCESS_MANIFEST } from './routeManifest.ts';
 import type {
   AccessReason, AccessRule, DecideResult, PolicyOutcome, RequestSnapshot, RouteAccessManifest, VerifiedIdentity,
@@ -162,7 +162,7 @@ export async function accessGate(
     const body = await readJsonBody(ctx.request);
     if (body === TOO_LARGE) return { refused: refused(413, 'body-too-large'), identity };
     candidates = candidateRules(manifest, info, method, { ...facts, body });
-    const read = new Set((manifest.routes[route]?.variants ?? []).filter((v) => v.match.on === 'body' && v.match.read).map((v) => v.id));
+    const read = new Set((refinementOf(manifest, route)?.variants ?? []).filter((v) => v.match.on === 'body' && v.match.read).map((v) => v.id));
     bodyVariant = candidates.find((c) => c.variant !== null && read.has(c.variant))?.variant ?? null;
   }
   const settled = bodyVariant === undefined ? {} : { bodyVariant };

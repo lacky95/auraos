@@ -134,6 +134,13 @@ export interface RouteAccessManifest {
   /** Baseline per first path segment after `/api`. */
   groups: Readonly<Record<string, AccessRule>>;
   routes: Readonly<Record<string, RouteRefinement>>;
+  /**
+   * Rows declared ahead of their route (Phase 5 Stage 1), each denying every
+   * method. They apply like `routes` once the file exists, so a new route is
+   * refused until its stream moves the row into `routes` with a real rule;
+   * the audit fails on a reserved row whose route exists.
+   */
+  reserved?: Readonly<Record<string, RouteRefinement>>;
   /** Files Astro registers as routes that export no handler, with the reason. */
   nonRoutes: Readonly<Record<string, string>>;
 }

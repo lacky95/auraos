@@ -138,6 +138,25 @@ export const SECURITY_OPTIONS: readonly SecurityOption[] = Object.freeze([
     env: 'AURA_SHELL_MODE', restartRequired: true, change: 'session', since: '2026-10-30', phase: 'early',
   },
   {
+    id: 'runtimes',
+    title: 'App runtimes',
+    description: 'Which runtimes apps may run in (container, PRoot), the default for apps that name none, each runtime\'s '
+      + 'settings, and the per-installation overrides (ARI). A change applies to the next start of an app; an unknown or '
+      + 'disabled runtime is refused, never replaced. Changed in Settings → Runtimes or with `aura runtime` '
+      + '(Phase 5, the runtime release).',
+    type: 'record', default: null, source: 'record', record: 'user:policy:runtimes', restartRequired: false, change: 'fresh',
+    since: '2026-11-26', phase: '5 (ARI, Q1)',
+  },
+  {
+    id: 'aura-root',
+    title: 'Root tab (`aura root`)',
+    description: 'enabled (default): the owner can open a dedicated root tab with the Docker socket in that tab only, after '
+      + 'an approval, with a banner and an audit entry. disabled: `aura root` is refused (a Zero Trust installation turns it '
+      + 'off). Not yet available: it comes with the root tab (Phase 5, D55).',
+    type: 'enum', values: ['enabled', 'disabled'], default: 'enabled', source: 'reserved',
+    restartRequired: false, change: 'fresh', since: '2026-11-26', phase: '5 (D55, P5-4)',
+  },
+  {
     id: 'access-profile',
     title: 'Access profile',
     description: 'Open (the alpha) or Zero Trust (every app call needs an explicit grant). Not yet available: '

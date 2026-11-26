@@ -28,9 +28,8 @@ const NOTES = 'com.acme.notes';
 /** installationId → installation. `inst-settings-user` is a same-id copy in user scope. */
 const installations: Record<string, { appId: string; scope: string; state: string; overlay?: { of: string } }> = {
   'inst-settings': { appId: SETTINGS, scope: 'system', state: 'active' },
-  // Track P: owner-approved overlays, linked to their system installation.
-  'inst-settings-overlay': { appId: SETTINGS, scope: 'user', state: 'active', overlay: { of: 'inst-settings' } },
-  'inst-nexus-overlay': { appId: NEXUS, scope: 'user', state: 'active', overlay: { of: 'inst-nexus' } },
+  // A record written while the (removed, Q6) overlay link existed: the field is never read.
+  'inst-settings-legacy': { appId: SETTINGS, scope: 'user', state: 'active', overlay: { of: 'inst-settings' } },
   'inst-settings-user': { appId: SETTINGS, scope: 'user', state: 'active' },
   'inst-nexus': { appId: NEXUS, scope: 'system', state: 'active' },
   'inst-nexus-user': { appId: NEXUS, scope: 'user', state: 'active' },
@@ -42,9 +41,6 @@ const sessionLive = async (sid: string) => liveSessions.has(sid);
 const services = {
   registry: {
     getInstallation: async (id: string) => installations[id] ?? null,
-    // Core AppHostStore `approvedOverlay` (tested in core app-host-registry): a link to the app's system installation.
-    approvedOverlay: async (i: { appId: string; overlay?: { of: string } }) =>
-      !!i.overlay && installations[i.overlay.of]?.appId === i.appId && installations[i.overlay.of]?.scope === 'system',
   },
   sessionLive,
 };
@@ -57,14 +53,12 @@ const instances: Record<string, { appId: string; instanceId: string }> = {
 };
 /** appId → install scope of the copy the registry resolves (a user copy shadows system). */
 const installedScope: Record<string, string> = { [SETTINGS]: 'system', [NEXUS]: 'system', [NOTES]: 'user' };
-/** Apps whose installed user copy is an approved overlay (core lifecycle `trustedOverlay`). */
-const overlaid = new Set<string>();
 const mgr = {
   tokens: { hasNonce: () => false, verify: () => null },
   getInstance: (id: string) => instances[id],
   getInstancesByApp: () => [],
   getManifest: (id: string) => (installedScope[id] ? { scopeId: installedScope[id] } : undefined),
-  isTrustedSystemCopy: (id: string) => installedScope[id] === 'system' || (installedScope[id] === 'user' && overlaid.has(id)),
+  isTrustedSystemCopy: (id: string) => installedScope[id] === 'system',
   getActivity: () => undefined,
 } as unknown as ObserverManager;
 /** No app holds any permission, so only `owner` can pass an owner rule. */
@@ -184,29 +178,17 @@ test('a same-id copy in user scope never qualifies', async () => {
   }
 });
 
-test('Track P: approved overlays of Settings and Nexus keep acting for the owner; a same-id copy does not', async () => {
-  const settingsOverlay = { ...settings, installationId: 'inst-settings-overlay' };
-  const nexusOverlay = { ...nexus, installationId: 'inst-nexus-overlay' };
-  installedScope[SETTINGS] = 'user'; installedScope[NEXUS] = 'user';
-  overlaid.add(SETTINGS); overlaid.add(NEXUS);
+test('a same-id user copy of Settings never acts for the owner, even with a legacy overlay field (Q6)', async () => {
+  installedScope[SETTINGS] = 'user';
   try {
-    for (const [method, path, route] of OWNER_ROUTES) {
-      assert.equal(await enforce(apiCtx(settingsOverlay, method, path, route)), null, `Settings overlay ${path}`);
+    for (const installationId of ['inst-settings-legacy', 'inst-settings-user', 'inst-settings']) {
+      assert.equal((await enforce(apiCtx({ ...settings, installationId }, ...OWNER_ROUTES[0]!)))?.status, 403, installationId);
     }
-    assert.equal(await enforce(apiCtx(nexusOverlay, 'POST', '/api/os/ui/command', '/api/os/ui/command')), null);
-    assert.equal(await enforce(apiCtx(nexusOverlay, 'POST', '/api/apps/com.acme.notes/start', '/api/apps/[id]/start', { params: { id: NOTES } })), null);
-    // Its scope still holds: the Nexus overlay is no Settings.
-    assert.equal((await enforce(apiCtx(nexusOverlay, ...OWNER_ROUTES[0]!)))?.status, 403);
-    // A same-id user copy with no overlay link, installed in front: refused.
-    overlaid.delete(SETTINGS);
-    assert.equal((await enforce(apiCtx(settingsOverlay, ...OWNER_ROUTES[0]!)))?.status, 403, 'the running copy is not the linked overlay');
-    overlaid.add(SETTINGS);
-    assert.equal((await enforce(apiCtx({ ...settings, installationId: 'inst-settings-user' }, ...OWNER_ROUTES[0]!)))?.status, 403,
-      'an unlinked installation of the same id');
   } finally {
-    installedScope[SETTINGS] = 'system'; installedScope[NEXUS] = 'system';
-    overlaid.clear();
+    installedScope[SETTINGS] = 'system';
   }
+  assert.equal((await enforce(apiCtx({ ...settings, installationId: 'inst-settings-legacy' }, ...OWNER_ROUTES[0]!)))?.status, 403,
+    'the claim names a user installation, not the system one');
 });
 
 test('a cookie without a live session, or a revoked session, is refused', async () => {

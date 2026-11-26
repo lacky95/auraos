@@ -1,24 +1,20 @@
 // Track P, the system side of app patching: the effective source mode, the
 // read-only rule for an agent workspace's own source, and installing a
 // prepared tree through the Nexus install pipeline (atomic swap, rollback
-// tree, data carry-over, system-app overlay in user scope).
+// tree, data carry-over; a built-in app's activation is refused).
 //
 //   pnpm --filter @aura/core test
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 
 import { Installer } from '../dist/nexus/Installer.js';
 import { NexusManager } from '../dist/nexus/NexusManager.js';
 import { effectiveSourceMode, listWorkspaces, workspaceSubpath, withoutCredentials } from '../dist/nexus/AppSource.js';
 import { ContainerRunner, ownSourceReadOnly } from '../dist/app-manager/ContainerRunner.js';
-import { appFingerprint, serveState, writeBuildStamp } from '../dist/app-manager/appBuild.js';
-import { needsProvisioning, provisionApp } from '../dist/app-manager/provisioning.js';
-import { portAppDirForScope } from '../dist/scopes/portability.js';
-import { validateStagedDir } from '../dist/nexus/Validator.js';
+import { appFingerprint, writeBuildStamp } from '../dist/app-manager/appBuild.js';
 
 const O1 = '00000000-0000-4000-8000-000000000001';
 const put = (p, text) => { mkdirSync(join(p, '..'), { recursive: true }); writeFileSync(p, text); };
@@ -127,7 +123,7 @@ test('activate a prepared tree: approval first, then the swap; rollback tree kep
   assert.equal(readFileSync(join(appDir, 'io.shop.app', 'orders.json'), 'utf-8'), '[42]');
 });
 
-test('Track P v1: a built-in app is not patched — its activation is refused, nothing installed, the system copy untouched', async () => {
+test('built-in: a built-in app is not patched — its activation is refused, nothing installed, the system copy untouched', async () => {
   const w = world();
   const sysDir = w.tree(join(w.sys.appsDir, 'com.aura.terminal'), 'com.aura.terminal', '1.0.0');
   const ws = w.tree(join(w.root, 'ws'), 'com.aura.terminal', '1.0.0', { files: { 'src/index.astro': 'status line\n' } });
@@ -136,7 +132,7 @@ test('Track P v1: a built-in app is not patched — its activation is refused, n
   let error = null;
   try { for (let c = await it.next(); !c.done; c = await it.next()) { /* to the end */ } }
   catch (err) { error = err.message; }
-  assert.equal(error, 'system-app-later: Patching built-in apps comes later; use a normal app or Developer Mode');
+  assert.equal(error, 'system-app-later: Built-in apps are patched by system patches (Phase 7) or in Developer Mode');
   assert.deepEqual(bindings, [], 'the owner is never asked');
   assert.equal(existsSync(join(w.user.appsDir, 'com.aura.terminal')), false);
   assert.equal(readFileSync(join(sysDir, 'src', 'index.astro'), 'utf-8'), 'v1.0.0\n');
@@ -163,61 +159,4 @@ test('own source read-only: a closed agent workspace (every tool) that serves it
     ['--mount', 'type=volume,source=vol,target=/workspace/apps/io.x,volume-subpath=scopes/users/default/apps/io.x,readonly']);
   assert.deepEqual(mount.call(self, '/data/scopes/users/default/apps/io.x', 'io.x', 'vol'),
     ['--mount', 'type=volume,source=vol,target=/workspace/apps/io.x,volume-subpath=scopes/users/default/apps/io.x']);
-});
-
-// ── a patched system app as a user-scope overlay: the monorepo port ────────
-
-const REPO_APPS = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'apps');
-const APP_FILES = ['app.manifest.json', 'package.json', 'astro.config.mjs', 'server.mjs'];
-
-/** `npm` and `aura` stand-ins on PATH: npm refuses what real npm refuses (a `workspace:` spec). */
-function fakeToolchain(root) {
-  const bin = join(root, 'bin');
-  mkdirSync(bin, { recursive: true });
-  const log = join(root, 'tools.log');
-  const script = (name, body) => { writeFileSync(join(bin, name), `#!/bin/sh\necho "${name} $*" >> ${log}\n${body}\n`); chmodSync(join(bin, name), 0o755); };
-  script('npm', 'if grep -q \'"workspace:\' package.json; then echo "npm error code EUNSUPPORTEDPROTOCOL" >&2; exit 1; fi\nmkdir -p node_modules/.bin && : > node_modules/.bin/astro && chmod +x node_modules/.bin/astro');
-  script('aura', 'mkdir -p node_modules/@aura/app-sdk');
-  return { bin, log };
-}
-
-for (const id of ['com.aura.terminal', 'com.aura.settings']) {
-  test(`overlay port (kept for later) of ${id}: the monorepo package.json is ported for user scope; it provisions and serves like the system copy`, async () => {
-    const root = mkdtempSync(join(tmpdir(), 'aura-port-'));
-    const copy = (dir) => { for (const f of APP_FILES) if (existsSync(join(REPO_APPS, id, f))) put(join(dir, f), readFileSync(join(REPO_APPS, id, f), 'utf-8')); return dir; };
-    const sysDir = copy(join(root, 'system', id));
-    const appDir = copy(join(root, 'user', id));
-    const port = portAppDirForScope(appDir, 'user', '1.2.3');
-    assert.deepEqual([port.changed, port.unportable], [true, []]);
-    assert.deepEqual(portAppDirForScope(appDir, 'user', '1.2.3'), { changed: false, unportable: [] }, 'idempotent');
-
-    const pkg = json(join(appDir, 'package.json'));
-    assert.doesNotMatch(JSON.stringify([pkg.dependencies, pkg.devDependencies]), /workspace:/, 'no workspace: spec is left');
-    assert.equal(pkg.auraDependencies['@aura/app-sdk'], '^1.2.3');
-    if (id === 'com.aura.settings') assert.equal(pkg.auraDependencies['@aura/ui'], '^1.2.3');
-    assert.ok(existsSync(join(appDir, '.npmrc')));
-    const manifest = validateStagedDir(appDir);
-    for (const t of ['bash', 'node', 'aura', 'oras']) assert.ok(manifest.tools.includes(t), `tool ${t}`);
-    assert.equal(manifest.originId, json(join(sysDir, 'app.manifest.json')).originId, 'the identity is the system app\'s');
-
-    // Provisioning (the npm stand-in refuses `workspace:` as npm does) and the serve state.
-    const tools = fakeToolchain(root);
-    const path = process.env.PATH;
-    process.env.PATH = `${tools.bin}:${path}`;
-    try {
-      await assert.rejects(provisionApp(sysDir), /npm install failed/, 'unported, it would not install');
-      const prov = await provisionApp(appDir);
-      assert.deepEqual(prov.ran, ['npm install', 'aura sdk install']);
-    } finally { process.env.PATH = path; }
-    assert.equal(needsProvisioning(appDir), false);
-    assert.deepEqual(serveState(appDir, manifest), serveState(sysDir, validateStagedDir(sysDir)));
-  });
-}
-
-test('overlay port: dependencies that only resolve inside the monorepo are reported, not ported', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'aura-port-'));
-  put(join(dir, 'app.manifest.json'), JSON.stringify({ id: 'com.aura.settings', name: 'Settings', version: '1.0.0' }));
-  put(join(dir, 'package.json'), JSON.stringify({ name: 'x', dependencies: { '@aura/app-sdk': 'workspace:*', 'shared-lib': 'workspace:*', theme: 'file:../../packages/theme', local: 'file:./vendor/local' } }));
-  assert.deepEqual(portAppDirForScope(dir, 'user', '1.0.0').unportable,
-    ['dependencies.shared-lib: workspace:*', 'dependencies.theme: file:../../packages/theme']);
 });

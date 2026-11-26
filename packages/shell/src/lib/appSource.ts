@@ -48,7 +48,7 @@ export interface AppSourceDeps {
     sourceMode(appId: string): SourceModeInfo | null;
     instance(instanceId: string): { appId: string; sandbox?: string } | undefined;
     instancesOf(appId: string): string[];
-    /** AppManager `isTrustedSystemCopy`: the system copy, or the owner's approved overlay of it. */
+    /** AppManager `isTrustedSystemCopy`: the active copy is the system installation. */
     trustedSystemCopy(appId: string): boolean;
     /** AppManager previews (Track P): start one from a prepared tree, list them, stop one. */
     startPreview(appId: string, opts: { appDir: string; workspace: string; owner: string }): Promise<string>;
@@ -107,29 +107,18 @@ export function resolveApp(deps: AppSourceDeps, ref: unknown): ScopedApp | Respo
 }
 
 /**
- * Whether the active copy is the owner's overlay of a system app: a user-scope
- * copy an approved activation linked to the system installation (core
- * AppHostStore `approvedOverlay`). A same-id copy from a store or `aura dev`
- * is its own app, with its own patches.
+ * A built-in app: read-only, patched by system patches (Phase 7) or in
+ * Developer Mode (Q6, D68). A same-id copy from a store or `aura dev` is its
+ * own app, with its own patches.
  */
-/** A built-in app (or its overlay) while built-in patching is off (core SYSTEM_APP_OVERLAYS). */
-function builtInApp(deps: AppSourceDeps, app: ScopedApp): boolean {
-  return (app.scopeId === 'system' || isOverlay(deps, app)) && !core.SYSTEM_APP_OVERLAYS;
+function builtInApp(app: ScopedApp): boolean {
+  return app.scopeId === 'system';
 }
 
-function isOverlay(deps: AppSourceDeps, app: ScopedApp): boolean {
-  return app.scopeId === 'user' && deps.apps.trustedSystemCopy(app.id);
-}
-
-/**
- * The installation patches and workspaces belong to: the active copy's, but a
- * system app's for its overlay, so the patches outlive the overlay itself.
- */
-async function patchInstallation(deps: AppSourceDeps, app: ScopedApp): Promise<{ key: string | null; active: string | null; overlay: boolean }> {
-  const overlay = isOverlay(deps, app);
+/** The installation patches and workspaces belong to: the active copy's. */
+async function patchInstallation(deps: AppSourceDeps, app: ScopedApp): Promise<{ key: string | null; active: string | null }> {
   const active = await deps.installationId(app.id, app.scopeId).catch(() => null);
-  const key = overlay ? await deps.installationId(app.id, 'system').catch(() => null) : active;
-  return { key, active, overlay };
+  return { key: active, active };
 }
 
 /** The user a request acts for: workspaces are per user. */
@@ -165,8 +154,8 @@ function consumer(deps: AppSourceDeps, instanceId: string | undefined): string |
 /**
  * A writable source view of an open app goes only to the owner's own
  * Terminal (or the owner): write access to another app's files is the
- * owner's (Q30), as for `aura mount --wr`. The Terminal's approved overlay
- * is still the owner's Terminal.
+ * owner's (Q30), as for `aura mount --wr`. Only the system Terminal: a
+ * same-id copy is not it.
  */
 function mayWrite(principal: AccessPrincipal, deps: AppSourceDeps): boolean {
   if (principal.kind === 'user' || principal.kind === 'operator') return true;
@@ -226,7 +215,7 @@ export async function appSourceStatus(request: Request, instanceId: string | und
   const app = resolveApp(deps, ref);
   if (app instanceof Response) return app;
   const mode = deps.apps.sourceMode(app.id) ?? { mode: 'closed', defaultMode: 'closed', from: 'default' } as SourceModeInfo;
-  const { key, active, overlay } = await patchInstallation(deps, app);
+  const { key, active } = await patchInstallation(deps, app);
   const userId = actingUser(principal);
 
   const writable = mode.mode === 'open' && mayWrite(principal, deps);
@@ -246,7 +235,7 @@ export async function appSourceStatus(request: Request, instanceId: string | und
   const repo = deps.mounts.list(inst).find((m) => m.id === `${app.id}:patches`);
   const workspaces = key ? core.listWorkspaces(deps.dataDir, userId, key) : [];
   const path = view?.containerPath ?? sourcePath(app.id);
-  const builtIn = builtInApp(deps, app);
+  const builtIn = builtInApp(app);
   const next = builtIn
     ? `Read the source at ${path} (read-only). ${core.SYSTEM_APP_LATER_MESSAGE}.`
     : mode.mode === 'open' && view?.mode === 'rw'
@@ -256,7 +245,7 @@ export async function appSourceStatus(request: Request, instanceId: string | und
         : `Read the source at ${path} (read-only). To change it: \`aura dev patch start ${app.id}\`.`;
   return json({
     appId: app.id, name: app.name, version: app.version, scope: app.scopeId,
-    installationId: key, activeInstallationId: active, overlay,
+    installationId: key, activeInstallationId: active,
     mode: mode.mode, defaultMode: mode.defaultMode, modeFrom: mode.from,
     upstream: upstreamOf(deps, app),
     source: { path, writable: view?.mode === 'rw', mounted: !!view },
@@ -297,8 +286,8 @@ export async function mountAppVolume(
   if (inst instanceof Response) return inst;
   const app = resolveApp(deps, body.app);
   if (app instanceof Response) return app;
-  // Track P v1 patches normal apps only (core SYSTEM_APP_OVERLAYS): no writable patch path of a built-in app.
-  if (builtInApp(deps, app)) {
+  // No writable patch path of a built-in app (Q6).
+  if (builtInApp(app)) {
     return json({ error: core.SYSTEM_APP_LATER, message: `${app.id} is a built-in app: no patch repository or workspace. ${core.SYSTEM_APP_LATER_MESSAGE}.` }, 409);
   }
   if (body.n !== undefined && (!Number.isInteger(body.n) || (body.n as number) < 1 || (body.n as number) > 9999)) {
@@ -444,18 +433,15 @@ export async function activatePrepared(request: Request, appId: string | undefin
   if (body instanceof Response) return body;
   const identity = parseIdentity(body['identity']);
   if (identity instanceof Response) return identity;
-  const overlay = app.scopeId === 'system' || isOverlay(deps, app);
-  // Track P v1 patches normal apps only (core SYSTEM_APP_OVERLAYS).
-  if (overlay && !core.SYSTEM_APP_OVERLAYS) {
+  if (builtInApp(app)) {
     return json({ error: core.SYSTEM_APP_LATER, message: `${app.id} is a built-in app. ${core.SYSTEM_APP_LATER_MESSAGE}.` }, 409);
   }
-  // A system app is patched as the user's own copy: /workspace stays as released.
   const scope: 'global' | 'user' = app.scopeId === 'global' ? 'global' : 'user';
 
   let tree: string;
   if (body['rollback'] === true) {
     const newest = deps.nexus.rollbackTrees(app.id, scope).newest;
-    if (!newest) return json({ error: 'no-rollback-tree', message: `no earlier tree of ${app.id} is kept${overlay ? ` — to drop your copy, \`aura nexus uninstall ${app.id}\`` : ''}` }, 404);
+    if (!newest) return json({ error: 'no-rollback-tree', message: `no earlier tree of ${app.id} is kept` }, 404);
     tree = newest;
   } else {
     const n = body['workspace'];
@@ -473,7 +459,7 @@ export async function activatePrepared(request: Request, appId: string | undefin
   catch (err) { return json({ error: 'invalid-tree', message: (err as Error).message }, 422); }
   if (candidate.id !== app.id) return json({ error: 'invalid-tree', message: `the prepared tree is ${candidate.id}, not ${app.id}` }, 422);
 
-  // Compared with the copy that runs now, which a system app's overlay has no record of.
+  // Compared with the copy that runs now.
   const diff = core.computePermissionDiff(app, candidate);
   const gate = installGate(deps.approvals, principal, request, body['operatorCode'], {
     level: (binding) => patchLevel(app.id, binding, diff), diff,
@@ -485,7 +471,7 @@ export async function activatePrepared(request: Request, appId: string | undefin
   const result = await answer.json() as { ok?: boolean; record?: InstallRecord };
   if (!result.ok || !result.record) return json(result);
   return json({
-    ok: true, record: result.record, scope, overlay,
+    ok: true, record: result.record, scope,
     rollbackTree: deps.nexus.rollbackTrees(app.id, scope, result.record).previous,
     running: deps.apps.instancesOf(app.id),
   });
@@ -507,7 +493,7 @@ export async function startPreview(request: Request, appId: string | undefined, 
   if (principal instanceof Response) return principal;
   const app = appId ? deps.apps.get(appId) : undefined;
   if (!app) return json({ error: 'app-not-found' }, 404);
-  if (builtInApp(deps, app)) {
+  if (builtInApp(app)) {
     return json({ error: core.SYSTEM_APP_LATER, message: `${app.id} is a built-in app. ${core.SYSTEM_APP_LATER_MESSAGE}.` }, 409);
   }
   const body = await readJson(request);

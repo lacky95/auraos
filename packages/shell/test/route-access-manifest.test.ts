@@ -320,3 +320,28 @@ test('fails when a surface decision is missing', () => {
   const s = surface({ rule: { ...OWNER, ambiguous: true } });
   assert.deepEqual(codes(auditSurfaces([s], [], [], NO_PUBLIC)), ['ambiguous-without-decision']);
 });
+
+// ── reserved Phase 5 rows (Stage 1) ─────────────────────────────────────────
+
+test('reserved Phase 5 routes are denied for every caller until implemented', () => {
+  const reserved = ROUTE_ACCESS_MANIFEST.reserved ?? {};
+  assert.ok(Object.keys(reserved).length >= 10, 'the Stage 1 rows exist');
+  for (const route of ['/api/admin/runtimes', '/api/admin/identity/ownership-report', '/api/instances/[instanceId]/logs', '/api/admin/root']) {
+    assert.ok(route in reserved, route);
+    for (const method of Object.keys(reserved[route]!.methods ?? {}) as Array<keyof NonNullable<typeof reserved[string]['methods']>>) {
+      const r = effectiveRule(ROUTE_ACCESS_MANIFEST, { route, handlers: [method] }, method);
+      assert.deepEqual(r?.allow, [], `${method} ${route} is denied, not the admin group's owner rule`);
+    }
+  }
+});
+
+test('a reserved row whose route exists fails the audit (move it into routes)', () => {
+  const route = '/api/admin/system-mode';
+  const manifest: RouteAccessManifest = {
+    ...ROUTE_ACCESS_MANIFEST,
+    reserved: { ...ROUTE_ACCESS_MANIFEST.reserved, [route]: { methods: { GET: { allow: ['owner'], target: 'system' } } } },
+  };
+  const found = codes(auditRoutes(inventory, manifest, POLICY));
+  assert.ok(found.includes('reserved-route-exists'));
+  assert.ok(found.includes('reserved-not-denied'));
+});

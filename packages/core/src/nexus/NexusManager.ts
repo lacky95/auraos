@@ -16,7 +16,6 @@ import { join, resolve as resolvePath } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import type { OsEventBus as OsEventBusSingleton } from '../ipc/OsEventBus.js';
 import type { ScopeDefinition, ScopeId } from '../scopes/types.js';
-import { portAppDirForScope } from '../scopes/portability.js';
 import { Resolver } from './Resolver.js';
 
 type OsEventBus = typeof OsEventBusSingleton;
@@ -29,7 +28,7 @@ import { fetchLocal } from './Fetchers/LocalFetcher.js';
 import { fetchGit } from './Fetchers/GitFetcher.js';
 import { fetchOci } from './Fetchers/OciFetcher.js';
 import { publishGit, publishOci } from './Publisher.js';
-import { isDevCheckout, SYSTEM_APP_LATER, SYSTEM_APP_LATER_MESSAGE, SYSTEM_APP_OVERLAYS } from './AppSource.js';
+import { isDevCheckout, SYSTEM_APP_LATER, SYSTEM_APP_LATER_MESSAGE } from './AppSource.js';
 import { computePermissionDiff } from './PermissionDiff.js';
 import type {
   IdentityDecision, InstallBinding, InstallRecord, NexusProgressEvent, PermissionDiff, ResolvedRef,
@@ -320,17 +319,7 @@ export class NexusManager {
     return validateStagedDir(stagingDir);
   }
 
-  /**
-   * Whether a patch activation of system app `appId` into `scope` is an
-   * overlay: no copy there yet (a new overlay), or the copy there is an
-   * approved overlay. A store or local copy with the id is a normal app.
-   */
-  private async isOverlayActivation(appId: string, scope: ScopeId): Promise<boolean> {
-    if (!existsSync(join(this.installerFor(scope).appsDir, appId))) return true;
-    return !!this.hostLifecycle && (await this.hostLifecycle.overlayLinkFor(appId, scope, true)) !== null;
-  }
-
-  /** Whether the system scope ships an app with this id (a patched tree of it is an overlay). */
+  /** Whether the system scope ships an app with this id. */
   private isSystemAppId(appId: string): boolean {
     const sys = this.scopeDefs.find((s) => s.id === 'system')?.appsDir;
     return !!sys && existsSync(join(sys, appId, 'app.manifest.json'));
@@ -528,21 +517,12 @@ export class NexusManager {
         mark();
         yield { type: 'identity.resolved', action: decision.action, appId: manifest.id };
       }
-      // A patched tree of a system app installs as its user-scope overlay
-      // (D52): a new one, or a new build of an approved one. Not in Track P
-      // v1 (SYSTEM_APP_OVERLAYS): refused before anyone is asked.
-      const overlayCopy = opts.action === 'app.patch.activate' && this.isSystemAppId(manifest.id)
-        && await this.isOverlayActivation(manifest.id, targetScope);
-      if (overlayCopy && !SYSTEM_APP_OVERLAYS) throw new Error(`${SYSTEM_APP_LATER}: ${SYSTEM_APP_LATER_MESSAGE}`);
-      // Its tree comes from the monorepo (`workspace:` deps and all): ported
-      // like `aura dev clone` before it is approved and installed, or refused
-      // when it can't run outside the monorepo.
-      if (overlayCopy) {
-        const port = portAppDirForScope(stagingDir, targetScope, this.sdkVersion());
-        if (port.unportable.length) {
-          throw new Error(`cannot activate ${manifest.id} in ${targetScope} scope: these dependencies only resolve inside the AuraOS monorepo — ${port.unportable.join(', ')}`);
-        }
-        if (port.changed) manifest = validateStagedDir(stagingDir);
+      // A built-in app is never patched by a same-id copy in another scope
+      // (Q6, D68): a patched tree of one is refused before anyone is asked. A
+      // store or local copy that already has the id is a normal app.
+      if (opts.action === 'app.patch.activate' && this.isSystemAppId(manifest.id)
+        && !existsSync(join(this.installerFor(targetScope).appsDir, manifest.id))) {
+        throw new Error(`${SYSTEM_APP_LATER}: ${SYSTEM_APP_LATER_MESSAGE}`);
       }
       keys.add(manifest.id); this.installing.add(manifest.id);
       // After the identity step, which may have given the app another local id.
@@ -619,12 +599,6 @@ export class NexusManager {
       }
 
       yield { type: 'install.start' };
-      // An approved patch activation of a system app (or of its overlay) is
-      // its overlay: linked to the system installation, it keeps that app's
-      // trust (D29, D45). Decided before the files move; anything else clears it.
-      const overlayOf = overlayCopy && this.hostLifecycle
-        ? await this.hostLifecycle.overlayLinkFor(manifest.id, targetScope, existsSync(join(installer.appsDir, manifest.id)))
-        : null;
       let record: InstallRecord;
       this.hostLifecycle?.beginInstall(manifest.id, targetScope);
       try {
@@ -641,7 +615,7 @@ export class NexusManager {
           : hostFacts;
         // Before the registry reload below, so its host guard accepts this manifest.
         try {
-          await this.hostLifecycle?.completeInstall(landed, restore, manifest.hosts.map((h) => h.name), { overlayOf });
+          await this.hostLifecycle?.completeInstall(landed, restore, manifest.hosts.map((h) => h.name));
         } catch (err) {
           console.warn(`[nexus] app host update for ${manifest.id} failed: ${(err as Error).message}`);
         }
@@ -912,7 +886,7 @@ export class NexusManager {
 /**
  * A prepared tree (Track P) is a new build of the installed app under its
  * own id, never another app and never a source switch: it lands on the
- * copy that runs now (a system app's: as the user's overlay).
+ * copy that runs now. A built-in app's is refused (Q6, D68).
  */
 function patchTarget(manifest: AppManifest, installed: InstalledIdentity[]): { kind: 'update'; target: InstalledIdentity } {
   const target = installed.find((i) => i.appId === manifest.id);

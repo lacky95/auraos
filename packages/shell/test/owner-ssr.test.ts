@@ -236,7 +236,7 @@ const deps = {
     tokens: { verify: (t: string) => TOKENS[t] ?? null },
     getInstance: (id: string) => instances[id],
     getManifest: (id: string) => (installedScope[id] ? { scopeId: installedScope[id] } : undefined),
-    // Track P: the system copy (no approved overlay here; overlays are off in v1).
+    // The active system copy (AppManager isTrustedSystemCopy).
     isTrustedSystemCopy: (id: string) => installedScope[id] === 'system',
   },
   ownerServices: (async () => svc) as unknown as GatewayOwnerDeps['services'],

@@ -63,7 +63,9 @@ export interface AuditIssue {
     | 'decision-without-ambiguous'
     | 'invalid-rule'
     | 'surface-missing'
-    | 'surface-stale';
+    | 'surface-stale'
+    | 'reserved-route-exists'
+    | 'reserved-not-denied';
   subject: string;
 }
 
@@ -251,6 +253,16 @@ export function auditRoutes(
   }
   for (const route of Object.keys(manifest.nonRoutes)) {
     if (!byRoute.has(route)) issues.push({ code: 'stale-non-route', subject: route });
+  }
+  // Reserved rows deny everything until their stream adds the route and moves
+  // the row into `routes` with its real rule.
+  for (const [route, refinement] of Object.entries(manifest.reserved ?? {})) {
+    if (byRoute.get(route)?.handlers.length || route in manifest.routes) issues.push({ code: 'reserved-route-exists', subject: route });
+    for (const [method, r] of Object.entries(refinement.methods ?? {})) {
+      if (r.allow.length) issues.push({ code: 'reserved-not-denied', subject: `${method} ${route}` });
+      auditRule(r, `${method} ${route}`, issues);
+    }
+    if (refinement.variants?.length) issues.push({ code: 'reserved-not-denied', subject: `${route} (variants)` });
   }
   return issues;
 }

@@ -5,9 +5,13 @@ import { hostname } from 'node:os';
 import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import { lifecyclePath } from '../types/manifest.js';
-import { toolsGrant } from './tool-allowlist.js';
-import { MY_TOOLS_PATH, SHARED_HOME_PATH, currentToolsMode, provisionAllowlist, toolchainMirrorBin } from './tool-provision.js';
-import { userHomeSubpath } from '../scopes/home.js';
+import { MY_TOOLS_PATH, currentToolsMode, provisionAllowlist, toolchainMirrorBin } from './tool-provision.js';
+import { containerHomeEnv, containerHomeMount } from './spawn/homeArgs.js';
+import { containerContextEnv, containerContextMounts } from './spawn/contextArgs.js';
+import { containerSocketArgs } from './spawn/socketArgs.js';
+import { containerNetworkArgs } from './spawn/networkArgs.js';
+import { containerIdentityArgs } from './spawn/identityArgs.js';
+import type { RuntimeCapabilities } from '../runtimes/types.js';
 // Value import, but MountManager imports ContainerRunner type-only, so there
 // is no runtime cycle.
 import { MOUNT_ROOT_PATH } from './MountManager.js';
@@ -307,6 +311,28 @@ export class ContainerRunner implements SandboxRunner {
     void opts.baseRootfs; // unused — containers bring their own rootfs via the image
     this.ensureNetwork();
     this.resolveVolumeNames();
+  }
+
+  /**
+   * Today's container runtime (ARI §2.3): namespaces, enforced read-only
+   * binds, mounts, port expose, sidecars, re-adoption. Every process runs as
+   * root (identity `none`) and jump is a `docker exec`, not an isolated
+   * session: streams A and J flip `identity`, `sessionExec` and
+   * `privateHomeSession` when they land.
+   */
+  public capabilities(): RuntimeCapabilities {
+    return {
+      isolation: 'namespace',
+      privateHomeSession: false,
+      sessionExec: false,
+      identity: 'none',
+      readOnlyBinds: true,
+      mounts: true,
+      portExpose: true,
+      sidecars: true,
+      warmPool: true,
+      survivesShellRestart: true,
+    };
   }
 
   // ─── Tool-allowlist dir (shared semantics with PRoot) ─────────────────
@@ -684,7 +710,7 @@ export class ContainerRunner implements SandboxRunner {
       // env (read by bashrc.aura.sh below) keeps the override discoverable
       // even when something resets `hostname`.
       '--hostname', appId,
-      '--network', SHARED_NETWORK,
+      ...containerNetworkArgs({ network: SHARED_NETWORK }),
       // Lets InstanceTokens re-learn the nonce of a container adopted after a
       // shell restart. Not `aura.parent`: that label marks sidecars, which
       // orphan adoption must skip.
@@ -726,45 +752,18 @@ export class ContainerRunner implements SandboxRunner {
       // owns HOME. /etc/profile.d copy covers login shells.
       '-v', `${this.workspaceRoot}/os/bashrc.aura.sh:/etc/bash.bashrc:ro`,
       '-v', `${this.workspaceRoot}/os/bashrc.aura.sh:/etc/profile.d/aura-prompt.sh:ro`,
-      // Shared user HOME across EVERY app container. The subpath is constant
-      // (`aura/home/user`), so when the user logs into `claude` from the
-      // terminal app, the same `~/.claude/` is visible after `aura jump`s
-      // into another app — i.e. "the next container knows you". This is the
-      // "one user, one home" model the user asked for; tighter per-app
-      // isolation would mean each container only sees its own slice, but
-      // here we explicitly prefer convenience over isolation (dev OS).
-      // The dir is pre-created by AppManager.healToolchainShims so docker
+      // The user HOME (spawn/homeArgs.ts; one shared home today, D65 moves
+      // it to the App Home). The dir is pre-created by AppManager so docker
       // can mount the subpath at container start.
-      '--mount', `type=volume,source=${appDataVolume},target=${SHARED_HOME_PATH},volume-subpath=${userHomeSubpath()}`,
-      // OS Context (env vars / secrets). The master writes decrypted values to
-      // /data/context/system/<KEY> (its view of the app-data volume); mounting
-      // the same volume subpath here at /run/context read-only mirrors those
-      // files live — a `set` reaches a RUNNING app on its next read, no respawn.
-      '--mount', `type=volume,source=${appDataVolume},target=/run/context,volume-subpath=context/system,readonly`,
-      // OS-managed shared Context Volumes. Each is a subpath of the app-data
-      // volume mounted at the user-chosen path — same mechanism as /run/context,
-      // so every app sees the same shared storage. `ensureAll()` (spawn) has
-      // created each subpath dir. RO volumes add ,readonly.
-      ...contextVolumes.flatMap((v) => [
-        '--mount',
-        `type=volume,source=${appDataVolume},target=${v.mountPath},volume-subpath=context/volumes/${v.name}${v.mode === 'ro' ? ',readonly' : ''}`,
-      ]),
-      // Identity + callback URL.
+      ...containerHomeMount({ appDataVolume }),
+      // OS Context: /run/context and the shared Context Volumes (spawn/contextArgs.ts).
+      ...containerContextMounts({ appDataVolume, volumes: contextVolumes }),
+      // The Docker socket when `tools[]` grants `docker` (spawn/socketArgs.ts).
+      ...containerSocketArgs(manifest.tools),
+      // OS Context env FIRST — the fixed OS vars below are pushed after, so a
+      // context key can't clobber them (docker's last-wins semantics).
+      ...containerContextEnv(contextEnv),
     ];
-
-    // Bind host docker socket if the manifest asks for it (explicit 'docker'
-    // in tools[] or the wildcard '*'). Matches ProotRunner's gating — needed
-    // so commands like `aura jump` from inside a container app can drive
-    // sibling-container spawns via the host daemon.
-    const wantsDocker = toolsGrant(manifest.tools ?? [], 'docker');
-    if (wantsDocker && existsSync('/var/run/docker.sock')) {
-      a.push('-v', '/var/run/docker.sock:/var/run/docker.sock');
-    }
-
-    // OS Context env injection FIRST — the fixed OS vars below are pushed
-    // after, so docker's last-wins semantics prevent a context key named e.g.
-    // APP_ID / PATH / HOME from clobbering an OS-critical variable.
-    for (const [k, v] of Object.entries(contextEnv)) a.push('-e', `${k}=${v}`);
 
     a.push(
       '-e', `APP_ID=${appId}`,
@@ -792,10 +791,9 @@ export class ContainerRunner implements SandboxRunner {
       // scope, so neither can be derived inside the container.
       '-e', `AURA_APP_DATA_VOLUME=${appDataVolume}`,
       '-e', `AURA_APP_DATA_SUBPATH=${appDataSubpath}`,
-      // Point HOME at the shared persistent volume so tools like claude/gh/
-      // ssh persist their state across container respawns AND across
-      // `aura jump` hops between apps (one shared home, one logged-in user).
-      '-e', `HOME=${SHARED_HOME_PATH}`,
+      // HOME on the persistent volume, so tools like claude/gh/ssh keep their
+      // state across container respawns (spawn/homeArgs.ts).
+      ...containerHomeEnv(),
       // Terminal-capability env so TUI apps (claude, htop, vim, …) render
       // their rich versions. Without these, docker's default TERM=xterm
       // makes claude downgrade to a one-line greeting instead of the boxed
@@ -828,6 +826,8 @@ export class ContainerRunner implements SandboxRunner {
       // docker takes the value from spawn()'s env, so it stays off the
       // command line. After contextEnv, like the instance token.
       '-e', 'AURA_LIFECYCLE_TOKEN',
+      // The process identity (spawn/identityArgs.ts): root today, until stream A.
+      ...containerIdentityArgs(ctx.identity),
       BASE_IMAGE,
     );
     a.push(...entrypoint);

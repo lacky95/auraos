@@ -1,4 +1,5 @@
 import type { Command } from 'commander';
+import { registerAdminHomes } from './admin-homes.js';
 import { api } from '../lib/client.js';
 import { shellFetch } from '../lib/identity.js';
 import { buildSystemDecisionPayload, describeDecision, releaseBody } from '../lib/system-decision.js';
@@ -194,6 +195,7 @@ export function registerAdmin(program: Command): void {
     });
 
   registerAdminSecurity(admin);
+  registerAdminHomes(admin);
 }
 
 interface SecurityOptionDto {

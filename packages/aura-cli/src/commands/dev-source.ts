@@ -20,7 +20,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import {
-  initRepo, patchesOverride, readSeries, safeDirectoryArgs, SYSTEM_APP_LATER_MESSAGE, SYSTEM_APP_OVERLAYS, type SeriesBase,
+  initRepo, patchesOverride, readSeries, safeDirectoryArgs, SYSTEM_APP_LATER_MESSAGE, type SeriesBase,
 } from '@aura/core';
 import { api } from '../lib/client.js';
 import { color, fail, info, ok, warn } from '../lib/format.js';
@@ -33,10 +33,9 @@ export interface AppSourceView {
   name:                 string;
   version:              string;
   scope:                'system' | 'global' | 'user';
-  /** The patch key (a system-app overlay: the system app's installation). */
+  /** The patch key: the active installation. */
   installationId:       string;
   activeInstallationId: string;
-  overlay:              boolean;
   mode:                 'closed' | 'open';
   defaultMode:          'closed' | 'open';
   modeFrom:             'system' | 'local' | 'record' | 'checkout' | 'manifest' | 'default';
@@ -135,13 +134,13 @@ export async function cleanWorkspaces(app: string, opts: { keep?: number; dryRun
   return r;
 }
 
-/** A built-in app (system scope, or an overlay of one): not patched in Track P v1 (core SYSTEM_APP_OVERLAYS). */
-export function isBuiltInLater(v: Pick<AppSourceView, 'scope' | 'overlay'>): boolean {
-  return (v.scope === 'system' || v.overlay) && !SYSTEM_APP_OVERLAYS;
+/** A built-in app (system scope): read-only, patched by system patches (Phase 7) or in Developer Mode (Q6). */
+export function isBuiltInLater(v: Pick<AppSourceView, 'scope'>): boolean {
+  return v.scope === 'system';
 }
 
 /** Stop a patch command on a built-in app, with the reason. */
-export function refuseBuiltIn(v: Pick<AppSourceView, 'appId' | 'scope' | 'overlay'>): void {
+export function refuseBuiltIn(v: Pick<AppSourceView, 'appId' | 'scope'>): void {
   if (isBuiltInLater(v)) fail(`${v.appId} is a built-in app. ${SYSTEM_APP_LATER_MESSAGE}.`);
 }
 
@@ -236,7 +235,7 @@ export function upstreamBase(v: AppSourceView): SeriesBase | null {
   return {
     repository: u.repository,
     commit:     u.commit,
-    ...(v.scope === 'system' || v.overlay ? { path: `apps/${v.appId}` } : {}),
+    ...(v.scope === 'system' ? { path: `apps/${v.appId}` } : {}),
   };
 }
 
@@ -244,7 +243,7 @@ export function upstreamBase(v: AppSourceView): SeriesBase | null {
 
 export function printStatus(v: AppSourceView, local: { repo: string; head: string | null; active: string | null; patches: number; base: SeriesBase | null }): void {
   const short = (s?: string | null) => (s ? s.slice(0, 12) : color.dim('(none)'));
-  console.log(`${color.bold(v.appId)} ${color.dim(`${v.name} ${v.version} · ${v.scope}${v.overlay ? ' (patched overlay of a system app)' : ''}`)}`);
+  console.log(`${color.bold(v.appId)} ${color.dim(`${v.name} ${v.version} · ${v.scope}`)}`);
   console.log(`  mode:       ${v.mode === 'open' ? color.green('open') : color.yellow('closed')}  ${color.dim(`(release default: ${v.defaultMode}; from ${v.modeFrom})`)}`);
   console.log(`  source:     ${v.source.path}  ${v.source.mounted ? (v.source.writable ? color.green('writable') : color.dim('read-only')) : color.yellow('not mounted')}`);
   const u = v.upstream;

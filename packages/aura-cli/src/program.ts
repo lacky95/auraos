@@ -30,6 +30,8 @@ import { registerSystemMode } from './commands/systemMode.js';
 import { registerIdentity } from './commands/identity.js';
 import { registerApprove } from './commands/approve.js';
 import { registerSecret } from './commands/secret.js';
+import { registerRuntime } from './commands/runtime.js';
+import { registerRoot } from './commands/root.js';
 import { LEGACY_GROUPS, markLegacy } from './lib/deprecate.js';
 import { color, visibleWidth } from './lib/format.js';
 import { RESOURCES, fetchApps, findResource, liveInstances, shortName } from './lib/resources.js';
@@ -283,6 +285,9 @@ export function buildProgram(): Command {
   registerApprove(program);
   registerSecret(program);
   registerApiKey(program);
+  // Phase 5: the streams fill these files in (R: runtime, J: root).
+  registerRuntime(program);
+  registerRoot(program);
   // Pre-kubectl groups: registered so they keep working, then hidden.
   registerApp(program);
   registerInst(program);

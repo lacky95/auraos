@@ -29,6 +29,7 @@ export const KNOWN_LISTENERS = [
   'server.mjs createServer',
   'server/attach.mjs WebSocketServer',
   'server/attach.mjs upgrade',
+  'server/exec-bridge.mjs upgrade',
   'server/sse-mux.mjs WebSocketServer',
 ];
 

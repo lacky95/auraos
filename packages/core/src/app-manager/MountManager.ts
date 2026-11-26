@@ -78,7 +78,7 @@ import type { AppRegistry } from './AppRegistry.js';
 import type { ScopeRegistry } from '../scopes/ScopeRegistry.js';
 import type { ContainerRunner } from './ContainerRunner.js';
 import { BASE_IMAGE } from './BaseImage.js';
-import { SYSTEM_APP_LATER, SYSTEM_APP_LATER_MESSAGE, SYSTEM_APP_OVERLAYS } from '../nexus/AppSource.js';
+import { SYSTEM_APP_LATER, SYSTEM_APP_LATER_MESSAGE } from '../nexus/AppSource.js';
 
 const HELPER_IMAGE = BASE_IMAGE;
 /**
@@ -106,8 +106,41 @@ export const WORK_DIR_NAME = 'work';
 /** Where `patches` mounts appear under a consumer's mount root. */
 export const PATCHES_DIR_NAME = 'patches';
 const PATCHES_SUBPATH = /^aura\/patches\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-/** Kinds that bind a writable dir of the app-data volume, owned by the consumer alone. */
-const isVolumeKind = (kind: MountKind): kind is 'work' | 'patches' => kind === 'work' || kind === 'patches';
+/**
+ * What each mount kind does (F11): one table instead of kind checks spread
+ * through the manager. A new kind is a new row.
+ */
+export interface MountKindPolicy {
+  /** Written to the consumer's declarations and restored at its next spawn. */
+  persist: boolean;
+  /** A live add or remove is mirrored into the consumer's inheriting sidecars. */
+  fanout: boolean;
+  /** Mirrored into an inheriting sidecar when the sidecar starts (`reapply` with `inherit`). */
+  inheritToSidecar: boolean;
+  /** Re-made when the target app's directory is replaced (reinstall, update). */
+  rebindOnReinstall: boolean;
+  /** `requested`: the asked mode, read-only by default. `always-rw`: a dir the consumer alone writes. */
+  modeRule: 'requested' | 'always-rw';
+  /** Needs the consumer's mount root at MOUNT_ROOT_PATH (a container consumer). */
+  needsMountRoot: boolean;
+  /** The source dir is created when missing (it appears only later, or is the consumer's own). */
+  createsSource: boolean;
+  /** A built-in (system scope) app may be the target. Built-in apps stay read-only (Q6). */
+  builtInTargets: boolean;
+}
+
+export const KIND_POLICY: Readonly<Record<MountKind, Readonly<MountKindPolicy>>> = Object.freeze({
+  source:    { persist: true,  fanout: true,  inheritToSidecar: true,  rebindOnReinstall: true,  modeRule: 'requested', needsMountRoot: false, createsSource: false, builtInTargets: true },
+  data:      { persist: true,  fanout: true,  inheritToSidecar: true,  rebindOnReinstall: true,  modeRule: 'requested', needsMountRoot: false, createsSource: true,  builtInTargets: true },
+  // A patch workspace or patch repo: a writable dir of the app-data volume,
+  // owned by the consumer alone. It does not live in the target app's dir.
+  // (`inheritToSidecar` is today's behaviour of `reapply`; `fanout` is not.)
+  work:      { persist: true,  fanout: false, inheritToSidecar: true,  rebindOnReinstall: false, modeRule: 'always-rw', needsMountRoot: true,  createsSource: true,  builtInTargets: false },
+  patches:   { persist: true,  fanout: false, inheritToSidecar: true,  rebindOnReinstall: false, modeRule: 'always-rw', needsMountRoot: true,  createsSource: true,  builtInTargets: false },
+  // The AuraOS checkout (Developer Mode): lives as long as the instance or
+  // Developer Mode, never declared, never mirrored.
+  workspace: { persist: false, fanout: false, inheritToSidecar: false, rebindOnReinstall: false, modeRule: 'always-rw', needsMountRoot: true,  createsSource: false, builtInTargets: true },
+});
 const WORKSPACE_SUBPATH = /^aura\/workspaces\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/[1-9]\d{0,3}$/;
 /**
  * How a mount came to exist in this shell generation:
@@ -249,7 +282,7 @@ export class MountManager {
   private writeDecls(instanceId: string): void {
     // Inherited mounts are derived from the parent's set, never declared; the
     // checkout lives as long as the instance (or Developer Mode) does.
-    this.writeDeclFile(instanceId, this.list(instanceId).filter((m) => m.origin !== 'inherited' && m.kind !== 'workspace').map((m) => ({
+    this.writeDeclFile(instanceId, this.list(instanceId).filter((m) => m.origin !== 'inherited' && KIND_POLICY[m.kind].persist).map((m) => ({
       targetAppId: m.targetAppId, mode: m.mode, data: m.kind === 'data', declaredAt: m.declaredAt,
       ...(m.workspace ? { workspace: m.workspace } : {}),
       ...(m.patches ? { patches: m.patches } : {}),
@@ -335,7 +368,7 @@ export class MountManager {
         const m = await this.add(instanceId, spec, { persist: false, origin: 'restored' });
         restored++;
         // A writable source of an app closed since is restored read-only, and stays so.
-        kept.push(m.mode === (spec.mode ?? 'ro') || isVolumeKind(m.kind) ? spec : { ...spec, mode: m.mode });
+        kept.push(m.mode === (spec.mode ?? 'ro') || KIND_POLICY[m.kind].modeRule === 'always-rw' ? spec : { ...spec, mode: m.mode });
       } catch (err) {
         failed++;
         kept.push(spec);
@@ -476,11 +509,11 @@ export class MountManager {
     if (!cap.ok) throw new Error(`mount propagation unavailable: ${cap.reason}`);
 
     const kind: MountKind = kindOf(spec);
-    // Track P v1: a patch repo or workspace (always writable) only for normal apps (SYSTEM_APP_OVERLAYS).
-    if (isVolumeKind(kind) && !SYSTEM_APP_OVERLAYS && this.opts.registry.getById(spec.targetAppId)?.scopeId === 'system') {
+    // A patch repo or workspace (always writable) only for normal apps: built-in apps stay read-only (Q6).
+    if (!KIND_POLICY[kind].builtInTargets && this.opts.registry.getById(spec.targetAppId)?.scopeId === 'system') {
       throw new Error(`refusing a ${kind} mount: ${spec.targetAppId} is a built-in app (${SYSTEM_APP_LATER}: ${SYSTEM_APP_LATER_MESSAGE})`);
     }
-    let mode: MountMode = isVolumeKind(kind) ? 'rw' : spec.mode ?? 'ro';
+    let mode: MountMode = KIND_POLICY[kind].modeRule === 'always-rw' ? 'rw' : spec.mode ?? 'ro';
     if (kind === 'source' && mode === 'rw' && this.isClosed(spec.targetAppId)) {
       // A request is refused; a declaration, re-bind or mirror made while the
       // app was open comes back read-only.
@@ -532,10 +565,10 @@ export class MountManager {
     const srcShell = this.resolveSource(spec.targetAppId, kind, kind === 'patches' ? spec.patches : spec.workspace);
     // A data dir only appears once the target has spawned — create it so a
     // data mount of a fresh target binds an empty dir instead of failing.
-    if (kind !== 'source' && kind !== 'workspace') { try { mkdirSync(srcShell, { recursive: true }); } catch { /* mount will report */ } }
+    if (KIND_POLICY[kind].createsSource) { try { mkdirSync(srcShell, { recursive: true }); } catch { /* mount will report */ } }
     const dirName  = this.dirName(spec.targetAppId, kind);
     const root     = this.rootFor(instanceId, consumerDataDir);
-    if ((isVolumeKind(kind) || kind === 'workspace') && root.containerDir !== MOUNT_ROOT_PATH) {
+    if (KIND_POLICY[kind].needsMountRoot && root.containerDir !== MOUNT_ROOT_PATH) {
       throw new Error(`${instanceId} has no mount root at ${MOUNT_ROOT_PATH} — restart it to get one`);
     }
     const dstShell = join(root.shellDir, dirName);
@@ -593,7 +626,7 @@ export class MountManager {
     // `persist: false` while reapply() is replaying what is already on disk.
     if (opts.persist !== false) this.writeDecls(instanceId);
     // A workspace, patch repo or the AuraOS checkout belongs to the consumer that asked for it, not its sidecars.
-    if (!isSidecarConsumer(instanceId) && !isVolumeKind(kind) && kind !== 'workspace') this.queueFanout(() => this.fanoutAdd(instanceId, mount));
+    if (!isSidecarConsumer(instanceId) && KIND_POLICY[kind].fanout) this.queueFanout(() => this.fanoutAdd(instanceId, mount));
     return mount;
   }
 
@@ -608,7 +641,7 @@ export class MountManager {
     this.writeDecls(instanceId);   // an explicit detach is a change of intent
     if (this.mounts.get(instanceId)!.size === 0) this.mounts.delete(instanceId);
     this.pruneStale(instanceId);
-    if (!isSidecarConsumer(instanceId) && !isVolumeKind(mount.kind) && mount.kind !== 'workspace') this.queueFanout(() => this.fanoutRemove(instanceId, mountId));
+    if (!isSidecarConsumer(instanceId) && KIND_POLICY[mount.kind].fanout) this.queueFanout(() => this.fanoutRemove(instanceId, mountId));
   }
 
   /**
@@ -664,7 +697,7 @@ export class MountManager {
     for (const [consumer, set] of [...this.mounts]) {
       for (const old of [...set.values()]) {
         // A workspace or patch repo does not live in the app's directory.
-        if (old.targetAppId !== targetAppId || isVolumeKind(old.kind) || old.kind === 'workspace') continue;
+        if (old.targetAppId !== targetAppId || !KIND_POLICY[old.kind].rebindOnReinstall) continue;
         // A parent's re-add fans out into its sidecars and may already have
         // replaced their inherited copy.
         if (set.get(old.id) !== old) continue;
@@ -735,7 +768,7 @@ export class MountManager {
     }
     if (opts.inherit) {
       for (const m of this.list(parentOfConsumer(consumer))) {
-        if (m.kind === 'workspace' || opts.exclude.includes(m.id) || have().has(m.id)) continue;
+        if (!KIND_POLICY[m.kind].inheritToSidecar || opts.exclude.includes(m.id) || have().has(m.id)) continue;
         try {
           await this.add(consumer, {
             targetAppId: m.targetAppId, data: m.kind === 'data', declaredAt: m.declaredAt,
@@ -880,7 +913,8 @@ export class MountManager {
       // previous shell asked for, only what actually exists now.
       const kind: MountKind = dirName === WORKSPACE_MOUNT_ID ? 'workspace' : dirName.startsWith(`${WORK_DIR_NAME}/`) ? 'work'
         : dirName.startsWith(`${PATCHES_DIR_NAME}/`) ? 'patches' : dirName.endsWith('.data') ? 'data' : 'source';
-      const targetAppId = isVolumeKind(kind) ? dirName.slice(dirName.indexOf('/') + 1)
+      // `work/<id>` and `patches/<id>` (dirName): the app id follows the prefix dir.
+      const targetAppId = kind === 'work' || kind === 'patches' ? dirName.slice(dirName.indexOf('/') + 1)
         : kind === 'data' ? dirName.slice(0, -'.data'.length) : dirName;
       const decl = this.readDecls(instanceId).find((d) => d.targetAppId === targetAppId && kindOf(d) === kind);
       const mount: AuraMount = {

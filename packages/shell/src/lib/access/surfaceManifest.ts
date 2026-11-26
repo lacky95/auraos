@@ -50,6 +50,18 @@ export const SURFACE_MANIFEST: readonly AccessSurface[] = [
     },
   },
   {
+    id: 'exec-bridge',
+    kind: 'websocket',
+    source: 'packages/shell/server/exec-bridge.mjs',
+    paths: ['/api/instances/{id}/session (upgrade)'],
+    attach: 'attachExecBridge',
+    rule: {
+      allow: [],
+      target: 'instance',
+      note: 'Phase 5 stream X: jump and exec through the shell (D74). Denied until it lands: the stub answers 501 to every upgrade and executes nothing. X sets the rule (the owner session, or the caller\'s instance token with its `u` claim) and checks it with surfaceGate at the upgrade.',
+    },
+  },
+  {
     id: 'sse-mux',
     kind: 'websocket',
     source: 'packages/shell/server/sse-mux.mjs',

@@ -77,11 +77,11 @@ export const OWNER_AGENT_EXCLUDED_TARGETS: ReadonlySet<AccessTarget> = new Set(
  * live state, so a claim minted a moment before any of it changed buys nothing:
  *
  *   - a verified claim for a live instance of that app (gatewayInstance)
- *   - its installed copy is the trusted system one (its `system` copy, or the
- *     owner's approved overlay of it: AppManager `isTrustedSystemCopy`), and the one scope decision
+ *   - its installed copy is the trusted system one (its active `system` copy:
+ *     AppManager `isTrustedSystemCopy`), and the one scope decision
  *     (gateway-identity.mjs `ownerUiActs`) holds for the path called: an
  *     OWNER_UI_APPS entry that covers it, the claim's installation is that
- *     active `system` installation or its approved overlay, and the owner's session is live
+ *     active `system` installation, and the owner's session is live
  *
  * The route manifest check (gatewayCaller.ts) and `authenticate()` (auth.ts)
  * both ask this, so no caller can skip the path scope.
@@ -407,8 +407,8 @@ export const OWNER_AGENT_APPS: ReadonlySet<string> = new Set(['com.aura.terminal
 /**
  * D29: the owner and trusted terminals have full control. A trusted owner
  * agent is an instance of the trusted system copy of an OWNER_AGENT_APPS
- * app (its `system` copy, or the owner's approved overlay of it, Track P:
- * AppManager `isTrustedSystemCopy`), calling with its own instance token
+ * app (its active `system` copy: AppManager `isTrustedSystemCopy`), calling
+ * with its own instance token
  * (never one of its sidecars). A gateway call is judged as the app's page,
  * by its instance rules only (gatewayCaller.ts never asks this).
  */

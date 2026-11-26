@@ -12,7 +12,7 @@ function hookUser(instances: ReadonlyMap<string, { owner?: string }>, instanceId
 import { mkdirSync, readdirSync, readFileSync, lstatSync, writeFileSync, chmodSync, copyFileSync, cpSync, renameSync, rmSync, unlinkSync, existsSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
-import { lifecyclePath } from '../types/manifest.js';
+import { lifecyclePath, manifestSandbox } from '../types/manifest.js';
 import type { AppLifecycleState } from '../types/lifecycle.js';
 import type { AppInstance, ResourceUsage, SidecarInfo } from '../types/instance.js';
 import type { AppActivity, ActivityRestoreSeed, FlightPatch, FlightNotice, FlightState, FlightRect, FlightBadge, FlightAction, FlightEdge, FlightEdgeSize, FlightMode } from '../types/activity.js';
@@ -35,7 +35,11 @@ import { PortManager, type ExposeSpec } from './PortManager.js';
 import { InstanceTokens } from './InstanceTokens.js';
 import { SidecarManager } from './SidecarManager.js';
 import { parentOfConsumer } from './MountManager.js';
-import type { SandboxExecOpts, SandboxRunner } from './SandboxRunner.js';
+import type { InstanceSpawnContext, SandboxExecOpts, SandboxRunner } from './SandboxRunner.js';
+import { RuntimeUnavailableError } from '../runtimes/types.js';
+import type { HomeResolver } from '../homes/types.js';
+import { legacyHomeResolver } from '../homes/legacyResolver.js';
+import { ROOT_IDENTITY_PROVIDER, type SpawnIdentityProvider } from '../identity/types.js';
 import { selectOrphanSidecars } from './sidecars.js';
 import { SidecarParking, keepServicesOf } from './sidecarParking.js';
 import {
@@ -75,6 +79,9 @@ export class AppManager {
    */
   private runner: SandboxRunner;
   private runners: Record<'proot' | 'container', SandboxRunner>;
+  /** Phase 5 spawn seams, used only by `spawnContext`. */
+  private readonly homes: HomeResolver;
+  private readonly identities: SpawnIdentityProvider;
   private instances = new Map<string, AppInstance>();
   private nextInstanceNum = new Map<string, number>();
   private activities = new Map<string, AppActivity>();
@@ -138,6 +145,9 @@ export class AppManager {
     portStart?: number;
     portEnd?: number;
     shellPort?: number;
+    /** Spawn seams (Phase 5): see `spawnContext`. Defaults reproduce today. */
+    homes?: HomeResolver;
+    identities?: SpawnIdentityProvider;
   }) {
     this.dataDir = opts.dataDir;
     this.toolchainDir = opts.toolchainDir;
@@ -168,6 +178,8 @@ export class AppManager {
     (this.runners.container as ContainerRunner).survivorsUnknown = () => this.adoptionPending;
     // Default runner for utility calls; per-app spawn routes via runnerOf().
     this.runner = this.runners['proot'];
+    this.homes      = opts.homes ?? legacyHomeResolver(opts.dataDir);
+    this.identities = opts.identities ?? ROOT_IDENTITY_PROVIDER;
     this.permissions = new PermissionManager(this.registry);
     this.tokens      = new InstanceTokens(join(opts.dataDir, 'aura', 'secrets', 'instance-token.key'));
     this.providers   = new ContentProviderRegistry();
@@ -355,10 +367,16 @@ export class AppManager {
    */
   private runnerOf(instanceIdOrAppId: string): SandboxRunner {
     const inst = this.instances.get(instanceIdOrAppId);
-    if (inst?.sandbox) return this.runners[inst.sandbox];
+    if (inst?.sandbox) return this.runnerById(inst.sandbox);
     const m = this.registry.getById(inst?.appId ?? instanceIdOrAppId);
-    if (m?.sandbox) return this.runners[m.sandbox];
+    if (m) return this.runnerById(manifestSandbox(m));
     return this.runners['proot'];
+  }
+
+  /** The runner for a runtime id; an unknown id is a Q17 error, never a fallback. */
+  private runnerById(sandbox: string): SandboxRunner {
+    if (sandbox === 'proot' || sandbox === 'container') return this.runners[sandbox];
+    throw new RuntimeUnavailableError('runtime-not-installed', sandbox);
   }
 
   /**
@@ -1521,6 +1539,31 @@ export class AppManager {
    * behavioural difference is whether content-provider routes get registered
    * (pool members don't claim them — see comment below).
    */
+  /**
+   * What the kernel decides for a spawn (Phase 5 Stage 1 seam): the home and
+   * the identity, through the injected `homes` and `identities`. Streams H,
+   * I and A replace those implementations here, never `spawnInstance`. The
+   * defaults reproduce today (the user home, root), and the runners ignore
+   * the fields until their stream lands (ARI §9.4). `env` stays the runner's
+   * own until the kernel builds it (ARI dup #2).
+   */
+  private async spawnContext(
+    appId: string, instanceId: string, opts: { manifest: AppManifest; runner: SandboxRunner; owner?: string },
+  ): Promise<Pick<InstanceSpawnContext, 'home' | 'identity'>> {
+    void instanceId; // a runtime handle only: never a durable reference (D85 A7)
+    // Not resolved yet: stream H resolves it here and fails closed without it.
+    const installationId = null;
+    const home = await this.homes.resolve({
+      installationId,
+      environmentScope: opts.manifest.environmentScope,
+      executionContext: 'application',
+      ...(opts.owner ? { userId: opts.owner } : {}),
+      runtime: opts.runner.capabilities(),
+    });
+    const identity = await this.identities.identityFor({ appId, installationId, ...(opts.owner ? { userId: opts.owner } : {}) });
+    return { home, identity };
+  }
+
   private async spawnInstance(
     appId: string, opts: { inPool: boolean; userId?: string; preview?: { appDir: string; workspace: string; owner: string; dataFrom: string | null } },
   ): Promise<string> {
@@ -1545,8 +1588,10 @@ export class AppManager {
     const owner = opts.inPool ? undefined : opts.preview?.owner ?? opts.userId ?? this.instances.get(instanceId)?.owner ?? DEFAULT_OWNER_ID;
 
     try {
-      const runner = this.runners[manifest.sandbox] ?? this.runners['proot'];
+      const sandbox = manifestSandbox(manifest);
+      const runner = this.runnerById(sandbox);
       const pid = await runner.spawn(instanceId, appId, port, manifest, {
+        ...await this.spawnContext(appId, instanceId, { manifest, runner, owner }),
         appDir:          opts.preview?.appDir ?? manifest.appDir,
         instanceDataDir,
         // Fresh nonce per spawn: tokens of a previous life of a recycled
@@ -1560,7 +1605,7 @@ export class AppManager {
       });
       const lifecycle = runner.lifecycleStatus(instanceId) ?? undefined;
       this.upsertInstance(instanceId, appId, {
-        pid, port, startedAt: new Date(), inPool: opts.inPool, sandbox: manifest.sandbox, owner, lifecycle,
+        pid, port, startedAt: new Date(), inPool: opts.inPool, sandbox, owner, lifecycle,
         ...(opts.preview ? { preview: { workspace: opts.preview.workspace, startedAt: new Date().toISOString() } } : {}),
       });
       if (opts.inPool) this.savePoolIds();
@@ -2580,19 +2625,12 @@ export class AppManager {
   }
 
   /**
-   * Whether the copy of `appId` that runs now is the system app as the owner
-   * approved it: its `system` copy, or an approved user-scope overlay of it
-   * (Track P: a patched system app keeps its trust, D29 and D45). Never by
-   * the id alone: a same-id copy from a store or `aura dev` has no overlay
-   * link (AppHostStore `approvedOverlay`).
+   * Whether the copy of `appId` that runs now is the active system-scope
+   * installation (D29, D45). Never by the id alone: a same-id copy in another
+   * scope (a store install or `aura dev`) is a normal app (Q6, D68).
    */
   isTrustedSystemCopy(appId: string): boolean {
-    const m = this.registry.getById(appId);
-    if (!m) return false;
-    if (m.scopeId === 'system') return true;
-    if (m.scopeId !== 'user') return false;
-    try { return getAppHostServices().lifecycle.trustedOverlay(appId) !== null; }
-    catch { return false; }
+    return this.registry.getById(appId)?.scopeId === 'system';
   }
 
   /**

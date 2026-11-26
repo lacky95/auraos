@@ -295,7 +295,7 @@ export type ActivateOutcome =
   | { status: 'not-approved' | 'failed'; reason: string }
   | { status: 'needs-repair'; failure: Extract<ApplyResult, { ok: false }>; base: SeriesBase; name?: string };
 
-interface ActivateResponse { ok?: boolean; error?: string; message?: string; running?: string[]; rollbackTree?: string | null; overlay?: boolean }
+interface ActivateResponse { ok?: boolean; error?: string; message?: string; running?: string[]; rollbackTree?: string | null }
 
 /** R4 with the approval and identity questions answered (nexus.ts installWithChoices). */
 async function activateRoute(appId: string, body: Record<string, unknown>): Promise<ActivateResponse | null> {
@@ -444,7 +444,7 @@ export async function updateSeries(app: string, opts: { ref?: string; activate?:
   // The new upstream: --ref; a system app's is the release checkout the system reports; else the branch tip.
   const target = opts.ref
     ? resolveRemoteRef(base.repository!, opts.ref)
-    : (v.scope === 'system' || v.overlay) && v.upstream?.commit
+    : v.scope === 'system' && v.upstream?.commit
       ? v.upstream.commit
       : resolveRemoteRef(base.repository!, v.upstream?.branch ?? 'HEAD');
   if (target === base.commit) return { status: 'current', commit: target };

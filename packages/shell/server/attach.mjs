@@ -19,6 +19,7 @@ import {
   countSurfaceEvent, followIdentity, internalServiceHeaders, reportSurface, requestIdentity, surfaceGate, surfaceIdentity,
 } from './access-bridge.mjs';
 import { stripShellCredentials } from './shell-credentials.mjs';
+import { attachExecBridge } from './exec-bridge.mjs';
 
 // Plain-inline mirror of @aura/core/logger's filter spec. These servers are
 // attached before (dev: astro.config.mjs) or beside (prod: server.mjs) the
@@ -508,5 +509,6 @@ export function attachAppHosts(httpServer) {
 export async function attachShellServers(httpServer) {
   attachAppHosts(httpServer);
   attachWsProxy(httpServer);
+  attachExecBridge(httpServer);
   await attachSio(httpServer);
 }

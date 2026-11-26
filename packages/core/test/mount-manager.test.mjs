@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { MountManager, isSidecarConsumer, parentOfConsumer } from '../dist/app-manager/MountManager.js';
+import { MountManager, KIND_POLICY, isSidecarConsumer, parentOfConsumer } from '../dist/app-manager/MountManager.js';
 
 const INST = 'io.test.app-2';
 const SC = `${INST}--box`;
@@ -372,10 +372,27 @@ test('the patch repo binds writable at /mnt/aura/patches/<app>: one dir per inst
   assert.deepEqual([adopted.kind, adopted.patches, adopted.containerPath], ['patches', repo, '/mnt/aura/patches/io.shop.app']);
 });
 
-test('Track P v1: no patch repo or workspace mount of a built-in app (SYSTEM_APP_OVERLAYS off)', async (t) => {
+test('built-in: no patch repo or workspace mount of a built-in app (Q6)', async (t) => {
   const w = world(t);
   await assert.rejects(w.mm.add(INST, { targetAppId: 'com.aura.terminal', workspace: 'aura/workspaces/default/inst-sys/1' }), /built-in app.*system-app-later/);
   await assert.rejects(w.mm.add(INST, { targetAppId: 'com.aura.terminal', patches: 'aura/patches/inst-sys' }), /built-in app.*system-app-later/);
   assert.deepEqual(w.mm.list(INST), []);
   assert.equal(w.kernel.size, 0, 'nothing bound');
+});
+
+test('KIND_POLICY (F11): one row per kind, today\'s rules', () => {
+  assert.deepEqual(Object.keys(KIND_POLICY).sort(), ['data', 'patches', 'source', 'work', 'workspace']);
+  assert.ok(Object.isFrozen(KIND_POLICY));
+  // Mirrored into sidecars live and re-bound on reinstall: only what lives in the target app's dir.
+  for (const k of ['source', 'data']) assert.deepEqual([KIND_POLICY[k].fanout, KIND_POLICY[k].rebindOnReinstall, KIND_POLICY[k].modeRule], [true, true, 'requested'], k);
+  // The consumer's own writable dirs: always rw, need the mount root, never of a built-in app (Q6).
+  for (const k of ['work', 'patches']) {
+    assert.deepEqual([KIND_POLICY[k].fanout, KIND_POLICY[k].rebindOnReinstall, KIND_POLICY[k].modeRule, KIND_POLICY[k].needsMountRoot, KIND_POLICY[k].builtInTargets],
+      [false, false, 'always-rw', true, false], k);
+  }
+  // The AuraOS checkout: never declared, never mirrored.
+  const ws = KIND_POLICY.workspace;
+  assert.deepEqual([ws.persist, ws.fanout, ws.inheritToSidecar, ws.rebindOnReinstall], [false, false, false, false]);
+  // No `socket` kind: the root tab gets the socket in its own session namespace (J.6, P5-4).
+  assert.equal('socket' in KIND_POLICY, false);
 });

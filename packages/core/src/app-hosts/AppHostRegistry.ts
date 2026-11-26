@@ -21,7 +21,7 @@ import { randomUUID } from 'node:crypto';
 import type { Redis } from '@aura/kv-store';
 import type {
   AllocateAppHostInput, AppHostLabelTombstone, AppHostRecord, AppHostRegistry, AppHostResolution,
-  AppHostSlotAssignment, AppInstallation, AppInstanceScope, AppOverlayLink, AppSourceFingerprint, ReactivateAppHostInput,
+  AppHostSlotAssignment, AppInstallation, AppInstanceScope, AppSourceFingerprint, ReactivateAppHostInput,
 } from './contracts.js';
 import {
   MAX_APP_HOST_SLOT, appHostNameForSlot, isValidHostName, proposeAppHostName,
@@ -44,11 +44,6 @@ const MAX_NAME_ATTEMPTS = 26;
 
 export function instanceScopeKey(scope: AppInstanceScope): string {
   return scope.kind === 'shared' ? 'shared' : `user:${scope.userId}`;
-}
-
-/** The exact same source (kind, ref and digest): what an overlay link was approved for. */
-function sameFingerprint(a: AppSourceFingerprint, b: AppSourceFingerprint): boolean {
-  return a.kind === b.kind && a.ref === b.ref && (a.digest ?? null) === (b.digest ?? null);
 }
 
 /**
@@ -131,15 +126,7 @@ export interface AppHostStore extends AppHostRegistry {
   listInstallations(appId: string): Promise<AppInstallation[]>;
   /** Creates the app's installation, or returns the one already bound. */
   createInstallation(input: NewInstallationInput): Promise<AppInstallation>;
-  /** `overlay: null` removes the overlay link; a source change without `overlay` removes it too. */
-  updateInstallation(installationId: string, patch: { originId?: string | null; source?: AppSourceFingerprint; overlay?: AppOverlayLink | null }): Promise<AppInstallation>;
-  /**
-   * Whether this installation is an approved overlay of its system app: an
-   * active user-scope installation whose overlay link names the app's active
-   * system installation, on the source the approved activation installed.
-   * The one rule; the gateway, the shell and the lifecycle's cache ask it.
-   */
-  approvedOverlay(installation: AppInstallation): Promise<boolean>;
+  updateInstallation(installationId: string, patch: { originId?: string | null; source?: AppSourceFingerprint }): Promise<AppInstallation>;
   /** `null` until the first boot migration recorded them. */
   getKnownManifestHosts(): Promise<Set<string> | null>;
   addKnownManifestHosts(claims: readonly string[]): Promise<void>;
@@ -259,23 +246,12 @@ export function createAppHostRegistry(kv: Redis | (() => Redis), opts: AppHostRe
           ...(patch.source ? { source: patch.source } : {}),
           updatedAt: now(),
         };
-        // An overlay link holds for the source the owner approved, never another.
-        const sourceChanged = !!patch.source && !sameFingerprint(patch.source, cur.value.source);
-        if (patch.overlay) next.overlay = patch.overlay;
-        else if (patch.overlay === null || sourceChanged) delete next.overlay;
         const ok = await commit(
           [{ key: installKey(id), expect: cur.raw }],
           [{ op: 'set', key: installKey(id), value: JSON.stringify(next) }],
         );
         return ok ? next : undefined;
       });
-    },
-
-    async approvedOverlay(i) {
-      const link = i.overlay;
-      if (!link || i.scope !== 'user' || i.state !== 'active' || !sameFingerprint(i.source, link.source)) return false;
-      const system = await store.getInstallation(link.of);
-      return !!system && system.appId === i.appId && system.scope === 'system' && system.state === 'active';
     },
 
     async allocate({ installation, instanceScope, isSystemApp }) {

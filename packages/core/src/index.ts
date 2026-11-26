@@ -51,3 +51,7 @@ export * from './system/systemIdentity.js';
 export * from './users/profileRegistry.js';
 export * from './users/userData.js';
 export * from './patches/series.js';
+export * from './runtimes/types.js';
+export * from './homes/types.js';
+export * from './homes/legacyResolver.js';
+export * from './identity/types.js';

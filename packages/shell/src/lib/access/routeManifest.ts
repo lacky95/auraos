@@ -652,8 +652,38 @@ const routes: RouteAccessManifest['routes'] = {
   },
 };
 
+// ── reserved: Phase 5 routes, denied until their stream implements them ────
+
+const notYet = (stream: string, target: AccessTarget, methods: readonly RouteMethod[]) => ({
+  methods: on(methods, rule([], target, why(`Phase 5 stream ${stream}: reserved, denied until the route is implemented and its rule set here.`))),
+});
+
+/** Stage 1 (phase5-plan.md §4 item 5): each stream adds its file and moves its row into `routes`. */
+const reserved: RouteAccessManifest['reserved'] = {
+  // R: Runtime Settings and the Runtimes page (ARI §9.7, §9.8).
+  '/api/admin/runtimes': notYet('R', 'system', ['GET']),
+  '/api/admin/runtimes/default': notYet('R', 'system', ['PUT']),
+  '/api/admin/runtimes/check': notYet('R', 'system', ['POST']),
+  '/api/admin/runtimes/[id]/settings': notYet('R', 'system', ['PUT']),
+  '/api/admin/runtimes/[id]/enable': notYet('R', 'system', ['POST']),
+  '/api/admin/runtimes/[id]/disable': notYet('R', 'system', ['POST']),
+  // I: identities and the read-only reports; H applies them.
+  '/api/admin/identity/ownership-report': notYet('I', 'system', ['GET']),
+  '/api/admin/identity/privilege-review': notYet('I/A', 'system', ['GET']),
+  '/api/admin/identity/ownership-apply': notYet('H', 'system', ['POST']),
+  '/api/admin/homes/plan': notYet('I', 'system', ['GET']),
+  '/api/admin/homes/import': notYet('H', 'system', ['POST']),
+  '/api/admin/homes/reset': notYet('H', 'system', ['POST']),
+  // X: instance logs and exec through the shell (the WS session is the `exec-bridge` surface).
+  '/api/instances/[instanceId]/logs': notYet('X', 'instance', ['GET']),
+  '/api/instances/[instanceId]/exec': notYet('X', 'instance', ['POST']),
+  // J: the root tab (`aura root`, P5-4).
+  '/api/admin/root': notYet('J', 'system', ['GET', 'POST']),
+};
+
 export const ROUTE_ACCESS_MANIFEST: RouteAccessManifest = {
   groups,
   routes,
+  reserved,
   nonRoutes: {},
 };

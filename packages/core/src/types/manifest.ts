@@ -490,6 +490,10 @@ export const AppManifestSchema = z.object({
    * `--bind` jail), and the AURA_LAYER_TAG prompt drops to `[ctnr]`.
    * Process-group kill, port allocation, identity verification all still
    * work — they're independent of the sandbox.
+   *
+   * Deprecated (Q17): stays parseable, and stream R stops reading it — an app
+   * picks its runtime with `sandbox` only. Until then ProotRunner still
+   * honours it.
    */
   useProot: z.boolean().default(true),
   /**
@@ -507,8 +511,22 @@ export const AppManifestSchema = z.object({
    * The two backends share the same manifest semantics (tools[], lifecycle,
    * activities, content providers, two-dir cap allowlist) — only the spawn
    * primitive differs. Apps migrate between them with no source change.
+   *
+   * A runtime id (ARI §9.2), not a closed pair: no schema default, so an
+   * omitted value stays visible after parsing (§11.2). An unknown id is
+   * refused when the app starts, not when it parses (Q17). Until stream R
+   * resolves the default from Runtime Settings, an omitted value means
+   * `LEGACY_DEFAULT_SANDBOX` (see `manifestSandbox`).
    */
-  sandbox: z.enum(['proot', 'container']).default('proot'),
+  sandbox: z.string().regex(/^[a-z][a-z0-9-]{1,31}$/, {
+    message: 'sandbox must be a runtime id (lowercase letters, digits and dashes)',
+  }).optional(),
+  /**
+   * Where the app's App Home lives (D65, Q21/D72): `global`, one App Home
+   * for every user of the installation, or `user`, one per user. Phase 5
+   * stream H uses it; until then every app gets the user home.
+   */
+  environmentScope: z.enum(['global', 'user']).default('global'),
   /**
    * What happens when the user clicks the app icon while at least one instance is already running.
    * Only meaningful for apps where BOTH instanceMode='multi' AND activityMode='multi'.
@@ -881,6 +899,18 @@ export const AppManifestSchema = z.object({
 );
 
 export type AppManifest = z.infer<typeof AppManifestSchema>;
+
+/**
+ * The runtime an omitted `sandbox` meant before Phase 5 (the old schema
+ * default). Stream R replaces it with the Runtime Settings default
+ * (`container`, Q18) plus the D75 migration overrides.
+ */
+export const LEGACY_DEFAULT_SANDBOX = 'proot';
+
+/** The runtime id a manifest asks for, with today's meaning of an omitted value. */
+export function manifestSandbox(manifest: Pick<AppManifest, 'sandbox'>): string {
+  return manifest.sandbox ?? LEGACY_DEFAULT_SANDBOX;
+}
 
 /** An app's `proxy` settings with every default filled in (`resolveProxyConfig`). */
 export interface ProxyConfig {

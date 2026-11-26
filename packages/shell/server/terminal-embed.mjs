@@ -44,8 +44,8 @@ export function terminalSessionInstance(sessionId) {
 /**
  * The decisions over a grant store. `deps` (tests pass fakes):
  *   systemCopy(appId)              whether the copy the app id resolves to is the trusted
- *                                  system app: its `system` copy or an approved overlay of
- *                                  it (core AppManager `isTrustedSystemCopy`, Track P)
+ *                                  system app: its active `system` copy (core AppManager
+ *                                  `isTrustedSystemCopy`)
  *   authorize(appId, permission)   core's Authorizer for an instance of the app
  *   sessionGrant(appId, sessionId) the session's own `terminal.embed` record, or null
  *   sessionLife(sessionId)         the current life of the session's Terminal
@@ -53,8 +53,8 @@ export function terminalSessionInstance(sessionId) {
  */
 export function createTerminalAccess(deps) {
   /**
-   * The System Terminal: its own id, in the `system` scope or as the owner's
-   * approved overlay of it. A same-id copy from anywhere else is an ordinary app.
+   * The System Terminal: its own id, in the `system` scope. A same-id copy
+   * from anywhere else is an ordinary app.
    */
   async function isSystemTerminal(appId) {
     if (appId !== TERMINAL_APP_ID) return false;

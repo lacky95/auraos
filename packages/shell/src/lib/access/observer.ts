@@ -76,7 +76,7 @@ export interface ObserverManager {
   getInstancesByApp(appId: string): ReadonlyArray<{ appId: string; instanceId: string }>;
   getActivity?(id: string): { appId?: string; parentInstanceId?: string; instanceId?: string } | undefined;
   getManifest?(id: string): unknown;
-  /** AppManager `isTrustedSystemCopy`: the system copy, or an approved overlay of it (Track P). */
+  /** AppManager `isTrustedSystemCopy`: the active copy is the system installation. */
   isTrustedSystemCopy?(appId: string): boolean;
   registry?: { getById(id: string): unknown };
   providers?: {
@@ -239,7 +239,7 @@ function provider(s: RequestSnapshot, mgr: ObserverManager | null) {
 export function resourceFor(rule: AccessRule, s: RequestSnapshot, mgr: ObserverManager | null): PolicyResource {
   const r: PolicyResource = { target: rule.target };
   if (rule.systemApp) {
-    // The system app as the owner approved it: its system copy or approved overlay.
+    // The built-in app: its active system copy, never a same-id copy.
     if (mgr?.isTrustedSystemCopy?.(rule.systemApp)) r.appId = rule.systemApp;
     return r;
   }

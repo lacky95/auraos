@@ -16,8 +16,7 @@ type InstallGenerator = AsyncGenerator<NexusProgressEvent, InstallRecord | null,
 /**
  * The gate for one install request, to pass as core's `approval` option.
  * `override`: a patch activation (Track P) names its own level and the diff
- * against the running copy, which core's record-based diff can't see for a
- * system-app overlay.
+ * against the running copy.
  */
 export function installGate(
   deps: ApprovalServiceDeps, principal: AccessPrincipal, request: Request, operatorCode: unknown,

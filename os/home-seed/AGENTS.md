@@ -97,7 +97,7 @@ The grammar is kubectl-style: `aura <verb> <resource> [name]`. Short resource na
   2. `aura dev patch save` saves your change as a versioned patch into the app's patch repository (`/mnt/aura/patches/<appId>`, shared by all your Terminals).
   3. To try it first: `aura dev patch preview` runs your workspace as a separate "Preview" instance in its own window, on a copy of the app's data (the installed app is untouched, nothing is installed); `--stop` ends it.
   4. `aura dev patch activate` installs it. The owner approves it in the desktop; the previous version is kept for rollback.
-- **Built-in apps** (Settings, Terminal, …) are read-only: you can read their source, but patching built-in apps comes later. Use a normal app (installed from Nexus, or your own) or Developer Mode.
+- **Built-in apps** (Settings, Terminal, …) are read-only: you can read their source. They are patched by system patches (Phase 7) or in Developer Mode; to change an app now, use a normal app (installed from Nexus, or your own) or Developer Mode.
 - **An open install** (the owner ran `aura dev open <app>`) and **your own apps** (`aura dev new`) are writable: `status` prints the writable path.
 - Never open an app yourself to make a change easier. Opening is the owner's decision.
 - Upstream updates keep your patches: `aura dev update <app>`. If a patch no longer applies, the working version keeps running and the patch is marked "needs repair" (you also get a notification naming the patch, the files and the repair command).
