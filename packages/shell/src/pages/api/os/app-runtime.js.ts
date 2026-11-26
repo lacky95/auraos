@@ -5,6 +5,7 @@ import { gatewayInstance } from '../../../lib/access/identify.ts';
 import { readShellKeymapState, readShellThemeSelection, resolveBindings } from '../../../lib/appDocumentState.js';
 import { buildAppRuntimeJs } from '../../../lib/appRuntime.js';
 import { errorResponse } from '../../../lib/appResponse.js';
+import { localOwnerId, requestUserId } from '../../../lib/userContext.js';
 import { withEtag } from '../../../lib/etag.js';
 
 /**
@@ -19,12 +20,14 @@ export const GET: APIRoute = async ({ request }) => {
   const manifest = mgr.getManifest(inst.appId);
   if (!manifest) return errorResponse('app not found', 404);
 
-  const sel = await readShellThemeSelection().catch(() => null);
+  // The theme and keymap of the user the instance acts for (D46).
+  const userId = (await requestUserId(request)) ?? localOwnerId();
+  const sel = await readShellThemeSelection(userId).catch(() => null);
   const themeIdDark = sel?.themeIdDark ?? ThemeManager.DEFAULT_THEME_ID_DARK;
   const themeIdLight = sel?.themeIdLight ?? ThemeManager.DEFAULT_THEME_ID_LIGHT;
   const colorMode = sel?.colorMode ?? ThemeManager.DEFAULT_COLOR_MODE;
   const { theme, resolvedMode } = ThemeManager.resolveActiveTheme(themeIdLight, themeIdDark, colorMode);
-  const state = await readShellKeymapState();
+  const state = await readShellKeymapState(userId);
   const actions = keymapRegistry.list().filter((a) => a.id.startsWith(`app.${inst.appId}.`) || a.scope !== 'app');
 
   const js = buildAppRuntimeJs({
