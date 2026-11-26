@@ -125,7 +125,7 @@ test('the launcher refuses every spec outside its rules (exit 125, nothing touch
 
 // ─── the kernel's decision ────────────────────────────────────────────────
 
-const USERS = { default: { uid: 1000, gid: 1000 }, 'u-bob': { uid: 100000, gid: 100000 } };
+const USERS = { default: { uid: 1000, gid: 1000, account: 'alice' }, 'u-bob': { uid: 100000, gid: 100000, account: 'bob' } };
 
 /** AppManager.sessionContext on a fake manager: the real resolver over a temp data dir. */
 function manager({ runAs = 'app', instRunAs = runAs, runtime = CONTAINER, appId = 'io.test.app', owner = 'default', grants = [] } = {}) {
@@ -153,10 +153,11 @@ test('private: the user\'s uid/gid and Private Home, passwd with the user and th
   const c = await m.ctx('private', OWNER);
   assert.deepEqual([c.kind, c.home.mode, c.home.hostPath, c.uid, c.gid, c.groups], ['user', 'private', join(m.dataDir, 'aura/home/default'), 1000, 1000, [1000]]);
   assert.equal(statSync(c.home.hostPath).mode & 0o777, 0o700, 'created 0700 by the resolver');
-  assert.match(c.passwd, /^aura-user-1000:x:1000:1000:AuraOS user:\/home\/aura:\/bin\/bash$/m);
+  // 5-main (J + T): the user's username, as in the user's own Terminal (identityAccountName).
+  assert.match(c.passwd, /^alice:x:1000:1000:AuraOS user:\/home\/aura:\/bin\/bash$/m);
   assert.match(c.passwd, /^app-inst1:x:200001:200001:AuraOS app:\/home\/aura:\/bin\/bash$/m);
   assert.ok(!/^node:/m.test(c.passwd), 'the owner\'s uid 1000 replaces the image\'s node');
-  assert.deepEqual([c.env.HOME, c.env.USER, c.env.TMPDIR], ['/home/aura', 'aura-user-1000', '/run/aura-session']);
+  assert.deepEqual([c.env.HOME, c.env.USER, c.env.TMPDIR], ['/home/aura', 'alice', '/run/aura-session']);
   assert.equal(c.dockerSocket, undefined);
   const e = await m.ctx('ephemeral', OWNER);
   assert.deepEqual([e.kind, e.home.mode, e.home.hostPath, e.uid], ['user', 'ephemeral', null, 1000]);
@@ -185,7 +186,7 @@ test('D79: --home app runs as the app\'s uid/gid with its App Home; the user is 
   const m = manager();
   const c = await m.ctx('app', OWNER);
   assert.deepEqual([c.kind, c.home.mode, c.home.hostPath, c.uid, c.gid, c.userId], ['app', 'app', null, 200001, 200001, 'default']);
-  assert.ok(!c.passwd.includes('aura-user-'), 'no user account in an app session');
+  assert.ok(!c.passwd.includes('AuraOS user'), 'no user account in an app session');
 });
 
 test('an --home app session exposes no user\'s private session or credentials: no Private Home, no user group, a hidden procfs', async () => {

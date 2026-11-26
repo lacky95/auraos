@@ -2072,7 +2072,8 @@ export class AppManager {
     const id = await this.userLinuxIdentity(user.userId);
     if (!id) throw new HomeDeniedError('identity-unresolved', `user ${user.userId} has no active Linux identity`);
     if (id.uid === 0 || id.gid === 0) throw new HomeDeniedError('identity-unresolved', 'a user identity is never root');
-    const name = identityAccountName({ ...id, range: 'user' }, null);
+    // The same passwd name as the user's own Terminal (stream T: the username, else user-<uid>).
+    const name = identityAccountName({ ...id, range: user.userId === DEFAULT_OWNER_ID ? 'owner' : 'user', userId: user.userId }, null);
     const accounts: PasswdEntry[] = [...appAccount.filter((a) => a.uid !== id.uid), { name, uid: id.uid, gid: id.gid, gecos: 'AuraOS user' }];
     return {
       kind: 'user', home: { mode: req.mode, hostPath: req.mode === 'private' ? home.hostPath : null },
@@ -2083,10 +2084,13 @@ export class AppManager {
     };
   }
 
-  /** A human user's active D70 identity, or null. */
-  private async userLinuxIdentity(userId: string): Promise<{ uid: number; gid: number } | null> {
-    const r = await (await import('../auth/services.js')).getAuthServices().identity.getUser(userId);
-    return r && r.state === 'active' ? { uid: r.uid, gid: r.gid } : null;
+  /** A human user's active D70 identity and its account name (the username, stream T), or null. */
+  private async userLinuxIdentity(userId: string): Promise<{ uid: number; gid: number; account?: string } | null> {
+    const auth = (await import('../auth/services.js')).getAuthServices();
+    const r = await auth.identity.getUser(userId);
+    if (!r || r.state !== 'active') return null;
+    const account = await auth.users.getUser(userId).catch(() => null);
+    return { uid: r.uid, gid: r.gid, ...(account?.username ? { account: account.username } : {}) };
   }
 
   /** The open in-environment sessions (stream J; never persisted). */
