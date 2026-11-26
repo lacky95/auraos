@@ -16,7 +16,8 @@
     "typecheck": "pnpm -r typecheck",
     "test": "node tools/run-tests.mjs",
     "smoke": "node tools/smoke/run.mjs",
-    "security": "node tools/security-check.mjs"
+    "security": "node tools/security-check.mjs",
+    "arch": "node tools/dep-check.mjs"
   },
   "devDependencies": {
     "typescript": "^5.5.0"

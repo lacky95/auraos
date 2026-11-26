@@ -1,5 +1,7 @@
 # Test baseline
 
+> **Superseded as the live record (D95):** the current known failures (package suites, `astro check`, e2e) are kept in the auraos-e2e repo, `docs/known-failures.md`. This file is the dated Phase 0 snapshot. Architecture dependency debt (D97) is in `tools/dep-baseline.json` (`pnpm arch`).
+
 | | |
 |---|---|
 | **Commit** | The Phase 0 review-fix commit on `phase0/baseline`, based on `e2f3664` (no product code changed from `6e4a797`) |
