@@ -595,6 +595,7 @@ export function registerVerbs(program: Command): void {
     .description('Delete apps with all their data (Delete app data), close activities, uninstall services/capabilities, detach mounts, remove port exposes.')
     .option('-y, --yes', 'skip the confirmation (apps: their data goes too; mounts/ports whose instance was inferred)')
     .option('-i, --instance <id>', 'mounts, sc: instance (default: $APP_INSTANCE_ID)')
+    .option('--delete-home', 'apps: also delete their App Homes (default: kept)')
     .addHelpText('after', resourcesLine('delete') + examples([
       'aura rm app com.example.hello',
       'aura rm act act-12',
@@ -602,10 +603,10 @@ export function registerVerbs(program: Command): void {
       'aura rm port into-5173                           # ids from: aura get ports',
       'aura rm sc worker-7                              # an OS sidecar of the app you are in',
     ]))
-    .action(async (resource: string, names: string[], opts: { yes?: boolean; instance?: string }) => {
+    .action(async (resource: string, names: string[], opts: { yes?: boolean; instance?: string; deleteHome?: boolean }) => {
       const def = resourceOrFail(resource, 'delete');
       switch (def.name) {
-        case 'apps':         return dispatchEach(names.map((n) => ['app', 'remove', n, ...(opts.yes ? ['-y'] : [])]));
+        case 'apps':         return dispatchEach(names.map((n) => ['app', 'remove', n, ...(opts.yes ? ['-y'] : []), ...(opts.deleteHome ? ['--delete-home'] : [])]));
         case 'activities':   return dispatchEach(names.map((n) => ['activity', 'close', n]));
         case 'services':     return dispatchEach(names.map((n) => ['service', 'uninstall', n]));
         case 'capabilities': return dispatchEach(names.map((n) => ['cap', 'remove', n]));

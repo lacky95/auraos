@@ -23,9 +23,9 @@
 //                                       (expanded per process at connect; stored as written)
 //   Codex        ~/.codex/config.toml   bearer_token_env_var = "AURA_INSTANCE_TOKEN"
 //
-// `~` is shared by every app, so a literal token there would hand one
-// instance's identity to all of them; the reference gives each process its
-// own. Nothing here returns, prints or writes a token value: entries are
+// `~` is read by every process that shares the home (an App Home, a Private
+// Home), so a literal token there would hand one instance's identity to all of
+// them; the reference gives each process its own. Nothing here returns, prints or writes a token value: entries are
 // classified, a rewrite writes only the reference, and the old file is kept as
 // `<file>.bak-aura-mcp` with any AuraOS credential removed. `fix` writes only
 // after a yes at an interactive terminal (an agent without one sees the plan).

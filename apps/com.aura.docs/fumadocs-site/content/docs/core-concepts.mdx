@@ -376,6 +376,27 @@ the pipeline behind a user-approval gate. See [Nexus](./nexus) for
 the full pipeline + source-type reference; `aura nexus install`
 is the day-to-day command.
 
+## Homes
+
+Every process sees its home at `/home/aura`, but which directory that is
+depends on who it belongs to (the kernel's Home Resolver decides; runtimes
+only mount it):
+
+- **App Home**: an app's own home, per installation. `environmentScope:
+  global` (the default) gives one App Home for everyone; `user` gives one per
+  user (an editor's settings, a personal agent). It starts empty, survives
+  restarts and updates, and is owned by the identity the app runs as.
+  Sidecars with `inheritHome` get their app's App Home. Changing the scope
+  never merges, copies or deletes a home.
+- **Private Home**: your personal home (logins, ssh keys, git config,
+  projects). Only your own sessions see it, such as your System Terminal; no
+  app ever gets it. Deleting an app never touches it.
+
+Moving tool state from your Private Home into an App Home is explicit:
+`aura admin homes import <app> <path...>` (a dry run first). `aura admin homes
+reset <app>` empties an App Home; `aura rm app <app> --delete-home` deletes an
+app's App Homes with it (by default they are kept).
+
 ## Scopes
 
 Every installed app belongs to a **scope** that determines where it

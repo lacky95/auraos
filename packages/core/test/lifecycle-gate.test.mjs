@@ -185,7 +185,7 @@ function appDir(files, entry) {
 const manifestFor = (id) => ({ id, entrypoint: 'entrypoint.sh', runtime: 'astro', tools: [], instanceMode: 'single' });
 
 async function spawnApp(runner, dir, appId, port) {
-  return runner.spawn(appId, appId, port, manifestFor(appId), { appDir: dir, instanceDataDir: dir });
+  return runner.spawn(appId, appId, port, manifestFor(appId), { appDir: dir, instanceDataDir: dir, home: { kind: 'app-global', hostPath: dir, volumeSubpath: 'h', logicalPath: '/home/aura', uid: 0, gid: 0, mode: 0o700 } });
 }
 
 test('ProotRunner + the real registry server: token sent, guard proven, outsiders get 401', async () => {

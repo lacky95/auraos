@@ -9,7 +9,7 @@ AuraOS is a WebOS for humans and their agents. It is a desktop that runs in the 
 - **The shell** is the master container, `aura-shell`. It hosts the API and window manager at `$OS_API_BASE`.
 - **Apps** run in sandboxes. A sandbox is either a PRoot (lightweight) or a container (full Docker).
 - **Windows** show apps on the desktop. This terminal is itself one of those apps.
-- **`~` (`/home/aura`) is one home shared by every app.** A `claude` or `codex` login, your git config and your dotfiles follow you into every app you jump into.
+- **`~` (`/home/aura`) is your Private Home.** Your `claude` or `codex` login, git config and dotfiles live here, and only your own sessions (your Terminal) see it. Each app has its own **App Home** at the same path instead: an app never sees your home (`aura admin homes import` copies something into one, explicitly).
 - **`/data` persists.** Everything outside `/data` and `~` inside a sandbox is throwaway.
 
 ## When the user asks "what is Aura?"
@@ -124,7 +124,7 @@ Humans browse the same registry in Settings → Interfaces.
 
 <!-- aura:section mcp-token-by-reference -->
 **Calls to the shell carry your session credential, by reference, never by value.** `$AURA_INSTANCE_TOKEN` is the credential AuraOS gives this session (each app instance, this Terminal included, has its own); it is not the internal lifecycle token the shell uses to drive an app. Every call through the shell (`$OS_API_BASE/api/proxy/…`, `$OS_API_BASE/api/…`) sends `Authorization: Bearer $AURA_INSTANCE_TOKEN`. Calls without it are refused once release 5-main is in.
-- A client config names the *variable*, never its value: `~` is shared by every app, so a token written there would let all of them act as you, while the reference gives each app its own. Never print the token or paste it into a file.
+- A client config names the *variable*, never its value: a config is read by every process that shares its home, so a token written there would let all of them act as you, while the reference gives each process its own identity. Never print the token or paste it into a file.
 - `curl`: `-H "Authorization: Bearer $AURA_INSTANCE_TOKEN"` (double quotes: expanded in your shell, never stored).
 - Examples for two clients (any client that reads a header from the environment works the same way):
   - Claude Code (single quotes, so the shell does not expand it): `claude mcp add --scope user --transport http aura-docs '${OS_API_BASE}/api/proxy/com.aura.docs/mcp' -H 'Authorization: Bearer ${AURA_INSTANCE_TOKEN}'`.

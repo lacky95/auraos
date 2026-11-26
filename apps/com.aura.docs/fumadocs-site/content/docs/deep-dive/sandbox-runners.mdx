@@ -106,7 +106,7 @@ apps as cooperating, not adversarial.
 --bind=/dev                      host /dev
 --bind=/tmp                      host /tmp (shared with siblings)
 --bind=/etc/resolv.conf          host DNS
---bind=<sharedHome>:/root        per-user home (shared across apps)
+--bind=<appHome>:/home/aura      the App Home the kernel resolved (never a Private Home)
 --bind=<toolchainDir>:/aura/all-tools
 --bind=<perInstanceToolsDir>:/aura/my-tools   the allowlist
 --bind=/var/run/docker.sock:...  only if 'docker' in tools[] (or wildcard)
@@ -307,8 +307,9 @@ what may be asked live, pure and docker-free, in `sidecar-spec.ts`:
    if the instance dies mid-seed). Marker written on success.
 7. With `inheritIdentity`, mint a token for `<instance>--<name>`.
 8. `docker create` + `docker start`. Identity env is appended last so a
-   template key can't overwrite it. With `inheritHome` the user home volume
-   subpath is mounted at `/home/aura` and `HOME=/home/aura` set after the
+   template key can't overwrite it. With `inheritHome` the parent's App Home
+   (its volume subpath, from the Home Resolver) is mounted at `/home/aura`
+   (no App Home: the sidecar is not created) and `HOME=/home/aura` set after the
    template env (the flag is absent from the spec otherwise, so existing
    spec hashes don't change). Then a 400 ms still-alive check: a
    container that died is removed and the spawn fails with its last 20 log

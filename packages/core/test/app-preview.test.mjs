@@ -13,7 +13,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { AppManager } from '../dist/app-manager/AppManager.js';
-import { legacyHomeResolver } from '../dist/homes/legacyResolver.js';
 import { ROOT_IDENTITY_PROVIDER } from '../dist/identity/types.js';
 import { PREVIEW_IDLE_MS, previewTitle } from '../dist/app-manager/preview.js';
 
@@ -25,11 +24,12 @@ function fakeManager() {
   const scope = { id: 'user', dataDir: join(root, 'user'), appsDir: join(root, 'user', 'apps') };
   const manifest = { id: APP, name: 'Shop', sandbox: 'container', instanceMode: 'single', provides: [], appDir: join(scope.appsDir, APP) };
   const spawned = [];
+  const homeAsks = [];
   const registered = { interfaces: [], providers: [] };
   const slots = new Map();
   let nextPort = 4100;
   const fake = {
-    root, scope, spawned, registered, slots,
+    root, scope, spawned, registered, slots, homeAsks,
     registry: { getById: (id) => (id === APP ? manifest : undefined) },
     scopeRegistry: { getById: () => scope },
     instances: new Map(),
@@ -53,8 +53,13 @@ function fakeManager() {
       runtime: 'container', source: 'manifest', installationId: null, capabilities: {}, settings: {},
       module: { runner: { spawn: async (id, appId, port, m, ctx) => { spawned.push({ id, ctx }); return 1000 + spawned.length; }, lifecycleStatus: () => null } },
     }),
-    // The Phase 5 spawn seams, with today's defaults.
-    homes: legacyHomeResolver('/data'),
+    // The Phase 5 spawn seams: the resolver is asked (a preview gets its own App Home, never the installed app's).
+    homes: { resolve: async (req) => { homeAsks.push(req); return { kind: 'app-global', hostPath: `/h/${req.preview ? 'preview' : 'app'}`, volumeSubpath: 'h', logicalPath: '/home/aura', uid: 0, gid: 0, mode: 0o700 }; } },
+    homeRequest: AppManager.prototype.homeRequest,
+    poolHomeUser: AppManager.prototype.poolHomeUser,
+    instanceHomes: new Map(),
+    poolHomes: new Map(),
+    seedPrivateHome() {},
     identities: ROOT_IDENTITY_PROVIDER,
     runnerOf: () => ({ callLifecycle: async () => undefined, getHost: () => '127.0.0.1', onExit() {} }),
     // D19: every instance claims its own slot (lifecycle.claimSlot); the label is per slot.
@@ -63,8 +68,8 @@ function fakeManager() {
     getActivitiesByInstance: (id) => [...fake.activities.values()].filter((a) => a.parentInstanceId === id),
     async stop(id) { fake.stops.push(id); fake.instances.delete(id); slots.delete(id); },
     forceKill(id) { fake.instances.delete(id); },
-    // Stream A: no installation record here, so the instances run as root (as before).
-    async installationRunAs() { return null; },
+    // Stream A: an installation record without runAs: the instances run as root (as before).
+    async installationRunAs() { return { installationId: 'inst-shop' }; },
   };
   for (const name of ['spawnInstance', 'spawnContext', 'allocateInstanceId', 'transition', 'upsertInstance', 'defaultInstance',
     'startPreview', 'previewsOf', 'stopPreview', 'reapIdlePreviews', 'previewDataSource']) {
@@ -96,6 +101,8 @@ test('a preview starts as a separate instance with its own slot and address, on 
   assert.equal(ctx.appDir, tree, 'it runs the workspace, not the installed tree');
   assert.equal(ctx.preview, workspace, 'labelled on the container');
   assert.equal(ctx.sourceMode, 'open');
+  assert.equal(fake.homeAsks[0].preview, true, 'its own App Home, never the installed app\'s (D65)');
+  assert.equal(ctx.home.hostPath, '/h/preview');
   const dataDir = join(scope.dataDir, 'apps', APP, id);
   assert.equal(ctx.instanceDataDir, dataDir);
   assert.equal(readFileSync(join(dataDir, 'orders.json'), 'utf-8'), '[42]', 'a copy of the user\'s data');

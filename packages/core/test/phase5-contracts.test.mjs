@@ -9,7 +9,6 @@ import {
   RUNTIME_ID_PATTERN, RuntimeUnavailableError, RuntimeCapabilityError, missingCapabilities, requireCapabilities,
 } from '../dist/runtimes/types.js';
 import { HomeDeniedError, LOGICAL_HOME_PATH } from '../dist/homes/types.js';
-import { legacyHomeResolver } from '../dist/homes/legacyResolver.js';
 import {
   LINUX_ID_RANGES, OWNER_UID, linuxIdRangeOf, formatPrincipalRef, parsePrincipalRef, ROOT_IDENTITY_PROVIDER,
 } from '../dist/identity/types.js';
@@ -106,13 +105,7 @@ test('principal refs: kind:id, qualified kind:id@systemId, open kind, no @ in id
   assert.throws(() => formatPrincipalRef({ kind: 'user', id: 'a@b' }));
 });
 
-test('legacy home resolver: the one user home for every request (today)', async () => {
-  const caps = ContainerRunner.prototype.capabilities.call({});
-  const home = await legacyHomeResolver('/data').resolve({ installationId: null, environmentScope: 'global', executionContext: 'application', runtime: caps });
-  assert.deepEqual(home, {
-    kind: 'private', hostPath: '/data/aura/home/default', volumeSubpath: 'aura/home/default',
-    logicalPath: LOGICAL_HOME_PATH, uid: 0, gid: 0, mode: 0o755,
-  });
+test('root identity provider: root for every request without runAs: app', async () => {
   assert.deepEqual(await ROOT_IDENTITY_PROVIDER.identityFor({ appId: 'a', installationId: null }), { uid: 0, gid: 0, range: 'root' });
 });
 
@@ -124,15 +117,29 @@ test('AppManager spawn seam: homes and identities are asked, with the runner cap
   };
   const caps = ContainerRunner.prototype.capabilities.call({});
   const manifest = AppManifestSchema.parse({ ...base, environmentScope: 'user' });
-  const ctx = await AppManager.prototype.spawnContext.call(fake, 'org.p5.app', 'org.p5.app-1', { manifest, runtime: { capabilities: caps }, owner: 'u1' });
+  fake.homeRequest = AppManager.prototype.homeRequest;
+  fake.poolHomeUser = AppManager.prototype.poolHomeUser;
+  const installation = { installationId: 'inst-1', runAs: 'app' };
+  const ctx = await AppManager.prototype.spawnContext.call(fake, 'org.p5.app', 'org.p5.app-1', { manifest, runtime: { capabilities: caps }, owner: 'u1', installation });
   assert.equal(ctx.home.kind, 'app-user');
   assert.equal(ctx.identity.uid, 200001);
-  assert.deepEqual(asked.home, { installationId: null, environmentScope: 'user', executionContext: 'application', userId: 'u1', runtime: caps });
-  // Stream A: the installation's runAs (no record: root, as before).
-  assert.deepEqual(asked.identity, { appId: 'org.p5.app', installationId: null, runAs: 'root', userId: 'u1' });
-  // A pool member (no owner) asks for no user.
-  await AppManager.prototype.spawnContext.call(fake, 'org.p5.app', 'org.p5.app-2', { manifest, runtime: { capabilities: caps } });
+  // Stream H: the App Home of the installation, owned by the identity the app runs as.
+  assert.deepEqual(asked.home, {
+    installationId: 'inst-1', environmentScope: 'user', executionContext: 'application', userId: 'u1',
+    appIdentity: { uid: 200001, gid: 200001 }, runtime: caps,
+  });
+  assert.deepEqual(asked.identity, { appId: 'org.p5.app', installationId: 'inst-1', runAs: 'app', userId: 'u1' });
+  // A pool member of a user-scope app is warmed for the owner (only the owner claims it).
+  await AppManager.prototype.spawnContext.call(fake, 'org.p5.app', 'org.p5.app-2', { manifest, runtime: { capabilities: caps }, inPool: true, installation });
+  assert.equal(asked.home.userId, 'default');
+  // A global app's pool member asks for no user.
+  const global = AppManifestSchema.parse({ ...base });
+  await AppManager.prototype.spawnContext.call(fake, 'org.p5.app', 'org.p5.app-3', { manifest: global, runtime: { capabilities: caps }, inPool: true, installation });
   assert.equal('userId' in asked.home, false);
+  // No recorded installation: no App Home, no start (fail closed, never the shared home).
+  await assert.rejects(
+    AppManager.prototype.spawnContext.call(fake, 'org.p5.app', 'org.p5.app-4', { manifest, runtime: { capabilities: caps }, owner: 'u1', installation: null }),
+    (e) => e instanceof HomeDeniedError && e.reason === 'installation-unresolved');
 });
 
 test('AppManager runner selection: a latched runtime id that is not installed is a Q17 error, never PRoot', () => {

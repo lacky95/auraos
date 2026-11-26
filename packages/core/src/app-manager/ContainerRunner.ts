@@ -794,10 +794,10 @@ export class ContainerRunner implements SandboxRunner {
       // owns HOME. /etc/profile.d copy covers login shells.
       '-v', `${this.workspaceRoot}/os/bashrc.aura.sh:/etc/bash.bashrc:ro`,
       '-v', `${this.workspaceRoot}/os/bashrc.aura.sh:/etc/profile.d/aura-prompt.sh:ro`,
-      // The user HOME (spawn/homeArgs.ts; one shared home today, D65 moves
-      // it to the App Home). The dir is pre-created by AppManager so docker
-      // can mount the subpath at container start.
-      ...containerHomeMount({ appDataVolume }),
+      // The App Home the kernel resolved (spawn/homeArgs.ts, D65): never the
+      // user's Private Home. The resolver created the dir, so docker can mount
+      // the subpath at container start; without one the spawn is refused.
+      ...containerHomeMount({ appDataVolume, home: ctx.home }),
       // OS Context: /run/context and the shared Context Volumes (spawn/contextArgs.ts).
       ...containerContextMounts({ appDataVolume, volumes: contextVolumes }),
       // The Docker socket when `tools[]` grants `docker` (spawn/socketArgs.ts).
@@ -834,7 +834,7 @@ export class ContainerRunner implements SandboxRunner {
       // scope, so neither can be derived inside the container.
       '-e', `AURA_APP_DATA_VOLUME=${appDataVolume}`,
       '-e', `AURA_APP_DATA_SUBPATH=${appDataSubpath}`,
-      // HOME on the persistent volume, so tools like claude/gh/ssh keep their
+      // HOME on the persistent volume (the App Home), so tools keep their
       // state across container respawns (spawn/homeArgs.ts).
       ...containerHomeEnv(),
       // Terminal-capability env so TUI apps (claude, htop, vim, …) render

@@ -85,8 +85,11 @@ to your app.
 
 Not supported, and listed by the contract report:
 
-- **The shared home `~`.** Phase 5 gives each app its own home; files you
-  leave in today's shared home won't be there.
+- **Your home `~` for data.** Each app has its own **App Home** at
+  `/home/aura` (see [Homes](/docs/core-concepts#homes)): fine for tool
+  configuration and logins your app's tools keep there, but it is not app
+  data (it is reset and deleted independently). It starts empty: nothing from
+  a user's own home is in it.
 - **Your install folder** (next to `app.manifest.json`). It is read-only from
   Phase 6.
 - **The container's own filesystem** outside the mounts: lost on every restart

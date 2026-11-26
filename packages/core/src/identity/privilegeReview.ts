@@ -29,7 +29,7 @@ export interface AppMigrationEntry {
  * The 23 apps of the plan's migration list (stream A, 2026-11-26), from
  * their code. `convert`: nothing in the app needs root, flip after the VM
  * check. `review`: something in the app needs a change first. `blocked`: it
- * needs App Homes or the Terminal sessions (5-main).
+ * needs more than its App Home (5-main, stream H), or the Terminal sessions.
  */
 export const APP_MIGRATION: Readonly<Record<string, AppMigrationEntry>> = Object.freeze({
   'com.aura.counter': { wave: 1, expect: 'convert', note: 'writes only /data/counter.json; the e2e canary, flipped first' },
@@ -49,11 +49,11 @@ export const APP_MIGRATION: Readonly<Record<string, AppMigrationEntry>> = Object
   'io.lakner.steelaibrowser': { wave: 2, expect: 'convert', note: 'after P1 (sidecars through the OS, no Docker socket); browse state in /data' },
   'com.aura.docs': { wave: 2, expect: 'review', note: 'serve.mjs builds Next.js into its own source tree at start (.next, .next-staging, next-env.d.ts) and npm-installs fumadocs-site when missing: the build has to move to the builder first' },
   'io.lakner.callgemini.copy': { wave: 2, expect: 'review', note: 'its OpenClaw state is in /data/openclaw (fine), but it patches node_modules/openclaw/dist at every gateway start: that patch has to move to install time first' },
-  'com.aura.browser': { wave: 3, expect: 'blocked', note: 'claude and code-server keep state in $HOME: needs its App Home (5-main)' },
-  'com.aura.notepad': { wave: 3, expect: 'blocked', note: 'code-server state in $HOME: needs a user-scope App Home (5-main)' },
-  'io.lakner.improvementboard': { wave: 3, expect: 'blocked', note: '$HOME writes (.claude.json, .codex/) and an inheritHome supervisor: App Home and the D66 patch (5-main, P2)' },
-  'dev.box': { wave: 3, expect: 'blocked', note: 'writes /usr/local/bin/devbox at start (rootfs) and code-server state in $HOME: the P2 patch and a user-scope App Home (5-main)' },
-  'io.lakner.terminalx': { wave: 3, expect: 'blocked', note: '$HOME (.gitconfig): a user-scope App Home (5-main)' },
+  'com.aura.browser': { wave: 3, expect: 'convert', note: 'its granted claude and code-server keep state in $HOME, which is now its own App Home (5-main, D65); the app runs neither itself (grep): global scope' },
+  'com.aura.notepad': { wave: 3, expect: 'convert', note: '$HOME is its own App Home (5-main, D65); the app does not run its granted code-server (grep), so global scope (D72); its notes stay in /data' },
+  'io.lakner.improvementboard': { wave: 3, expect: 'convert', note: 'after the D66 P2 patch: logins in its global App Home (aura jump --home app), one config dir per supervisor; its inheritHome supervisors get the same App Home and run as the app' },
+  'dev.box': { wave: 3, expect: 'blocked', note: 'App Homes exist now, but its entrypoint still writes /usr/local/bin/devbox (rootfs) and runs npm ci and aura install sdk in the running app at start: the P2 patch (scope user, devbox on PATH from the App Home) plus a builder-provisioning check on the VM first' },
+  'io.lakner.terminalx': { wave: 3, expect: 'convert', note: 'after the P2 patch (environmentScope: user): $HOME (.gitconfig) is the owner\'s App Home; container runtime since P1' },
   'com.aura.terminal': { wave: 'terminal', expect: 'blocked', note: 'not an app identity: each Terminal instance runs as its owner\'s uid (stream T, 5-main)' },
 });
 
