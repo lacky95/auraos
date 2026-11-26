@@ -254,8 +254,11 @@ login and no shared admin credential (`aura admin login`, `--save`,
   approve, the command sends the same request again with the approval, which
   the server uses up once.
 - **On the host** (`docker exec -it aura-shell aura …`) the host operator acts
-  directly. Over plain HTTP the desktop cannot take your password; approve such
-  a request on the host with `aura approve <id>`.
+  directly, and `aura approve <id>` approves any pending request.
+- **Over plain HTTP** the desktop takes your password too (with a note that it
+  travels unencrypted). With the security option `fresh-auth-require-https` on,
+  it does not: approve such a request on HTTPS or on the host with
+  `aura approve <id>`.
 - **Other apps** are refused: they never manage AuraOS.
 - **Recovery** stays on the host: `aura user reset-password <username>` and
   `aura setup-code`.
@@ -341,6 +344,8 @@ aura dev validate --all
 | `aura api-resources` | All resource types, short names, verbs. | — |
 | `aura setup-code` | Host command: a one-time code for creating the owner account at `/setup` (expires after 10 minutes). Run it as `docker exec -it aura-shell aura setup-code`. | — |
 | `aura user reset-password <username>` | Host command: a one-time code for resetting the owner's password at `/setup`. Signs out every browser. | — |
+| `aura admin security [list\|options]` | Every [security option](/docs/security-options): its value, where it comes from (default, policy, `env AURA_…`) and how to change it. | `-o json` |
+| `aura admin security set <id> <value>` | Set a writable security option, e.g. `set fresh-auth-require-https on`. Needs your password in the desktop (from the Terminal), or runs directly on the host. Options set on the host (env) answer where to set them. | — |
 
 ```bash
 aura set theme paper --tone light

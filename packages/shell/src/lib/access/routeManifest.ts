@@ -171,6 +171,12 @@ const routes: RouteAccessManifest['routes'] = {
     methods: on(['GET', 'POST', 'DELETE'], ownerManages('API keys: the owner decides; creating one needs the password.')),
   },
   '/api/admin/audit': { methods: { GET: ownerManages('The audit trail: an owner view.') } },
+  '/api/admin/security-options': {
+    methods: {
+      GET: ownerManages('The security options registry (D64): every switch, its value and source. An owner view.'),
+      PUT: ownerManages('Sets a writable security option (D64): the owner decides with the password (fresh); the operator directly.'),
+    },
+  },
   '/api/admin/manifest-edit': {
     methods: { POST: ownerManages('Edits an app\'s permissions and tools: the owner decides.') },
   },

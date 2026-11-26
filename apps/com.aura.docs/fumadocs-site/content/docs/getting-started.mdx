@@ -22,8 +22,15 @@ manifest edits, installs) works like this:
   audit` and `aura nexus app install …` send the same approval to the
   desktop and wait. Approve it there, and the command finishes.
 - **On the host**, `docker exec -it aura-shell aura …` runs directly:
-  the host operator stands above the owner. Over plain HTTP, a request
-  that needs your password is approved there with `aura approve <id>`.
+  the host operator stands above the owner. `aura approve <id>` approves
+  any request there, also one that needs your password.
+
+Over plain HTTP the dialog takes your password too, with a small note
+that it travels unencrypted. If AuraOS is reachable from networks you
+don't trust, turn on **Require HTTPS for password confirmations**
+(Settings → Users & Identities → Global): over HTTP such requests then
+need `aura approve <id>` on the host. See
+[Security options](/docs/security-options).
 
 ## 1. Install an AI agent
 

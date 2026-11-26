@@ -16,7 +16,7 @@
 import { approvalBelongsToSender, onAuraChannel, replyTo, type AuraChannelEvent } from '../auraChannelShell.ts';
 import {
   APPROVAL_ID_RE, APPROVE_DELAY_MS, approvalReply, decisionErrorText, operatorRequiredText, outcomeOf, parseApprovalView,
-  secretTransportNotice,
+  passwordTransportNote, secretTransportNotice,
   type ApprovalDialogView, type ApprovalOutcome, type ApprovalWaiterKind,
 } from './dialogClient.ts';
 
@@ -97,6 +97,7 @@ export function initOwnerDialog(): void {
   const reasonText = $('aura-owner-password-reason-text');
   const currentLabel = $('aura-owner-password-current-label');
   const currentCaption = $('aura-owner-password-current-caption');
+  const currentNote = $('aura-owner-password-current-note');
   const current = $<HTMLInputElement>('aura-owner-password-current');
   const newFields = $('aura-owner-password-new-fields');
   const next = $<HTMLInputElement>('aura-owner-password-next');
@@ -145,6 +146,7 @@ export function initOwnerDialog(): void {
     if (secretNotice) secretNotice.hidden = true;
     if (currentLabel) currentLabel.hidden = false;
     if (currentCaption) currentCaption.textContent = 'Current password';
+    if (currentNote) currentNote.hidden = true;
     if (cancel) cancel.textContent = 'CANCEL';
     if (submit) submit.disabled = false;
   }
@@ -162,7 +164,7 @@ export function initOwnerDialog(): void {
 
   async function readApproval(id: string): Promise<ApprovalDialogView | null> {
     const r = await fetch(`/api/approvals/${encodeURIComponent(id)}`, { credentials: 'same-origin' }).catch(() => null);
-    return r?.ok ? parseApprovalView(await r.json().catch(() => null)) : null;
+    return r?.ok ? parseApprovalView(await r.json().catch(() => null), location.protocol) : null;
   }
 
   function settle(id: string, outcome: ApprovalOutcome): void {
@@ -225,14 +227,18 @@ export function initOwnerDialog(): void {
     reasonText.textContent = view.display.reason ?? '';
     reasonBox.hidden = !view.display.reason;
     newFields.hidden = true;
-    // D18: over HTTP the password is never sent; a fresh approval is the host operator's.
-    const hostOnly = view.level === 'fresh' && location.protocol !== 'https:';
+    // D18, D63: the server says how a fresh approval is given here. `operator`: the
+    // owner requires HTTPS and this is HTTP, so the password is never sent.
+    const hostOnly = view.level === 'fresh' && view.freshVia === 'operator';
     currentLabel.hidden = view.level !== 'fresh' || hostOnly;
     if (hostOnly) {
       error.textContent = operatorRequiredText(view.id);
       error.hidden = false;
     }
     if (currentCaption) currentCaption.textContent = 'Your password (this needs a fresh confirmation)';
+    // D63: over HTTP the password is taken, and the dialog says so.
+    const note = passwordTransportNote(view, location.protocol);
+    if (currentNote) { currentNote.textContent = note ?? ''; currentNote.hidden = !note; }
     // D56: the secret an app asked for, typed only here. Its name comes from the server's title.
     const asksSecret = view.action === 'credential.store';
     if (secretLabel) secretLabel.hidden = !asksSecret;
@@ -321,7 +327,7 @@ export function initOwnerDialog(): void {
       seen = typeof data?.version === 'number' ? data.version : null;
       const open = new Set<string>();
       for (const raw of data?.pending ?? []) {
-        const view = parseApprovalView(raw);
+        const view = parseApprovalView(raw, location.protocol);
         if (!view || view.state !== 'pending') continue;
         open.add(view.id);
         if (!queue.has(view.id)) queue.set(view.id, { view, waiters: [] });

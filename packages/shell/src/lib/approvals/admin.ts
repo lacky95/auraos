@@ -11,7 +11,8 @@
  *       the owner decides in the desktop, the caller sends the same
  *       request again with `X-Aura-Approval` and it is used up once
  *
- * Levels (D9): `fresh` (the password, or the host operator over HTTP, D18)
+ * Levels (D9): `fresh` (the password; or the host operator, D18, which over
+ * HTTP is the only way when the owner requires HTTPS, D63)
  * for privileged permissions, Docker or `*` tools, sidecars.privileged and
  * API key creation; `session` (one click) for the rest, reads included.
  * Who may call these routes at all is the route manifest's (OWNER_MANAGES).

@@ -19,6 +19,8 @@ export interface ApprovalDialogView {
   appId: string | null;
   /** The app "Deny and block" would block (L4), or null: no block offered. */
   blockable: string | null;
+  /** How a `fresh` approval is given on this connection, as the server decided it (D18, D63). */
+  freshVia: 'password' | 'operator';
 }
 
 export type ApprovalWaiterKind = 'approval' | 'confirm';
@@ -29,8 +31,8 @@ export const APPROVE_DELAY_MS = 1500;
 
 export const APPROVAL_ID_RE = /^apr_[A-Za-z0-9_-]{22}$/;
 
-/** A server answer as a view the dialog can show, or null. */
-export function parseApprovalView(x: unknown): ApprovalDialogView | null {
+/** A server answer as a view the dialog can show, or null. `protocol`: the page's (`location.protocol`). */
+export function parseApprovalView(x: unknown, protocol = 'https:'): ApprovalDialogView | null {
   if (!x || typeof x !== 'object') return null;
   const v = x as Record<string, unknown>;
   const d = v['display'] as Record<string, unknown> | undefined;
@@ -47,7 +49,17 @@ export function parseApprovalView(x: unknown): ApprovalDialogView | null {
     },
     appId: typeof v['appId'] === 'string' ? v['appId'] : null,
     blockable: typeof v['blockable'] === 'string' ? v['blockable'] : null,
+    freshVia: freshViaOf(v['freshVia'], protocol),
   };
+}
+
+/**
+ * The server's `freshVia`; an older server sends none, and then only HTTPS
+ * takes the password, as it did (D18).
+ */
+export function freshViaOf(x: unknown, protocol: string): 'password' | 'operator' {
+  if (x === 'password' || x === 'operator') return x;
+  return protocol === 'https:' ? 'password' : 'operator';
 }
 
 /** The outcome a record's state means for whoever waits on it. Null while it is still open. */
@@ -74,9 +86,16 @@ export function approvalReply(kind: ApprovalWaiterKind, requestId: unknown, appr
     : { type: 'aura.approval.result' as const, requestId: rid, approvalId, ok: false, error: outcome };
 }
 
-/** D18: a `fresh` approval on an HTTP page. The server refuses the password there (`operator-required`). */
+/** D18: a `fresh` approval on HTTP with HTTPS required (D63). The server refuses the password there (`operator-required`). */
 export function operatorRequiredText(approvalId: string): string {
   return `This needs HTTPS, or approve on the host with \`aura approve ${approvalId}\`.`;
+}
+
+/** D63: a `fresh` approval whose password goes over plain HTTP. Informational only. */
+export const PASSWORD_OVER_HTTP_NOTE = '(HTTP: password sent unencrypted)';
+
+export function passwordTransportNote(view: Pick<ApprovalDialogView, 'level' | 'freshVia'>, protocol: string): string | null {
+  return view.level === 'fresh' && view.freshVia === 'password' && protocol !== 'https:' ? PASSWORD_OVER_HTTP_NOTE : null;
 }
 
 /**

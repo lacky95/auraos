@@ -114,6 +114,8 @@ function deps(): CredentialDeps & ApprovalRouteDeps {
     resolve: async () => ({ principal: caller, via } as unknown as ResolvedPrincipal),
     shellOwner: async () => ({ owner: { userId: 'default', sessionId: 'sess-desk', username: 'owner' }, scheme }),
     ownerRead: async () => ({ userId: 'default', sessionId: 'sess-desk', username: 'owner' }),
+    scheme: () => scheme,
+    freshAuthRequiresHttps: async () => false,
     lockOf: async () => 'unlocked',
     verifyPassword: async (_u, p) => (p === PASSWORD ? 'ok' : 'invalid'),
     rateKey: () => 'ip:10.0.0.1',
