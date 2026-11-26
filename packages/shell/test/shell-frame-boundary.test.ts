@@ -412,11 +412,13 @@ test('the auto-hide badge is above keyboard and launcher, below every trusted di
 });
 
 test('the owner dialog is a native modal, mounted, and gives the requester only the outcome', () => {
-  const src = css('OwnerPasswordDialog.astro');
-  assert.match(src, /<dialog id="aura-owner-password"/);
+  const markup = css('OwnerPasswordDialog.astro');
+  assert.match(markup, /<dialog id="aura-owner-password"/);
+  assert.match(markup, /initOwnerDialog\(\)/);
+  assert.match(markup, /autocomplete="current-password"/);
+  assert.match(markup, /autocomplete="new-password"/);
+  const src = readFileSync(new URL('../src/lib/approvals/ownerDialog.ts', import.meta.url), 'utf8');
   assert.match(src, /\.showModal\(\)/);
-  assert.match(src, /autocomplete="current-password"/);
-  assert.match(src, /autocomplete="new-password"/);
   // The reply carries {ok, error?} only, never a field value. An approval's
   // answer is built by approvalReply() alone (approvals.test.ts pins it).
   const literal = [...src.matchAll(/replyTo\([\w.]+, \{([^}]*)\}/g)].length;
@@ -445,4 +447,15 @@ test('IP mode moves to the App Hosts address on its own, unless the owner stays 
   assert.equal(shouldAutoSwitch(planSetupBar({ host: 'os.aura.localhost:3000', protocol: 'http:', pathname: '/', webkit: false }), false), false);
   assert.equal(autoSwitchTarget('http://10-0-0-5.nip.io:3000/', '?a=1', '#x'), 'http://10-0-0-5.nip.io:3000/?a=1#x');
   assert.ok(AUTO_SWITCH_SECONDS > 0 && AUTO_SWITCH_SECONDS <= 5);
+});
+
+test('WebKit on os.aura.localhost gets the "Apps blocked" bar with a link that keeps the page, and is never moved (D44, D57)', () => {
+  const plan = settleSetupBar(planCookieFallback({ host: 'os.aura.localhost:3000', protocol: 'http:', pathname: '/', webkit: true }), true);
+  assert.ok(plan.show && plan.kind === 'link' && plan.reason === 'cookies');
+  assert.equal(plan.href, 'http://127-0-0-1.nip.io:3000/');
+  assert.equal(shouldAutoSwitch(plan, false), false, 'the owner decides; the other address is a new sign-in');
+  assert.equal(autoSwitchTarget(plan.href, '?open=com.aura.docs', '#a1'), 'http://127-0-0-1.nip.io:3000/?open=com.aura.docs#a1');
+  const src = readFileSync(new URL('../src/components/shell/AppHostSetupBar.astro', import.meta.url), 'utf-8');
+  assert.match(src, /'Apps blocked in this browser\.'/);
+  assert.match(src, /link\.href = autoSwitchTarget\(plan\.href, location\.search, location\.hash\)/);
 });

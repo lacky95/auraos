@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ContainerRunner } from '../dist/app-manager/ContainerRunner.js';
 import { AppManager } from '../dist/app-manager/AppManager.js';
+import { PortAllocator } from '../dist/app-manager/PortAllocator.js';
 
 let dir;
 let savedPath;
@@ -92,6 +93,7 @@ function fakeManager(records, { pooled = [], running = [] } = {}) {
     instances: new Map(),
     nextInstanceNum: new Map(),
     fsm: { set: () => {} },
+    ports: new PortAllocator(4001, 4010),
     tokens: { register: (id, nonce) => calls.tokens.push([id, nonce]) },
     registry: { getById: (appId) => (appId === 'io.ex.gone' ? undefined : { id: appId }) },
     providers: { registerInstance: (i) => calls.providers.push(i.instanceId) },
@@ -157,6 +159,46 @@ test('a late pass (reconciler) skips instances already tracked or still the runn
   assert.deepEqual(calls.measured, ['com.aura.notepad']);
 });
 
+test('adopted ports stay taken: the next spawn gets another port', async () => {
+  const { fake, adopt } = fakeManager([
+    rec('com.aura.terminal-1', 'com.aura.terminal', { port: 4001 }),
+    rec('com.aura.docs', 'com.aura.docs', { port: 4003 }),
+  ]);
+  assert.equal(await adopt(), true);
+  assert.ok(fake.ports.isInUse(4001) && fake.ports.isInUse(4003));
+  const next = [await fake.ports.allocate('a'), await fake.ports.allocate('b')];
+  assert.ok(!next.includes(4001) && !next.includes(4003), `got ${next}`);
+});
+
+test('after adoption every running UI instance holds its App Host slot; pool members and services do not; never while adoption is pending', async () => {
+  const claimed = [];
+  const released = [];
+  const slots = { 'com.aura.terminal': ['com.aura.terminal-1', 'com.aura.terminal-9'] };
+  const manifests = { 'com.aura.terminal': {}, 'com.aura.svc': { componentType: 'service' } };
+  const fake = {
+    adoptionPending: false,
+    instances: new Map([
+      ['com.aura.terminal-1', { instanceId: 'com.aura.terminal-1', appId: 'com.aura.terminal', state: 'resumed' }],
+      ['com.aura.terminal-3', { instanceId: 'com.aura.terminal-3', appId: 'com.aura.terminal', state: 'resumed' }],
+      ['com.aura.terminal-5', { instanceId: 'com.aura.terminal-5', appId: 'com.aura.terminal', state: 'resumed', inPool: true }],
+      ['com.aura.svc', { instanceId: 'com.aura.svc', appId: 'com.aura.svc', state: 'resumed' }],
+      ['com.aura.terminal-7', { instanceId: 'com.aura.terminal-7', appId: 'com.aura.terminal', state: 'stopping' }],
+    ]),
+    registry: { getAll: () => Object.keys(manifests).map((id) => ({ id })), getById: (id) => manifests[id] },
+    claimHostSlot: async (appId, id) => { claimed.push(id); },
+  };
+  const lifecycle = {
+    releaseDeadSlots: async (appId, isLive) => { for (const id of slots[appId] ?? []) if (!isLive(id)) released.push(id); },
+  };
+  const settleSlots = (f) => AppManager.prototype.settleAdoptedSlots.call(f, lifecycle);
+  await settleSlots(fake);
+  assert.deepEqual(released, ['com.aura.terminal-9'], 'a slot whose instance did not survive is freed');
+  assert.deepEqual(claimed, ['com.aura.terminal-1', 'com.aura.terminal-3'], 'held or restored (assignSlot is idempotent)');
+  claimed.length = 0; released.length = 0;
+  await settleSlots({ ...fake, adoptionPending: true });
+  assert.deepEqual([claimed, released], [[], []], 'survivors unknown: nothing freed, nothing claimed');
+});
+
 test('while the survivors are unknown, sidecars are never reaped', async () => {
   const fake = {
     adoptionPending: true,
@@ -178,4 +220,21 @@ test('M6: boot tries the scan once and leaves retries to the reconciler; the run
   // The async inspect still reads every survivor.
   const recs = await runner().listOrphanRecords();
   assert.equal(recs.length, 3);
+});
+
+test('a port two survivors share is given back only when the last of them goes', () => {
+  const released = [];
+  const fake = {
+    instances: new Map([
+      ['com.aura.console', { instanceId: 'com.aura.console', port: 4004 }],
+      ['com.aura.counter-4', { instanceId: 'com.aura.counter-4', port: 4004 }],
+    ]),
+    ports: { release: (p) => released.push(p) },
+  };
+  const release = (id) => AppManager.prototype.releasePort.call(fake, 4004, id);
+  release('com.aura.console');
+  assert.deepEqual(released, [], 'Counter still holds 4004');
+  fake.instances.delete('com.aura.console');
+  release('com.aura.counter-4');
+  assert.deepEqual(released, [4004]);
 });
