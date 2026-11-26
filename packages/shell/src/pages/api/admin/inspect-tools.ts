@@ -2,6 +2,7 @@ import type { APIRoute } from 'astro';
 import { getAppManager, currentToolsMode, toolchainMirrorBin, listToolchainBinaries, readSidecarMap, sidecarNames, readLibMap, INSTANCE_LIB_DIR } from '@aura/core';
 import { existsSync, readdirSync, readlinkSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
+import { TERMINAL_APP_ID } from '../../../../server/terminal-embed.mjs';
 
 /**
  * Lists the per-instance /aura/my-tools allowlist for an app, plus the
@@ -15,7 +16,7 @@ import { join } from 'node:path';
  * symlinks only, and `resolves` reports whether the entry leads to a binary.
  */
 export const GET: APIRoute = ({ url }) => {
-  const appId = url.searchParams.get('appId') ?? 'com.aura.terminal';
+  const appId = url.searchParams.get('appId') ?? TERMINAL_APP_ID;
   const mgr = getAppManager();
   const dataDir = mgr.getDataDir();
   const mirrorBin = toolchainMirrorBin(dataDir);

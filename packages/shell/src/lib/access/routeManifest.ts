@@ -1,3 +1,4 @@
+import { TERMINAL_APP_ID } from '../../../server/terminal-embed.mjs';
 import { ROUTE_METHODS } from './types.ts';
 import type { AccessLevel, AccessRule, AccessTarget, RouteAccessManifest, RouteMethod } from './types.ts';
 
@@ -43,7 +44,7 @@ const VERIFIED = ['app-permission', 'owner'] as const;
  * them acts directly (lib/approvals/admin.ts `ownerAction`). Every other app
  * is refused, in every mode.
  */
-const OWNER_MANAGES = { systemApp: 'com.aura.terminal', guard: 'rule' } as const;
+const OWNER_MANAGES = { systemApp: TERMINAL_APP_ID, guard: 'rule' } as const;
 
 // ── shared open questions ───────────────────────────────────────────────────
 
@@ -109,7 +110,7 @@ const groups: RouteAccessManifest['groups'] = {
 // ── reusable refinements ────────────────────────────────────────────────────
 
 /** The owner, or the System Terminal asking for the owner's approval (D29, D31). */
-const TERMINAL_ASKS = rule(INSTANCE, 'app', { systemApp: 'com.aura.terminal' });
+const TERMINAL_ASKS = rule(INSTANCE, 'app', { systemApp: TERMINAL_APP_ID });
 
 /** TerminalX's agent watch (D29): the owner, the System Terminal, an app holding the list grant. */
 const TERMINAL_AGENTS = rule(APP_PERMISSION, 'app', { permissions: ['terminal.sessions.list'], guard: 'rule' });
@@ -220,6 +221,17 @@ const routes: RouteAccessManifest['routes'] = {
   },
   '/api/admin/restart': { methods: { POST: ownerManages('Restarts the OS: the owner decides.') } },
   '/api/admin/soft-restart': { methods: { POST: ownerManages('Stops every app and the app manager: the owner decides.') } },
+  // 5-main (P2, the SF-2 report): maintenance changes that took no approval. The owner and the operator
+  // act directly; `aura` in the System Terminal asks for one click (lib/approvals/maintenance.ts).
+  '/api/admin/cap-doctor': {
+    methods: {
+      GET: rule(OWNER, 'system', why('`aura cap doctor`: a read-only health report (D29: the trusted Terminal too).')),
+      POST: ownerManages('`aura cap doctor --fix` re-stages toolchain libraries and refreshes running apps: the owner decides.'),
+    },
+  },
+  '/api/admin/cap-refresh': { methods: { POST: ownerManages('Re-applies an app\'s granted tools to its running instances: the owner decides.') } },
+  '/api/admin/reap-orphans': { methods: { POST: ownerManages('Kills app processes no instance tracks (a dry run lists them): the owner decides.') } },
+  '/api/admin/install-aura-shim': { methods: { POST: ownerManages('Replaces the toolchain\'s aura CLI with its wrapper script: the owner decides.') } },
   '/api/admin/shell-mode': {
     methods: {
       GET: rule(OWNER, 'system', { guard: 'rule' }),
@@ -460,7 +472,7 @@ const routes: RouteAccessManifest['routes'] = {
       methods: ['POST'],
       match: { on: 'body', field: 'kind', equals: 'workspace', read: true },
       rule: rule(INSTANCE, 'app', {
-        systemApp: 'com.aura.terminal', guard: 'rule',
+        systemApp: TERMINAL_APP_ID, guard: 'rule',
         ...why('D60 `aura mount workspace`: the System Terminal mounts the AuraOS checkout into itself, in Developer Mode only, with the owner\'s click. The route refuses every other caller and target.'),
       }),
     }],
@@ -572,7 +584,7 @@ const routes: RouteAccessManifest['routes'] = {
       id: 'terminal-command',
       methods: ['POST'],
       match: { on: 'body', field: 'extras.command', read: true },
-      rule: rule(INSTANCE, 'app', { systemApp: 'com.aura.terminal', guard: 'rule' }),
+      rule: rule(INSTANCE, 'app', { systemApp: TERMINAL_APP_ID, guard: 'rule' }),
     }],
   },
 
@@ -586,7 +598,7 @@ const routes: RouteAccessManifest['routes'] = {
   '/api/terminal/share': { methods: { POST: rule(OWNER, 'system') } },
   // The System Terminal reports an ended session; the route checks it is the session's own instance.
   '/api/terminal/sessions/ended': {
-    methods: { POST: rule(INSTANCE, 'app', { systemApp: 'com.aura.terminal' }) },
+    methods: { POST: rule(INSTANCE, 'app', { systemApp: TERMINAL_APP_ID }) },
   },
   // Programmatic screen access (5.16): both grants; derived facts only (lib/terminalScreen.ts).
   // New in Phase 3, so held to its rule in every mode (L1).

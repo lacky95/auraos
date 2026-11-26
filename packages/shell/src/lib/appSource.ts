@@ -31,6 +31,7 @@ import { patchLevel, sourceOpenDetails, sourceOpenLevel } from './approvals/disp
 import { installGate, runInstall } from './approvals/nexus.ts';
 import { json, type ApprovalServiceDeps } from './approvals/service.ts';
 import { parseIdentity } from './nexusIdentity.js';
+import { TERMINAL_APP_ID } from '../../server/terminal-embed.mjs';
 
 /** The app a registry knows, with where it lives. */
 export type ScopedApp = AppManifest & { scopeId: core.ScopeId; appDir: string };
@@ -159,8 +160,8 @@ function consumer(deps: AppSourceDeps, instanceId: string | undefined): string |
  */
 function mayWrite(principal: AccessPrincipal, deps: AppSourceDeps): boolean {
   if (principal.kind === 'user' || principal.kind === 'operator') return true;
-  return principal.kind === 'instance' && principal.appId === 'com.aura.terminal'
-    && deps.apps.trustedSystemCopy('com.aura.terminal');
+  return principal.kind === 'instance' && principal.appId === TERMINAL_APP_ID
+    && deps.apps.trustedSystemCopy(TERMINAL_APP_ID);
 }
 
 /**

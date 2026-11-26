@@ -205,7 +205,7 @@ to strip any default-valued fields you've written by hand.
 Optional fields (all have defaults — only set them if you need a non-default):
 `runtime` (`'astro' | 'raw'` — see Raw runtime above), `proxy` (per-app
 runtime toggles), `maxInstances`, `maxActivitiesPerInstance`,
-`defaultLaunch`, `backgroundService`, `warmPool`, `viewConfig`, `preferredLayout`,
+`defaultLaunch`, `backgroundService`, `keepRunningOnBuild`, `warmPool`, `viewConfig`, `preferredLayout`,
 `themeStrategy`, `theme`, `keymapActions`, `dataProvider`, `serverPort`,
 `icon`, `entrypoint`.
 

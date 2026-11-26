@@ -108,7 +108,7 @@ to strip any default-valued fields you've written by hand.
 
 Optional fields (all have defaults — only set them if you need a non-default):
 `maxInstances`, `maxActivitiesPerInstance`, `defaultLaunch`,
-`backgroundService`, `warmPool`, `viewConfig`, `preferredLayout`,
+`backgroundService`, `keepRunningOnBuild`, `warmPool`, `viewConfig`, `preferredLayout`,
 `themeStrategy`, `theme`, `keymapActions`, `dataProvider`, `serverPort`,
 `icon`, `entrypoint`.
 

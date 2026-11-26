@@ -1,5 +1,7 @@
 import type { APIRoute } from 'astro';
 import { writeFileSync, chmodSync, unlinkSync, lstatSync, existsSync, readlinkSync } from 'node:fs';
+import { auditOwner, ownerAction } from '../../../lib/approvals/admin.ts';
+import { installAuraShimRequest } from '../../../lib/approvals/maintenance.ts';
 
 /**
  * Replace the (symlinked) /os/toolchain/bin/aura with a real shell-wrapper
@@ -10,13 +12,18 @@ import { writeFileSync, chmodSync, unlinkSync, lstatSync, existsSync, readlinkSy
  *
  * The wrapper execs the current bundled CLI, which is still updated in-place
  * by the esbuild watcher — so we don't lose hot-reload of CLI edits.
+ *
+ * The owner's (lib/approvals/maintenance.ts): the owner and the host operator
+ * directly, the System Terminal with one click.
  */
 const TARGETS = ['/os/toolchain/bin/aura', '/usr/local/bin/aura'];
 const WRAPPER = `#!/usr/bin/env bash
 exec node /workspace/packages/aura-cli/dist/aura.cjs "$@"
 `;
 
-export const POST: APIRoute = () => {
+export const POST: APIRoute = async (ctx) => {
+  const actor = await ownerAction(ctx, installAuraShimRequest(TARGETS));
+  if (actor instanceof Response) return actor;
   const report: Record<string, string> = {};
   for (const path of TARGETS) {
     try {
@@ -39,6 +46,8 @@ export const POST: APIRoute = () => {
       report[`${path}.error`] = (err as Error).message;
     }
   }
+  const failed = Object.keys(report).some((k) => k.endsWith('.error'));
+  await auditOwner(actor, 'os.install-aura-shim', { outcome: failed ? 'failed' : 'ok' });
   return new Response(JSON.stringify(report, null, 2), {
     status: 200,
     headers: { 'Content-Type': 'application/json' },
