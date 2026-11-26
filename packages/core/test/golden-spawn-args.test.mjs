@@ -223,7 +223,11 @@ test('spawn args match the golden file (container argv; proot master launch and 
   for (const fx of FIXTURES) {
     actual[fx.name] = {
       container: await containerArgv(fx),
-      proot: await prootLaunch(fx),
+      // 5-main (R2 + T): PRoot runs app identities only, so a session host's user identity is a recorded refusal.
+      proot: await prootLaunch(fx).catch((err) => {
+        if (err?.name !== 'ProotIdentityError') throw err;
+        return { refused: err.message };
+      }),
       pool: prootPool(),
     };
   }
