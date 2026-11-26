@@ -1,0 +1,140 @@
+---
+import '../styles/settings.css';
+
+/**
+ * Settings → Runtimes (Phase 5 stream R, ARI §5.1, D75): the runtimes apps
+ * run in. A dropdown of the installed runtimes; for the selected one its
+ * capabilities (read-only), its settings as a form rendered from the
+ * runtime's own schema (components/schemaForm.ts), the apps on it, and
+ * Enable / Disable / Make default. Below: the per-installation overrides
+ * (Remove) and the open runtime-migration decisions.
+ *
+ * Every read goes to the shell's /api/admin/runtimes as the owner acting
+ * through Settings (D45); every change opens the Shell's approval dialog and
+ * needs the owner's password (`fresh`). Changes apply to new starts.
+ */
+---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Settings · Runtimes — AuraOS</title>
+  <link rel="stylesheet" href="/api/os/theme.css" />
+  <style is:global>
+    /* Global: everything below the status line is built at runtime (components/runtimesView.ts). */
+    .rt-section { border: var(--aura-border); padding: 14px 16px; margin-bottom: 14px; display: flex; flex-direction: column; gap: 10px; }
+    .rt-section.rt-warn { border-color: var(--aura-color-warning); }
+    .rt-head { display: flex; align-items: center; gap: 10px; }
+    .rt-title { font-size: var(--aura-font-size-sm); letter-spacing: 0.1em; text-transform: uppercase; color: var(--aura-color-primary); }
+    .rt-warn .rt-title { color: var(--aura-color-warning); }
+    .rt-note { font-size: 0.65rem; color: var(--aura-color-text-dim); letter-spacing: 0.04em; line-height: 1.5; margin: 0; }
+    .rt-facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; font-size: 0.72rem; margin: 0; }
+    .rt-facts dt { color: var(--aura-color-text-dim); letter-spacing: 0.08em; font-size: 0.62rem; text-transform: uppercase; }
+    .rt-facts dd { margin: 0; }
+    .rt-table { border-collapse: collapse; font-size: 0.7rem; }
+    .rt-table th { text-align: left; font-weight: normal; color: var(--aura-color-text-dim); padding: 2px 16px 2px 0; }
+    .rt-table td { padding: 2px 0; }
+    .rt-table td.rt-no { color: var(--aura-color-warning); }
+    .rt-list { margin: 0; padding-left: 18px; font-size: 0.68rem; line-height: 1.9; }
+    .rt-list code { font-family: var(--aura-font-mono, monospace); font-size: 0.65rem; }
+    .rt-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .sf-form { display: flex; flex-direction: column; gap: 10px; }
+    .sf-row { display: grid; grid-template-columns: 160px 1fr; gap: 4px 12px; align-items: center; font-size: 0.7rem; }
+    .sf-title { color: var(--aura-color-text-dim); letter-spacing: 0.06em; text-transform: uppercase; font-size: 0.62rem; }
+    .sf-desc { grid-column: 2; font-size: 0.62rem; color: var(--aura-color-text-dim); line-height: 1.5; }
+    .sf-empty { font-size: 0.65rem; color: var(--aura-color-text-dim); margin: 0; }
+    .sf-select, .sf-input { font: inherit; font-size: 0.7rem; background: var(--aura-color-surface); color: var(--aura-color-text); border: var(--aura-border); padding: 3px 6px; }
+    .btn { font: inherit; font-size: 0.65rem; letter-spacing: 0.08em; padding: 3px 9px; background: var(--aura-color-surface); color: var(--aura-color-text); border: var(--aura-border); cursor: pointer; }
+    .btn:hover:not(:disabled) { color: var(--aura-color-primary); }
+    .btn:disabled { opacity: 0.4; cursor: default; }
+    .btn.danger:hover:not(:disabled) { color: var(--aura-color-danger); }
+    #status { font-size: 0.65rem; letter-spacing: 0.06em; color: var(--aura-color-text-dim); }
+    #status[data-tone="error"] { color: var(--aura-color-danger); }
+  </style>
+</head>
+<body>
+  <main class="settings-body">
+    <p id="status">Loading…</p>
+    <div id="rt-root"></div>
+  </main>
+
+  <footer class="settings-foot">PROVIDER · /api/admin/runtimes</footer>
+
+  <script>
+    import { osUrl } from '@aura/app-sdk';
+    import { ownerFetch } from '../scripts/os';
+    import { renderRuntimes, type RuntimesState } from '../components/runtimesView';
+
+    const root = document.getElementById('rt-root') as HTMLElement;
+    const statusEl = document.getElementById('status') as HTMLElement;
+    let state: RuntimesState | null = null;
+    let selected = '';
+    try { selected = new URLSearchParams(location.search).get('runtime') ?? ''; } catch { /* no query */ }
+
+    const setStatus = (msg: string, tone?: 'error') => {
+      statusEl.textContent = msg;
+      if (tone) statusEl.dataset['tone'] = tone; else delete statusEl.dataset['tone'];
+    };
+
+    function paint(): void {
+      if (!state) return;
+      renderRuntimes(root, state, selected, actions);
+      selected = (root.querySelector<HTMLSelectElement>('[data-runtime-picker]'))?.value ?? selected;
+    }
+
+    async function load(): Promise<void> {
+      const r = await fetch(osUrl('/api/admin/runtimes'), { cache: 'no-store' });
+      const data = await r.json().catch(() => ({})) as RuntimesState & { error?: string; message?: string };
+      if (!r.ok) throw new Error(data.message || data.error || `HTTP ${r.status}`);
+      state = data;
+      paint();
+    }
+
+    /** One owner change: the Shell's dialog asks for the password; then reload. */
+    async function change(label: string, method: string, path: `/${string}`, body?: unknown): Promise<void> {
+      for (const b of root.querySelectorAll<HTMLButtonElement>('button')) b.disabled = true;
+      setStatus(`${label}…`);
+      try {
+        let r = await ownerFetch(path, method, body);
+        let data = await r.json().catch(() => ({})) as Record<string, unknown>;
+        if (r.status === 409 && data['error'] === 'instances-running') {
+          const n = (data['instances'] as string[] | undefined)?.length ?? 0;
+          if (!confirm(`${n} instance(s) run on this runtime. Stop them and disable it?`)) { setStatus('Not changed.'); return; }
+          r = await ownerFetch(path, method, { stopInstances: true });
+          data = await r.json().catch(() => ({})) as Record<string, unknown>;
+        }
+        if (r.status === 403 && data['error'] === 'cancelled') { setStatus('Not approved: nothing changed.'); return; }
+        if (!r.ok) throw new Error(String(data['message'] || data['error'] || `HTTP ${r.status}`));
+        setStatus(`${label}: done. Applies to new starts.`);
+      } catch (err) {
+        setStatus((err as Error).message, 'error');
+      } finally {
+        try { await load(); } catch (err) { setStatus(`Could not read the runtimes: ${(err as Error).message}`, 'error'); }
+      }
+    }
+
+    const enc = encodeURIComponent;
+    const actions = {
+      select(id: string) { selected = id; paint(); },
+      saveSettings(id: string, settings: Record<string, unknown>) {
+        void change(`Saving the ${id} settings`, 'PUT', `/api/admin/runtimes/${enc(id)}/settings`, { settings });
+      },
+      setEnabled(id: string, on: boolean) {
+        void change(`${on ? 'Enabling' : 'Disabling'} ${id}`, 'POST', `/api/admin/runtimes/${enc(id)}/${on ? 'enable' : 'disable'}`, {});
+      },
+      makeDefault(id: string) {
+        void change(`Making ${id} the default`, 'PUT', '/api/admin/runtimes/default', { runtime: id });
+      },
+      removeOverride(installationId: string, label: string) {
+        void change(`Removing the override of ${label}`, 'DELETE', `/api/admin/runtimes/overrides/${enc(installationId)}`);
+      },
+      decide(appId: string, decision: 'adopt-default' | 'keep', runtime?: string) {
+        void change(decision === 'keep' ? `Keeping ${appId} on ${runtime}` : `Moving ${appId} to the default runtime`, 'POST', '/api/admin/runtimes/migrate',
+          { appId, decision, ...(runtime ? { runtime } : {}) });
+      },
+    };
+
+    load().then(() => setStatus('')).catch((err) => setStatus(`Could not read the runtimes: ${(err as Error).message}`, 'error'));
+  </script>
+</body>
+</html>

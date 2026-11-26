@@ -90,8 +90,12 @@ primitive differs. Apps migrate between them with no source change.
   bind mounts. Real PID/net/mount namespaces. Heavier (~80-150 ms
   spawn) but actually isolated.
 
-Pick PRoot for quick utilities, container for anything that needs
-hard isolation or runs untrusted code.
+An app that names no `sandbox` runs on the default runtime from
+Runtime Settings, `container` unless the owner changed it (Settings →
+Runtimes, `aura runtime default`). An unknown or disabled runtime is a
+clear error at start, never replaced by another one. PRoot does not
+enforce read-only binds, so closed apps cannot run on it. `useProot` in a
+manifest is ignored.
 
 ## Proxy and iframe
 

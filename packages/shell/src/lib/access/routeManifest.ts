@@ -238,6 +238,33 @@ const routes: RouteAccessManifest['routes'] = {
   '/api/admin/dev/restart': {
     methods: { POST: ownerManages('`aura dev rebuild|restart`, Developer Mode only: the owner decides.') },
   },
+  // Phase 5 stream R: the runtimes and the Runtime Settings (ARI §9.7, D75). Reads are the owner's,
+  // the trusted Terminal included (D29: `aura runtime ls`, the `dev new` wizard, diagnose); nothing in
+  // them is secret. Every change is the owner's at `fresh` (lib/runtimes.ts).
+  '/api/admin/runtimes': {
+    methods: { GET: rule(OWNER, 'system', why('The runtimes, their settings and each installation\'s resolution: an owner view (D29: the trusted Terminal too).')) },
+  },
+  '/api/admin/runtimes/check': {
+    methods: { POST: rule(OWNER, 'system', why('A read-only capability dry run (diagnose, `aura runtime check`): changes nothing.')) },
+  },
+  '/api/admin/runtimes/default': {
+    methods: { PUT: ownerManages('The default runtime for apps that name none: the owner decides with the password (fresh).') },
+  },
+  '/api/admin/runtimes/[id]/settings': {
+    methods: { PUT: ownerManages('A runtime\'s settings: the owner decides with the password (fresh).') },
+  },
+  '/api/admin/runtimes/[id]/enable': {
+    methods: { POST: ownerManages('Enables a runtime: the owner decides with the password (fresh).') },
+  },
+  '/api/admin/runtimes/[id]/disable': {
+    methods: { POST: ownerManages('Disables a runtime (and stops its instances when asked): the owner decides with the password (fresh).') },
+  },
+  '/api/admin/runtimes/overrides/[installationId]': {
+    methods: { DELETE: ownerManages('Removes a runtime override (D75 step 6): the owner decides with the password (fresh).') },
+  },
+  '/api/admin/runtimes/migrate': {
+    methods: { POST: ownerManages('A D75 runtime migration decision: the owner decides with the password (fresh).') },
+  },
   // D29: the owner's trusted terminal acts for the owner, so `aura enable|disable app` works from it.
   '/api/admin/apps/enabled': {
     methods: on(['GET', 'POST'], rule(OWNER, 'system', why('The owner: the desktop, Settings (D45) and `aura enable|disable app` from the trusted Terminal (D29).'))),
@@ -660,13 +687,6 @@ const notYet = (stream: string, target: AccessTarget, methods: readonly RouteMet
 
 /** Stage 1 (phase5-plan.md §4 item 5): each stream adds its file and moves its row into `routes`. */
 const reserved: RouteAccessManifest['reserved'] = {
-  // R: Runtime Settings and the Runtimes page (ARI §9.7, §9.8).
-  '/api/admin/runtimes': notYet('R', 'system', ['GET']),
-  '/api/admin/runtimes/default': notYet('R', 'system', ['PUT']),
-  '/api/admin/runtimes/check': notYet('R', 'system', ['POST']),
-  '/api/admin/runtimes/[id]/settings': notYet('R', 'system', ['PUT']),
-  '/api/admin/runtimes/[id]/enable': notYet('R', 'system', ['POST']),
-  '/api/admin/runtimes/[id]/disable': notYet('R', 'system', ['POST']),
   // I: identities and the read-only reports; H applies them.
   '/api/admin/identity/ownership-report': notYet('I', 'system', ['GET']),
   '/api/admin/identity/privilege-review': notYet('I/A', 'system', ['GET']),

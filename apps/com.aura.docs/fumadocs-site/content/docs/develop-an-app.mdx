@@ -36,7 +36,7 @@ Run it without an app id and the wizard walks you through:
 | **Icon** | 1-3 char glyph (e.g. `H`, `HL`, `HEL`). Falls back to the first letter of the name. |
 | **Shape preset** | `activity` (default, has a UI) · `activity-bg` (UI + stays alive when last window closes) · `service` (headless backend, no UI). |
 | **Instance mode** | `single` (reuse one backend) · `multi` (new backend per launch). |
-| **Sandbox** | `proot` (cheap, ~3 ms spawn) · `container` (kernel-namespace isolation, ~80-150 ms). |
+| **Runtime** | `Default` (writes no `sandbox`: the app follows the default runtime, `container` unless changed) or one of the enabled runtimes the shell lists: `container` (kernel-namespace isolation) · `proot` (cheap, weak isolation, open apps only). |
 | **Tools** | Allowlist of binaries bind-mounted into `/aura/my-tools`. Pick from the registry; `bash` and `node` are almost always wanted. |
 
 To script it instead, pass the id plus flags — `aura dev new

@@ -121,6 +121,7 @@ export const HELP_SECTIONS: Array<{ title: string; lines: Array<[string, string]
     ['aura revoke nperm <app> <locked|popup|read>', 'Revoke them again, takes effect at once'],
     ['aura get nperm [app]', 'Requested vs granted notification features'],
     ['aura admin ...', 'grants · audit · access-report · contract-report · notif release'],
+    ['aura runtime ...', 'Runtimes apps run in: ls · show · default · set · enable|disable · override · migrate'],
     ['aura whoami', 'Server-verified identity, and local hints'],
     ['aura setup-code', 'Host: one-time owner setup code'],
     ['aura user reset-password <username>', 'Host: one-time password reset code'],

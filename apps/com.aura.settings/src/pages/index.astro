@@ -60,6 +60,10 @@ import Icon from '../components/Icon.astro';
         <h3><Icon name="plug" /> INTERFACES</h3>
         <p>What apps provide · what they need · live addresses</p>
       </button>
+      <button class="tile" data-section="runtimes">
+        <h3><Icon name="cpu" /> RUNTIMES</h3>
+        <p>Container · PRoot · default · settings · overrides</p>
+      </button>
       <button class="tile" data-section="system">
         <h3><Icon name="terminal" /> SYSTEM</h3>
         <p>Developer mode · clean-tree check · patches</p>
@@ -101,6 +105,7 @@ import Icon from '../components/Icon.astro';
         case 'interfaces': return ['/interfaces', 'Settings · Interfaces'];
         case 'access':     return ['/access',     'Settings · Notifications & access'];
         case 'users':      return ['/users',      'Settings · Users & Identities'];
+        case 'runtimes':   return ['/runtimes',   'Settings · Runtimes'];
         case 'system':     return ['/system',     'Settings · System'];
         case 'about':      return ['/about',      'Settings · About'];
         default:           return ['/',           'Settings'];

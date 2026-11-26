@@ -81,9 +81,14 @@ test('an omitted sandbox follows the default; the manifest names its runtime; an
   const withDefault = { ...rec, default: 'proot' };
   assert.equal(resolve(reg, app(), withDefault).runtime, 'proot', 'the default is the record\'s');
   const over = { ...rec, overrides: { 'inst-1': { runtime: 'proot', source: 'migration', recordedAt: 'x', settings: { placement: 'master' } } } };
-  const c = resolve(reg, app({ sandbox: 'container' }), over);
+  const c = resolve(reg, app(), over);
   assert.deepEqual([c.runtime, c.source], ['proot', 'migration']);
   assert.equal(resolve(reg, app(), over, { installationId: 'inst-2' }).source, 'default', 'overrides are per installation');
+  // A migration override keeps what an omitted sandbox meant: once the manifest names a runtime (an app update), it lapses.
+  assert.deepEqual(Object.values(resolve(reg, app({ sandbox: 'container' }), over)).slice(0, 2), ['container', 'manifest']);
+  // The owner's own override wins over the manifest.
+  const owner = { ...rec, overrides: { 'inst-1': { runtime: 'proot', source: 'override', recordedAt: 'x' } } };
+  assert.deepEqual(Object.values(resolve(reg, app({ sandbox: 'container' }), owner)).slice(0, 2), ['proot', 'override']);
 });
 
 test('Q17: an unknown or disabled runtime is a clear error, never a fallback', () => {
@@ -135,6 +140,8 @@ test('an open D75 decision stops the start with the decision commands', () => {
   const rec = { ...builtInRuntimeRecord(reg), pending: { 'inst-1': { appId: 'org.r.app', legacy: 'master-direct', sandbox: 'omitted', reason: 'master-direct', recordedAt: 'x' } } };
   assert.throws(() => resolve(reg, app(), rec), (e) => e instanceof RuntimeResolutionError && e.code === 'runtime-decision-needed'
     && /aura runtime migrate --adopt-default org\.r\.app/.test(e.message) && /--keep org\.r\.app proot/.test(e.message));
+  assert.throws(() => resolve(reg, app({ sandbox: 'proot' }), rec), (e) => e.code === 'runtime-decision-needed');
+  assert.equal(resolve(reg, app({ sandbox: 'container' }), rec).source, 'manifest', 'an update that names container decides by itself');
 });
 
 test('a registry refuses a duplicate id', () => {

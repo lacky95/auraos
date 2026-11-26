@@ -51,7 +51,7 @@ The grammar is kubectl-style: `aura <verb> <resource> [name]`. Short resource na
 `aura dev new com.example.hello --name Hello --shape activity --sandbox container --tools git,claude --non-interactive`
 
 - **Shapes:** `activity` (a window), `activity-bg` (a window that keeps running), `service` (headless).
-- **Sandbox:** `proot` (default) or `container`.
+- **Runtime:** omit `--sandbox` to follow the default runtime (`container`; `aura runtime ls`), or name one (`container`, `proot`).
 - **Scope:** `user` (default) or `global`.
 - **Every new app gets its own `AGENTS.md`** (and a one-line `CLAUDE.md` that loads it). Read it before changing that app.
 - **Related:** `aura dev clone` (copy any app, system ones included), `aura dev validate` and `aura dev standalone <app>` (fast UI iteration).

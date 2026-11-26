@@ -321,7 +321,7 @@ Ref shapes `install` / `info` accept:
 
 | Command | What it does | Key flags |
 |---|---|---|
-| `aura dev new [appId]` | Scaffold a new app. Wizard if `appId` is omitted. | `--name`, `--icon`, `--description`, `--shape activity\|activity-bg\|service`, `--instance-mode single\|multi`, `--sandbox proot\|container`, `--tools`, `--scope user\|global`, `--force`, `--non-interactive` |
+| `aura dev new [appId]` | Scaffold a new app. Wizard if `appId` is omitted. | `--name`, `--icon`, `--description`, `--shape activity\|activity-bg\|service`, `--instance-mode single\|multi`, `--sandbox <runtime>` (default: none written, the app follows the default runtime), `--tools`, `--scope user\|global`, `--force`, `--non-interactive` |
 | `aura dev clone [source] [target]` | Clone any app (incl. system apps) into `user` or `global` scope. The copy gets a new `originId`. Wizard if ids are omitted. | `--scope`, `--source-scope`, `--name`, `--keep-origin`, `--no-rewrite-ids`, `--exclude-git`, `--with-data`, `--force`, `--dry-run`, `--json`, … |
 | `aura dev validate [path]` | Validate one manifest against the schema, or all with `--all`. Warns when `originId` is missing. | `--all` |
 | `aura dev origin [appId]` | List app `originId`s, or set them. | `--assign [--all]`, `--reassign` (the owner's), `--origin-id <uuid>`, `--scope`, `--json` |
@@ -348,6 +348,10 @@ aura dev validate --all
 | `aura setup-code` | Host command: a one-time code for creating the owner account at `/setup` (expires after 10 minutes). Run it as `docker exec -it aura-shell aura setup-code`. | — |
 | `aura user reset-password <username>` | Host command: a one-time code for resetting the owner's password at `/setup`. Signs out every browser. | — |
 | `aura admin security [list\|options]` | Every [security option](/docs/security-options): its value, where it comes from (default, policy, `env AURA_…`) and how to change it. | `-o json` |
+| `aura runtime ls\|show <id>` | The runtimes apps run in (container, PRoot): enabled, default, health, capabilities, settings and the apps on each. | `-o json` |
+| `aura runtime default [<id>]` · `set <id> <key>=<value>` · `enable\|disable <id>` | Change the default runtime, a runtime's settings (e.g. `set proot placement=master`) or whether it is enabled. Needs your password; applies to the next start of an app. | `disable --stop-instances` |
+| `aura runtime check <id>` | Would an app run there? A read-only capability check. | `--app <appId>`, `--need jump,mount,closed` |
+| `aura runtime override ls\|rm <app>` · `migrate` | Per-installation runtime overrides, and the open runtime migration decisions of the runtime release (apps that wait for you and do not start). | `migrate --adopt-default <app>`, `migrate --keep <app> proot` |
 | `aura admin security set <id> <value>` | Set a writable security option, e.g. `set fresh-auth-require-https on`. Needs your password in the desktop (from the Terminal), or runs directly on the host. Options set on the host (env) answer where to set them. | — |
 
 ```bash

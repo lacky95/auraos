@@ -27,6 +27,11 @@ function mgrOf(list: Inst[]) {
     getAllInstances: () => [...instances.values()],
     getInstance: (id: string) => instances.get(id),
     getManifest: (appId: string) => manifests[appId],
+    // Stream R: respawn keys on the runtime's capability, not its id.
+    runtimeCapabilitiesOf: (id: string) => {
+      const sandbox = instances.get(id)?.sandbox;
+      return sandbox ? { survivesShellRestart: sandbox === 'container' } : null;
+    },
     isEnabled: () => true,
     start: async (appId: string) => {
       const id = `${appId}-new${++n}`;

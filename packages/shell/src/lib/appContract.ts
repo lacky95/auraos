@@ -209,7 +209,8 @@ export function liveContractReportDeps(): ContractReportDeps {
   return {
     apps: () => mgr.registry.getAll().map((m) => ({
       appId: m.id, name: m.name, scope: String(m.scopeId), dir: m.appDir,
-      sandbox: m.sandbox === 'container' ? 'container' : 'proot',
+      // The runtime a running instance latched; else the manifest's, else the default (container, Q18).
+      sandbox: (mgr.getAllInstances().find((i) => i.appId === m.id && i.sandbox)?.sandbox ?? m.sandbox ?? 'container') === 'container' ? 'container' : 'proot',
       manifest: m as unknown as ContractReportApp['manifest'],
       instances: mgr.getAllInstances()
         .filter((i) => i.appId === m.id && !i.inPool)

@@ -56,6 +56,8 @@ export * from './runtimes/registry.js';
 export * from './runtimes/settingsSchema.js';
 export * from './runtimes/settingsStore.js';
 export * from './runtimes/migrateLegacy.js';
+export * from './runtimes/builtins/container.js';
+export * from './runtimes/builtins/proot.js';
 export * from './security/SealedPolicyRecord.js';
 export * from './homes/types.js';
 export * from './homes/legacyResolver.js';

@@ -84,14 +84,18 @@ function renderTemplate(
 /** Three "shape" presets the wizard offers. Maps to manifest field combos. */
 type ComponentShape = 'activity' | 'activity-bg' | 'service';
 
-interface ScaffoldConfig {
+export interface ScaffoldConfig {
   appId:        string;
   name:         string;
   icon?:        string;
   description?: string;
   shape:        ComponentShape;
   instanceMode: 'single' | 'multi';
-  sandbox:      'proot' | 'container';
+  /**
+   * The runtime the manifest names; absent: none is written and the app
+   * follows the Runtime Settings default (Phase 5 R, Q18).
+   */
+  sandbox?:     string;
   tools:        string[];
   /** Where the app lives on disk. Default `user`. Determines:
    *    • destination directory (scope.appsDir/<id>)
@@ -110,7 +114,17 @@ interface ScaffoldConfig {
  * `aura dev clean-manifest` output (no churn diff for the user). Shape preset
  * decides componentType + backgroundService + autoStart in one place.
  */
-function manifestFromConfig(cfg: ScaffoldConfig): Record<string, unknown> {
+/** The enabled runtimes and the default from the shell (`GET /api/admin/runtimes`), or null without it. */
+async function enabledRuntimes(): Promise<{ default: string; runtimes: Array<{ id: string; title: string; description: string }> } | null> {
+  try {
+    const s = await api.get<{ default: string; runtimes: Array<{ id: string; title: string; description: string; enabled: boolean }> }>('/api/admin/runtimes');
+    return { default: s.default, runtimes: s.runtimes.filter((r) => r.enabled) };
+  } catch {
+    return null;
+  }
+}
+
+export function manifestFromConfig(cfg: ScaffoldConfig): Record<string, unknown> {
   const m: Record<string, unknown> = {
     id:          cfg.appId,
     // A new, independent app: its own logical identity across registries and
@@ -142,9 +156,10 @@ function manifestFromConfig(cfg: ScaffoldConfig): Record<string, unknown> {
     if (cfg.shape === 'activity-bg') m['backgroundService'] = true;
   }
 
-  // Container sandbox is opt-in (heavier spawn but real kernel-namespace
-  // isolation + survives shell restarts). PRoot is the schema default; omit it.
-  if (cfg.sandbox === 'container') m['sandbox'] = 'container';
+  // A runtime only when one was chosen: otherwise the app follows the
+  // Runtime Settings default (`aura runtime default`, container unless the
+  // owner changed it), and a later default change applies to it too.
+  if (cfg.sandbox) m['sandbox'] = cfg.sandbox;
 
   // User/global-scope apps NEED `aura` + `oras` available at runtime so the
   // synth entrypoint's `aura sdk install` call can resolve @aura/* from the
@@ -275,16 +290,19 @@ async function runWizard(seed: { appId?: string; force?: boolean }): Promise<Sca
     {
       id: 'sandbox',
       run: async () => {
-        // Container first = preselected default. The user wants the stronger
-        // isolation by default; PRoot stays available as a lighter alternative.
-        const opts = [
-          { value: 'container' as const, label: 'Container', desc: 'Real Docker namespace. Survives shell restart. Recommended.' },
-          { value: 'proot'     as const, label: 'PRoot',     desc: 'Lightweight ptrace sandbox. Fast cold start, weaker isolation.' },
+        // The runtimes come from the shell (the enabled ones, ARI §9.11), not
+        // a hard-coded pair. The first choice writes no `sandbox`: the app
+        // follows the default. Without the shell, only that choice is offered.
+        const listed = await enabledRuntimes();
+        const def = listed?.default;
+        const opts: Array<{ value: string; label: string; desc: string }> = [
+          { value: '', label: `Default${def ? ` (${def})` : ''}`, desc: 'Follow the Runtime Settings default (aura runtime default). Recommended.' },
+          ...(listed?.runtimes ?? []).map((r) => ({ value: r.id, label: r.title, desc: r.description })),
         ];
-        const startIdx = Math.max(0, opts.findIndex((o) => o.value === draft.sandbox));
-        const v = await promptChoice<'proot' | 'container'>('Sandbox', opts, startIdx, { allowBack: true });
+        const startIdx = Math.max(0, opts.findIndex((o) => o.value === (draft.sandbox ?? '')));
+        const v = await promptChoice<string>('Runtime', opts, startIdx, { allowBack: true });
         if (v === BACK) return 'back';
-        draft.sandbox = v;
+        if (v) draft.sandbox = v; else delete draft.sandbox;
         return 'advance';
       },
     },
@@ -743,7 +761,7 @@ export function registerDev(program: Command): void {
     .option('--description <text>',    'Short description')
     .option('--shape <preset>',        'activity | activity-bg | service')
     .option('--instance-mode <mode>',  'single | multi', 'single')
-    .option('--sandbox <kind>',        'proot | container', 'proot')
+    .option('--sandbox <runtime>',     'A runtime id (aura runtime ls). Default: none written, the app follows the Runtime Settings default')
     .option('--tools <list>',          'Comma-separated capabilities to declare', '')
     .option('--scope <id>',            'user | global — where to install (default: user). system is reserved and cannot be targeted.', 'user')
     .option('--source-mode <mode>',    'closed | open — what installed copies start as (manifest source.defaultMode)', 'closed')
@@ -755,7 +773,7 @@ export function registerDev(program: Command): void {
       opts: {
         name?: string; icon?: string; description?: string;
         shape?: ComponentShape; instanceMode: 'single' | 'multi';
-        sandbox: 'proot' | 'container'; tools: string; scope: ScopeId;
+        sandbox?: string; tools: string; scope: ScopeId;
         sourceMode: 'closed' | 'open';
         force?: boolean;
         nonInteractive?: boolean;
@@ -790,7 +808,10 @@ export function registerDev(program: Command): void {
       };
       enumGuard('--shape',          opts.shape,        ['activity', 'activity-bg', 'service'] as const);
       enumGuard('--instance-mode',  opts.instanceMode, ['single', 'multi'] as const);
-      enumGuard('--sandbox',        opts.sandbox,      ['proot', 'container'] as const);
+      // A runtime id is checked when the app starts (Q17: an unknown one is a clear error there).
+      if (opts.sandbox !== undefined && !/^[a-z][a-z0-9-]{1,31}$/.test(opts.sandbox)) {
+        fail(`Invalid --sandbox: '${opts.sandbox}'. A runtime id (aura runtime ls), e.g. container or proot.`);
+      }
       enumGuard('--source-mode',    opts.sourceMode,   ['closed', 'open'] as const);
       // `system` is reserved for the immutable in-repo OS scope and must never
       // be a scaffold target — surface a dedicated message before the generic
@@ -812,7 +833,7 @@ export function registerDev(program: Command): void {
         ...(opts.description ? { description: opts.description } : {}),
         shape:        opts.shape ?? 'activity',
         instanceMode: opts.instanceMode,
-        sandbox:      opts.sandbox,
+        ...(opts.sandbox ? { sandbox: opts.sandbox } : {}),
         tools:        opts.tools.split(',').map((t) => t.trim()).filter(Boolean),
         scope:        opts.scope,
         sourceMode:   opts.sourceMode,

@@ -4,7 +4,9 @@
  * closed `Record<'proot'|'container'>` and its silent PRoot fallbacks.
  *
  * Resolution, first match wins (ARI §5.3, §11.2):
- *   1. a per-installation override (ARI-3) or D75 migration override;
+ *   1. a per-installation override (ARI-3) or D75 migration override (a
+ *      migration override keeps what an omitted `sandbox` meant, so it
+ *      lapses once the manifest names a runtime);
  *   2. the manifest's `sandbox`;
  *   3. the Runtime Settings default.
  * An open D75 decision stops it (`runtime-decision-needed`). Then the runtime
@@ -132,6 +134,12 @@ export class RuntimeRegistry {
     return this.require(id).capabilities(this.settingsOf(id, record));
   }
 
+  /** The override that applies: the owner's always; a migration one only while the manifest names no runtime. */
+  private overrideFor(manifest: RuntimeManifest, installationId: string, record: RuntimeSettingsRecord) {
+    const o = record.overrides[installationId];
+    return o && !(o.source === 'migration' && manifest.sandbox) ? o : undefined;
+  }
+
   /** Which runtime an installation asks for, and why; before any check. */
   choose(input: Pick<ResolveInput, 'manifest' | 'installationId' | 'record'>): { runtime: string; source: RuntimeSource } {
     const { manifest, installationId, record } = input;
@@ -142,13 +150,15 @@ export class RuntimeRegistry {
       throw new RuntimeResolutionError('runtime-unresolved', manifest.id,
         `the runtime of ${manifest.id} cannot be decided: ${record ? 'its installation is not recorded yet' : 'the Runtime Settings cannot be read'}; try again`);
     }
+    // D75 decisions and migration overrides are about what an omitted (or PRoot) `sandbox` meant before
+    // the release. A manifest that now names another runtime (an app update, e.g. P1) decides by itself.
     const pending = record.pending?.[installationId];
-    if (pending) {
+    if (pending && (!manifest.sandbox || manifest.sandbox === 'proot')) {
       throw new RuntimeResolutionError('runtime-decision-needed', manifest.id,
         `runtime migration decision needed for ${manifest.id} (${pending.legacy === 'master-direct' ? 'it ran unwrapped in the master' : 'a closed app on PRoot'}): `
         + `\`aura runtime migrate --adopt-default ${manifest.id}\` (container, recommended) or \`--keep ${manifest.id} proot\` (open apps only)`);
     }
-    const override = record.overrides[installationId];
+    const override = this.overrideFor(manifest, installationId, record);
     if (override) return { runtime: override.runtime, source: override.source };
     if (manifest.sandbox) return { runtime: manifest.sandbox, source: 'manifest' };
     return { runtime: record.default, source: 'default' };
@@ -164,7 +174,7 @@ export class RuntimeRegistry {
     const module = this.require(runtime);
     const record = input.record;
     if (record && !this.isEnabled(runtime, record)) throw new RuntimeUnavailableError('runtime-disabled', runtime);
-    const override = input.installationId ? record?.overrides[input.installationId] : undefined;
+    const override = input.installationId && record ? this.overrideFor(input.manifest, input.installationId, record) : undefined;
     const settings = override?.settings && override.runtime === runtime
       ? { ...this.settingsOf(runtime, record), ...override.settings }
       : this.settingsOf(runtime, record);

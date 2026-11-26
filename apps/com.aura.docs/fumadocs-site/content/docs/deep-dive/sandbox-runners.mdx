@@ -34,10 +34,18 @@ interface SandboxRunner {
 }
 ```
 
-The AppManager picks which runner per spawn from `manifest.sandbox`:
+The AppManager resolves the runtime once per spawn through the runtime
+registry (`packages/core/src/runtimes/registry.ts`): a per-installation
+override, else `manifest.sandbox`, else the Runtime Settings default
+(`container`). An unknown or disabled runtime, an open migration decision
+or a missing capability (a closed app on PRoot, sidecars on PRoot) fails
+the start with a clear error; nothing falls back to another runtime. The
+resolved id is latched on the instance as `sandbox`, and every later call
+reaches the runner through it:
 
 ```ts
-const runner = this.runners[manifest.sandbox] ?? this.runners['proot'];
+const runtime = await this.resolveRuntime(appId, manifest);   // throws, never falls back
+const pid = await runtime.module.runner.spawn(instanceId, appId, port, manifest, ctx);
 ```
 
 `ContainerRunner.listOrphanRecords()` is how containers survive a shell

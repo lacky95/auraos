@@ -154,12 +154,12 @@ export async function buildSnapshot(reason: DesktopSnapshot['reason']): Promise<
   return { schema: 1, savedAt: new Date().toISOString(), reason, instances: sessionInstances(mgr, members, withWindows), activities };
 }
 
-/** Instance states a PRoot respawn brings back: running ones, never one that had crashed or stopped (M5). */
+/** Instance states a respawn (a runtime that does not survive a shell restart, e.g. PRoot) brings back: running ones, never one that had crashed or stopped (M5). */
 const RESPAWN_STATES = new Set(['resumed', 'started', 'paused']);
 
 /** The instances a snapshot keeps: shown on a workspace, parent of a window, or a running PRoot one. */
 export function sessionInstances(
-  mgr: Pick<Mgr, 'getAllInstances' | 'getManifest'>, members: Set<string>, withWindows: Set<string>,
+  mgr: Pick<Mgr, 'getAllInstances' | 'getManifest' | 'runtimeCapabilitiesOf'>, members: Set<string>, withWindows: Set<string>,
 ): SessionInstance[] {
   const instances: SessionInstance[] = [];
   for (const inst of mgr.getAllInstances()) {
@@ -169,7 +169,8 @@ export function sessionInstances(
     const m = mgr.getManifest(inst.appId);
     if (!m || m.componentType === 'service') continue;
     const view = m.activityMode !== 'multi' && members.has(inst.instanceId);
-    const respawn = inst.sandbox === 'proot' && RESPAWN_STATES.has(inst.state);
+    // A runtime whose instances end with the shell (PRoot) is respawned; one that survives is re-adopted.
+    const respawn = mgr.runtimeCapabilitiesOf(inst.instanceId)?.survivesShellRestart === false && RESPAWN_STATES.has(inst.state);
     if (!view && !respawn && !withWindows.has(inst.instanceId)) continue;
     instances.push({ instanceId: inst.instanceId, appId: inst.appId, view, ...(respawn ? { respawn: true as const } : {}) });
   }
