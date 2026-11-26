@@ -14,7 +14,7 @@ import type { ApprovalClaim, ApprovalDecider, ApprovalRecord, ApprovalRequest, A
 import type { CallerPrincipal } from '../src/lib/access/identify.ts';
 import { mountedSourcePath } from '../src/lib/appSource.ts';
 import {
-  activatePrepared, appSourceStatus, bindWorkspace, startPreview, stopPreviews, cleanWorkspaces, detachWorkspace, mountAppVolume, setSourceMode, type AppSourceDeps, type ScopedApp,
+  activatePrepared, appSourceStatus, startPreview, stopPreviews, cleanWorkspaces, mountAppVolume, setSourceMode, type AppSourceDeps, type ScopedApp,
 } from '../src/lib/appSource.ts';
 
 class MemoryStore {
@@ -230,16 +230,16 @@ test('opening needs the owner (202, then approved, then once); the open view is 
 });
 
 test('a workspace is created and bound writable at /mnt/aura/work/<app> in the calling Terminal only', async () => {
-  const r = await read(await bindWorkspace(req('POST', { app: 'io.shop.app' }), 'com.aura.terminal', deps()));
+  const r = await read(await mountAppVolume(req('POST'), 'com.aura.terminal', deps(), { app: 'io.shop.app', kind: 'work' }));
   const { mount, ...rest } = r.body;
   assert.deepEqual(rest, { ok: true, appId: 'io.shop.app', installationId: 'inst-global-io-shop-app', n: 1, path: '/mnt/aura/work/io.shop.app', created: true });
   assert.deepEqual([mount.kind, mount.id, mount.workspace], ['work', 'io.shop.app:work', 'aura/workspaces/default/inst-global-io-shop-app/1'], 'the same mount `aura mount ls` shows');
   assert.ok(existsSync(join(root, 'root', 'aura', 'workspaces', 'default', 'inst-global-io-shop-app', '1')));
   assert.deepEqual(kernel.map((m) => [m.instanceId, m.id, m.mode]), [['com.aura.terminal', 'io.shop.app:work', 'rw']], 'nowhere else');
 
-  const again = await read(await bindWorkspace(req('POST', { app: 'io.shop.app' }), 'com.aura.terminal', deps()));
+  const again = await read(await mountAppVolume(req('POST'), 'com.aura.terminal', deps(), { app: 'io.shop.app', kind: 'work' }));
   assert.deepEqual([again.body.n, again.body.created], [1, false], 'the bound one again');
-  const next = await read(await bindWorkspace(req('POST', { app: 'io.shop.app', new: true }), 'com.aura.terminal', deps()));
+  const next = await read(await mountAppVolume(req('POST'), 'com.aura.terminal', deps(), { app: 'io.shop.app', kind: 'work', new: true }));
   assert.deepEqual([next.body.n, next.body.created], [2, true]);
   assert.equal(kernel.length, 1, 'one workspace of an app per Terminal');
 
@@ -247,13 +247,12 @@ test('a workspace is created and bound writable at /mnt/aura/work/<app> in the c
   assert.deepEqual(status.body.workspace, { n: 2, path: '/mnt/aura/work/io.shop.app' });
   assert.deepEqual(status.body.workspaces, [1, 2]);
 
-  const off = await read(await detachWorkspace(req('DELETE', undefined, {}, 'http://shell.test/x?app=io.shop.app'), 'com.aura.terminal', deps()));
-  assert.deepEqual(off.body, { ok: true, removed: true });
+  await deps().mounts.remove('com.aura.terminal', 'io.shop.app:work');   // `aura mount rm io.shop.app:work`
   assert.ok(existsSync(join(root, 'root', 'aura', 'workspaces', 'default', 'inst-global-io-shop-app', '2')), 'the dir is kept');
 });
 
 test('activate without approval answers 202; with it the tree is swapped, the rollback tree kept, the data survives', async () => {
-  await bindWorkspace(req('POST', { app: 'io.shop.app' }), 'com.aura.terminal', deps());
+  await mountAppVolume(req('POST'), 'com.aura.terminal', deps(), { app: 'io.shop.app', kind: 'work' });
   const ws = join(root, 'root', 'aura', 'workspaces', 'default', 'inst-global-io-shop-app', '1');
   writeApp(ws, { id: 'io.shop.app', originId: O1, name: 'Shop', version: '1.0.0' }, 'patched\n');
   const appDir = join(scopes[1]!.appsDir, 'io.shop.app');
@@ -353,8 +352,8 @@ test('patch clean: deletes this user\'s old workspaces; never the bound one, the
   for (let n = 1; n <= 6; n++) mkdirSync(wsDir('default', n), { recursive: true });
   mkdirSync(wsDir('bob', 1), { recursive: true });
   // Bound here: 2. Bound in another Terminal of this user: 3.
-  await bindWorkspace(req('POST', { app: 'io.shop.app', n: 2 }), 'com.aura.terminal', deps());
-  await bindWorkspace(req('POST', { app: 'io.shop.app', n: 3 }), 'com.aura.terminal-2', deps());
+  await mountAppVolume(req('POST'), 'com.aura.terminal', deps(), { app: 'io.shop.app', kind: 'work', n: 2 });
+  await mountAppVolume(req('POST'), 'com.aura.terminal-2', deps(), { app: 'io.shop.app', kind: 'work', n: 3 });
   const clean = async (body: Record<string, unknown>) => read(await cleanWorkspaces(req('POST', { app: 'shop', ...body }), 'com.aura.terminal', deps()));
   const present = () => [1, 2, 3, 4, 5, 6].filter((n) => existsSync(wsDir('default', n)));
 
@@ -402,13 +401,13 @@ test('mount kind patches: one repository per installation on the volume, the sam
   const fresh = await read(await appSourceStatus(req('GET', undefined, {}, 'http://shell.test/x?app=io.shop.app'), 'com.aura.terminal', deps(), false));
   assert.deepEqual(fresh.body.patches, { path: '/mnt/aura/patches/io.shop.app', mounted: false }, 'a new Terminal binds it on demand');
 
-  // Binding again is a no-op; the work kind goes through the same code (R2 is a thin call into it).
+  // Binding again is a no-op; the work kind goes through the same code.
   assert.equal((await read(await mountAppVolume(req('POST'), 'com.aura.terminal-2', deps(), { app: 'io.shop.app', kind: 'patches' }))).status, 200);
   assert.equal(kernel.filter((m) => m.kind === 'patches' && m.instanceId === 'com.aura.terminal-2').length, 1);
   const w = await read(await mountAppVolume(req('POST'), 'com.aura.terminal-2', deps(), { app: 'io.shop.app', kind: 'work', new: true }));
   assert.deepEqual([w.body.n, w.body.path, w.body.mount.kind], [1, '/mnt/aura/work/io.shop.app', 'work']);
-  const viaR2 = await read(await bindWorkspace(req('POST', { app: 'io.shop.app', new: true }), 'com.aura.terminal-2', deps()));
-  assert.deepEqual([viaR2.body.n, viaR2.body.mount.workspace], [2, 'aura/workspaces/default/inst-global-io-shop-app/2']);
+  const w2 = await read(await mountAppVolume(req('POST'), 'com.aura.terminal-2', deps(), { app: 'io.shop.app', kind: 'work', new: true }));
+  assert.deepEqual([w2.body.n, w2.body.mount.workspace], [2, 'aura/workspaces/default/inst-global-io-shop-app/2']);
   assert.equal((await read(await mountAppVolume(req('POST'), 'io.proot.app', deps(), { app: 'io.shop.app', kind: 'patches' }))).status, 409, 'containers only');
 });
 
@@ -462,4 +461,14 @@ test('a sandbox path in its own source mount is the app dir in the shell (dev pu
   assert.equal(map('/mnt/aura/com.example.ab'), '/mnt/aura/com.example.ab', 'a prefix is not the mount');
   assert.equal(map('/mnt/aura/work/com.example.a'), '/mnt/aura/work/com.example.a', 'only source mounts');
   assert.equal(map('relative/dir'), 'relative/dir');
+});
+
+test('Track P v1: no writable patch path of a built-in app — neither a patch repo nor a workspace is created or bound', async () => {
+  for (const kind of ['work', 'patches'] as const) {
+    const r = await read(await mountAppVolume(req('POST'), 'com.aura.terminal', deps(), { app: 'com.aura.terminal', kind, new: true }));
+    assert.deepEqual([r.status, r.body.error], [409, 'system-app-later'], kind);
+  }
+  assert.equal(kernel.filter((m) => m.kind === 'work' || m.kind === 'patches').length, 0, 'nothing bound');
+  assert.equal(existsSync(join(root, 'root', 'aura', 'workspaces', 'default', 'inst-system-com-aura-terminal')), false, 'no workspace dir');
+  assert.equal(existsSync(join(root, 'root', 'aura', 'patches', 'inst-system-com-aura-terminal')), false, 'no patch repo');
 });

@@ -5,9 +5,8 @@
  * builds, restarts and health checks) is `aura dev`'s, in the Terminal.
  *
  *   GET|POST /api/instances/<inst>/app-source      status (+ the source view in the caller)
- *   POST|DELETE /api/instances/<inst>/app-workspace  bind / detach a writable workspace
  *   POST /api/instances/<inst>/app-workspace/clean  delete old workspaces (never the bound one, the newest N or one in use)
- *   POST /api/instances/<inst>/mounts {kind}         `patches` / `work` binds (mountAppVolume); R2 is a thin call into it
+ *   POST /api/instances/<inst>/mounts {kind}         `patches` / `work` binds (mountAppVolume), the only way to bind them
  *   POST /api/apps/<id>/source-mode                 open (owner approval) or close
  *   POST /api/apps/<id>/activate                    install a workspace or the rollback tree
  *   POST|DELETE /api/apps/<id>/preview              run a workspace as a separate preview instance / stop it
@@ -113,6 +112,11 @@ export function resolveApp(deps: AppSourceDeps, ref: unknown): ScopedApp | Respo
  * AppHostStore `approvedOverlay`). A same-id copy from a store or `aura dev`
  * is its own app, with its own patches.
  */
+/** A built-in app (or its overlay) while built-in patching is off (core SYSTEM_APP_OVERLAYS). */
+function builtInApp(deps: AppSourceDeps, app: ScopedApp): boolean {
+  return (app.scopeId === 'system' || isOverlay(deps, app)) && !core.SYSTEM_APP_OVERLAYS;
+}
+
 function isOverlay(deps: AppSourceDeps, app: ScopedApp): boolean {
   return app.scopeId === 'user' && deps.apps.trustedSystemCopy(app.id);
 }
@@ -174,7 +178,7 @@ function mayWrite(principal: AccessPrincipal, deps: AppSourceDeps): boolean {
  * Whose workspace an activation installs (multi-user rule): a caller
  * activates its own user's workspaces; the owner (the owner's login or the
  * host operator) may name any user's. Workspaces are keyed by the
- * installation and that user, as R2 creates them.
+ * installation and that user, as mountAppVolume creates them.
  */
 function workspaceOwner(principal: AccessPrincipal, requested: unknown): string | Response {
   const own = actingUser(principal);
@@ -242,7 +246,7 @@ export async function appSourceStatus(request: Request, instanceId: string | und
   const repo = deps.mounts.list(inst).find((m) => m.id === `${app.id}:patches`);
   const workspaces = key ? core.listWorkspaces(deps.dataDir, userId, key) : [];
   const path = view?.containerPath ?? sourcePath(app.id);
-  const builtIn = (app.scopeId === 'system' || isOverlay(deps, app)) && !core.SYSTEM_APP_OVERLAYS;
+  const builtIn = builtInApp(deps, app);
   const next = builtIn
     ? `Read the source at ${path} (read-only). ${core.SYSTEM_APP_LATER_MESSAGE}.`
     : mode.mode === 'open' && view?.mode === 'rw'
@@ -264,7 +268,7 @@ export async function appSourceStatus(request: Request, instanceId: string | und
   });
 }
 
-// ── R2: the patch repo and workspace binds (mount kinds `patches`, `work`) ──
+// ── the patch repo and workspace binds (mount kinds `patches`, `work`) ──
 
 /**
  * `aura mount <app> --patches | --work [n]` (POST /api/instances/<inst>/mounts
@@ -293,6 +297,10 @@ export async function mountAppVolume(
   if (inst instanceof Response) return inst;
   const app = resolveApp(deps, body.app);
   if (app instanceof Response) return app;
+  // Track P v1 patches normal apps only (core SYSTEM_APP_OVERLAYS): no writable patch path of a built-in app.
+  if (builtInApp(deps, app)) {
+    return json({ error: core.SYSTEM_APP_LATER, message: `${app.id} is a built-in app: no patch repository or workspace. ${core.SYSTEM_APP_LATER_MESSAGE}.` }, 409);
+  }
   if (body.n !== undefined && (!Number.isInteger(body.n) || (body.n as number) < 1 || (body.n as number) > 9999)) {
     return json({ error: 'invalid-workspace', message: 'n must be a whole number from 1 to 9999' }, 400);
   }
@@ -327,27 +335,6 @@ export async function mountAppVolume(
   }
   const path = body.kind === 'patches' ? patchesPath(app.id) : workPath(app.id);
   return json({ ok: true, mount, appId: app.id, installationId: key, path, created, ...(n !== undefined ? { n } : {}) });
-}
-
-/** R2 POST `{ app, n?, new? }`: kept within the branch, the same code as `aura mount <app> --work`. */
-export async function bindWorkspace(request: Request, instanceId: string | undefined, deps: AppSourceDeps): Promise<Response> {
-  const body = await readJson(request);
-  if (body instanceof Response) return body;
-  return mountAppVolume(request, instanceId, deps, { app: body['app'], kind: 'work', n: body['n'], new: body['new'] });
-}
-
-export async function detachWorkspace(request: Request, instanceId: string | undefined, deps: AppSourceDeps): Promise<Response> {
-  const principal = await deps.authenticate(request);
-  if (principal instanceof Response) return principal;
-  const inst = consumer(deps, instanceId);
-  if (inst instanceof Response) return inst;
-  const app = resolveApp(deps, new URL(request.url).searchParams.get('app'));
-  if (app instanceof Response) return app;
-  const bound = deps.mounts.list(inst).find((m) => m.id === `${app.id}:work`);
-  if (!bound) return json({ ok: true, removed: false });
-  try { await deps.mounts.remove(inst, bound.id); }
-  catch (err) { return json({ error: 'mount-failed', message: (err as Error).message }, 409); }
-  return json({ ok: true, removed: true });
 }
 
 /**
@@ -520,7 +507,7 @@ export async function startPreview(request: Request, appId: string | undefined, 
   if (principal instanceof Response) return principal;
   const app = appId ? deps.apps.get(appId) : undefined;
   if (!app) return json({ error: 'app-not-found' }, 404);
-  if ((app.scopeId === 'system' || isOverlay(deps, app)) && !core.SYSTEM_APP_OVERLAYS) {
+  if (builtInApp(deps, app)) {
     return json({ error: core.SYSTEM_APP_LATER, message: `${app.id} is a built-in app. ${core.SYSTEM_APP_LATER_MESSAGE}.` }, 409);
   }
   const body = await readJson(request);

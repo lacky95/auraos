@@ -10,7 +10,7 @@
  *
  * The system knows only the source mode, the read-only rule and how to bind
  * and install trees (routes in aura-work/trackp-streams.md "## Routes":
- * R1 app-source, R2 app-workspace, R3 source-mode, R4 activate). Everything
+ * R1 app-source, /mounts kinds patches|work, R3 source-mode, R4 activate). Everything
  * else — the patch repo, workspaces' content, series — is here and in
  * dev-patch.ts. Git runs in this process: the Terminal, where the user's
  * credentials are.

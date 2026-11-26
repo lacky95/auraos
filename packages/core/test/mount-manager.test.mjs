@@ -67,7 +67,7 @@ function world(t, { noCat = new Set(), noMountRoot = new Set(), pidFallbackFails
   let targets = [];
   const mm = new MountManager({
     dataDir,
-    registry: { getById: (id) => (id.startsWith('gone.') ? undefined : { id, appDir: `/workspace/apps/${id}`, scopeId: 'system' }) },
+    registry: { getById: (id) => (id.startsWith('gone.') ? undefined : { id, appDir: `/workspace/apps/${id}`, scopeId: id.startsWith('com.aura.') ? 'system' : 'global' }) },
     scopeRegistry: { getById: () => ({ dataDir: join(dataDir, 'scopes', 'system') }) },
     runner: {
       canPropagateMounts: () => ({ ok: true }),
@@ -329,4 +329,12 @@ test('the patch repo binds writable at /mnt/aura/patches/<app>: one dir per inst
   fresh.reconcile(new Set([OTHER]));
   const adopted = fresh.list(OTHER).find((x) => x.id === 'io.shop.app:patches');
   assert.deepEqual([adopted.kind, adopted.patches, adopted.containerPath], ['patches', repo, '/mnt/aura/patches/io.shop.app']);
+});
+
+test('Track P v1: no patch repo or workspace mount of a built-in app (SYSTEM_APP_OVERLAYS off)', async (t) => {
+  const w = world(t);
+  await assert.rejects(w.mm.add(INST, { targetAppId: 'com.aura.terminal', workspace: 'aura/workspaces/default/inst-sys/1' }), /built-in app.*system-app-later/);
+  await assert.rejects(w.mm.add(INST, { targetAppId: 'com.aura.terminal', patches: 'aura/patches/inst-sys' }), /built-in app.*system-app-later/);
+  assert.deepEqual(w.mm.list(INST), []);
+  assert.equal(w.kernel.size, 0, 'nothing bound');
 });

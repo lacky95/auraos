@@ -69,6 +69,7 @@ import type { AppRegistry } from './AppRegistry.js';
 import type { ScopeRegistry } from '../scopes/ScopeRegistry.js';
 import type { ContainerRunner } from './ContainerRunner.js';
 import { BASE_IMAGE } from './BaseImage.js';
+import { SYSTEM_APP_LATER, SYSTEM_APP_LATER_MESSAGE, SYSTEM_APP_OVERLAYS } from '../nexus/AppSource.js';
 
 const HELPER_IMAGE = BASE_IMAGE;
 /**
@@ -457,6 +458,10 @@ export class MountManager {
     if (!cap.ok) throw new Error(`mount propagation unavailable: ${cap.reason}`);
 
     const kind: MountKind = kindOf(spec);
+    // Track P v1: a patch repo or workspace (always writable) only for normal apps (SYSTEM_APP_OVERLAYS).
+    if (isVolumeKind(kind) && !SYSTEM_APP_OVERLAYS && this.opts.registry.getById(spec.targetAppId)?.scopeId === 'system') {
+      throw new Error(`refusing a ${kind} mount: ${spec.targetAppId} is a built-in app (${SYSTEM_APP_LATER}: ${SYSTEM_APP_LATER_MESSAGE})`);
+    }
     let mode: MountMode = isVolumeKind(kind) ? 'rw' : spec.mode ?? 'ro';
     if (kind === 'source' && mode === 'rw' && this.isClosed(spec.targetAppId)) {
       // A request is refused; a declaration, re-bind or mirror made while the
