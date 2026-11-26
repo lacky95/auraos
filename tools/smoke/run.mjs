@@ -12,6 +12,7 @@ import { parseArgs } from 'node:util';
 import { createGuard } from './lib/guard.mjs';
 import { createClient, normalizeTarget } from './lib/http.mjs';
 import { runSmoke } from './lib/checks.mjs';
+import { loadOperatorIdentity } from './lib/operator.mjs';
 
 const USAGE = 'usage: node tools/smoke/run.mjs --target <url> [--json <file>] [--tier live|test-instance]';
 
@@ -61,7 +62,9 @@ async function main() {
   const jsonPath = values.json ? reportPath(values.json) : null;
 
   const guard = createGuard();
-  const client = createClient({ target: values.target, guard });
+  const { identity, why } = await loadOperatorIdentity(values.target);
+  console.log(`identity: ${identity ? why : `anonymous (${why})`}`);
+  const client = createClient({ target: values.target, guard, identity });
   const report = await runSmoke({ client, guard, tier: values.tier });
 
   for (const x of report.results) {

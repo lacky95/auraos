@@ -252,20 +252,40 @@ export class AppManager {
     }
   }
 
-  /** After adoption: installation + host for every app, dead slots freed. */
+  /** After adoption: installation + host for every app, dead slots freed, adopted instances' slots kept. */
   private async migrateAppHosts(): Promise<void> {
     try {
       const { lifecycle } = getAppHostServices();
       const { apps, failed } = await lifecycle.migrate(this.getScopeDefinitions());
       for (const f of failed) console.warn(`[AppManager] app host migration failed for ${f}`);
-      for (const m of this.registry.getAll()) {
-        await lifecycle.releaseDeadSlots(m.id, (id) => this.instances.has(id));
-        await this.blockForeignHosts(m.id);
-      }
+      for (const m of this.registry.getAll()) await this.blockForeignHosts(m.id);
+      await this.settleAdoptedSlots();
       this.appHostsReady = true;
       console.log(`[AppManager] app hosts: ${apps} installation(s) checked`);
     } catch (err) {
       console.warn(`[AppManager] app host migration failed: ${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * After adoption: free the slots of instances that did not survive, and give
+   * every running UI instance (not a pool member, not a service) its slot. A
+   * slot outlives the shell, so an adopted instance mostly holds it already
+   * (assignSlot is idempotent); it lacks one when a pass freed it before the
+   * survivor was adopted. Not while adoption is pending: the survivors are
+   * unknown then, and the reconciler calls this once it adopted them.
+   */
+  private async settleAdoptedSlots(
+    lifecycle: Pick<ReturnType<typeof getAppHostServices>['lifecycle'], 'releaseDeadSlots'> = getAppHostServices().lifecycle,
+  ): Promise<void> {
+    if (this.adoptionPending) return;
+    for (const m of this.registry.getAll()) {
+      await lifecycle.releaseDeadSlots(m.id, (id) => this.instances.has(id));
+    }
+    for (const inst of [...this.instances.values()]) {
+      if (inst.inPool || inst.state !== 'resumed') continue;
+      if (this.registry.getById(inst.appId)?.componentType === 'service') continue;
+      await this.claimHostSlot(inst.appId, inst.instanceId);
     }
   }
 
@@ -1057,6 +1077,8 @@ export class AppManager {
           ...(o.preview ? { preview: { workspace: o.preview, startedAt: new Date().toISOString() } } : {}),
         };
         this.instances.set(o.instanceId, inst);
+        // Its port stays its own: the allocator starts empty with this shell.
+        if (o.port) this.ports.reserve(o.port);
         // The FSM must agree with the record: left at its default
         // ('installed'), every lifecycle call on an adopted instance failed —
         // `stop` answered "Invalid lifecycle transition: installed → pausing".
@@ -2659,6 +2681,9 @@ export class AppManager {
       this.adoptionPending = false;
       console.log('[AppManager] reconcile: surviving containers adopted');
       await this.reconcileSurvivors();
+      if (this.appHostsReady) {
+        await this.settleAdoptedSlots().catch((err) => console.warn(`[AppManager] app host slots after adoption: ${(err as Error).message}`));
+      }
     }
     await this.reapIdlePreviews().catch((err: unknown) => console.warn(`[AppManager] preview reaper failed: ${(err as Error).message}`));
     // 1) Tracked-instance liveness: any pid we believe is alive but isn't

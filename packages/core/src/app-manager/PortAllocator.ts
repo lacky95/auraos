@@ -50,6 +50,18 @@ export class PortAllocator {
     throw new Error(`[PortAllocator] No free port available for ${appId} in range ${this.start}-${this.end}`);
   }
 
+  /**
+   * Mark a port taken that an instance already holds, so no spawn gets it
+   * again: an adopted container's (it survived the last shell). Not checked
+   * for availability, like a pin: the container binds it in its own network
+   * namespace. Unique ports still matter there, because `aura port` exposes
+   * a source port under its own number on another app's loopback, and a PRoot
+   * app binds its port in the master's namespace.
+   */
+  reserve(port: number): void {
+    this.inUse.add(port);
+  }
+
   release(port: number): void {
     this.inUse.delete(port);
   }
