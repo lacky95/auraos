@@ -316,6 +316,10 @@ test('sessionCallerOf: the verified principal decides the user, never the frame'
   assert.deepEqual(sessionCallerOf({ kind: 'user', userId: 'bob', role: 'member' }, 'owner', 'default'), {}, 'a member never passes as the owner');
   assert.deepEqual(sessionCallerOf({ kind: 'instance', appId: 'com.aura.terminal', instanceId: 't-1', userId: 'default' }, 'owner', 'default'), { user: { userId: 'default', role: 'owner' } });
   assert.deepEqual(sessionCallerOf({ kind: 'instance', appId: 'io.test.app', instanceId: 'io.test.app-1', userId: 'default' }, 'self', 'default'), {}, 'the instance itself is no user');
+  // 5-main (J + T + I.2): a member's own Terminal acts for the member at the member level; a sidecar never.
+  assert.deepEqual(sessionCallerOf({ kind: 'instance', appId: 'com.aura.terminal', instanceId: 't-2', userId: 'bob' }, 'member', 'default'), { user: { userId: 'bob', role: 'member' } });
+  assert.deepEqual(sessionCallerOf({ kind: 'instance', appId: 'com.aura.terminal', instanceId: 't-2', userId: 'bob', sidecar: 'db' }, 'member', 'default'), {});
+  assert.deepEqual(sessionCallerOf({ kind: 'instance', appId: 'com.aura.terminal', instanceId: 't-2' }, 'member', 'default'), {}, 'no user, no member');
 });
 
 test('parseSessionOpen validates the first frame', () => {

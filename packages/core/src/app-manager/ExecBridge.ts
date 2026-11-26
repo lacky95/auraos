@@ -557,7 +557,8 @@ export class ExecBridge {
 /**
  * The session caller of a verified principal, by the level the shell's rule
  * let it in at: `owner` (the owner's login, the host operator, or a trusted
- * owner agent acting for the owner, D29), `member` (a member's own login; its
+ * owner agent acting for the owner, D29), `member` (a member's own login, or
+ * a member's own System Terminal acting for it by its token's `u`, D69; its
  * `app.jump` grant is the kernel's check), `self` (the instance itself: the
  * app identity only). Never from a header or the open frame.
  */
@@ -569,6 +570,7 @@ export function sessionCallerOf(principal: AccessPrincipal | null | undefined, l
     return { user: { userId: principal.userId, role: principal.role } };
   }
   if (principal?.kind === 'instance' && level === 'owner') return { user: { userId: principal.userId ?? ownerId, role: 'owner' } };
+  if (principal?.kind === 'instance' && level === 'member' && !principal.sidecar && principal.userId) return { user: { userId: principal.userId, role: 'member' } };
   return {};
 }
 

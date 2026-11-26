@@ -22,7 +22,8 @@
  *
  * Who: the surface rule, decided at the upgrade in EVERY access mode: the
  * owner, or the instance itself by its own token (never one of its
- * sidecars), or a member's own login (D82; the kernel then requires its
+ * sidecars), or a member's own login or the member's own System Terminal
+ * acting for it (D82, D69; the kernel then requires its
  * `app.jump:<installationId>` grant before anything runs). A sidecar target
  * is the owner's only. The user is the verified principal's, never a header.
  * Audit: `session.opened` / `session.closed` (user, instance, mode, home,
@@ -35,6 +36,7 @@
  */
 import { WebSocketServer } from 'ws';
 import { followIdentity, reportSurface, requestIdentity, surfaceDecision } from './access-bridge.mjs';
+import { SESSION_HOST_APPS } from './terminal-embed.mjs';
 
 /** `/api/instances/<id>/session`, query allowed. */
 export const EXEC_BRIDGE_PATH = /^\/api\/instances\/([^/?]+)\/session(?:\?.*)?$/;
@@ -101,8 +103,12 @@ async function upgrade(req, socket, head, rawId, wss, deps) {
   const ruled = appId !== null && decision?.outcome === 'allow'
     && (decision.reason === 'owner' || (decision.reason === 'own-instance' && principal?.kind === 'instance' && !principal.sidecar));
   // D82: a member's own login reaches the kernel, which requires its app.jump grant (core sessionContext).
-  const member = !ruled && appId !== null && principal?.kind === 'user' && principal.role === 'member'
-    && principal.verification === 'verified';
+  // So does a session host acting for its user (D69, a member's own System Terminal: its token's `u`)
+  // that the rule did not let in as the owner: the user's member level, never the owner's.
+  const member = !ruled && appId !== null && principal?.verification === 'verified'
+    && ((principal.kind === 'user' && principal.role === 'member')
+      || (principal.kind === 'instance' && !principal.sidecar && SESSION_HOST_APPS.has(principal.appId)
+        && typeof principal.userId === 'string' && principal.userId !== ''));
   const allowed = ruled || member;
   if (!allowed) {
     report(principal && principal.kind !== 'anonymous' ? 403 : 401, appId);

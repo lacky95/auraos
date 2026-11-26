@@ -157,6 +157,18 @@ test('a member\'s own login reaches the kernel as a member (its app.jump is core
   assert.equal(sc.control[0]!['code'], 'forbidden');
 });
 
+test('5-main (J + T + I.2): a member\'s own Terminal reaches the kernel as that member; another app\'s instance does not', async (t) => {
+  const bobTerm: Principal = { kind: 'instance', appId: 'com.aura.terminal', instanceId: 'com.aura.terminal-2', userId: 'bob', verification: 'verified' };
+  const r = await rig(t, { principal: bobTerm, reason: null });
+  const res = await connect(r.url, '/api/instances/com.acme.notes-1/session', [open({ kind: 'exec', argv: ['id'], tty: false })], { then: [JSON.stringify({ op: 'eof' })] });
+  assert.equal(res.status, 'closed');
+  assert.deepEqual(r.opened[0]!.caller, { user: { userId: 'bob', role: 'member' } });
+  const other = await rig(t, { principal: { ...bobTerm, appId: 'io.acme.other', instanceId: 'io.acme.other-1' }, reason: null });
+  assert.equal((await connect(other.url, '/api/instances/com.acme.notes-1/session', [open()])).status, 'refused');
+  const sidecar = await rig(t, { principal: { ...bobTerm, sidecar: 'db' }, reason: null });
+  assert.equal((await connect(sidecar.url, '/api/instances/com.acme.notes-1/session', [open()])).status, 'refused');
+});
+
 test('the instance itself: non-TTY exec keeps stderr apart and ends on EOF', async (t) => {
   const r = await rig(t, { principal: self, reason: 'own-instance' });
   const res = await connect(r.url, '/api/instances/com.acme.notes-1/session', [open({ kind: 'exec', argv: ['cat'], tty: false })], {
