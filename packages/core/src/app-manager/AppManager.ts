@@ -2393,7 +2393,10 @@ export class AppManager {
       return instanceId;
     } catch (err) {
       // P5-3: a failed non-root start is reported, never retried as root.
-      if (nonRoot) this.appStarts.set(appId, { at: new Date().toISOString(), ok: false, error: String(err).slice(0, 500) });
+      // So is a start refused for a root request without its approval (identity/execution.ts): the review shows why.
+      if (nonRoot || (err as { code?: unknown })?.code === 'root-execution-not-approved') {
+        this.appStarts.set(appId, { at: new Date().toISOString(), ok: false, error: String(err).slice(0, 500) });
+      }
       this.releasePort(port, instanceId);
       this.transition(instanceId, appId, 'error', null, String(err));
       throw err;
