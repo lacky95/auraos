@@ -59,9 +59,9 @@ and asks you to pick one.
 
 A jump enters the app's running container itself (its files, network and
 `/tmp`); only your session's home and identity differ. Nobody else sees your
-session: not the app, not other users. In return, a session as yourself lists
-only your own processes; to inspect the app's processes, jump with `--home app`
-(as the app). Jumping never adds you to the app's group: access to an app's
+session: not the app, not other users. A session as yourself lists only your
+own processes (a limitation of the container runtime, see Core concepts → Jump
+sessions); to inspect the app's processes, jump with `--home app` (as the app). Jumping never adds you to the app's group: access to an app's
 files as yourself goes through an authorized mount. It goes through AuraOS, so no Docker access is needed anywhere: apps
 and Terminals have no Docker socket. A session with your private home runs the
 app's own code with your home: use `--home ephemeral` for apps you don't trust.

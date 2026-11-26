@@ -188,6 +188,22 @@ test('D79: --home app runs as the app\'s uid/gid with its App Home; the user is 
   assert.ok(!c.passwd.includes('aura-user-'), 'no user account in an app session');
 });
 
+test('an --home app session exposes no user\'s private session or credentials: no Private Home, no user group, a hidden procfs', async () => {
+  const m = manager({ grants: ['u-bob:inst-1'] });
+  for (const caller of [OWNER, BOB, {}]) {
+    const c = await m.ctx('app', caller);
+    assert.equal(c.home.hostPath, null, 'nothing is bound: the app\'s own App Home');
+    assert.deepEqual([c.uid, c.gid, c.groups], [200001, 200001, []], 'the app identity, no user group');
+    assert.ok(!JSON.stringify(c.env).includes('aura/home'), 'no Private Home path in the env');
+    assert.equal(c.dockerSocket, undefined);
+    const spec = enterSpec({ ...c, sessionId: 's', instanceId: 'io.test.app-1', argv: ['true'], tty: false, cols: 80, rows: 24 }, { containerId: CID, pid: 4321 });
+    assert.equal(spec.homePath, undefined);
+    const r = check(spec);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /procfs=invisible$/m, 'its /proc lists the app\'s uid only: no user session');
+  }
+});
+
 test('D82: a member needs app.jump for every mode; with it, their own uid and Private Home', async () => {
   await assert.rejects(manager().ctx('private', BOB), (e) => e.reason === 'not-authorized');
   await assert.rejects(manager().ctx('app', BOB), (e) => e.reason === 'not-authorized');
