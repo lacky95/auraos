@@ -59,6 +59,9 @@ export interface SecurityOption {
 /** The writable option behind D63: fresh confirmations over plain HTTP. */
 export const FRESH_AUTH_REQUIRE_HTTPS = 'fresh-auth-require-https';
 
+/** The host switch behind the proot runtime (`AURA_USE_PROOT`, D92). */
+export const PROOT_HOST = 'proot-host';
+
 export const SECURITY_OPTIONS: readonly SecurityOption[] = Object.freeze([
   {
     id: FRESH_AUTH_REQUIRE_HTTPS,
@@ -167,6 +170,16 @@ export const SECURITY_OPTIONS: readonly SecurityOption[] = Object.freeze([
       + '`aura admin apps privileges` is the review (Phase 5, P5-3).',
     type: 'record', default: null, source: 'record', record: 'apphost:install:<installationId> runAs', restartRequired: false, change: 'fresh',
     since: '2026-11-26', phase: '5 (P5-3)',
+  },
+  {
+    id: PROOT_HOST,
+    title: 'PRoot on this host',
+    description: 'Whether the proot runtime can run apps at all. true (set in docker-compose): PRoot apps run wrapped in PRoot '
+      + 'under their own app identity, with a narrowed view (no /workspace beyond the shared packages, no /run/context, no '
+      + 'socket, their App Home, their own /tmp). Unset or false (default): the proot runtime is unavailable and a PRoot app '
+      + 'start fails closed; PRoot never runs an app unwrapped in the AuraOS container (D75, D92).',
+    type: 'boolean', default: false, source: 'env', env: 'AURA_USE_PROOT', restartRequired: true, change: 'fresh',
+    since: '2026-11-26', phase: '5 (R2, D92)',
   },
   {
     id: 'aura-root',

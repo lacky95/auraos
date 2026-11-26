@@ -91,25 +91,35 @@
       "<sha256:99c1336ee429a2d32eb3faf6bdb1aec528b8238faad1cb1208542d579e1cbaf4>"
     ],
     "proot": {
-      "prooted": true,
-      "args": [
+      "command": "setpriv",
+      "prefix": [
+        "--reuid=200099",
+        "--regid=200099",
+        "--clear-groups",
+        "--no-new-privs",
+        "--",
+        "proot",
         "--rootfs=<TMP>/rootfs",
-        "--bind=/workspace:/workspace",
+        "--bind=/workspace/node_modules:/workspace/node_modules",
+        "--bind=/workspace/packages:/workspace/packages",
+        "--bind=/workspace/package.json:/workspace/package.json",
+        "--bind=/workspace/pnpm-lock.yaml:/workspace/pnpm-lock.yaml",
+        "--bind=/workspace/pnpm-workspace.yaml:/workspace/pnpm-workspace.yaml",
+        "--bind=/workspace/tsconfig.base.json:/workspace/tsconfig.base.json",
+        "--bind=/workspace/.aura:/workspace/.aura",
         "--bind=<TMP>/data/inst/org.golden.system-1:/data",
         "--bind=/proc",
         "--bind=/dev",
-        "--bind=/tmp",
+        "--bind=<TMP>/data/aura/runtime/org.golden.system-1/tmp:/tmp",
         "--bind=/etc/resolv.conf:/etc/resolv.conf",
         "--bind=/usr/local/bin/node:/usr/local/bin/node",
         "--bind=<TMP>/data/aura/apphomes/inst-system/global:/home/aura",
-        "--bind=<TMP>/data/context/system:/run/context",
+        "--bind=<TMP>/data/aura/runtime/org.golden.system-1/identity/passwd:/etc/passwd",
+        "--bind=<TMP>/data/aura/runtime/org.golden.system-1/identity/group:/etc/group",
         "--bind=/workspace/apps/org.golden.system:/workspace/apps/org.golden.system",
         "--cwd=/workspace/apps/org.golden.system",
         "--bind=<TMP>/toolchain/bin:/aura/all-tools",
-        "--bind=<TMP>/data/aura/runtime/org.golden.system-1/tools:/aura/my-tools",
-        "bash",
-        "-c",
-        "<sha256:99c1336ee429a2d32eb3faf6bdb1aec528b8238faad1cb1208542d579e1cbaf4>"
+        "--bind=<TMP>/data/aura/runtime/org.golden.system-1/tools:/aura/my-tools"
       ],
       "appDir": "/workspace/apps/org.golden.system",
       "entrypointArgv": [
@@ -121,38 +131,25 @@
         "APP_ID": "org.golden.system",
         "APP_INSTANCE_ID": "org.golden.system-1",
         "APP_PORT": "4321",
+        "ASTRO_TELEMETRY_DISABLED": "1",
+        "AURA_HOSTNAME": "org.golden.system",
         "AURA_LAYER_TAG": "[proot+ctnr]",
         "AURA_LIFECYCLE_TOKEN": "<token>",
+        "AURA_RUN_AS": "app",
         "AURA_SERVE": "dev",
+        "AURA_SHELL_HOSTNAME": "golden-shell",
+        "AURA_TOOLS_MODE": "symlink",
+        "COLORTERM": "truecolor",
         "HOME": "/home/aura",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
         "OS_API_BASE": "http://127.0.0.1:3000",
-        "PATH": "/aura/my-tools:<PATH>"
+        "PATH": "/aura/my-tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "TERM": "xterm-256color"
       }
     },
-    "direct": {
-      "prooted": false,
-      "args": [
-        "bash",
-        "-c",
-        "<sha256:99c1336ee429a2d32eb3faf6bdb1aec528b8238faad1cb1208542d579e1cbaf4>"
-      ],
-      "appDir": "/workspace/apps/org.golden.system",
-      "entrypointArgv": [
-        "bash",
-        "-c",
-        "<sha256:99c1336ee429a2d32eb3faf6bdb1aec528b8238faad1cb1208542d579e1cbaf4>"
-      ],
-      "env": {
-        "APP_ID": "org.golden.system",
-        "APP_INSTANCE_ID": "org.golden.system-1",
-        "APP_PORT": "4321",
-        "AURA_LAYER_TAG": "[ctnr]",
-        "AURA_LIFECYCLE_TOKEN": "<token>",
-        "AURA_SERVE": "dev",
-        "HOME": "<TMP>/data/aura/apphomes/inst-system/global",
-        "OS_API_BASE": "http://127.0.0.1:3000",
-        "PATH": "<PATH>"
-      }
+    "pool": {
+      "refused": "the pool placement is not available in this release (the PRoot pool comes with Phase 5-post); nothing falls back to the master placement"
     }
   },
   "user-tools-token-owner-preview": {
@@ -262,26 +259,37 @@
       "/workspace/apps/org.golden.user/entrypoint.sh"
     ],
     "proot": {
-      "prooted": true,
-      "args": [
+      "command": "setpriv",
+      "prefix": [
+        "--reuid=200099",
+        "--regid=200099",
+        "--clear-groups",
+        "--no-new-privs",
+        "--",
+        "proot",
         "--rootfs=<TMP>/rootfs",
-        "--bind=/workspace:/workspace",
+        "--bind=/workspace/node_modules:/workspace/node_modules",
+        "--bind=/workspace/packages:/workspace/packages",
+        "--bind=/workspace/package.json:/workspace/package.json",
+        "--bind=/workspace/pnpm-lock.yaml:/workspace/pnpm-lock.yaml",
+        "--bind=/workspace/pnpm-workspace.yaml:/workspace/pnpm-workspace.yaml",
+        "--bind=/workspace/tsconfig.base.json:/workspace/tsconfig.base.json",
+        "--bind=/workspace/.aura:/workspace/.aura",
         "--bind=<TMP>/data/inst/org.golden.user-1:/data",
         "--bind=/proc",
         "--bind=/dev",
-        "--bind=/tmp",
+        "--bind=<TMP>/data/aura/runtime/org.golden.user-1/tmp:/tmp",
         "--bind=/etc/resolv.conf:/etc/resolv.conf",
         "--bind=/usr/local/bin/node:/usr/local/bin/node",
         "--bind=<TMP>/data/aura/apphomes/inst-user/users/default:/home/aura",
-        "--bind=<TMP>/data/context/system:/run/context",
+        "--bind=<TMP>/data/aura/runtime/org.golden.user-1/identity/passwd:/etc/passwd",
+        "--bind=<TMP>/data/aura/runtime/org.golden.user-1/identity/group:/etc/group",
         "--bind=<TMP>/data/context/volumes/shared:/mnt/shared",
         "--bind=<TMP>/data/context/volumes/ro:/mnt/ro",
         "--bind=<TMP>/data/scopes/users/default/apps/org.golden.user:<TMP>/data/scopes/users/default/apps/org.golden.user",
         "--cwd=<TMP>/data/scopes/users/default/apps/org.golden.user",
         "--bind=<TMP>/toolchain/bin:/aura/all-tools",
-        "--bind=<TMP>/data/aura/runtime/org.golden.user-1/tools:/aura/my-tools",
-        "bash",
-        "<TMP>/data/scopes/users/default/apps/org.golden.user/entrypoint.sh"
+        "--bind=<TMP>/data/aura/runtime/org.golden.user-1/tools:/aura/my-tools"
       ],
       "appDir": "<TMP>/data/scopes/users/default/apps/org.golden.user",
       "entrypointArgv": [
@@ -292,40 +300,26 @@
         "APP_ID": "org.golden.user",
         "APP_INSTANCE_ID": "org.golden.user-1",
         "APP_PORT": "4321",
+        "ASTRO_TELEMETRY_DISABLED": "1",
+        "AURA_HOSTNAME": "org.golden.user",
         "AURA_INSTANCE_TOKEN": "tok-1",
         "AURA_LAYER_TAG": "[proot+ctnr]",
         "AURA_LIFECYCLE_TOKEN": "<token>",
+        "AURA_RUN_AS": "app",
         "AURA_SERVE": "dev",
-        "FOO": "bar",
+        "AURA_SHELL_HOSTNAME": "golden-shell",
+        "AURA_TOOLS_MODE": "symlink",
+        "COLORTERM": "truecolor",
         "HOME": "/home/aura",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
         "OS_API_BASE": "http://127.0.0.1:3000",
-        "PATH": "/aura/my-tools:<PATH>"
+        "PATH": "/aura/my-tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "TERM": "xterm-256color"
       }
     },
-    "direct": {
-      "prooted": false,
-      "args": [
-        "bash",
-        "<TMP>/data/scopes/users/default/apps/org.golden.user/entrypoint.sh"
-      ],
-      "appDir": "<TMP>/data/scopes/users/default/apps/org.golden.user",
-      "entrypointArgv": [
-        "bash",
-        "<TMP>/data/scopes/users/default/apps/org.golden.user/entrypoint.sh"
-      ],
-      "env": {
-        "APP_ID": "org.golden.user",
-        "APP_INSTANCE_ID": "org.golden.user-1",
-        "APP_PORT": "4321",
-        "AURA_INSTANCE_TOKEN": "tok-1",
-        "AURA_LAYER_TAG": "[ctnr]",
-        "AURA_LIFECYCLE_TOKEN": "<token>",
-        "AURA_SERVE": "dev",
-        "FOO": "bar",
-        "HOME": "<TMP>/data/aura/apphomes/inst-user/users/default",
-        "OS_API_BASE": "http://127.0.0.1:3000",
-        "PATH": "<PATH>"
-      }
+    "pool": {
+      "refused": "the pool placement is not available in this release (the PRoot pool comes with Phase 5-post); nothing falls back to the master placement"
     }
   },
   "wildcard-closed-raw": {
@@ -426,27 +420,35 @@
       "/workspace/apps/org.golden.raw/start.sh"
     ],
     "proot": {
-      "prooted": true,
-      "args": [
+      "command": "setpriv",
+      "prefix": [
+        "--reuid=200099",
+        "--regid=200099",
+        "--clear-groups",
+        "--no-new-privs",
+        "--",
+        "proot",
         "--rootfs=<TMP>/rootfs",
-        "--bind=/workspace:/workspace",
+        "--bind=/workspace/node_modules:/workspace/node_modules",
+        "--bind=/workspace/packages:/workspace/packages",
+        "--bind=/workspace/package.json:/workspace/package.json",
+        "--bind=/workspace/pnpm-lock.yaml:/workspace/pnpm-lock.yaml",
+        "--bind=/workspace/pnpm-workspace.yaml:/workspace/pnpm-workspace.yaml",
+        "--bind=/workspace/tsconfig.base.json:/workspace/tsconfig.base.json",
+        "--bind=/workspace/.aura:/workspace/.aura",
         "--bind=<TMP>/data/inst/org.golden.raw-1:/data",
         "--bind=/proc",
         "--bind=/dev",
-        "--bind=/tmp",
+        "--bind=<TMP>/data/aura/runtime/org.golden.raw-1/tmp:/tmp",
         "--bind=/etc/resolv.conf:/etc/resolv.conf",
         "--bind=/usr/local/bin/node:/usr/local/bin/node",
         "--bind=<TMP>/data/aura/apphomes/inst-raw/global:/home/aura",
-        "--bind=<TMP>/data/context/system:/run/context",
+        "--bind=<TMP>/data/aura/runtime/org.golden.raw-1/identity/passwd:/etc/passwd",
+        "--bind=<TMP>/data/aura/runtime/org.golden.raw-1/identity/group:/etc/group",
         "--bind=<TMP>/data/scopes/users/default/apps/org.golden.raw:<TMP>/data/scopes/users/default/apps/org.golden.raw",
         "--cwd=<TMP>/data/scopes/users/default/apps/org.golden.raw",
         "--bind=<TMP>/toolchain/bin:/aura/all-tools",
-        "--bind=<TMP>/data/aura/runtime/org.golden.raw-1/tools:/aura/my-tools",
-        "bash",
-        "-c",
-        "<sha256:05937f43d881fb41238121ae4f1aac28a4935537af8f7b64ed917ce2164c9cf0>",
-        "aura-raw",
-        "<TMP>/data/scopes/users/default/apps/org.golden.raw/start.sh"
+        "--bind=<TMP>/data/aura/runtime/org.golden.raw-1/tools:/aura/my-tools"
       ],
       "appDir": "<TMP>/data/scopes/users/default/apps/org.golden.raw",
       "entrypointArgv": [
@@ -460,44 +462,25 @@
         "APP_ID": "org.golden.raw",
         "APP_INSTANCE_ID": "org.golden.raw-1",
         "APP_PORT": "4321",
+        "ASTRO_TELEMETRY_DISABLED": "1",
+        "AURA_HOSTNAME": "org.golden.raw",
         "AURA_LAYER_TAG": "[proot+ctnr]",
         "AURA_LIFECYCLE_TOKEN": "<token>",
+        "AURA_RUN_AS": "app",
         "AURA_SERVE": "dev",
+        "AURA_SHELL_HOSTNAME": "golden-shell",
+        "AURA_TOOLS_MODE": "symlink",
+        "COLORTERM": "truecolor",
         "HOME": "/home/aura",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
         "OS_API_BASE": "http://127.0.0.1:3000",
-        "PATH": "/aura/my-tools:<PATH>",
-        "SECRET_KEY": "v"
+        "PATH": "/aura/my-tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "TERM": "xterm-256color"
       }
     },
-    "direct": {
-      "prooted": false,
-      "args": [
-        "bash",
-        "-c",
-        "<sha256:05937f43d881fb41238121ae4f1aac28a4935537af8f7b64ed917ce2164c9cf0>",
-        "aura-raw",
-        "<TMP>/data/scopes/users/default/apps/org.golden.raw/start.sh"
-      ],
-      "appDir": "<TMP>/data/scopes/users/default/apps/org.golden.raw",
-      "entrypointArgv": [
-        "bash",
-        "-c",
-        "<sha256:05937f43d881fb41238121ae4f1aac28a4935537af8f7b64ed917ce2164c9cf0>",
-        "aura-raw",
-        "<TMP>/data/scopes/users/default/apps/org.golden.raw/start.sh"
-      ],
-      "env": {
-        "APP_ID": "org.golden.raw",
-        "APP_INSTANCE_ID": "org.golden.raw-1",
-        "APP_PORT": "4321",
-        "AURA_LAYER_TAG": "[ctnr]",
-        "AURA_LIFECYCLE_TOKEN": "<token>",
-        "AURA_SERVE": "dev",
-        "HOME": "<TMP>/data/aura/apphomes/inst-raw/global",
-        "OS_API_BASE": "http://127.0.0.1:3000",
-        "PATH": "<PATH>",
-        "SECRET_KEY": "v"
-      }
+    "pool": {
+      "refused": "the pool placement is not available in this release (the PRoot pool comes with Phase 5-post); nothing falls back to the master placement"
     }
   },
   "system-terminal-private-network": {
@@ -604,25 +587,35 @@
       "<sha256:99c1336ee429a2d32eb3faf6bdb1aec528b8238faad1cb1208542d579e1cbaf4>"
     ],
     "proot": {
-      "prooted": true,
-      "args": [
+      "command": "setpriv",
+      "prefix": [
+        "--reuid=200099",
+        "--regid=200099",
+        "--clear-groups",
+        "--no-new-privs",
+        "--",
+        "proot",
         "--rootfs=<TMP>/rootfs",
-        "--bind=/workspace:/workspace",
+        "--bind=/workspace/node_modules:/workspace/node_modules",
+        "--bind=/workspace/packages:/workspace/packages",
+        "--bind=/workspace/package.json:/workspace/package.json",
+        "--bind=/workspace/pnpm-lock.yaml:/workspace/pnpm-lock.yaml",
+        "--bind=/workspace/pnpm-workspace.yaml:/workspace/pnpm-workspace.yaml",
+        "--bind=/workspace/tsconfig.base.json:/workspace/tsconfig.base.json",
+        "--bind=/workspace/.aura:/workspace/.aura",
         "--bind=<TMP>/data/inst/com.aura.terminal-1:/data",
         "--bind=/proc",
         "--bind=/dev",
-        "--bind=/tmp",
+        "--bind=<TMP>/data/aura/runtime/com.aura.terminal-1/tmp:/tmp",
         "--bind=/etc/resolv.conf:/etc/resolv.conf",
         "--bind=/usr/local/bin/node:/usr/local/bin/node",
         "--bind=<TMP>/data/aura/home/default:/home/aura",
-        "--bind=<TMP>/data/context/system:/run/context",
+        "--bind=<TMP>/data/aura/runtime/com.aura.terminal-1/identity/passwd:/etc/passwd",
+        "--bind=<TMP>/data/aura/runtime/com.aura.terminal-1/identity/group:/etc/group",
         "--bind=/workspace/apps/com.aura.terminal:/workspace/apps/com.aura.terminal",
         "--cwd=/workspace/apps/com.aura.terminal",
         "--bind=<TMP>/toolchain/bin:/aura/all-tools",
-        "--bind=<TMP>/data/aura/runtime/com.aura.terminal-1/tools:/aura/my-tools",
-        "bash",
-        "-c",
-        "<sha256:99c1336ee429a2d32eb3faf6bdb1aec528b8238faad1cb1208542d579e1cbaf4>"
+        "--bind=<TMP>/data/aura/runtime/com.aura.terminal-1/tools:/aura/my-tools"
       ],
       "appDir": "/workspace/apps/com.aura.terminal",
       "entrypointArgv": [
@@ -634,40 +627,25 @@
         "APP_ID": "com.aura.terminal",
         "APP_INSTANCE_ID": "com.aura.terminal-1",
         "APP_PORT": "4321",
+        "ASTRO_TELEMETRY_DISABLED": "1",
+        "AURA_HOSTNAME": "com.aura.terminal",
         "AURA_LAYER_TAG": "[proot+ctnr]",
         "AURA_LIFECYCLE_TOKEN": "<token>",
-        "AURA_LISTEN_SUBNET": "0.0.0.0/0",
+        "AURA_RUN_AS": "app",
         "AURA_SERVE": "dev",
+        "AURA_SHELL_HOSTNAME": "golden-shell",
+        "AURA_TOOLS_MODE": "symlink",
+        "COLORTERM": "truecolor",
         "HOME": "/home/aura",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
         "OS_API_BASE": "http://127.0.0.1:3000",
-        "PATH": "/aura/my-tools:<PATH>"
+        "PATH": "/aura/my-tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "TERM": "xterm-256color"
       }
     },
-    "direct": {
-      "prooted": false,
-      "args": [
-        "bash",
-        "-c",
-        "<sha256:99c1336ee429a2d32eb3faf6bdb1aec528b8238faad1cb1208542d579e1cbaf4>"
-      ],
-      "appDir": "/workspace/apps/com.aura.terminal",
-      "entrypointArgv": [
-        "bash",
-        "-c",
-        "<sha256:99c1336ee429a2d32eb3faf6bdb1aec528b8238faad1cb1208542d579e1cbaf4>"
-      ],
-      "env": {
-        "APP_ID": "com.aura.terminal",
-        "APP_INSTANCE_ID": "com.aura.terminal-1",
-        "APP_PORT": "4321",
-        "AURA_LAYER_TAG": "[ctnr]",
-        "AURA_LIFECYCLE_TOKEN": "<token>",
-        "AURA_LISTEN_SUBNET": "0.0.0.0/0",
-        "AURA_SERVE": "dev",
-        "HOME": "<TMP>/data/aura/home/default",
-        "OS_API_BASE": "http://127.0.0.1:3000",
-        "PATH": "<PATH>"
-      }
+    "pool": {
+      "refused": "the pool placement is not available in this release (the PRoot pool comes with Phase 5-post); nothing falls back to the master placement"
     }
   },
   "app-identity": {
@@ -778,25 +756,35 @@
       "<sha256:99c1336ee429a2d32eb3faf6bdb1aec528b8238faad1cb1208542d579e1cbaf4>"
     ],
     "proot": {
-      "prooted": true,
-      "args": [
+      "command": "setpriv",
+      "prefix": [
+        "--reuid=200001",
+        "--regid=200001",
+        "--clear-groups",
+        "--no-new-privs",
+        "--",
+        "proot",
         "--rootfs=<TMP>/rootfs",
-        "--bind=/workspace:/workspace",
+        "--bind=/workspace/node_modules:/workspace/node_modules",
+        "--bind=/workspace/packages:/workspace/packages",
+        "--bind=/workspace/package.json:/workspace/package.json",
+        "--bind=/workspace/pnpm-lock.yaml:/workspace/pnpm-lock.yaml",
+        "--bind=/workspace/pnpm-workspace.yaml:/workspace/pnpm-workspace.yaml",
+        "--bind=/workspace/tsconfig.base.json:/workspace/tsconfig.base.json",
+        "--bind=/workspace/.aura:/workspace/.aura",
         "--bind=<TMP>/data/inst/org.golden.appid-1:/data",
         "--bind=/proc",
         "--bind=/dev",
-        "--bind=/tmp",
+        "--bind=<TMP>/data/aura/runtime/org.golden.appid-1/tmp:/tmp",
         "--bind=/etc/resolv.conf:/etc/resolv.conf",
         "--bind=/usr/local/bin/node:/usr/local/bin/node",
         "--bind=<TMP>/data/aura/apphomes/3f1c2e7a-0000-4000-8000-000000000001/global:/home/aura",
-        "--bind=<TMP>/data/context/system:/run/context",
+        "--bind=<TMP>/data/aura/runtime/org.golden.appid-1/identity/passwd:/etc/passwd",
+        "--bind=<TMP>/data/aura/runtime/org.golden.appid-1/identity/group:/etc/group",
         "--bind=<TMP>/data/scopes/users/default/apps/org.golden.appid:<TMP>/data/scopes/users/default/apps/org.golden.appid",
         "--cwd=<TMP>/data/scopes/users/default/apps/org.golden.appid",
         "--bind=<TMP>/toolchain/bin:/aura/all-tools",
-        "--bind=<TMP>/data/aura/runtime/org.golden.appid-1/tools:/aura/my-tools",
-        "bash",
-        "-c",
-        "<sha256:99c1336ee429a2d32eb3faf6bdb1aec528b8238faad1cb1208542d579e1cbaf4>"
+        "--bind=<TMP>/data/aura/runtime/org.golden.appid-1/tools:/aura/my-tools"
       ],
       "appDir": "<TMP>/data/scopes/users/default/apps/org.golden.appid",
       "entrypointArgv": [
@@ -808,38 +796,25 @@
         "APP_ID": "org.golden.appid",
         "APP_INSTANCE_ID": "org.golden.appid-1",
         "APP_PORT": "4321",
+        "ASTRO_TELEMETRY_DISABLED": "1",
+        "AURA_HOSTNAME": "org.golden.appid",
         "AURA_LAYER_TAG": "[proot+ctnr]",
         "AURA_LIFECYCLE_TOKEN": "<token>",
+        "AURA_RUN_AS": "app",
         "AURA_SERVE": "dev",
+        "AURA_SHELL_HOSTNAME": "golden-shell",
+        "AURA_TOOLS_MODE": "symlink",
+        "COLORTERM": "truecolor",
         "HOME": "/home/aura",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
         "OS_API_BASE": "http://127.0.0.1:3000",
-        "PATH": "/aura/my-tools:<PATH>"
+        "PATH": "/aura/my-tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "TERM": "xterm-256color"
       }
     },
-    "direct": {
-      "prooted": false,
-      "args": [
-        "bash",
-        "-c",
-        "<sha256:99c1336ee429a2d32eb3faf6bdb1aec528b8238faad1cb1208542d579e1cbaf4>"
-      ],
-      "appDir": "<TMP>/data/scopes/users/default/apps/org.golden.appid",
-      "entrypointArgv": [
-        "bash",
-        "-c",
-        "<sha256:99c1336ee429a2d32eb3faf6bdb1aec528b8238faad1cb1208542d579e1cbaf4>"
-      ],
-      "env": {
-        "APP_ID": "org.golden.appid",
-        "APP_INSTANCE_ID": "org.golden.appid-1",
-        "APP_PORT": "4321",
-        "AURA_LAYER_TAG": "[ctnr]",
-        "AURA_LIFECYCLE_TOKEN": "<token>",
-        "AURA_SERVE": "dev",
-        "HOME": "<TMP>/data/aura/apphomes/3f1c2e7a-0000-4000-8000-000000000001/global",
-        "OS_API_BASE": "http://127.0.0.1:3000",
-        "PATH": "<PATH>"
-      }
+    "pool": {
+      "refused": "the pool placement is not available in this release (the PRoot pool comes with Phase 5-post); nothing falls back to the master placement"
     }
   },
   "docker-tool": {
@@ -934,25 +909,35 @@
       "<sha256:99c1336ee429a2d32eb3faf6bdb1aec528b8238faad1cb1208542d579e1cbaf4>"
     ],
     "proot": {
-      "prooted": true,
-      "args": [
+      "command": "setpriv",
+      "prefix": [
+        "--reuid=200099",
+        "--regid=200099",
+        "--clear-groups",
+        "--no-new-privs",
+        "--",
+        "proot",
         "--rootfs=<TMP>/rootfs",
-        "--bind=/workspace:/workspace",
+        "--bind=/workspace/node_modules:/workspace/node_modules",
+        "--bind=/workspace/packages:/workspace/packages",
+        "--bind=/workspace/package.json:/workspace/package.json",
+        "--bind=/workspace/pnpm-lock.yaml:/workspace/pnpm-lock.yaml",
+        "--bind=/workspace/pnpm-workspace.yaml:/workspace/pnpm-workspace.yaml",
+        "--bind=/workspace/tsconfig.base.json:/workspace/tsconfig.base.json",
+        "--bind=/workspace/.aura:/workspace/.aura",
         "--bind=<TMP>/data/inst/org.golden.docker-1:/data",
         "--bind=/proc",
         "--bind=/dev",
-        "--bind=/tmp",
+        "--bind=<TMP>/data/aura/runtime/org.golden.docker-1/tmp:/tmp",
         "--bind=/etc/resolv.conf:/etc/resolv.conf",
         "--bind=/usr/local/bin/node:/usr/local/bin/node",
         "--bind=<TMP>/data/aura/apphomes/inst-docker/global:/home/aura",
-        "--bind=<TMP>/data/context/system:/run/context",
+        "--bind=<TMP>/data/aura/runtime/org.golden.docker-1/identity/passwd:/etc/passwd",
+        "--bind=<TMP>/data/aura/runtime/org.golden.docker-1/identity/group:/etc/group",
         "--bind=<TMP>/data/scopes/users/default/apps/org.golden.docker:<TMP>/data/scopes/users/default/apps/org.golden.docker",
         "--cwd=<TMP>/data/scopes/users/default/apps/org.golden.docker",
         "--bind=<TMP>/toolchain/bin:/aura/all-tools",
-        "--bind=<TMP>/data/aura/runtime/org.golden.docker-1/tools:/aura/my-tools",
-        "bash",
-        "-c",
-        "<sha256:99c1336ee429a2d32eb3faf6bdb1aec528b8238faad1cb1208542d579e1cbaf4>"
+        "--bind=<TMP>/data/aura/runtime/org.golden.docker-1/tools:/aura/my-tools"
       ],
       "appDir": "<TMP>/data/scopes/users/default/apps/org.golden.docker",
       "entrypointArgv": [
@@ -964,38 +949,25 @@
         "APP_ID": "org.golden.docker",
         "APP_INSTANCE_ID": "org.golden.docker-1",
         "APP_PORT": "4321",
+        "ASTRO_TELEMETRY_DISABLED": "1",
+        "AURA_HOSTNAME": "org.golden.docker",
         "AURA_LAYER_TAG": "[proot+ctnr]",
         "AURA_LIFECYCLE_TOKEN": "<token>",
+        "AURA_RUN_AS": "app",
         "AURA_SERVE": "dev",
+        "AURA_SHELL_HOSTNAME": "golden-shell",
+        "AURA_TOOLS_MODE": "symlink",
+        "COLORTERM": "truecolor",
         "HOME": "/home/aura",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
         "OS_API_BASE": "http://127.0.0.1:3000",
-        "PATH": "/aura/my-tools:<PATH>"
+        "PATH": "/aura/my-tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "TERM": "xterm-256color"
       }
     },
-    "direct": {
-      "prooted": false,
-      "args": [
-        "bash",
-        "-c",
-        "<sha256:99c1336ee429a2d32eb3faf6bdb1aec528b8238faad1cb1208542d579e1cbaf4>"
-      ],
-      "appDir": "<TMP>/data/scopes/users/default/apps/org.golden.docker",
-      "entrypointArgv": [
-        "bash",
-        "-c",
-        "<sha256:99c1336ee429a2d32eb3faf6bdb1aec528b8238faad1cb1208542d579e1cbaf4>"
-      ],
-      "env": {
-        "APP_ID": "org.golden.docker",
-        "APP_INSTANCE_ID": "org.golden.docker-1",
-        "APP_PORT": "4321",
-        "AURA_LAYER_TAG": "[ctnr]",
-        "AURA_LIFECYCLE_TOKEN": "<token>",
-        "AURA_SERVE": "dev",
-        "HOME": "<TMP>/data/aura/apphomes/inst-docker/global",
-        "OS_API_BASE": "http://127.0.0.1:3000",
-        "PATH": "<PATH>"
-      }
+    "pool": {
+      "refused": "the pool placement is not available in this release (the PRoot pool comes with Phase 5-post); nothing falls back to the master placement"
     }
   }
 }

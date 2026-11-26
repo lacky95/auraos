@@ -1,20 +1,22 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
-import { existsSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync } from 'node:fs';
+import { chmodSync, chownSync, existsSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import { lifecyclePath } from '../types/manifest.js';
-import { ALL_TOOLS_PATH, MY_TOOLS_PATH, currentToolsMode, provisionAllowlist } from './tool-provision.js';
-import { prootHomeBind, prootHomeEnv } from './spawn/homeArgs.js';
-import type { ResolvedHome } from '../homes/types.js';
-import { prootContextBinds } from './spawn/contextArgs.js';
-import { prootSocketBinds } from './spawn/socketArgs.js';
-import type { RuntimeCapabilities } from '../runtimes/types.js';
+import { ALL_TOOLS_PATH, MY_TOOLS_PATH, SHARED_HOME_PATH, currentToolsMode, provisionAllowlist } from './tool-provision.js';
+import { prootHomeBind } from './spawn/homeArgs.js';
+import { declaredContextEnv, prootContextBinds } from './spawn/contextArgs.js';
+import { prootIdentityLaunch, requireProotIdentity, writeIdentityFiles } from './spawn/identityArgs.js';
+import { WORKSPACE_ROOT_FILES } from './ContainerRunner.js';
+import type { SpawnIdentity } from '../identity/types.js';
+import type { RuntimeCapabilities, RuntimeSettings } from '../runtimes/types.js';
 import type { SandboxExecOpts, SandboxRunner, SandboxRunnerOpts } from './SandboxRunner.js';
 import { OutputLog } from './outputLog.js';
 import type { SpawnContext } from '../scopes/types.js';
 import { ContextStore } from '../context/ContextStore.js';
-import { VolumeStore, type VolumeEntry } from '../context/VolumeStore.js';
+import { VolumeStore } from '../context/VolumeStore.js';
+import { PROOT_HOST, securityEnvValue } from '../security/options.js';
 import {
   ASTRO_START_SHELL, RAW_START_SHELL, PROVISION_TIMEOUT_MS, ProvisionWatch, nextHealthDeadline,
 } from './provisioning.js';
@@ -45,6 +47,22 @@ const LIFECYCLE_TIMEOUT_MS = 5_000;
 // dev, or the production build when it matches the sources (AURA_SERVE).
 const SYNTHESISED_ENTRYPOINT = ASTRO_START_SHELL;
 
+/** The PATH of a PRoot app process: its granted tools first, then the rootfs (as in an app container). */
+const PROOT_PATH = `${MY_TOOLS_PATH}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`;
+
+/**
+ * How an instance is launched: `command` with `prefix` before the app's own
+ * argv (the identity drop, then `proot` and its binds), the env and the
+ * shell-side cwd. `exec` runs a command the same way, so it joins the same
+ * sandbox as the same identity.
+ */
+export interface ProotLaunch {
+  command: string;
+  prefix: string[];
+  env: Record<string, string>;
+  appDir: string;
+}
+
 interface SpawnedApp {
   process: ChildProcess;
   /** Watches the app's output to tell "installing dependencies" from
@@ -52,16 +70,15 @@ interface SpawnedApp {
   provision: ProvisionWatch;
   port: number;
   appId: string;
-  /** How the instance was launched, so `exec` can join the same sandbox:
-   *  the proot args minus the entrypoint (empty when not prooted), env, cwd. */
-  launch: { prooted: boolean; sandboxArgs: string[]; env: Record<string, string>; appDir: string };
+  /** How the instance was launched, so `exec` can join the same sandbox. */
+  launch: ProotLaunch;
   /** This start's lifecycle secret (also `AURA_LIFECYCLE_TOKEN` in `launch.env`). */
   lifecycleToken: string;
   /** Health identity and runtime-check result, once healthy. */
   lifecycle?: LifecycleStatus;
 }
 
-/** What `prootBinds` lays out: everything resolved by the runner (or, later, the pool). */
+/** What `prootBinds` lays out: everything resolved by the runner. */
 export interface ProotBindSpec {
   rootfs: string;
   /** Bound at /data. */
@@ -70,18 +87,28 @@ export interface ProotBindSpec {
   appDir: string;
   /** The `/home/aura` bind (spawn/homeArgs.ts). */
   homeBind: string;
-  /** /run/context and the Context Volumes (spawn/contextArgs.ts). */
+  /** The instance's own `/tmp` (a host dir owned by its app identity). */
+  tmpDir: string;
+  /** `/etc/passwd` and `/etc/group` of the app identity (spawn/identityArgs.ts). */
+  identityBinds: string[];
+  /** The Context Volumes (spawn/contextArgs.ts); never `/run/context`. */
   contextBinds: string[];
   /** The allowlist dir, and the store too in legacy symlink mode; null without a toolchain. */
   tools: { myTools: string; allTools: string | null } | null;
-  /** The Docker socket when granted (spawn/socketArgs.ts). */
-  socketBinds: string[];
 }
 
 /**
  * The PRoot bind topology of one instance, in one place (ARI §9.3): the
- * master placement uses it today, the pool placement (R2) reuses it rather
+ * master placement uses it; the pool placement (5-post) reuses it rather
  * than a second copy. Returns the sandbox arguments before the entrypoint.
+ *
+ * Narrowed (Phase 5 R2, Q18b): of `/workspace` only what an app container
+ * gets too (ContainerRunner `workspaceMounts`: node_modules, packages, the
+ * pnpm root files, the capability registry) plus the app's own dir; no
+ * `/run/context`, no Docker socket, the App Home and a per-instance `/tmp`.
+ * PRoot binds are writable whatever their intent: what keeps the shared
+ * pieces read-only is that they are root- or owner-owned and the app runs
+ * as its own uid (`requireProotIdentity`).
  */
 export function prootBinds(spec: ProotBindSpec): string[] {
   // pnpm workspace creates node_modules as a forest of relative symlinks
@@ -92,11 +119,19 @@ export function prootBinds(spec: ProotBindSpec): string[] {
   // the app its identity instead.
   const args = [
     `--rootfs=${spec.rootfs}`,
-    '--bind=/workspace:/workspace',
+    // The shared workspace pieces those symlinks and `@aura/*` resolve
+    // against; never the other apps' sources or the OS source tree.
+    '--bind=/workspace/node_modules:/workspace/node_modules',
+    '--bind=/workspace/packages:/workspace/packages',
+    ...WORKSPACE_ROOT_FILES.map((f) => `--bind=/workspace/${f}:/workspace/${f}`),
+    // The capability registry, so a sandboxed `aura cap …` reads the real one.
+    '--bind=/workspace/.aura:/workspace/.aura',
     `--bind=${spec.instanceDataDir}:/data`,
+    // As a non-root tracee, /proc/<master pid>/root and /environ are closed by the kernel.
     '--bind=/proc',
     '--bind=/dev',
-    '--bind=/tmp',
+    // The instance's own /tmp: never the master's (its sockets and files).
+    `--bind=${spec.tmpDir}:/tmp`,
     '--bind=/etc/resolv.conf:/etc/resolv.conf',
     // Bring the master container's Node 22 into the sandbox — Debian-bookworm
     // ships Node 18 in its package archive, which is too old for our apps.
@@ -107,7 +142,9 @@ export function prootBinds(spec: ProotBindSpec): string[] {
     // tool dotfile written there is destroyed by the next `compose up
     // --build` or container recreate.
     spec.homeBind,
-    // OS Context: /run/context and the shared Context Volumes (spawn/contextArgs.ts).
+    // The app identity's account, so `id`, git and ssh know it.
+    ...spec.identityBinds,
+    // OS-managed shared Context Volumes (spawn/contextArgs.ts).
     ...spec.contextBinds,
     // Expose the app's own source dir at its real absolute path. Required for
     // user/global-scope apps, whose appDir lives UNDER /data (e.g.
@@ -116,8 +153,7 @@ export function prootBinds(spec: ProotBindSpec): string[] {
     // the app source — `chdir(appDir)` then fails and proot falls back to `/`,
     // so `astro dev` never finds package.json/node_modules. Binding appDir
     // onto itself overlays that subtree back. For system-scope apps (appDir
-    // under /workspace) this is a no-op — the path already maps to the same
-    // host dir via the /workspace bind.
+    // under /workspace/apps) it is the one app dir the sandbox sees.
     `--bind=${spec.appDir}:${spec.appDir}`,
     `--cwd=${spec.appDir}`,
   ];
@@ -148,11 +184,50 @@ export function prootBinds(spec: ProotBindSpec): string[] {
     args.push(`--bind=${spec.tools.myTools}:${MY_TOOLS_PATH}`);
   }
 
-  // The Docker socket when `tools[]` grants `docker` (spawn/socketArgs.ts).
-  args.push(...spec.socketBinds);
-
   return args;
 }
+
+/**
+ * Why the proot runtime cannot run an app on this host, or null (D75, D92):
+ * the `proot-host` switch (`AURA_USE_PROOT`) is off, or the base rootfs is
+ * missing. PRoot never runs an app unwrapped instead.
+ */
+export function prootUnavailable(env: Record<string, string | undefined>, baseRootfs: string): string | null {
+  if (securityEnvValue(PROOT_HOST, env) !== true) {
+    return 'AURA_USE_PROOT is not true on this AuraOS (security option proot-host), and PRoot never runs an app unwrapped';
+  }
+  if (!existsSync(baseRootfs)) return `the base rootfs (${baseRootfs}) is missing`;
+  return null;
+}
+
+/** PRoot's placements (ARI-1): `master` (the default) and `pool`. */
+export type ProotPlacement = 'master' | 'pool';
+
+/**
+ * What PRoot can do, per placement (ARI §2.3, Phase 5 R2). Both run
+ * ptrace-wrapped processes under the installation's app uid, which the
+ * kernel enforces (D70); neither enforces read-only binds, so closed apps
+ * fail closed (ARI-4); neither opens an isolated session or is a Private Home
+ * boundary (D65, J.5); no mounts, port expose or sidecars; processes end with
+ * the shell (D77). They differ only in their network (the shell's namespace
+ * vs `aura-net`), which this contract does not carry yet (5b).
+ */
+const PTRACE_CAPABILITIES: RuntimeCapabilities = Object.freeze({
+  isolation: 'ptrace',
+  privateHomeSession: false,
+  sessionExec: false,
+  identity: 'enforced',
+  readOnlyBinds: false,
+  mounts: false,
+  portExpose: false,
+  sidecars: false,
+  warmPool: true,
+  survivesShellRestart: false,
+});
+export const PROOT_CAPABILITIES: Readonly<Record<ProotPlacement, RuntimeCapabilities>> = Object.freeze({
+  master: PTRACE_CAPABILITIES,
+  pool: PTRACE_CAPABILITIES,
+});
 
 const execFileAsync = promisify(execFile);
 
@@ -172,7 +247,7 @@ export class ProotRunner implements SandboxRunner {
   private appsDir: string;
   private dataDir: string;
   private osApiBase: string;
-  /** OS-wide env/secret store, injected into every sandbox. */
+  /** OS-wide env/secret store: only the keys an app declares reach it. */
   private contextStore: ContextStore;
   /** OS-managed shared volumes, bound into every sandbox. */
   private volumeStore: VolumeStore;
@@ -196,24 +271,10 @@ export class ProotRunner implements SandboxRunner {
     return join(this.dataDir, 'aura', 'runtime', instanceId, 'tools');
   }
 
-  /**
-   * Today's PRoot runtime on the master (ARI §2.3): ptrace isolation, no
-   * enforced read-only binds (ARI-4), no mounts, port expose or sidecars, and
-   * its processes die with the shell. Never a Private Home boundary (D65).
-   */
-  public capabilities(): RuntimeCapabilities {
-    return {
-      isolation: 'ptrace',
-      privateHomeSession: false,
-      sessionExec: false,
-      identity: 'none',
-      readOnlyBinds: false,
-      mounts: false,
-      portExpose: false,
-      sidecars: false,
-      warmPool: true,
-      survivesShellRestart: false,
-    };
+  /** The placement's capabilities (master unless the settings say `pool`). */
+  public capabilities(settings?: RuntimeSettings): RuntimeCapabilities {
+    const placement: ProotPlacement = settings?.['placement'] === 'pool' ? 'pool' : 'master';
+    return { ...PROOT_CAPABILITIES[placement] };
   }
 
   /**
@@ -221,7 +282,7 @@ export class ProotRunner implements SandboxRunner {
    * app's `tools[]` grants — hardlinks from the toolchain mirror by default,
    * symlinks into /aura/all-tools on filesystems that can't hardlink. See
    * tool-provision.ts for the two modes and why the mode decides whether
-   * buildProotArgs also binds the shared store.
+   * prootBinds also binds the shared store.
    *
    * Apps with `'*'` in tools[] get every entry in the toolchain; explicit-list
    * apps get just their declared tools (with the historical `claude-code` →
@@ -247,54 +308,78 @@ export class ProotRunner implements SandboxRunner {
     try { rmSync(this.toolsDir(instanceId), { recursive: true, force: true }); } catch { /* ignore */ }
   }
 
+  /**
+   * The instance's own `/tmp` (`<dataDir>/aura/runtime/<inst>/tmp`): emptied
+   * at every start, 0700 and owned by its app identity, so no other app (and
+   * nothing of the master's /tmp) is in it. Its parent stays root-owned.
+   */
+  private instanceTmpDir(instanceId: string, identity: SpawnIdentity): string {
+    const dir = join(this.dataDir, 'aura', 'runtime', instanceId, 'tmp');
+    rmSync(dir, { recursive: true, force: true });
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    chmodSync(dir, 0o700);
+    chownSync(dir, identity.uid, identity.gid);
+    return dir;
+  }
+
   async spawn(instanceId: string, appId: string, port: number, manifest: AppManifest, ctx: SpawnContext): Promise<number> {
     const appDir = ctx.appDir;
-    const dataDir = ctx.instanceDataDir;
-
-    // The OS-wide switch and the rootfs. The manifest's `useProot` is not
-    // read (Q17), and the `proot` runtime refuses a start when this is false
-    // (runtimes/builtins/proot.ts, D75): R2 removes the unwrapped path.
-    const prooted = process.env['AURA_USE_PROOT'] === 'true'
-                 && existsSync(this.baseRootfs);
-    // Resolve once — used by the proot-args builder AND (when not prooted) as
-    // the direct spawn argv.
+    // Fail closed (D75, D92): no `proot-host` switch or no rootfs means no
+    // start; PRoot never runs an app unwrapped. The manifest's `useProot` is
+    // not read (Q17). The runtime refuses this before a start already
+    // (runtimes/builtins/proot.ts); this keeps the runner from ever doing it.
+    const why = prootUnavailable(process.env, this.baseRootfs);
+    if (why) throw new Error(`[ProotRunner] runtime proot is not available: ${why}`);
+    // D65: the resolved App Home, or no start.
+    const homeBind = prootHomeBind({ home: ctx.home });
+    // Q18b: the app identity, or no start (never root).
+    const identity = requireProotIdentity(appId, ctx.identity);
     const entrypointArgv = this.resolveEntrypoint(appDir, manifest);
     // Materialise the per-instance tool allowlist BEFORE building the args
     // (the args reference the dir). Wildcard apps get the whole store mirrored;
     // explicit apps get just their declared tools.
-    if (prooted) this.provisionToolsDir(instanceId, manifest);
-    // Resolve OS Context (env/secret) LIVE from Valkey on every spawn.
-    this.contextStore.ensureDir();
-    const contextEnv = await this.contextStore.resolveEnv();
+    this.provisionToolsDir(instanceId, manifest);
+    // The context env: only the keys the manifest declares, read live from
+    // Valkey on every spawn (nothing is read for an app that declares none).
+    const contextEnv = manifest.context?.length
+      ? declaredContextEnv(await this.contextStore.resolveEnv(), manifest.context)
+      : {};
     // OS-managed shared volumes — bound into the proot (RW; proot --bind can't
-    // enforce read-only, so RO volumes are effectively RW here).
+    // enforce read-only: an RO volume is protected only by its ownership).
     await this.volumeStore.ensureAll();
     const contextVolumes = await this.volumeStore.resolveMounts();
-    // D65: the resolved App Home, or no start (an unwrapped process gets its path, never the master's home).
-    const home = prootHomeEnv({ home: ctx.home, prooted });
-    const args = this.buildProotArgs(instanceId, port, manifest, appDir, dataDir, prooted, entrypointArgv, contextVolumes, ctx.home);
+    const ident = prootIdentityLaunch(identity, writeIdentityFiles(this.dataDir, instanceId, identity, ctx.installationId ?? null));
+    const toolBinDir = join(this.toolchainDir, 'bin');
+    const sandboxArgs = prootBinds({
+      rootfs: this.baseRootfs,
+      instanceDataDir: ctx.instanceDataDir,
+      appDir,
+      homeBind,
+      tmpDir: this.instanceTmpDir(instanceId, identity),
+      identityBinds: ident.binds,
+      contextBinds: prootContextBinds({ volumesDir: this.volumeStore.volumesDir, volumes: contextVolumes }),
+      tools: existsSync(toolBinDir)
+        ? { myTools: this.toolsDir(instanceId), allTools: currentToolsMode(this.dataDir) === 'symlink' ? toolBinDir : null }
+        : null,
+    });
 
-    // Prepend the per-instance allowlist to PATH so non-interactive children
-    // (which don't source .bashrc) still find granted tools. Interactive
-    // shells also benefit — the bashrc's PATH guard then short-circuits.
-    const inheritedPath = process.env['PATH'] ?? '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
-    const path = prooted ? `${MY_TOOLS_PATH}:${inheritedPath}` : inheritedPath;
+    // A clean env (Q18b): nothing of the master's own environment, only what
+    // an app container gets too. Context keys first, so the fixed OS vars
+    // below override them (a context key can't clobber PATH/APP_ID/HOME …).
     // The granted tools' shared libraries need no env var here: tools with
     // staged libs are wrapper scripts that scope LD_LIBRARY_PATH to their own
-    // process tree (see provisionAllowlist), and `cap install` also stages
-    // libs into base-rootfs at their original paths (which survives an exec
-    // that scrubs the environment, e.g. sudo). A process-wide LD_LIBRARY_PATH
-    // would shadow newer copies of the same sonames in the app's own runtime.
+    // process tree (see provisionAllowlist).
+    const shellHostname = process.env['AURA_SHELL_HOSTNAME'];
     const env: Record<string, string> = {
-      ...process.env as Record<string, string>,
-      // OS Context env FIRST — the fixed OS vars below override, so a context
-      // key can't clobber PATH/APP_ID/OS_API_BASE etc.
       ...contextEnv,
-      PATH: path,
-      // The App Home, through the bind in buildProotArgs (never the master's
-      // home). Set unconditionally — inheriting the master's $HOME here would
-      // leak OS-operator state into an app and write app state into it.
-      HOME: home,
+      PATH: PROOT_PATH,
+      // The App Home, through the bind in prootBinds (never the master's home).
+      HOME: SHARED_HOME_PATH,
+      // Terminal-capability env so TUI apps render their rich versions (as in an app container).
+      TERM: 'xterm-256color',
+      COLORTERM: 'truecolor',
+      LANG: 'C.UTF-8',
+      LC_ALL: 'C.UTF-8',
       APP_ID: appId,
       APP_INSTANCE_ID: instanceId,
       APP_PORT: String(port),
@@ -302,16 +387,15 @@ export class ProotRunner implements SandboxRunner {
       // prod = start from the app's build (matches its sources), dev = astro
       // dev; read by ASTRO_START_SHELL (appBuild.ts serveState).
       AURA_SERVE: serveState(ctx.appDir, manifest).mode,
-      // Statically known: AppManager runs inside the Docker container and
-      // every spawn we do is wrapped in PRoot. Baking the tag here means the
-      // /root/.bashrc snippet that renders the prompt never has to shell out
-      // to detect layers — saves ~100–300 ms off every interactive terminal
-      // launch (which is dominated by bash startup work, not by anything we
-      // can fix in pty-server or astro).
-      // Drop the "proot" half of the layer tag when the spawn is not wrapped
-      // (the prompt should reflect the actual sandbox state, not the
-      // OS-wide intent). Bash startup .bashrc reads $AURA_LAYER_TAG verbatim.
-      AURA_LAYER_TAG: prooted ? '[proot+ctnr]' : '[ctnr]',
+      // Statically known, so the /root/.bashrc prompt snippet never has to
+      // shell out to detect layers (~100–300 ms off every interactive
+      // terminal launch). Bash startup .bashrc reads $AURA_LAYER_TAG verbatim.
+      AURA_LAYER_TAG: '[proot+ctnr]',
+      AURA_HOSTNAME: appId,
+      ...(shellHostname ? { AURA_SHELL_HOSTNAME: shellHostname } : {}),
+      // Which allowlist mode the OS provisioned this instance with (tool-provision.ts).
+      AURA_TOOLS_MODE: currentToolsMode(this.dataDir),
+      ...ident.env,
       // Same bearer ContainerRunner injects. The token-gated sidecar routes
       // still answer 409 for proot sandboxes; carrying it keeps identity
       // uniform across runners.
@@ -321,9 +405,11 @@ export class ProotRunner implements SandboxRunner {
       // D89 B4: a strict relay mode (app-sdk shell-peer); nothing in the default `warn`.
       ...relayStrictEnv(),
     };
+    // Drop to the app identity, then proot with the binds; the app's argv follows.
+    const launch: ProotLaunch = { command: ident.command, prefix: [...ident.prefix, 'proot', ...sandboxArgs], env, appDir };
 
     try {
-      return await this.startProcess(instanceId, appId, port, manifest, args, appDir, env, prooted, entrypointArgv);
+      return await this.startProcess(instanceId, appId, port, launch, entrypointArgv);
     } catch (err) {
       // A production build that won't boot (it exits, or never answers) must
       // not leave the app dead: the sources are right there, so `astro dev`
@@ -331,27 +417,23 @@ export class ProotRunner implements SandboxRunner {
       // build was made on this machine and nobody watched it boot.
       if (env['AURA_SERVE'] !== 'prod' || !(err instanceof StartupFailure)) throw err;
       console.warn(`[ProotRunner] ${instanceId}: production build failed to start — retrying with astro dev`);
-      return await this.startProcess(instanceId, appId, port, manifest, args, appDir, { ...env, AURA_SERVE: 'dev' }, prooted, entrypointArgv);
+      return await this.startProcess(instanceId, appId, port, { ...launch, env: { ...env, AURA_SERVE: 'dev' } }, entrypointArgv);
     }
   }
 
   /** Spawn the sandbox once and wait until it is healthy, or fail loud. */
   private async startProcess(
-    instanceId: string, appId: string, port: number, manifest: AppManifest,
-    args: string[], appDir: string, env: Record<string, string>,
-    prooted: boolean, entrypointArgv: string[],
+    instanceId: string, appId: string, port: number, launch: ProotLaunch, entrypointArgv: string[],
   ): Promise<number> {
-    console.log(`[ProotRunner] Spawning ${instanceId} (app=${appId}) on port ${port} (serve=${env['AURA_SERVE']})`);
+    console.log(`[ProotRunner] Spawning ${instanceId} (app=${appId}) on port ${port} (serve=${launch.env['AURA_SERVE']})`);
 
-    // detached: true makes proot a process-group leader so we can SIGKILL the
-    // entire group on cleanup (including any detached astro children). Without
-    // it, kill() only signals the proot pid and orphan astros survive on the
-    // bound port — that's the squatter that caused the wrong-content bug.
-    const child = spawn(
-      prooted ? 'proot'          : entrypointArgv[0]!,
-      prooted ? args             : entrypointArgv.slice(1),
-      { cwd: appDir, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true },
-    );
+    // detached: true makes the sandbox a process-group leader so we can
+    // SIGKILL the entire group on cleanup (including any detached astro
+    // children). Without it, kill() only signals the proot pid and orphan
+    // astros survive on the bound port — that's the squatter that caused the
+    // wrong-content bug. `setpriv` execs proot, so the pid stays the leader.
+    const child = spawn(launch.command, [...launch.prefix, ...entrypointArgv],
+      { cwd: launch.appDir, env: launch.env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
 
     const provision = new ProvisionWatch();
     const tail = new OutputTail();
@@ -381,11 +463,9 @@ export class ProotRunner implements SandboxRunner {
     child.once('exit', (code, signal) => { exited = signal ? `signal ${signal}` : `code ${code}`; });
     child.once('error', (err) => { exited = `spawn error: ${err.message}`; });
 
-    const sandboxArgs = prooted ? args.slice(0, args.length - entrypointArgv.length) : [];
     const spawned: SpawnedApp = {
-      process: child, port, appId, provision,
-      launch: { prooted, sandboxArgs, env, appDir },
-      lifecycleToken: env['AURA_LIFECYCLE_TOKEN']!,
+      process: child, port, appId, provision, launch,
+      lifecycleToken: launch.env['AURA_LIFECYCLE_TOKEN']!,
     };
     this.processes.set(instanceId, spawned);
 
@@ -436,37 +516,6 @@ export class ProotRunner implements SandboxRunner {
     }
     if (entrypointExists) return ['bash', entrypointPath];
     return ['bash', '-c', SYNTHESISED_ENTRYPOINT];
-  }
-
-  private buildProotArgs(
-    instanceId: string,
-    port: number,
-    manifest: AppManifest,
-    appDir: string,
-    dataDir: string,
-    useProot: boolean,
-    entrypointArgv: string[],
-    contextVolumes: VolumeEntry[] = [],
-    home?: ResolvedHome,
-  ): string[] {
-    if (!useProot) return entrypointArgv;
-
-    // Toolchain view: see prootBinds. The allowlist dir exists before the bind.
-    const toolBinDir = join(this.toolchainDir, 'bin');
-    const hasTools = existsSync(toolBinDir);
-    const myTools = this.toolsDir(instanceId);
-    if (hasTools) mkdirSync(myTools, { recursive: true });
-    const args = prootBinds({
-      rootfs: this.baseRootfs,
-      instanceDataDir: dataDir,
-      appDir,
-      homeBind: prootHomeBind({ home }),
-      contextBinds: prootContextBinds({ systemDir: this.contextStore.systemDir, volumesDir: this.volumeStore.volumesDir, volumes: contextVolumes }),
-      tools: hasTools ? { myTools, allTools: currentToolsMode(this.dataDir) === 'symlink' ? toolBinDir : null } : null,
-      socketBinds: prootSocketBinds(manifest.tools),
-    });
-    args.push(...entrypointArgv);
-    return args;
   }
 
   /**
@@ -653,16 +702,15 @@ export class ProotRunner implements SandboxRunner {
   }
 
   /**
-   * Run `argv` in the instance's sandbox: a sibling proot with the same binds,
-   * env and cwd it was launched with (so the same tools at /aura/my-tools and
-   * the same HOME), or — not prooted — a plain process with that env.
+   * Run `argv` in the instance's sandbox: a sibling proot with the same
+   * identity, binds, env and cwd it was launched with (so the same tools at
+   * /aura/my-tools and the same HOME).
    */
   async exec(instanceId: string, argv: string[], opts: SandboxExecOpts = {}): Promise<{ stdout: string; stderr: string }> {
     const p = this.processes.get(instanceId);
     if (!p || !argv.length) throw new Error(`${instanceId} is not running in PRoot`);
-    const { prooted, sandboxArgs, env, appDir } = p.launch;
-    const [cmd, args] = prooted ? ['proot', [...sandboxArgs, ...argv]] : [argv[0]!, argv.slice(1)];
-    return execFileAsync(cmd, args, {
+    const { command, prefix, env, appDir } = p.launch;
+    return execFileAsync(command, [...prefix, ...argv], {
       cwd: appDir, env: { ...env, ...opts.env },
       timeout: opts.timeoutMs ?? 120_000, maxBuffer: 16 * 1024 * 1024,
     });

@@ -96,26 +96,41 @@ syscalls so the child sees a virtual rootfs, but it shares the host's
 kernel, PID space, and network. ~3 ms spawn. Weak isolation — treat
 apps as cooperating, not adversarial.
 
-### Bind mounts (`buildProotArgs`)
+### Launch and bind mounts (`prootBinds`)
+
+The runner drops to the installation's app identity first, then starts
+`proot`. A root installation is refused on PRoot (a root tracee would reach
+every home, `/workspace` and the secrets through `/proc/1/root`); run it as
+`app` (`aura admin apps run-as <app> app`) or on `container`.
 
 ```
---rootfs=<base-rootfs>           the shared base image (Debian)
---bind=/workspace:/workspace     the full monorepo
---bind=<dataDir>:/data           per-instance data
---bind=/proc                     host /proc
---bind=/dev                      host /dev
---bind=/tmp                      host /tmp (shared with siblings)
---bind=/etc/resolv.conf          host DNS
---bind=<appHome>:/home/aura      the App Home the kernel resolved (never a Private Home)
---bind=<toolchainDir>:/aura/all-tools
+setpriv --reuid=<app uid> --regid=<app gid> --clear-groups --no-new-privs -- proot \
+--rootfs=<base-rootfs>                 the shared base image (Debian)
+--bind=/workspace/node_modules         the shared workspace pieces an app container gets too:
+--bind=/workspace/packages             node_modules, packages, the pnpm root files and
+--bind=/workspace/<root files>         the capability registry (.aura); never other apps
+--bind=/workspace/.aura                or the OS source
+--bind=<dataDir>:/data                 per-instance data
+--bind=/proc                           host /proc (other uids' /proc/<pid>/root stay closed)
+--bind=/dev                            host /dev
+--bind=<runtime>/<inst>/tmp:/tmp       the instance's own /tmp (0700, the app uid)
+--bind=/etc/resolv.conf                host DNS
+--bind=<appHome>:/home/aura            the App Home the kernel resolved (never a Private Home)
+--bind=<identity>/passwd:/etc/passwd   the app identity's account (and /etc/group)
+--bind=<appDir>:<appDir>               the app's own source, also the cwd
+--bind=<toolchainDir>:/aura/all-tools  legacy symlink mode only
 --bind=<perInstanceToolsDir>:/aura/my-tools   the allowlist
---bind=/var/run/docker.sock:...  only if 'docker' in tools[] (or wildcard)
 ```
+
+No `/run/context` and no Docker socket. The environment is clean: PATH,
+TERM, LANG/LC_ALL, HOME, the `APP_*` and `AURA_*` variables and only the
+Context keys the manifest declares in `context[]`; nothing of the master's
+own environment.
 
 The two-dir tools layout (`all-tools` + `my-tools`) is the cap mechanism.
 `/aura/all-tools/` mirrors the toolchain registry. `/aura/my-tools/`
 holds symlinks ONLY for entries in `manifest.tools[]`. PATH inside
-the sandbox is `/aura/my-tools:<inherited>`. So `tools: ["bash", "node"]`
+the sandbox is `/aura/my-tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`. So `tools: ["bash", "node"]`
 means the child can `bash` and `node` but not `claude` even if claude is
 installed on the host.
 
@@ -424,8 +439,8 @@ PRoot                                 Container
 ─────                                 ─────────
 resolveEntrypoint()                   resolveEntrypoint()
 provisionToolsDir()                   buildDockerArgs()
-buildProotArgs()                      execFileSync('docker', args)
-spawn('proot', args, env)             attach `docker logs -f` for stdio
+prootBinds()                          execFileSync('docker', args)
+spawn('setpriv', [… 'proot', …], env) attach `docker logs -f` for stdio
 processes.set(instanceId, {...})      docker inspect → pid
 waitHealthy(...)                      tracked.set(instanceId, {...})
                                        watcher = spawn('docker', ['wait', ...])

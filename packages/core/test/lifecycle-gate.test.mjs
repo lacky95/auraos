@@ -161,7 +161,9 @@ test('inspectSpawned binds a System Terminal to its private network (D58)', () =
   assert.equal(inspectSpawned('t', () => '9 {"aura-net":{"IPAddress":"172.18.0.9"}}', 'aura-term-default').address, null);
 });
 
-// ── ProotRunner end to end (not prooted: AURA_USE_PROOT is unset in tests) ──
+// ── ProotRunner's process lifecycle (startProcess: health, token, listener ownership) ──
+// Without the sandbox wrap: tests have no proot, rootfs or app uid (R2: spawn
+// itself refuses all three missing; golden-spawn-args pins the wrap).
 
 function makeRunner() {
   const dataDir = mkdtempSync(join(tmpdir(), 'lc-data-'));
@@ -185,7 +187,8 @@ function appDir(files, entry) {
 const manifestFor = (id) => ({ id, entrypoint: 'entrypoint.sh', runtime: 'astro', tools: [], instanceMode: 'single' });
 
 async function spawnApp(runner, dir, appId, port) {
-  return runner.spawn(appId, appId, port, manifestFor(appId), { appDir: dir, instanceDataDir: dir, home: { kind: 'app-global', hostPath: dir, volumeSubpath: 'h', logicalPath: '/home/aura', uid: 0, gid: 0, mode: 0o700 } });
+  const env = { ...process.env, APP_ID: appId, APP_INSTANCE_ID: appId, APP_PORT: String(port), AURA_SERVE: 'dev', AURA_LIFECYCLE_TOKEN: newLifecycleToken() };
+  return runner.startProcess(appId, appId, port, { command: 'bash', prefix: [], env, appDir: dir }, [join(dir, manifestFor(appId).entrypoint)]);
 }
 
 test('ProotRunner + the real registry server: token sent, guard proven, outsiders get 401', async () => {

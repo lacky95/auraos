@@ -34,15 +34,22 @@ export function containerContextEnv(contextEnv: Record<string, string>): string[
   return Object.entries(contextEnv).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
 }
 
-/** PRoot binds: `/run/context` and each Context Volume (proot binds are RW regardless of mode). */
-export function prootContextBinds(o: { systemDir: string; volumesDir: string; volumes: VolumeEntry[] }): string[] {
-  return [
-    // OS Context files. The master writes decrypted values here; binding the
-    // dir at /run/context mirrors changes live (no respawn to pick up a file
-    // edit — mirrors the ContainerRunner volume-subpath mount).
-    `--bind=${o.systemDir}:/run/context`,
-    // OS-managed shared Context Volumes — bind each volume's subpath dir at
-    // the user-chosen mount path (proot binds are RW regardless of mode).
-    ...o.volumes.map((v) => `--bind=${join(o.volumesDir, v.name)}:${v.mountPath}`),
-  ];
+/**
+ * PRoot binds of the Context Volumes (proot binds are RW regardless of mode).
+ * No `/run/context` (Phase 5 R2, Q18b): no PRoot app reads it (F23), and the
+ * context env a PRoot app gets is only its declared keys (`declaredContextEnv`).
+ */
+export function prootContextBinds(o: { volumesDir: string; volumes: VolumeEntry[] }): string[] {
+  // OS-managed shared Context Volumes: each volume's subpath dir at the
+  // user-chosen mount path.
+  return o.volumes.map((v) => `--bind=${join(o.volumesDir, v.name)}:${v.mountPath}`);
+}
+
+/**
+ * The context env narrowed to the keys the manifest declares (`context[]`,
+ * D48): what the app reads anyway. Stream C narrows it further to granted keys.
+ */
+export function declaredContextEnv(contextEnv: Record<string, string>, declared: readonly string[] | undefined): Record<string, string> {
+  const keys = new Set(declared ?? []);
+  return Object.fromEntries(Object.entries(contextEnv).filter(([k]) => keys.has(k)));
 }

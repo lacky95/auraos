@@ -139,3 +139,41 @@ export function sidecarIdentityArgs(
   if (spec.user || !spec.inheritHome || spec.image !== opts.baseImage || !isNonRootIdentity(parent)) return [];
   return [...processIdentityFlags(parent), ...identityFileMounts(opts.appDataVolume, opts.instanceId)];
 }
+
+/**
+ * A PRoot app process's identity (Phase 5 R2, Q18b). PRoot shares the master's
+ * kernel view: a root tracee reaches every Private Home, `/workspace`, the
+ * socket and the secrets through `/proc/1/root`, whatever is bound. So a PRoot
+ * app runs only under its installation's app identity (D70 app range), where
+ * the kernel closes those paths; a root installation is refused, never run as
+ * root (no fallback, D75).
+ */
+export class ProotIdentityError extends Error {
+  override readonly name = 'ProotIdentityError';
+}
+
+export function requireProotIdentity(appId: string, identity: SpawnIdentity | undefined | null): SpawnIdentity {
+  if (isNonRootIdentity(identity) && identity.range === 'app') return identity;
+  throw new ProotIdentityError(
+    `${appId}: PRoot runs an app only under its own app identity (a root process in the master reaches every home, `
+    + `/workspace and the secrets), and this installation runs as ${identity && identity.uid !== 0 ? `uid ${identity.uid}` : 'root'}: `
+    + `not started. Run it as its app identity (\`aura admin apps run-as ${appId} app\`) or on the container runtime.`);
+}
+
+/**
+ * How the runner drops to the app identity before `proot` (the master's
+ * util-linux `setpriv`): real, effective and saved uid/gid, no supplementary
+ * groups (so no `docker` group), no-new-privileges. Root loses every
+ * capability on the uid change. Plus the identity files bound over the
+ * rootfs's own, and the env the container identity sets too.
+ */
+export function prootIdentityLaunch(identity: SpawnIdentity, identityDir: string): {
+  command: string; prefix: string[]; binds: string[]; env: Record<string, string>;
+} {
+  return {
+    command: 'setpriv',
+    prefix: [`--reuid=${identity.uid}`, `--regid=${identity.gid}`, '--clear-groups', '--no-new-privs', '--'],
+    binds: [`--bind=${join(identityDir, 'passwd')}:/etc/passwd`, `--bind=${join(identityDir, 'group')}:/etc/group`],
+    env: { AURA_RUN_AS: 'app', ASTRO_TELEMETRY_DISABLED: '1' },
+  };
+}
