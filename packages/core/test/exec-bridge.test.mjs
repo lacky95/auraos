@@ -127,13 +127,16 @@ const PROOT_CAPS = { ...CONTAINER_CAPS, isolation: 'ptrace', privateHomeSession:
 const CONTAINER_ID = 'c'.repeat(64);
 const owner = { user: { userId: 'u1', role: 'owner' } };
 
+/** A generated /etc/passwd line (identity/passwd.ts shape). */
+const accountLine = (uid) => `aura-user-${uid}:x:${uid}:${uid}::/home/aura:/bin/bash\n`;
+
 /** The kernel's decision as AppManager.sessionContext makes it (its own tests: phase5-homes). */
 function defaultContext(req) {
   if (req.mode === 'app') return { kind: 'app', home: { mode: 'app', hostPath: null }, uid: 200001, gid: 200001, groups: [], env: { HOME: '/home/aura' } };
   return {
     kind: 'user', home: { mode: req.mode, hostPath: req.mode === 'private' ? '/data/aura/home/u1' : null },
     uid: 1000, gid: 1000, groups: [1000], env: { HOME: '/home/aura', TMPDIR: '/run/aura-session' }, userId: req.caller.user.userId,
-    passwd: 'aura-user-1000:x:1000:1000::/home/aura:/bin/bash\n',
+    passwd: accountLine(1000),
   };
 }
 

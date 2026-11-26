@@ -36,7 +36,7 @@ async function rig(t: { after(fn: () => void): void }, who: { principal: Princip
       ? { outcome: 'allow', reason: who.reason } : { outcome: 'deny', reason: 'wrong-principal' }),
     appOf: async (id: string) => (id === 'no-such-1' ? null : 'com.acme.notes'),
     parseOpen: async (frame: unknown) => parseSessionOpen(frame),
-    callerOf: async (p: never, level: 'owner' | 'member' | 'self') => sessionCallerOf(p, level, 'default'),
+    callerOf: async (p: Parameters<typeof sessionCallerOf>[0], level: 'owner' | 'member' | 'self') => sessionCallerOf(p, level, 'default'),
     consumeRoot: async (grant: string, userId: string, instanceId: string) => grant === GRANT && userId === 'u1' && instanceId === 'com.acme.notes-1',
     bridge: async () => ({
       openSession: async (instanceId: string, req: Record<string, unknown>, onOutput: (ch: number, d: Buffer) => void, caller: Record<string, unknown>) => {
