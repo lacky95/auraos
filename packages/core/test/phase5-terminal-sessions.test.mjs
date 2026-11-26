@@ -166,7 +166,7 @@ test('T: a session host gets its lifecycle token as a one-time file, never in it
     Object.assign(runner, { appDataVolume: 'v', nodeModulesVolume: 'n' });
     const home = { kind: 'private', hostPath: '/x', volumeSubpath: 'aura/home/default', logicalPath: '/home/aura', uid: 1000, gid: 1000, mode: 0o700 };
     const args = (id, dir) => runner.buildDockerArgs(`${id}-1`, id, 4000, { id, entrypoint: 'server.mjs', tools: [], sandbox: 'container' }, `aura-${id}-1`,
-      { appDir: dir, instanceDataDir: join(appDir, `${TERMINAL}-1`), home, identity: { uid: 1000, gid: 1000, range: 'owner', userId: 'default' } }, {}, []);
+      { appDir: dir, instanceDataDir: join(appDir, `${TERMINAL}-1`), home, identity: { uid: 1000, gid: 1000, range: 'owner', userId: 'default' } }, []);
     const term = args(TERMINAL, '/workspace/apps/com.aura.terminal');
     assert.ok(!term.includes('AURA_LIFECYCLE_TOKEN'), 'no lifecycle token in the session host\'s env');
     assert.ok(term.includes(`AURA_LIFECYCLE_TOKEN_FILE=${SESSION_SECRET_FILE}`));

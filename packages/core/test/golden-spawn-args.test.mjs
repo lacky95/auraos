@@ -277,8 +277,9 @@ test('R2: the master placement is narrowed (no /workspace, /run/context, socket 
     assert.equal(l.env['AURA_GOLDEN_LEAK'], undefined, 'nothing of the master env');
     assert.equal(l.env['FOO'], 'bar', 'a declared context key');
     assert.equal(l.env['APP_ID'], 'org.golden.user', 'a context key never clobbers an OS var');
-    const undeclared = await prootLaunch(fx);
-    assert.equal(undeclared.env['FOO'], undefined, 'an undeclared context key is not handed over');
+    // Stream C: the kernel decides the keys (declared AND granted, ctx.contextEnv); the runner hands over exactly those.
+    const ungranted = await prootLaunch({ ...fx, contextEnv: {} });
+    assert.equal(ungranted.env['FOO'], undefined, 'a key the kernel did not grant is not handed over');
   } finally {
     if (saved === undefined) delete process.env['AURA_GOLDEN_LEAK']; else process.env['AURA_GOLDEN_LEAK'] = saved;
   }
