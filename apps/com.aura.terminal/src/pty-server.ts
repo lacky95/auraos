@@ -4,7 +4,7 @@ import { parse as parseUrl } from 'node:url';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { HOST_LABEL, TMUX_CONF, TMUX_SOCKET, liveTmuxSessions, respawnIfDead, shellArgv, shellCwd, tmuxBin, tmuxKill, tmuxName } from './tmux-control.ts';
+import { HOST_LABEL, TMUX_CONF, TMUX_SOCKET_ARGS, liveTmuxSessions, respawnIfDead, sessionEnv, sessionEnvArgs, shellArgv, shellCwd, tmuxBin, tmuxKill, tmuxName } from './tmux-control.ts';
 import { dialogAction, getDialog, installDialogHooks, setDialogText } from './input-dialog.ts';
 import { openPaneTap, paneRepaint, tmuxHasSession, type PaneTap } from './pane-tap.ts';
 import { forgetSessionPicks } from './window-session.ts';
@@ -278,10 +278,12 @@ function shellSpec(): { shell: string; cwd: string; env: Record<string, string> 
   // window-title shows the host ("aura-shell") rather than this app's id.
   // `aura jump` shells run in a different sandbox where it's absent (or
   // explicitly blanked, see enter-sandbox.ts), so they show the app instead.
+  // The session's own env, never this server's (tmux-control.ts `sessionEnv`,
+  // stream T): no lifecycle token, no listen settings, HOME=/home/aura.
   return {
     shell: process.env['SHELL'] ?? '/bin/bash',
     cwd:   shellCwd(),   // never inside the dev server's watched tree
-    env:   { ...process.env, AURA_TERM_LABEL: HOST_LABEL } as Record<string, string>,
+    env:   sessionEnv(),
   };
 }
 
@@ -301,12 +303,12 @@ function spawnPty(sessionId: string | null, cols: number, rows: number): IPty {
   // created; attaching to a live one ignores it.
   const dir = savedCwd(sessionId);
   return pty.spawn(tmuxBin, [
-    '-L', TMUX_SOCKET,
+    ...TMUX_SOCKET_ARGS,
     '-f', TMUX_CONF,
     '-u',
     'new-session', '-A', '-s', tmuxName(sessionId),
     ...(dir ? ['-c', dir] : []),
-    '-e', `AURA_TERM_SESSION=${sessionId}`,   // lets programs in the shell (agent hooks) name their session; ignored on attach
+    ...sessionEnvArgs(sessionId),   // its label, its id and its hook token (agent hooks); ignored on attach
     ...shellArgv(shell),   // root `exit` ends the session, a crash restarts the shell
   ], opts);
 }

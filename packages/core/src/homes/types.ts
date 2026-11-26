@@ -82,7 +82,9 @@ export type HomeDeniedReason =
   /** The owner's Linux identity is not allocated: nothing is created under a guessed uid. */
   | 'identity-unresolved'
   /** The home path exists but is a symbolic link or not a directory: never followed, never used. */
-  | 'home-unsafe';
+  | 'home-unsafe'
+  /** Stream T: the owner's Private Home still belongs to root (the ownership apply has not run); no root fallback. */
+  | 'ownership-pending';
 
 export class HomeDeniedError extends Error {
   override readonly name = 'HomeDeniedError';

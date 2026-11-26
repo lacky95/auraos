@@ -37,12 +37,15 @@ function instanceParam(request: Request): string | null {
   return new URL(request.url).searchParams.get('instance') || null;
 }
 
+const notRunning = (instanceId: string) =>
+  json({ error: 'instance-not-running', message: `${instanceId} is not a running Terminal instance` }, 404);
+
 /** Each way a Terminal instance can fail to answer, as the routes under /api/terminal say it. */
 async function reach(instanceId: string, open: () => Promise<Response | null>): Promise<Response> {
   try {
     const res = await open();
     if (res) return res;
-    return json({ error: 'instance-not-running', message: `${instanceId} is not a running Terminal instance` }, 404);
+    return notRunning(instanceId);
   } catch (err) {
     return json({ error: 'instance-unreachable', message: `${instanceId}: ${(err as Error).message}` }, 502);
   }
@@ -56,6 +59,8 @@ export interface AgentEventsDeps {
   holdsListGrant(appId: string): Promise<boolean>;
   /** The instance's own SSE (`/api/sessions/events?stream=1`), ended by `signal`; null when not running. */
   open(instanceId: string, signal: AbortSignal): Promise<Response | null>;
+  /** D69: whether the caller acts for the instance's user (terminalCaller `callerOwnsTerminal`); another's is not running. */
+  owns?(request: Request, instanceId: string): Promise<boolean>;
   recheckMs?: number;
 }
 
@@ -65,6 +70,7 @@ export function createAgentEventsRoute(deps: AgentEventsDeps): (request: Request
     if (caller === 'invalid') return json({ error: 'caller-invalid' }, 401);
     const instanceId = instanceParam(request);
     if (!instanceId) return json({ error: 'instance required' }, 400);
+    if (deps.owns && !(await deps.owns(request, instanceId))) return notRunning(instanceId);
 
     const upstream = new AbortController();
     const stop = () => upstream.abort();
@@ -116,6 +122,8 @@ export interface AgentHooksDeps {
   approve(request: Request, change: AgentHooksChange): Promise<Response | null>;
   /** `/api/agent-hooks` on that instance with this method; null when not running. */
   forward(instanceId: string, method: string): Promise<Response | null>;
+  /** D69: as AgentEventsDeps `owns`: the hooks live in that user's Private Home. */
+  owns?(request: Request, instanceId: string): Promise<boolean>;
 }
 
 export function createAgentHooksRoute(deps: AgentHooksDeps): (request: Request) => Promise<Response> {
@@ -124,6 +132,7 @@ export function createAgentHooksRoute(deps: AgentHooksDeps): (request: Request) 
     if (caller === 'invalid') return json({ error: 'caller-invalid' }, 401);
     const instanceId = instanceParam(request);
     if (!instanceId) return json({ error: 'instance required' }, 400);
+    if (deps.owns && !(await deps.owns(request, instanceId))) return notRunning(instanceId);
     const op = HOOK_CHANGES[request.method];
     if (op && caller) {
       const asked = await deps.approve(request, { op });

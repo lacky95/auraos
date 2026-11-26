@@ -19,6 +19,13 @@
 // identity, no /workspace beyond the shared pieces, no /run/context, no
 // socket, a per-instance /tmp and a clean env. PRoot runs only app
 // identities, so a fixture without one runs there as PROOT_APP_IDENTITY.
+// Stream T (owner-approved D89 B4 strict, D69): every container start carries
+// its relay mode (`AURA_RELAY_STRICT=strict` by default); a System Terminal
+// carries its session user and the tmux socket tmpfs, and with a session
+// identity runs as that user's uid. Owner decision (2026-11-26): a session host
+// gets AURA_SERVER_SEALED (production build only, execute-only node) and its
+// lifecycle token as a one-time file, never `-e AURA_LIFECYCLE_TOKEN`; the
+// synthesised start script (every fixture's digest) carries the sealed branch.
 //
 // Run via: node tools/run-tests.mjs --only=core
 
@@ -111,6 +118,18 @@ const FIXTURES = [
     appDir: '/workspace/apps/com.aura.terminal',
     ctx: { owner: 'default', home: privateHome('default') },
     contextEnv: { AURA_LISTEN_SUBNET: '0.0.0.0/0' },
+    volumes: [],
+    term: { name: 'aura-term-default', subnet: '172.30.0.0/16' },
+  },
+  {
+    // Stream T (D69): the System Terminal as its user's session host: the
+    // user's uid (passwd names the username), no capabilities, the user's
+    // Private Home, AURA_SESSION_USER and the tmux socket tmpfs.
+    name: 'system-terminal-session-user',
+    manifest: { id: 'com.aura.terminal', tools: ['*'], sandbox: 'container' },
+    appDir: '/workspace/apps/com.aura.terminal',
+    ctx: { owner: 'default', identity: { uid: 1000, gid: 1000, range: 'owner', userId: 'default', account: 'lukas' }, home: privateHome('default') },
+    contextEnv: {},
     volumes: [],
     term: { name: 'aura-term-default', subnet: '172.30.0.0/16' },
   },

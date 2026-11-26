@@ -1,11 +1,15 @@
 import type { APIRoute } from 'astro';
 import { agentFor, allAgents, parseEventBody, recordEvent, subscribeAgents } from '../../../agent-state';
 import { localInstanceId } from '../../../session-service';
+import { HOOK_TOKEN_HEADER, hookTokenValid } from '../../../hook-token';
 
 /**
  * Agent events for this instance's sessions (agent-state.ts).
  *
- *   POST  { session, source: 'claude'|'codex', payload }   — from agent-hook.sh
+ *   POST  { session, source: 'claude'|'codex', payload }   — from agent-hook.sh,
+ *         with that session's hook token (`x-aura-hook-token`, hook-token.ts;
+ *         stream T): anything else is refused 403, so no app and no other
+ *         session can report agent state for a session
  *   GET                → { instanceId, agents: { <sessionId>: AgentState } }
  *   GET ?stream=1      → SSE: one `agent` event per change, `{ session, agent }`
  *                        (agent null ⇒ the session is gone), after an initial
@@ -25,6 +29,9 @@ export const POST: APIRoute = async ({ request }) => {
   // wrong container (the hook derives the URL from the id, so this is a bug).
   if (!parsed.session.startsWith(`${localInstanceId()}#`)) {
     return Response.json({ error: 'wrong-instance', message: `${parsed.session} does not live on ${localInstanceId()}` }, { status: 409 });
+  }
+  if (!hookTokenValid(parsed.session, request.headers.get(HOOK_TOKEN_HEADER))) {
+    return Response.json({ error: 'hook-token', message: 'an agent event needs its session\'s hook token (AURA_TERM_HOOK_TOKEN)' }, { status: 403 });
   }
   recordEvent(parsed.session, parsed.event);
   return Response.json({ session: parsed.session, agent: agentFor(parsed.session) });

@@ -27,7 +27,7 @@ import { Socket } from 'node:net';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { TMUX_CONF, TMUX_SOCKET, shellArgv, tmuxBin, tmuxName } from './tmux-control.ts';
+import { TMUX_CONF, TMUX_SOCKET_ARGS, sessionEnvArgs, shellArgv, tmuxBin, tmuxName } from './tmux-control.ts';
 
 const TAP_DIR = join(tmpdir(), `aura-term-tap-${process.getuid?.() ?? 0}`);
 
@@ -38,7 +38,7 @@ export interface PaneTap {
 
 function tmuxSync(args: string[]): { ok: boolean; out: string } {
   if (!tmuxBin) return { ok: false, out: '' };
-  const r = spawnSync(tmuxBin, ['-L', TMUX_SOCKET, '-f', TMUX_CONF, '-u', ...args], { encoding: 'utf-8' });
+  const r = spawnSync(tmuxBin, [...TMUX_SOCKET_ARGS, '-f', TMUX_CONF, '-u', ...args], { encoding: 'utf-8' });
   return { ok: r.status === 0, out: r.stdout ?? '' };
 }
 
@@ -81,11 +81,10 @@ export function openPaneTap(
   const args = create && !tmuxHasSession(sessionId)
     ? ['new-session', '-d', '-s', name,
        '-x', String(create.cols), '-y', String(create.rows),
-       '-c', create.cwd, '-e', `AURA_TERM_LABEL=${create.env['AURA_TERM_LABEL'] ?? ''}`,
-       '-e', `AURA_TERM_SESSION=${sessionId}`,   // lets programs in the shell (agent hooks) name their session
+       '-c', create.cwd, ...sessionEnvArgs(sessionId),
        ...shellArgv(create.shell), ';', ...pipe]
     : pipe;
-  const r = spawnSync(tmuxBin, ['-L', TMUX_SOCKET, '-f', TMUX_CONF, '-u', ...args],
+  const r = spawnSync(tmuxBin, [...TMUX_SOCKET_ARGS, '-f', TMUX_CONF, '-u', ...args],
     { encoding: 'utf-8', env: create?.env ?? process.env });
   if (r.status !== 0) {
     sock.destroy();

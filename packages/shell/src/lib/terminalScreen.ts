@@ -44,6 +44,8 @@ export interface ScreenStateDeps {
   listed(instanceId: string): Promise<string[] | null>;
   /** The session's visible rows. */
   screen(instanceId: string, sessionId: string): Promise<string[]>;
+  /** D69: whether the caller acts for the instance's user (terminalCaller `callerOwnsTerminal`); another's is not running. */
+  owns?(request: Request, instanceId: string): Promise<boolean>;
   now?: () => number;
 }
 
@@ -83,6 +85,9 @@ export function createScreenStateRoute(deps: ScreenStateDeps): (request: Request
     if (!id || !instanceId) return json({ error: 'bad-session-id' }, 400);
     if (!take(who.key)) {
       return json({ error: 'rate-limited', message: `at most ${SCREEN_READS_PER_MINUTE} screen reads a minute` }, 429, { 'retry-after': '60' });
+    }
+    if (deps.owns && !(await deps.owns(request, instanceId))) {
+      return json({ error: 'instance-not-running', message: `${instanceId} is not a running Terminal instance` }, 404);
     }
     try {
       const ids = await deps.listed(instanceId);

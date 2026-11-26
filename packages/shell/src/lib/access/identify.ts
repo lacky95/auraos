@@ -5,10 +5,10 @@ import { DEFAULT_OWNER_ID } from '@aura/core';
 // The file-only entry, as the CLI uses it: one subject rule on both sides.
 import { operatorRequestSubject } from '@aura/core/setup-tickets';
 import { localSystemId } from '@aura/core/system-identity';
-import { lookup as dnsLookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { loadAppHostServices, type AppHostServices } from '../../../server/app-host-auth.mjs';
 import { gatewayClaimOf, ownerSsrClaimOf, ownerUiActs, ownerUiApp } from '../../../server/gateway-identity.mjs';
+import { SESSION_HOST_APPS } from '../../../server/terminal-embed.mjs';
 import type { AccessTarget, AccessVia, VerifiedIdentity } from './types.ts';
 
 /**
@@ -417,10 +417,13 @@ export function actingInstance(p: AccessPrincipal): InstancePrincipal | null {
  *                        app's call to it only for the System Terminal
  *                        (decide.ts, H2, H3). Phase 5 scopes who may call it.
  *
- * Their upstreams are also the ones a network-identified app container never
- * reaches through /api/proxy, the System Terminal itself excepted (decide.ts, H2).
+ * Their upstreams take the `owner` level only (decide.ts, H2, D89 B6): no
+ * other app instance reaches them through /api/proxy, whatever its token.
  */
 export const OWNER_AGENT_APPS: ReadonlySet<string> = new Set(['com.aura.terminal', 'com.aura.aurashelld']);
+
+/** D69 (stream T): the session host apps, one list (server/terminal-embed.mjs). */
+export { SESSION_HOST_APPS };
 
 /**
  * D29: the owner and trusted terminals have full control. A trusted owner
@@ -447,86 +450,9 @@ export function isTrustedOwnerAgent(
   return p.userId === undefined || p.userId === DEFAULT_OWNER_ID;
 }
 
-// ── D28: tokenless callers by their container network address ───────────────
-
-/** What `networkInstance` reads. Structural, so tests can fake it. */
-export interface NetworkDeps {
-  instances(): ReadonlyArray<Pick<AppInstance, 'appId' | 'instanceId'> & { sandbox?: string; state?: string; inPool?: boolean }>;
-  /**
-   * The instance's addresses on every network it is on, as its runtime read
-   * them from the container (AppManager `getInstanceAddresses`): a System
-   * Terminal is on the app network and its private one (D58), and its calls
-   * arrive from either. Empty or absent: the name's DNS answer below.
-   */
-  addresses?(instanceId: string): ReadonlyArray<string>;
-  /** Every address a container name resolves to (Docker's DNS on the app network). */
-  resolve(name: string): Promise<string[]>;
-  now?(): number;
-}
-
-const NETWORK_TTL_MS = 10_000;
-/** A miss rebuilds the table at most this often, so unknown peers can't drive lookups. */
-const NETWORK_RETRY_MS = 2_000;
-const LIVE_STATES = new Set(['resumed', 'started', 'paused', 'starting']);
+// ── peer addresses: report-only (D89 B7), never identity (D28 removed, B6) ──
 
 export const normalizePeer = (addr: string | null | undefined): string | null => {
   const a = String(addr ?? '').trim().toLowerCase().replace(/^::ffff:/, '');
   return isIP(a) ? a : null;
 };
-
-/**
- * D28: the running container instance whose address is `peer`, on any network
- * the shell shares with it: the addresses its runtime read from the container
- * (`docker inspect`, D58: a Terminal's private network too), else its
- * container name's DNS answer (`aura-<instanceId>`) on the app network. A TCP
- * peer address on those networks can't be taken over without the reply, so
- * this names the container that opened the connection. Loopback and anything else that is no
- * instance's address stay null: a PRoot app or the shell itself is never
- * named this way, nor is the address a published port's traffic comes from.
- */
-export function createNetworkIdentity(deps: NetworkDeps) {
-  const now = () => (deps.now ?? Date.now)();
-  let table: Map<string, { appId: string; instanceId: string }> = new Map();
-  let builtAt = -Infinity;
-  let building: Promise<void> | null = null;
-
-  async function rebuild(): Promise<void> {
-    const next = new Map<string, { appId: string; instanceId: string }>();
-    const live = deps.instances().filter((i) => i.sandbox === 'container' && !i.inPool && (!i.state || LIVE_STATES.has(i.state)));
-    await Promise.all(live.map(async (i) => {
-      try {
-        const known = deps.addresses?.(i.instanceId) ?? [];
-        for (const addr of known.length ? known : await deps.resolve(`aura-${i.instanceId}`)) {
-          const a = normalizePeer(addr);
-          if (a) next.set(a, { appId: i.appId, instanceId: i.instanceId });
-        }
-      } catch { /* not resolvable: not on the network */ }
-    }));
-    table = next;
-    builtAt = now();
-  }
-
-  const refresh = (): Promise<void> => (building ??= rebuild().finally(() => { building = null; }));
-
-  return async function networkInstance(peer: string | null | undefined): Promise<InstancePrincipal | null> {
-    const a = normalizePeer(peer);
-    if (!a || a.startsWith('127.') || a === '::1') return null;
-    const age = now() - builtAt;
-    if (age > NETWORK_TTL_MS || (!table.has(a) && age > NETWORK_RETRY_MS)) await refresh();
-    const hit = table.get(a);
-    return hit ? { kind: 'instance', appId: hit.appId, instanceId: hit.instanceId, verification: 'verified' } : null;
-  };
-}
-
-/** The live table over an AppManager (read when it is up), resolved through the container's DNS. */
-export function liveNetworkIdentity(mgr: () => Pick<AppManager, 'getAllInstances' | 'getInstanceAddresses'> | null) {
-  return createNetworkIdentity({
-    instances: () => {
-      try { return mgr()?.getAllInstances() ?? []; } catch { return []; }
-    },
-    addresses: (instanceId) => {
-      try { return mgr()?.getInstanceAddresses(instanceId) ?? []; } catch { return []; }
-    },
-    resolve: async (name) => (await dnsLookup(name, { all: true })).map((r) => r.address),
-  });
-}

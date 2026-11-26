@@ -16,7 +16,8 @@ import type { AppRunAs } from './types.js';
 
 export type MigrationWave = 1 | 2 | 3 | 'terminal';
 /** What stream A expects for the app in its wave. */
-export type MigrationExpectation = 'convert' | 'review' | 'blocked';
+/** `session-host`: not an app identity at all; each instance runs as its user's uid (stream T, D69). */
+export type MigrationExpectation = 'convert' | 'review' | 'blocked' | 'session-host';
 
 export interface AppMigrationEntry {
   wave: MigrationWave;
@@ -54,7 +55,7 @@ export const APP_MIGRATION: Readonly<Record<string, AppMigrationEntry>> = Object
   'io.lakner.improvementboard': { wave: 3, expect: 'convert', note: 'after the D66 P2 patch: logins in its global App Home (aura jump --home app), one config dir per supervisor; its inheritHome supervisors get the same App Home and run as the app' },
   'dev.box': { wave: 3, expect: 'blocked', note: 'App Homes exist now, but its entrypoint still writes /usr/local/bin/devbox (rootfs) and runs npm ci and aura install sdk in the running app at start: the P2 patch (scope user, devbox on PATH from the App Home) plus a builder-provisioning check on the VM first' },
   'io.lakner.terminalx': { wave: 3, expect: 'convert', note: 'after the P2 patch (environmentScope: user): $HOME (.gitconfig) is the owner\'s App Home; container runtime since P1' },
-  'com.aura.terminal': { wave: 'terminal', expect: 'blocked', note: 'not an app identity: each Terminal instance runs as its owner\'s uid (stream T, 5-main)' },
+  'com.aura.terminal': { wave: 'terminal', expect: 'session-host', note: 'not an app identity: each Terminal instance is its user\'s session host and runs as that user\'s uid, no capabilities (stream T, D69); root only in a root tab (J.6). Fewer privileges than an app, not more' },
 });
 
 /** What the review needs from a manifest (a structural subset of AppManifest). */
@@ -142,14 +143,17 @@ export function buildPrivilegeReview(inputs: readonly PrivilegeReviewInput[], no
     const migration = APP_MIGRATION[i.appId] ?? null;
     const elevated = [
       ...i.needs.filter((n) => n.level === 'blocks').map((n) => `needs elevated privileges: ${n.reason}`),
-      ...(migration && migration.expect !== 'convert' ? [`needs elevated privileges: ${migration.note}`] : []),
+      ...(migration && migration.expect !== 'convert' && migration.expect !== 'session-host' ? [`needs elevated privileges: ${migration.note}`] : []),
     ];
+    const sessionHost = migration?.expect === 'session-host';
     const mismatched = i.instances.filter((x) => {
       if (x.uid === null) return false;
+      // A session host runs as its user's uid (any user's, never 0 once the owner's home is handed over).
+      if (sessionHost) return false;
       return i.runAs === 'app' ? x.uid !== i.identity?.uid : x.uid !== 0;
     }).map((x) => x.instanceId);
     let verdict: PrivilegeVerdict;
-    if (i.runAs === 'app') verdict = 'app';
+    if (i.runAs === 'app' || sessionHost) verdict = 'app';
     else if (i.runAs === null) verdict = 'root';
     else if (i.needs.some((n) => n.level === 'blocks') || migration?.expect === 'blocked') verdict = 'blocked';
     else if (migration?.expect === 'review') verdict = 'needs-review';

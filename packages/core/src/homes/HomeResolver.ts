@@ -8,9 +8,10 @@
  *                          Never a Private Home (D65 §8, D84).
  *   terminal-session       the session user's Private Home (D69). The
  *                          instance itself is the user's session context
- *                          (P5-4), so it needs a namespace runtime and must
- *                          run as that user (or as root, until stream T
- *                          moves the System Terminal to the owner's uid).
+ *                          (P5-4), so it needs a namespace runtime and runs
+ *                          as that user (stream T); as root only while the
+ *                          owner's home still awaits the ownership apply
+ *                          (AppManager `ownerHomeAwaitsOwnership`).
  *   jump                   `private` (default) the jumping user's Private
  *                          Home, `app` the App Home (D79: as the app's
  *                          identity, owner or `app.jump:<installationId>`),
@@ -159,7 +160,7 @@ export function kernelHomeResolver(deps: KernelHomeResolverDeps): HomeResolver {
         owner = id;
       }
       if (req.executionContext === 'terminal-session') {
-        // Until stream T, the System Terminal runs as root; never as an app or another user.
+        // The session's own user (stream T); root only for the owner before the ownership apply. Never an app or another user.
         if (app && app.uid !== 0 && (app.uid !== owner.uid || app.gid !== owner.gid)) {
           throw new HomeDeniedError('not-authorized', 'a Terminal session runs as its own user only');
         }

@@ -25,6 +25,10 @@
       "import": "./dist/os-auth.js",
       "types": "./dist/os-auth.d.ts"
     },
+    "./lifecycle-secret": {
+      "import": "./dist/lifecycle-secret.js",
+      "types": "./dist/lifecycle-secret.d.ts"
+    },
     "./shell-peer": {
       "import": "./dist/shell-peer.js",
       "types": "./dist/shell-peer.d.ts"

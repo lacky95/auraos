@@ -41,7 +41,7 @@ import {
   OWN_API_RE, browserBoundaryError, classifyHost, hostListed, hostParses, hostPolicy, isShellOrigin, originOf, requestEdge,
 } from './host-policy.mjs';
 import { stripCookies, stripShellCredentials } from './shell-credentials.mjs';
-import { EMBEDDER_PARAM } from './terminal-embed.mjs';
+import { EMBEDDER_PARAM, SESSION_HOST_APPS } from './terminal-embed.mjs';
 
 export { SAME_ORIGIN_HEADER, classifyHost } from './host-policy.mjs';
 
@@ -72,6 +72,7 @@ const EXACT_ORIGIN_RE = /^https?:\/\/[a-z0-9.-]+(?::\d{1,5})?$/;
  * arrive from the Shell or an embedder; `frame-ancestors` decides where it shows.
  */
 const OWN_ORIGIN_ONLY_APPS = new Set(['com.aura.terminal']);
+
 
 /**
  * Apps whose pages their own origin may not frame. Aura Browser frames any
@@ -387,6 +388,17 @@ export function createAppHostRouter({
     });
   }
 
+  /**
+   * D69 (stream T): a System Terminal instance is one user's session host.
+   * Once the slot's instance is known, the App Host rule is decided again on
+   * that instance, so the access decision checks it belongs to the user whose
+   * session this is (decide.ts `sessionHostReachable`). Any other app: yes.
+   */
+  async function sessionHostGate(route, req, method, t) {
+    if (!SESSION_HOST_APPS.has(t.appId)) return true;
+    return surfaceGate({ subject: 'app-hosts', method, appId: t.appId, instanceId: t.instanceId, identity: hostIdentity(route, req) });
+  }
+
   /** Asks for a start, once at a time. `start()` claims the slot in the lifecycle. */
   function startSlotOne({ record }) {
     const scope = record.instanceScope.kind === 'user' ? `user:${record.instanceScope.userId}` : 'shared';
@@ -528,6 +540,7 @@ export function createAppHostRouter({
     if (t.missing) return page(404, 'No app here', 'This app has no page at this address.');
     if (t.notReady) return page(503, `${t.appName} is not ready`, 'No running instance holds this address. Open the app again from the AuraOS desktop.');
     if (t.starting) return page(503, `Starting ${t.appName}…`, 'This page reloads by itself when it is up.', { refresh: 2 });
+    if (!(await sessionHostGate(route, req, req.method, t))) return page(403, 'Request refused', 'This Terminal belongs to another user.');
     const headers = appRequestHeaders(req, 'app-hosts-http');
     for (const [k, v] of Object.entries({ ...forwardedHeaders(req, edge), ...identityHeaders(t), ...activityHeaders(req.url, t.instanceId), [APP_HOST_ROUTE_HEADER]: 'host' })) headers.push(k, v);
     const ownerSsr = await ownerSsrHeader(route, req, session, t);
@@ -587,6 +600,7 @@ export function createAppHostRouter({
     } catch { return fail(503, 'Service Unavailable'); }
     if (t.missing) return fail(404, 'Not Found');
     if (t.starting || t.notReady) return fail(503, 'Service Unavailable');
+    if (!(await sessionHostGate(route, req, 'UPGRADE', t))) return fail(403, 'Forbidden');
     const extra = { ...forwardedHeaders(req, edge), ...identityHeaders(t), ...activityHeaders(req.url, t.instanceId), [APP_HOST_ROUTE_HEADER]: 'host' };
     // D89 B4: the Terminal's PTY on its App Host gets the shell's relay claim for this upgrade.
     const relay = relayClaimOf({ appId: t.appId, instanceId: t.instanceId, method: req.method, path: url, session });

@@ -1,6 +1,6 @@
 import * as core from '@aura/core';
 import type { AccessPrincipal, InstancePrincipal, Principal } from '@aura/core';
-import { OWNER_AGENT_APPS, OWNER_AGENT_EXCLUDED_TARGETS } from './identify.ts';
+import { OWNER_AGENT_APPS, OWNER_AGENT_EXCLUDED_TARGETS, SESSION_HOST_APPS } from './identify.ts';
 import type {
   AccessReason, AccessRule, Decide, DecideInput, DecideResult, PolicyResource, PolicyTransport,
 } from './types.ts';
@@ -22,6 +22,19 @@ import type {
  * this system's is refused (`foreign-system`); its role is never read. A
  * member (I.2) satisfies no `owner` level; on an `app-permission` rule it
  * holds only its own `user` grants (core `Authorizer`).
+ *
+ * D89 B6: an address is never a principal. A call through `/api/proxy` is
+ * decided on its credential like any other (the `proxy-upstream` rules),
+ * and an owner agent's upstream (OWNER_AGENT_APPS) takes the `owner` level
+ * only, never `app-permission`.
+ *
+ * D69 (stream T): a System Terminal instance is ONE user's session host.
+ * Whoever reaches its upstream (its PTY, MCP, session API: `proxy-upstream`)
+ * must act for that user (`actingUser`, the user an instance acts for,
+ * the operator for the owner), whatever level let them in: the owner's login
+ * never reaches a member's sessions, and an unclaimed pool member nobody's.
+ * A user's own session host (another of their Terminal instances: the
+ * session router, MCP across instances) reaches theirs (`own-session`).
  */
 
 export interface DecideDeps {
@@ -30,6 +43,49 @@ export interface DecideDeps {
   ownerAgent?(principal: InstancePrincipal): boolean;
   /** D63: the owner's switch (`freshAuthRequiresHttps`). Absent: its default, off. */
   freshAuthRequiresHttps?(): Promise<boolean>;
+  /**
+   * D69: the user an instance belongs to (its `owner`); null for an
+   * unclaimed pool member or an unknown instance. Absent: session hosts are
+   * refused to everyone (fail closed).
+   */
+  instanceOwner?(instanceId: string): string | null;
+}
+
+/**
+ * The user a principal acts for (D46, D69): a user, the user an instance acts
+ * for (its token's `u` or its owner, identify.ts), and the owner for the host
+ * operator and an API key (both the owner's, host-issued, in the alpha).
+ * Null for anyone else: never a guess.
+ */
+export function actingUser(p: AccessPrincipal | { kind: 'operator' }): string | null {
+  const q = p as AccessPrincipal & { userId?: unknown };
+  if (q.kind === 'operator' || q.kind === 'apiKey') return core.DEFAULT_OWNER_ID;
+  if ((q.kind === 'user' || q.kind === 'instance') && typeof q.userId === 'string' && q.userId) return q.userId;
+  return null;
+}
+
+/**
+ * D69: whether `principal` may reach this session host target. Only for a
+ * `proxy-upstream` target of a SESSION_HOST_APPS app; any other is not a
+ * session host and passes. A named instance must belong to the user the
+ * caller acts for; a bare app id (the route then picks the caller's own
+ * instance) needs a caller that acts for a user at all.
+ */
+export function sessionHostReachable(
+  principal: AccessPrincipal, rule: AccessRule, resource: PolicyResource, deps: Pick<DecideDeps, 'instanceOwner'>,
+): boolean {
+  if (rule.target !== 'proxy-upstream' || !resource.appId || !SESSION_HOST_APPS.has(resource.appId)) return true;
+  const user = actingUser(principal);
+  if (!user) return false;
+  if (!resource.instanceId) return true;
+  const owner = deps.instanceOwner?.(resource.instanceId) ?? null;
+  return owner !== null && owner === user;
+}
+
+/** A session host of the same user calling another of that user's (stream T: the session router, MCP). */
+function ownSessionHost(p: AccessPrincipal, resource: PolicyResource): boolean {
+  return p.kind === 'instance' && !p.sidecar && SESSION_HOST_APPS.has(p.appId) && !!resource.appId && SESSION_HOST_APPS.has(resource.appId)
+    && typeof p.userId === 'string' && !!p.userId;
 }
 
 // ── fresh authentication and transport (D18, D63) ───────────────────────────
@@ -186,21 +242,20 @@ async function evaluate(input: DecideInput, deps: DecideDeps): Promise<DecideRes
 
   const via = input.auth.via;
   const refusedAs: AccessReason = principal.kind === 'anonymous' ? 'unauthenticated' : 'wrong-principal';
-  // D28: a network-identified caller is good for a `networkCaller` rule and nothing else,
-  // and never for an owner agent's upstream (the Terminal's PTY, MCP and sessions,
-  // aurashelld's MCP; H2). D89 B3: not even the System Terminal's address: an address is
-  // no credential, so an owner agent proves itself by its instance token (matchLevel).
-  if (via === 'network') {
-    if (!rule.networkCaller) return deny('unauthenticated');
-    if (rule.target === 'proxy-upstream' && resource.appId && OWNER_AGENT_APPS.has(resource.appId)) return deny('wrong-target');
-    return allow('network-caller');
-  }
   if (rule.credentials && !(via && rule.credentials.includes(via))) return deny(refusedAs);
 
-  const { granted, failure } = await matchLevel(input, rule, deps);
-  if (!granted) return deny(failure);
+  const matched = await matchLevel(input, rule, deps);
+  let granted = matched.granted;
+  // An owner agent's upstream (the Terminal's PTY, MCP and sessions, aurashelld's
+  // MCP; H2, D89 B3/B6): the owner level only, or (D69) its user's own session host.
+  if (rule.target === 'proxy-upstream' && resource.appId && OWNER_AGENT_APPS.has(resource.appId) && granted !== 'owner') {
+    if (ownSessionHost(principal, resource)) granted = 'own-session';
+    else return deny(granted ? 'wrong-target' : matched.failure);
+  }
+  if (!granted) return deny(matched.failure);
+  if (!sessionHostReachable(principal, rule, resource, deps)) return deny('not-session-owner');
 
-  let reason = granted;
+  let reason: AccessReason = granted;
   const target = await targetPermissionsHeld(deps, rule, resource, input.strict);
   if (target.outcome !== 'allow') return target;
   if (target.reason === 'auto-granted') reason = 'auto-granted';
@@ -225,4 +280,18 @@ export function createDecide(deps: DecideDeps): Decide {
 }
 
 /** The live decision, on the shell's `Authorizer`. */
-export const decide: Decide = (input) => createDecide({ authorizer: core.getAuthServices().authorizer, freshAuthRequiresHttps: () => freshAuthRequiresHttps() })(input);
+export const decide: Decide = (input) => createDecide({
+  authorizer: core.getAuthServices().authorizer,
+  freshAuthRequiresHttps: () => freshAuthRequiresHttps(),
+  instanceOwner: (id) => liveInstanceOwner(id),
+})(input);
+
+/** The live owner of an instance: null for an unknown one or an unclaimed pool member. */
+export function liveInstanceOwner(instanceId: string): string | null {
+  try {
+    const inst = core.getAppManager().getInstance(instanceId) as { owner?: string; inPool?: boolean } | undefined;
+    return inst && !inst.inPool && typeof inst.owner === 'string' ? inst.owner : null;
+  } catch {
+    return null;
+  }
+}

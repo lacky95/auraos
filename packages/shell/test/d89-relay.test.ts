@@ -51,7 +51,7 @@ test('B4: the claim names who the shell authorized, never a credential', () => {
     { userId: 'u1', sid: 's1', caller: 'owner-through:com.aura.settings' });
   assert.deepEqual(relayCaller({ kind: 'instance', appId: 'com.aura.terminal', instanceId: 'com.aura.terminal-2', userId: 'u1', verification: 'verified' } as AccessPrincipal),
     { userId: 'u1', caller: 'instance:com.aura.terminal-2' });
-  assert.deepEqual(relayCaller({ kind: 'operator', verification: 'verified' } as AccessPrincipal), { caller: 'operator' });
+  assert.deepEqual(relayCaller({ kind: 'operator', verification: 'verified' } as AccessPrincipal), { userId: 'default', caller: 'operator' }, 'the operator acts for the owner (D69: the claim names the user a session host serves)');
   assert.deepEqual(relayCaller(null), { caller: 'anonymous' });
 });
 
@@ -117,7 +117,7 @@ test('B7: a token from an address its instance does not have is a mismatch; noth
   assert.equal(tokenAddressMismatch(tokenInst(), '127.0.0.1', addrMgr), true, 'a container token from the shell\'s own namespace');
   assert.equal(tokenAddressMismatch(tokenInst({ instanceId: 'com.a.proot-1' }), '127.0.0.1', addrMgr), false, 'no addresses (PRoot): never flagged');
   assert.equal(tokenAddressMismatch(tokenInst({ sidecar: 'db' }), '172.20.0.9', addrMgr), false, 'a sidecar has its own container');
-  assert.equal(tokenAddressMismatch({ ...tokenInst(), via: 'network' }, '172.20.0.9', addrMgr), false, 'only a token');
+  assert.equal(tokenAddressMismatch({ ...tokenInst(), via: 'gateway' }, '172.20.0.9', addrMgr), false, 'only a token');
   assert.equal(tokenAddressMismatch(tokenInst(), null, addrMgr), false, 'no peer');
   assert.equal(tokenAddressMismatch(tokenInst(), '172.20.0.9', null), false, 'no manager');
   assert.equal(tokenAddressMismatch(tokenInst(), '172.20.0.9', { getInstanceAddresses: () => { throw new Error('x'); } }), false);

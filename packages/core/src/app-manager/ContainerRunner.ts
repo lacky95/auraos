@@ -11,6 +11,7 @@ import { containerContextEnv, containerContextMounts } from './spawn/contextArgs
 import { containerNetworkArgs, containerNetworkEnv, containerShellBase, rawSocketArgs, terminalNetworkUser } from './spawn/networkArgs.js';
 import { TERM_NETWORK_CONTAINER_LABEL, TermNetworks, type TermNetwork } from './TermNetworks.js';
 import { containerIdentityArgs, isNonRootIdentity, writeIdentityFiles } from './spawn/identityArgs.js';
+import { readKernelSessionSecret, sessionHostUser, terminalSessionArgs, writeSessionSecret } from './spawn/sessionArgs.js';
 import type { RuntimeCapabilities } from '../runtimes/types.js';
 // Value import, but MountManager imports ContainerRunner type-only, so there
 // is no runtime cycle.
@@ -495,6 +496,8 @@ export class ContainerRunner implements SandboxRunner {
     // lifecycle token reaches the container through the client's env
     // (`-e AURA_LIFECYCLE_TOKEN` without a value), not its command line.
     const lifecycleToken = newLifecycleToken();
+    // A session host's server takes its token from a one-time file, not its env (stream T).
+    if (sessionHostUser(appId, ctx)) writeSessionSecret(this.dataDir, instanceId, lifecycleToken, ctx.identity ?? { uid: 0, gid: 0 });
     const r = spawnSync('docker', args, {
       stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000, encoding: 'utf-8',
       env: { ...process.env, AURA_LIFECYCLE_TOKEN: lifecycleToken },
@@ -883,13 +886,16 @@ export class ContainerRunner implements SandboxRunner {
       // Per-start shell→app lifecycle secret (lifecycleGate.ts). Name only:
       // docker takes the value from spawn()'s env, so it stays off the
       // command line. After contextEnv, like the instance token.
-      '-e', 'AURA_LIFECYCLE_TOKEN',
+      // A session host takes it from a one-time file instead (spawn/sessionArgs.ts): never in its env.
+      ...(sessionHostUser(appId, ctx) ? [] : ['-e', 'AURA_LIFECYCLE_TOKEN']),
       // D89 B4: a strict relay mode (app-sdk shell-peer); nothing in the default `warn`.
       ...Object.entries(relayStrictEnv()).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
       // A Terminal's private listen subnet and shell peer (spawn/networkArgs.ts, D58).
       ...containerNetworkEnv({ term, shellHostname: this.shellHostname }),
       // The process identity (spawn/identityArgs.ts): root, or the installation's app uid (P5-3).
       ...containerIdentityArgs(ctx.identity, { appDataVolume, instanceId }),
+      // A System Terminal is its user's session host (spawn/sessionArgs.ts, stream T, D69).
+      ...terminalSessionArgs(appId, ctx, { appDataVolume, instanceId }),
       BASE_IMAGE,
     );
     a.push(...entrypoint);
@@ -1184,7 +1190,8 @@ export class ContainerRunner implements SandboxRunner {
         address: networks?.[termNet ?? SHARED_NETWORK]?.IPAddress || undefined,
         addresses: networkAddresses(networks),
         ...(termNet ? { dialByAddress: true } : {}),
-        lifecycleToken: env['AURA_LIFECYCLE_TOKEN'] || undefined,
+        // A session host has none in its env: the kernel's own copy (spawn/sessionArgs.ts).
+        lifecycleToken: env['AURA_LIFECYCLE_TOKEN'] || readKernelSessionSecret(this.dataDir, instanceId) || undefined,
         ...(inspect.Config?.Labels?.[PREVIEW_LABEL] ? { preview: inspect.Config.Labels[PREVIEW_LABEL] } : {}),
         ...(inspect.Config?.User ? { user: inspect.Config.User } : {}),
       });

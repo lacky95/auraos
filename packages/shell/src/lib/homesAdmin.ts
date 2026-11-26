@@ -81,6 +81,34 @@ export async function postOwnershipApply(ctx: Ctx): Promise<Response> {
   }
 }
 
+/**
+ * Stream T, the 5-main deploy's recovery: restore one ownership journal
+ * exactly (previous owner and mode of every entry, newest first). The
+ * owner's decision at `fresh`, audited; the journal is named by its file
+ * name in the journal directory only.
+ */
+export async function postOwnershipRevert(ctx: Ctx): Promise<Response> {
+  const b = await body(ctx);
+  if (b instanceof Response) return b;
+  const journal = typeof b['journal'] === 'string' ? core.ownershipJournalPath(dataDir(), b['journal']) : null;
+  if (!journal) return json({ error: 'invalid-request', message: 'expected { journal }: a journal name from the apply (aura admin homes ownership --apply)' }, 400);
+  const name = journal.split('/').pop()!;
+  const actor = await ownerAction(ctx, {
+    action: 'admin.change', payload: { ownershipRevert: { journal: name } }, level: 'fresh',
+    title: `Revert the ownership apply ${name}`,
+    details: ['Every entry of that journal gets its previous owner and mode back (the release before 5-main reads them as root).'],
+  });
+  if (actor instanceof Response) return actor;
+  try {
+    const r = core.revertOwnershipJournal(journal);
+    await auditOwner(actor, core.HOME_AUDIT_ACTIONS.ownershipReverted, { target: `ownership-journal:${name.slice(0, 40)}`, detail: { restored: r.restored, skipped: r.skipped.length } });
+    return json({ ok: true, journal: name, restored: r.restored, skipped: r.skipped });
+  } catch (err) {
+    await auditOwner(actor, core.HOME_AUDIT_ACTIONS.ownershipReverted, { target: `ownership-journal:${name.slice(0, 40)}`, outcome: 'failed' });
+    return denied(err);
+  }
+}
+
 function appTarget(b: Record<string, unknown>): { appId: string; userId?: string } | Response {
   const { appId, userId } = b as { appId?: unknown; userId?: unknown };
   if (typeof appId !== 'string' || !appId) return json({ error: 'invalid-request', message: 'expected { appId }' }, 400);

@@ -3,7 +3,7 @@ import * as core from '@aura/core';
 import { authenticate } from '../../../lib/auth.ts';
 import { agentHooksDisplay } from '../../../lib/approvals/display.ts';
 import { approvedOrAsk, liveApprovalDeps } from '../../../lib/approvals/service.ts';
-import { grantedAppCaller } from '../../../lib/terminalCaller.ts';
+import { callerOwnsTerminal, grantedAppCaller } from '../../../lib/terminalCaller.ts';
 import { createAgentHooksRoute } from '../../../lib/terminalAgents.ts';
 import { fetchTerminal } from '../../../../server/terminal-embed.mjs';
 
@@ -16,6 +16,7 @@ const TIMEOUT_MS = 10_000;
 
 const handle = createAgentHooksRoute({
   caller: grantedAppCaller,
+  owns: callerOwnsTerminal,
   approve: async (request, change) => {
     const principal = await authenticate(request);
     if (principal instanceof Response) return principal;

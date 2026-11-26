@@ -137,7 +137,10 @@ test('registry: every option has a title, a description, a source and the fresh 
     assert.ok(['policy', 'env', 'record', 'file', 'reserved'].includes(o.source), o.id);
     // Every security option needs the password; the shell mode's switch is one click (D57).
     assert.equal(o.change, o.id === 'shell-mode' ? 'session' : 'fresh', `${o.id}: the change level`);
-    if (o.source === 'env' || o.source === 'file') assert.match(o.env ?? '', /^AURA_[A-Z_]+$/);
+    // The one file option without a host variable: the 5-main deploy window, which an env value would
+    // keep open past its 6 hours (stream T); it is read from its root-owned switch file only.
+    if (o.source === 'env' || (o.source === 'file' && o.id !== 'terminal-root-transition')) assert.match(o.env ?? '', /^AURA_[A-Z_]+$/);
+    if (o.id === 'terminal-root-transition') assert.equal(o.env, undefined, 'no host variable opens the deploy window');
     if (o.source === 'file') assert.match(o.file ?? '', /^aura\/[a-z-]+$/);
     if (o.type === 'enum') assert.ok(o.values?.includes(o.default as string), `${o.id}: default is a value`);
   }

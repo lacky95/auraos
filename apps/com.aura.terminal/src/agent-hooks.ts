@@ -42,18 +42,20 @@ ${HOOK_HEADER}, see agent-hooks.ts).
 # reparented to the container's PID 1 (node, which never reaps) and stays a
 # zombie until the 1035-pid cap is hit.
 # The post carries the session's instance token (D89 B3: an address is no
-# credential), read from a file descriptor so it is not on curl's command line.
+# credential) and the session's own hook token (stream T: the Terminal refuses
+# an event without it), both read from a file descriptor so neither is on
+# curl's command line.
 src="\${1:-claude}"
 if [ "$src" = codex ]; then payload="\${2:-}"; else payload="$(cat)"; fi
-[ -n "\${AURA_TERM_SESSION:-}" ] && [ -n "$payload" ] || exit 0
+[ -n "\${AURA_TERM_SESSION:-}" ] && [ -n "\${AURA_TERM_HOOK_TOKEN:-}" ] && [ -n "$payload" ] || exit 0
 command -v curl >/dev/null 2>&1 || exit 0
 inst="\${AURA_TERM_SESSION%%#*}"
 base="\${OS_API_BASE:-http://localhost:3000}"
-auth=/dev/null
-[ -n "\${AURA_INSTANCE_TOKEN:-}" ] && auth=/dev/fd/3
+hdr="x-aura-hook-token: $AURA_TERM_HOOK_TOKEN"
+[ -n "\${AURA_INSTANCE_TOKEN:-}" ] && hdr="$hdr"$'\\n'"Authorization: Bearer $AURA_INSTANCE_TOKEN"
 printf '{"session":"%s","source":"%s","payload":%s}' "$AURA_TERM_SESSION" "$src" "$payload" \\
-  | curl -s -m 2 -o /dev/null -X POST -H 'content-type: application/json' -H "@$auth" --data-binary @- \\
-      "$base/api/proxy/$inst/api/sessions/events" 3<<<"Authorization: Bearer \${AURA_INSTANCE_TOKEN:-}" >/dev/null 2>&1
+  | curl -s -m 2 -o /dev/null -X POST -H 'content-type: application/json' -H @/dev/fd/3 --data-binary @- \\
+      "$base/api/proxy/$inst/api/sessions/events" 3<<<"$hdr" >/dev/null 2>&1
 exit 0
 `;
 

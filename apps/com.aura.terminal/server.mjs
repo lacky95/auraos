@@ -2,12 +2,15 @@
 // standalone Astro server plus the PTY WebSocket on /ws — what the dev server
 // gets from ptyWsIntegration in astro.config.mjs.
 process.env.ASTRO_NODE_AUTOSTART = 'disabled';
-const { RELAY_CLAIM_HEADER, checkShellRelay } = await import('@aura/app-sdk/shell-peer');
+// Stream T: take this start's lifecycle token from its one-time file first (app-sdk lifecycle-secret), before
+// anything could start a session; it is never in this server's env (a session host's sessions share its uid).
+(await import('@aura/app-sdk/lifecycle-secret')).lifecycleSecret();
+const { RELAY_CLAIM_HEADER, checkShellRelay, relayServesSessionUser } = await import('@aura/app-sdk/shell-peer');
 
-/** The PTY upgrade came through the shell (app-sdk shell-peer, D89 B4 relay claim). */
-const shellRelayed = async (req) => (await checkShellRelay({
+/** The PTY upgrade came through the shell (app-sdk shell-peer, D89 B4 relay claim), for this instance's user (D69). */
+const shellRelayed = async (req) => relayServesSessionUser(await checkShellRelay({
   peer: req.socket.remoteAddress, header: req.headers[RELAY_CLAIM_HEADER], method: req.method ?? 'GET', path: req.url ?? '/',
-})).ok;
+}));
 
 const { startServer } = await import('./dist/server/entry.mjs');
 const { server } = startServer();

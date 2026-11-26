@@ -63,12 +63,6 @@ export interface AccessRule {
    */
   credentials?: readonly AccessVia[];
   /**
-   * D28: a caller without any credential counts as the app instance whose
-   * container network address it calls from (identify.ts `networkInstance`),
-   * and that is enough for this rule. Never a gateway or token caller.
-   */
-  networkCaller?: true;
-  /**
    * What the route checked itself before Phase 3, which moved here (D36). The
    * middleware applies it in EVERY access mode; the rest of the rule only in
    * `enforce`. Permissions are read as before (core's MVP auto-grant counts).
@@ -190,10 +184,12 @@ export const ACCESS_REASONS = [
   'public', 'owner', 'own-instance', 'app-permission', 'system',
   // allowed only because core has not enforced this permission yet (never in `enforce`)
   'auto-granted',
-  // D28: a tokenless call from an app container's network address
-  'network-caller',
+  // D69 (stream T): a session host's upstream, reached by its own user's session host
+  'own-session',
   // refused
   'unclassified', 'unauthenticated', 'wrong-principal', 'wrong-target',
+  // D69 (stream T): a session host instance of another user (or of nobody yet)
+  'not-session-owner',
   'missing-permission', 'missing-target-permission', 'rule-denied', 'ambiguous-rule',
   // D85 A1: a principal of another Aura, refused before any role or grant rule
   'foreign-system',
@@ -209,8 +205,6 @@ export const ACCESS_VIAS = [
   // a signed App Host gateway claim / a verified App Host cookie session
   'gateway', 'app-host',
   'referer-hint', 'instance-id-hint', 'internal', 'sse-mux',
-  // D28: no credential, but the container network address of a running instance
-  'network',
   // a credential that isn't a valid Aura one / one that can't be checked right now
   'foreign-or-invalid', 'unverified',
   'none',
@@ -315,7 +309,7 @@ export interface SurfaceIdentity {
   /** Hints for the report's app column only. */
   referer: string | null;
   instanceId: string | null;
-  /** The socket peer address: names an app container for a `networkCaller` rule (D28). */
+  /** The socket peer address: report-only signals (D89 B7), never identity (D28 removed, B6). */
   peer?: string | null;
 }
 
@@ -411,7 +405,7 @@ export interface DecideInput {
   action: PolicyAction;
   resource: PolicyResource;
   transport: PolicyTransport;
-  /** `via`: how the principal was established, for `credentials` and `networkCaller`. */
+  /** `via`: how the principal was established, for `credentials`. */
   auth: { fresh: boolean; via?: AccessVia };
   /**
    * `enforce` (D36 fold of core's ENFORCED_PERMISSIONS): a permission core

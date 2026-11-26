@@ -27,16 +27,21 @@
  * D89 B4: the address is not proof (D28). The shell signs each call it relays
  * to such an app with a relay claim (`x-aura-relay`, ./relayClaim.ts), keyed
  * from this start's lifecycle token. `checkShellRelay` verifies it on a call
- * from the shell's address: in `warn` (the default) a missing or invalid
- * claim is reported in the app's log and the call is still served; in
- * `strict` (`AURA_RELAY_STRICT=strict`, the `relay-strict` security option)
- * it is refused. Loopback and the container's own addresses are the app
- * itself and need no claim. `fromShell` stays the address-only check.
+ * from the shell's address: in `strict` (the default since 5-main, the
+ * `relay-strict` security option) a missing or invalid claim is refused; in
+ * `warn` (`AURA_RELAY_STRICT=warn`, a rollback aid) it is reported in the
+ * app's log and still served. The kernel's own lifecycle calls (the runner's
+ * hooks and health probes) carry this start's lifecycle token instead
+ * (`x-aura-lifecycle`), which proves the kernel just as well. Loopback and
+ * the container's own addresses are the app itself and need no claim.
+ * `fromShell` stays the address-only check.
  */
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import { RELAY_CLAIM_HEADER, relayKey, verifyRelayClaim, type RelayClaim } from './relayClaim.js';
+import { lifecycleSecret } from './lifecycle-secret.js';
 
 export { RELAY_CLAIM_HEADER, type RelayClaim };
 
@@ -109,7 +114,8 @@ export const fromShell = createShellPeer({
 
 // ── D89 B4: the relay claim ────────────────────────────────────────────────
 
-export type RelayVerdict = 'valid' | 'missing' | 'invalid' | 'self';
+/** `kernel`: the call carried this start's lifecycle token (the runner's lifecycle calls). */
+export type RelayVerdict = 'valid' | 'missing' | 'invalid' | 'self' | 'kernel';
 
 export interface ShellRelayResult {
   /** Serve the call. */
@@ -122,11 +128,11 @@ export interface ShellRelayResult {
 
 export interface ShellRelayDeps {
   peerKind(peer: string | null | undefined): Promise<PeerKind | null>;
-  /** This start's lifecycle token (AURA_LIFECYCLE_TOKEN); the claim key derives from it. */
+  /** This start's lifecycle token (lifecycle-secret.ts: its env, or a session host's one-time file); the claim key derives from it. */
   lifecycleToken(): string | undefined;
   /** This instance's id (APP_INSTANCE_ID). */
   instanceId(): string | undefined;
-  /** `AURA_RELAY_STRICT`: `strict` refuses; anything else is `warn`. */
+  /** `AURA_RELAY_STRICT`: `warn` serves and reports; anything else (unset included) is `strict`. */
   mode(): string | undefined;
   /** A missing or invalid claim on a call from the shell's address (never the claim's value). */
   report?(verdict: 'missing' | 'invalid', call: { method: string; path: string; mode: 'warn' | 'strict' }): void;
@@ -149,11 +155,14 @@ export function createShellRelay(deps: ShellRelayDeps) {
    */
   return async function checkShellRelay(call: {
     peer: string | null | undefined; header: string | string[] | null | undefined; method: string; path: string;
+    /** The `x-aura-lifecycle` value, if any: the kernel's own call. */
+    lifecycle?: string | string[] | null | undefined;
   }): Promise<ShellRelayResult> {
     const kind = await deps.peerKind(call.peer);
     if (kind === null) return { ok: false, verdict: null, claim: null };
     if (kind === 'self') return { ok: true, verdict: 'self', claim: null };
-    const mode = (deps.mode() ?? '').trim().toLowerCase() === 'strict' ? 'strict' : 'warn';
+    if (lifecycleTokenMatches(call.lifecycle, deps.lifecycleToken())) return { ok: true, verdict: 'kernel', claim: null };
+    const mode = (deps.mode() ?? '').trim().toLowerCase() === 'warn' ? 'warn' : 'strict';
     const header = Array.isArray(call.header) ? call.header[0] : call.header;
     const k = key();
     const instanceId = deps.instanceId();
@@ -165,6 +174,15 @@ export function createShellRelay(deps: ShellRelayDeps) {
     try { deps.report?.(verdict, { method: call.method, path: call.path, mode }); } catch { /* report-only */ }
     return { ok: mode === 'warn', verdict, claim: null };
   };
+}
+
+const digest = (v: string): Buffer => createHash('sha256').update(v).digest();
+
+/** Whether `presented` is this start's lifecycle token (constant time). */
+function lifecycleTokenMatches(presented: string | string[] | null | undefined, expected: string | undefined): boolean {
+  const p = Array.isArray(presented) ? presented[0] : presented;
+  if (!p || !expected) return false;
+  return timingSafeEqual(digest(p), digest(expected));
 }
 
 const REPORT_EVERY_MS = 60_000;
@@ -188,11 +206,35 @@ function reportRelay(verdict: 'missing' | 'invalid', call: { method: string; pat
 /** The live relay check: the live address check, this start's lifecycle token and AURA_RELAY_STRICT. */
 export const checkShellRelay = createShellRelay({
   peerKind: (peer) => fromShell.peerKind(peer),
-  lifecycleToken: () => process.env['AURA_LIFECYCLE_TOKEN'] || undefined,
+  lifecycleToken: () => lifecycleSecret(),
   instanceId: () => process.env['APP_INSTANCE_ID'] || process.env['AURA_INSTANCE_ID'] || undefined,
   mode: () => process.env['AURA_RELAY_STRICT'],
   report: reportRelay,
 });
+
+/**
+ * D69 (stream T): an app instance that hosts ONE user's sessions (the System
+ * Terminal; the runtime names the user in `AURA_SESSION_USER`) serves only
+ * calls the shell authorized for that user. The shell checks session
+ * ownership before it relays (principal = instance owner); this is the same
+ * check at the instance, on the claim it signed:
+ *
+ *   the claim names a user (`u`)   it must be this instance's user
+ *   it names none                  only the shell's own call (`c: system`)
+ *   self, kernel                   the instance itself, the kernel's lifecycle call
+ *   no claim (warn mode only)      as `warn` serves it
+ *
+ * Without `AURA_SESSION_USER` (any other app, an app started by hand) the
+ * relay result alone decides.
+ */
+export function relayServesSessionUser(
+  r: Pick<ShellRelayResult, 'ok' | 'verdict' | 'claim'>, sessionUser: string | undefined = process.env['AURA_SESSION_USER'] || undefined,
+): boolean {
+  if (!r.ok) return false;
+  if (!sessionUser || r.verdict !== 'valid' || !r.claim) return true;
+  if (r.claim.u !== undefined) return r.claim.u === sessionUser;
+  return r.claim.c === 'system';
+}
 
 /** The refusal an HTTP route answers to a caller that is not the shell. */
 export function shellOnlyResponse(path: string): Response {

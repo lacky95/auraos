@@ -75,7 +75,10 @@ const CONTEXT_Q31 = decide(5,
   'Holds secrets and is never public. The Settings app manages it from an app context today; Q31 gives other apps only keys approved per instance.');
 
 const PROXY_ACCESS = why(
-  'D28: the owner, and a tokenless call from an app container (Claude Code\'s MCP URLs, the Terminal\'s session calls, the agent hooks), known by its network address. The SDK never sends a token on this path, and a gateway call stays refused. Caller-scoped grants are Phase 5.');
+  'D89 B6: the owner, and any app instance by its own token (Claude Code and Codex MCP entries send `Bearer ${AURA_INSTANCE_TOKEN}` by reference, B5; the Terminal\'s session calls and agent hooks send it too). An address is no caller any more (D28 removed), and a gateway call or an API key stays refused. An owner agent\'s upstream (Terminal, aurashelld) takes the owner only (decide.ts), and a Terminal instance only its own user (D69). Caller-scoped grants are later.');
+
+/** D89 B6: the credentials a machine call through /api/proxy may present (no gateway claim, no API key). */
+const PROXY_CREDENTIALS = ['login-session', 'operator-ticket', 'instance-token'] as const;
 
 const STORAGE_ACCESS = why(
   'Only app <id> (and the owner), and only while the app declares storage.read / storage.write. The value is the caller\'s user\'s (D46), from the verified principal.');
@@ -413,6 +416,9 @@ const routes: RouteAccessManifest['routes'] = {
   '/api/admin/identity/ownership-apply': {
     methods: { POST: ownerManages('Applies the reviewed dry-run ownership report (P5-2, D70) for its digest, journaled: the owner decides with the password (fresh).') },
   },
+  '/api/admin/identity/ownership-revert': {
+    methods: { POST: ownerManages('Stream T, the 5-main deploy\'s recovery: restores one ownership-apply journal exactly (previous owner and mode); the owner decides with the password (fresh).') },
+  },
   '/api/admin/homes/import': {
     methods: { POST: ownerManages('Copies named paths from the owner\'s Private Home into an App Home (Q15): a dry run is an owner view, the copy the owner\'s decision (fresh).') },
   },
@@ -548,10 +554,11 @@ const routes: RouteAccessManifest['routes'] = {
     methods: { GET: rule(OWNER, 'app') },
     variants: [{
       // D29: TerminalX finds the Terminal instances whose sessions the owner let it list.
+      // D69: a Terminal instance finds its user's others (the session router); the route lists the caller's user's only.
       id: 'terminal-instances',
       methods: ['GET'],
       match: { on: 'param', name: 'id', equals: 'com.aura.terminal' },
-      rule: rule(APP_PERMISSION, 'app', { permissions: ['terminal.sessions.list'] }),
+      rule: rule(['own-instance', 'app-permission', 'owner'], 'app', { permissions: ['terminal.sessions.list'] }),
     }],
   },
   // M2: in every mode, since the route gives a caller with no app identity the whole stream.
@@ -654,8 +661,7 @@ const routes: RouteAccessManifest['routes'] = {
   '/api/interfaces': {
     methods: {
       GET: rule(VERIFIED, 'interface', {
-        networkCaller: true,
-        ...why('The registry lists what apps declare: the owner, any verified app, and a tokenless `curl` from an app container (D28, the documented Terminal tour). Anonymous no longer.'),
+        ...why('The registry lists what apps declare: the owner and any verified app (the documented Terminal tour sends `Authorization: Bearer $AURA_INSTANCE_TOKEN`; D89 B6: no address caller). Anonymous no longer.'),
       }),
       POST: rule(['own-instance'], 'interface', { guard: 'rule', ...why('Registers for the calling instance itself, verified (was a self-asserted hint, every mode).') }),
     },
@@ -714,7 +720,7 @@ const routes: RouteAccessManifest['routes'] = {
     },
   },
   '/api/proxy/[id]/[...path]': {
-    methods: on(ROUTE_METHODS, rule(OWNER, 'proxy-upstream', { networkCaller: true, ...PROXY_ACCESS })),
+    methods: on(ROUTE_METHODS, rule(VERIFIED, 'proxy-upstream', { credentials: PROXY_CREDENTIALS, ...PROXY_ACCESS })),
   },
 };
 

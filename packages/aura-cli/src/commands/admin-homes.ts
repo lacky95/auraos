@@ -17,6 +17,7 @@
  * (fresh) and audited:
  *
  *   aura admin homes ownership --apply <digest>      the reviewed dry run, journaled
+ *   aura admin homes ownership --revert <journal>    restore one apply exactly (stream T's deploy recovery)
  *   aura admin homes import <app> <path...> [--apply] [--personal] [--user <id>]
  *                                            copy from your Private Home into the App Home (dry run first)
  *   aura admin homes reset <app> [--user <id>]       the App Home starts empty at the next start
@@ -95,9 +96,19 @@ export function registerAdminHomes(admin: Command): void {
     .description('The ownership report (P5-2): --dry-run shows what would be chowned, row by row; --apply <digest> applies exactly that report. Never a blanket chown.')
     .option('--dry-run', 'the report only; changes nothing')
     .option('--apply <digest>', 'apply the report you reviewed (its digest), journaled; asks for your password')
+    .option('--revert <journal>', 'restore one apply exactly from its journal (the name --apply printed); asks for your password')
     .option('-o, --output <format>', 'json')
-    .action(async (opts: { dryRun?: boolean; apply?: string; output?: string }) => {
-      if (!!opts.dryRun === !!opts.apply) fail('say which: aura admin homes ownership --dry-run, or --apply <digest> after reviewing it');
+    .action(async (opts: { dryRun?: boolean; apply?: string; revert?: string; output?: string }) => {
+      if ([opts.dryRun, opts.apply, opts.revert].filter(Boolean).length !== 1) {
+        fail('say which: aura admin homes ownership --dry-run, --apply <digest> after reviewing it, or --revert <journal>');
+      }
+      if (opts.revert) {
+        const r = await change<{ journal: string; restored: number; skipped: string[] }>('/api/admin/identity/ownership-revert', { journal: opts.revert });
+        if (opts.output === 'json') { json(r); return; }
+        for (const x of r.skipped) warn(`not restored: ${x}`);
+        ok(`reverted ${r.journal}: ${r.restored} entr${r.restored === 1 ? 'y' : 'ies'} restored`);
+        return;
+      }
       if (opts.apply) {
         const r = await change<{ changed: boolean; journal?: string; rows: Array<{ path: string; kind: string; changed: number; skipped: number }>; notApplied: Array<{ path: string; reason: string }> }>(
           '/api/admin/identity/ownership-apply', { digest: opts.apply });

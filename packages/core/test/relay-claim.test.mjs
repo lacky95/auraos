@@ -60,23 +60,24 @@ test('the key is derived from the lifecycle token, never the token itself', () =
   assert.deepEqual(relayKey('lifecycle-token-of-this-start'), KEY);
 });
 
-test('relay-strict: a D64 registry option, default warn, handed to an app only when strict', () => {
+test('relay-strict: a D64 registry option, strict by default since 5-main (D89 B4), always handed to the app', () => {
   const opt = SECURITY_OPTIONS.find((o) => o.id === 'relay-strict');
   assert.ok(opt, 'registered');
   assert.equal(opt.env, 'AURA_RELAY_STRICT');
-  assert.equal(opt.default, 'warn');
+  assert.equal(opt.default, 'strict');
   assert.deepEqual(opt.values, ['warn', 'strict']);
-  assert.equal(relayStrictMode({}), 'warn');
+  assert.equal(relayStrictMode({}), 'strict');
   assert.equal(relayStrictMode({ AURA_RELAY_STRICT: 'Strict ' }), 'strict');
-  assert.equal(relayStrictMode({ AURA_RELAY_STRICT: 'bogus' }), 'warn');
-  assert.deepEqual(relayStrictEnv({}), {});
-  assert.deepEqual(relayStrictEnv({ AURA_RELAY_STRICT: 'strict' }), { AURA_RELAY_STRICT: 'strict' });
+  assert.equal(relayStrictMode({ AURA_RELAY_STRICT: 'bogus' }), 'strict', 'an invalid value is the default, never warn');
+  assert.equal(relayStrictMode({ AURA_RELAY_STRICT: 'warn' }), 'warn', 'only an explicit warn relaxes it');
+  assert.deepEqual(relayStrictEnv({}), { AURA_RELAY_STRICT: 'strict' });
+  assert.deepEqual(relayStrictEnv({ AURA_RELAY_STRICT: 'warn' }), { AURA_RELAY_STRICT: 'warn' });
   const eff = resolveSecurityOptions({}, { AURA_RELAY_STRICT: 'strict' }, () => null).find((o) => o.id === 'relay-strict');
   assert.equal(eff.value, 'strict');
   assert.equal(eff.effectiveSource, 'env AURA_RELAY_STRICT');
 });
 
-test('a container start carries AURA_RELAY_STRICT only in strict mode', () => {
+test('a container start always carries its AURA_RELAY_STRICT mode (strict by default)', () => {
   const root = mkdtempSync(join(tmpdir(), 'aura-relay-'));
   const prev = process.env.AURA_RELAY_STRICT;
   try {
@@ -91,9 +92,9 @@ test('a container start carries AURA_RELAY_STRICT only in strict mode', () => {
     const args = () => runner.buildDockerArgs('com.aura.terminal-1', 'com.aura.terminal', 4000, manifest, 'aura-com.aura.terminal-1',
       { appDir, instanceDataDir: instDir, home: { kind: 'private', hostPath: '/x', volumeSubpath: 'aura/home/default', logicalPath: '/home/aura', uid: 1000, gid: 1000, mode: 0o700 } }, {}, []);
     delete process.env.AURA_RELAY_STRICT;
-    assert.ok(!args().some((a) => a.startsWith('AURA_RELAY_STRICT')), 'warn: nothing added');
-    process.env.AURA_RELAY_STRICT = 'strict';
-    assert.ok(args().includes('AURA_RELAY_STRICT=strict'), 'strict: in the env');
+    assert.ok(args().includes('AURA_RELAY_STRICT=strict'), 'default: strict in the env');
+    process.env.AURA_RELAY_STRICT = 'warn';
+    assert.ok(args().includes('AURA_RELAY_STRICT=warn'), 'an explicit warn is handed on');
     assert.equal(runner.relayKey('com.aura.terminal-1'), null, 'no start, no key');
   } finally {
     if (prev === undefined) delete process.env.AURA_RELAY_STRICT; else process.env.AURA_RELAY_STRICT = prev;

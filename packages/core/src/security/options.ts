@@ -101,11 +101,22 @@ export const SECURITY_OPTIONS: readonly SecurityOption[] = Object.freeze([
     id: 'relay-strict',
     title: 'Shell relay claim',
     description: 'How the Terminal and aurashelld treat a call from the shell\'s address without a valid relay claim '
-      + '(x-aura-relay, signed per app start; D28/D89 B4). warn (default): it is served as before and reported in the '
-      + 'app\'s log. strict: it is refused; the address alone no longer proves the shell relayed it. Planned to become '
-      + 'strict in 5-main. Applies to app starts after the change.',
-    type: 'enum', values: ['warn', 'strict'], default: 'warn', source: 'env', env: 'AURA_RELAY_STRICT',
-    restartRequired: true, change: 'fresh', since: '2026-11-26', phase: '5-pre2 (D89 B4)',
+      + '(x-aura-relay, signed per app start; D28/D89 B4). strict (default since 5-main): it is refused; the address '
+      + 'alone never proves the shell relayed it. warn: it is served and reported in the app\'s log (the 5-pre2 '
+      + 'migration period; a rollback aid only). Applies to app starts after the change.',
+    type: 'enum', values: ['warn', 'strict'], default: 'strict', source: 'env', env: 'AURA_RELAY_STRICT',
+    restartRequired: true, change: 'fresh', since: '2026-11-26', phase: '5-pre2 (D89 B4), strict by default in 5-main',
+  },
+  {
+    id: 'terminal-root-transition',
+    title: 'Terminal root transition (5-main deploy only)',
+    description: 'The one migration exception of stream T. deploy: while the 5-main deploy migrates the owner\'s Private '
+      + 'Home to uid 1000, the owner\'s System Terminal may still start as root if that home is still root\'s. Honoured '
+      + 'only for a root-owned switch file written less than 6 hours ago, and never for a member. off (default, and once '
+      + 'the window has passed): a Terminal whose user\'s home is not theirs yet does not start (no root fallback); '
+      + 'run `aura admin homes ownership --dry-run`, then `--apply <digest>` (from the host if need be).',
+    type: 'enum', values: ['off', 'deploy'], default: 'off', source: 'file', file: 'aura/terminal-root-transition',
+    restartRequired: false, change: 'fresh', since: '2026-11-26', phase: '5-main (stream T)',
   },
   {
     id: 'host-policy',

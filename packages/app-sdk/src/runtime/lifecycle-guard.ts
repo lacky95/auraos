@@ -16,6 +16,7 @@
  * there is nothing to check against, and the routes answer as before.
  */
 import { createHash, timingSafeEqual } from 'node:crypto';
+import { lifecycleSecret } from '../lifecycle-secret.js';
 import { identityResponseHeaders } from '../context.js';
 import { LIFECYCLE_HEALTH_PATH, LIFECYCLE_TOKEN_HEADER, lifecycleRequestPath } from '../hostRules.js';
 
@@ -35,7 +36,7 @@ function tokenMatches(presented: string, expected: string): boolean {
 export function lifecycleRequestRefused(
   path: string,
   presented: string | string[] | null | undefined,
-  expected: string | undefined = process.env['AURA_LIFECYCLE_TOKEN'],
+  expected: string | undefined = lifecycleSecret(),
 ): boolean {
   const route = lifecycleRequestPath(path);
   if (route === null || !expected) return false;
