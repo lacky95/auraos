@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { getUserMe, patchMyProfile, type UserMeDeps } from '../src/lib/userMe.ts';
 import { actingUserId, localOwnerId, principalUserId } from '../src/lib/userContext.ts';
 import { instanceEventView } from '../src/lib/access/gatewayEvents.ts';
+import { USER_PREF_KEYS } from '../../core/src/users/userData.ts';
 import { ROUTE_ACCESS_MANIFEST } from '../src/lib/access/routeManifest.ts';
 import { ownerUiCovers } from '../server/gateway-identity.mjs';
 import type { ResolvedPrincipal } from '../src/lib/access/identify.ts';
@@ -187,5 +188,31 @@ test('no shell, core or SDK code compares a user id to the literal \'default\'',
     }
   };
   dirs.forEach(walk);
+  assert.deepEqual(hits, []);
+});
+
+// D46: a per-user preference lives in `user/<userId>/prefs`. Reading or writing
+// the shared `os/<pref>` directly bypasses it: the SSR desktop read the stale
+// `os/workspaces` and rendered the wrong workspace after a reload until the
+// first switch (fix/workspace-restore), and the boot remap / member sweep
+// edited a document no browser reads.
+test('no shell code reads or writes a per-user preference in the shared os namespace', () => {
+  const root = fileURLToPath(new URL('..', import.meta.url));
+  const keys = USER_PREF_KEYS.join('|');
+  const pattern = new RegExp(`['"\`]os['"\`]\\s*,\\s*['"\`](${keys})['"\`]`);
+  // Allowed: seeding the shared fallback (first boot) and the fresh-install probe.
+  const allowed = new Set(['src/lib/kvBootstrap.ts', 'src/middleware.ts',
+    // Known, separate: the app document's initial theme and keymap (pending).
+    'src/lib/appDocumentState.ts']);
+  const hits: string[] = [];
+  const walk = (dir: string) => {
+    for (const name of readdirSync(join(root, dir))) {
+      const rel = `${dir}/${name}`;
+      if (statSync(join(root, rel)).isDirectory()) { if (name !== 'node_modules' && name !== 'dist') walk(rel); continue; }
+      if (!/\.(ts|tsx|mjs|js|astro)$/.test(name) || allowed.has(rel)) continue;
+      readFileSync(join(root, rel), 'utf-8').split('\n').forEach((line, i) => { if (pattern.test(line)) hits.push(`${rel}:${i + 1}: ${line.trim()}`); });
+    }
+  };
+  ['src', 'server'].forEach(walk);
   assert.deepEqual(hits, []);
 });
