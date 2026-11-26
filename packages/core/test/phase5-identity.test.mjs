@@ -234,6 +234,12 @@ test('the ownership report flags nested rows and truncated walks', async () => {
   ], { refuseRoots: [], maxEntries: 2 });
   assert.ok(rep.findings.some((f) => f.includes('lies inside')));
   assert.ok(rep.planned.some((row) => row.truncated));
+  // Across sections: a planned app-data row inside a closed source tree that must stay as it is.
+  const cross = await buildOwnershipReport([
+    { section: 'reportOnly', path: join(root, 'ws'), kind: 'app-source', to: null, recursive: false },
+    { section: 'plannedAppPaths', path: join(root, 'ws'), kind: 'app-data', to, recursive: true },
+  ], { refuseRoots: [] });
+  assert.ok(cross.findings.some((f) => f.includes('is also')), cross.findings.join('\n'));
 });
 
 // ── the home import report (Q15) ────────────────────────────────────────────

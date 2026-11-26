@@ -71,11 +71,18 @@ export async function liveOwnershipSpecs(): Promise<OwnershipRowSpec[]> {
     const installationId = await installationOf(m.id, m.scopeId);
     const app = installationId ? await svc.identity.getApp(installationId) : null;
     if (scopeDir) {
-      specs.push({
-        section: 'plannedAppPaths', path: join(scopeDir, 'apps', m.id), kind: 'app-data', owner: installationId ?? m.id,
-        to: app ? { uid: app.uid, gid: app.gid } : null, recursive: true,
-        note: app ? 'applied with this installation\'s runAs flip (P5-3)' : 'app identity not allocated yet (stream A allocates it at the runAs flip)',
-      });
+      // Instance data is `<scope>/apps/<appId>/<appId>[-N]` (AppManager). For global and user
+      // scopes `<scope>/apps/<appId>` is also the app's source tree, so the rows name the
+      // instance directories, never the whole tree.
+      const appData = join(scopeDir, 'apps', m.id);
+      const instanceDir = new RegExp(`^${m.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(-\\d+)?$`);
+      for (const dir of subdirs(appData).filter((d) => instanceDir.test(d))) {
+        specs.push({
+          section: 'plannedAppPaths', path: join(appData, dir), kind: 'app-data', owner: installationId ?? m.id,
+          to: app ? { uid: app.uid, gid: app.gid } : null, recursive: true,
+          note: app ? 'applied with this installation\'s runAs flip (P5-3)' : 'app identity not allocated yet (stream A allocates it at the runAs flip)',
+        });
+      }
     }
     let mode: 'open' | 'closed' = 'closed';
     try {

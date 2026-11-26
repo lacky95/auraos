@@ -195,12 +195,17 @@ export async function buildOwnershipReport(specs: readonly OwnershipRowSpec[], o
     if (w.truncated) report.findings.push(`${path}: more than ${maxEntries} entries; the counts are lower bounds`);
     if (spec.section !== 'reportOnly' && !spec.to && w.exists) report.findings.push(`${path}: its identity is not allocated yet, so the row is not applicable`);
   }
-  // Rows nested in another row of the same section would be chowned twice: report it.
-  for (const section of ['planned', 'plannedUserPaths', 'plannedAppPaths'] as const) {
-    const rows = report[section];
-    for (const a of rows) {
-      for (const b of rows) {
-        if (a !== b && a.recursive && b.path.startsWith(`${a.path}/`)) report.findings.push(`${b.path} lies inside ${a.path} (${section})`);
+  // A recursive row that covers another row (of any section) would chown it too: a planned
+  // row over a report-only one changes what must stay, two planned rows disagree. Report both.
+  const all = (['planned', 'plannedUserPaths', 'plannedAppPaths', 'reportOnly'] as const)
+    .flatMap((section) => report[section].map((row) => ({ section, row })));
+  for (const a of all) {
+    if (a.section === 'reportOnly' || !a.row.recursive) continue;
+    for (const b of all) {
+      if (a === b) continue;
+      const inside = b.row.path.startsWith(`${a.row.path}/`);
+      if (inside || (b.row.path === a.row.path && a.section !== b.section)) {
+        report.findings.push(`${b.row.path} (${b.section}) ${inside ? 'lies inside' : 'is also'} ${a.row.path} (${a.section})`);
       }
     }
   }
