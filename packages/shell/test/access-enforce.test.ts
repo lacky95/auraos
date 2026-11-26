@@ -536,13 +536,17 @@ test('H1: a proxy path the upstream would read as another is refused; the Termin
   assert.match(src('src/pages/api/proxy/[id]/[...path].ts'), /if \(!plainProxyPath\(new URL\(request\.url\)\.pathname\)\) return jsonError\(400/);
 });
 
-test('H2: a network-identified app reaches no owner agent upstream through /api/proxy; the System Terminal and the owner do', async () => {
+test('H2, D89 B3: no network-identified caller reaches an owner agent upstream, not even from the System Terminal\'s address; its token and the owner do', async () => {
+  const term = inst('com.aura.terminal', 'com.aura.terminal-1');
   const proxy = (id: string, peer?: string, p = 'mcp') =>
     ({ method: 'POST', path: `/api/proxy/${id}/${p}`, route: '/api/proxy/[id]/[...path]', params: { id, path: p }, ...(peer ? { peer } : {}) });
   for (const target of ['com.aura.terminal', 'com.aura.terminal-1', 'com.aura.aurashelld']) {
     assert.equal(await gate('enforce', anon, proxy(target, '172.20.0.8')), '403 access-denied', `notes → ${target}`);
     assert.equal(await gate('enforce', anon, proxy(target, '172.20.0.8', 'api/sessions/input')), '403 access-denied');
-    assert.equal(await gate('enforce', anon, proxy(target, '172.20.0.7')), 'pass', `System Terminal → ${target}`);
+    assert.equal(await gate('enforce', anon, proxy(target, '172.20.0.7')), '403 access-denied', `System Terminal's address alone → ${target}`);
+    assert.equal(await gate('enforce', anon, proxy(target, '172.20.0.7', 'api/sessions/events')), '403 access-denied', 'a tokenless hook post');
+    assert.equal(await gate('enforce', term, proxy(target)), 'pass', `System Terminal by its token → ${target}`);
+    assert.equal(await gate('enforce', inst('com.acme.notes'), proxy(target)), '403 access-denied', `an app's token → ${target}`);
     assert.equal(await gate('enforce', owner, proxy(target)), 'pass', `owner → ${target}`);
     assert.equal(await gate('enforce', anon, proxy(target)), '401 unauthenticated');
   }
@@ -557,6 +561,8 @@ test('H2: a network-identified app reaches no owner agent upstream through /api/
     identity: { verified: { principal: anon, via: 'none' }, referer: null, instanceId: null, peer },
   })).outcome;
   assert.equal(await ws('ws-proxy', 'com.aura.terminal', '172.20.0.8'), 'deny');
+  assert.equal(await ws('ws-proxy', 'com.aura.terminal', '172.20.0.7'), 'deny', 'the System Terminal\'s address alone');
+  assert.equal(await ws('ws-proxy', 'com.aura.aurashelld', '172.20.0.7'), 'deny');
   assert.equal(await ws('ws-proxy', 'com.acme.notes', '172.20.0.7'), 'allow');
   assert.equal(await ws('ws-proxy', 'com.other.app', '172.20.0.8'), 'allow');
   bridge.dispose();

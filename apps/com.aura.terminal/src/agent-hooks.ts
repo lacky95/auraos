@@ -39,15 +39,19 @@ export const HOOK_SCRIPT = `#!/usr/bin/env bash
 # foreground on purpose: a backgrounded pipeline outlives this script, gets
 # reparented to the container's PID 1 (node, which never reaps) and stays a
 # zombie until the 1035-pid cap is hit.
+# The post carries the session's instance token (D89 B3: an address is no
+# credential), read from a file descriptor so it is not on curl's command line.
 src="\${1:-claude}"
 if [ "$src" = codex ]; then payload="\${2:-}"; else payload="$(cat)"; fi
 [ -n "\${AURA_TERM_SESSION:-}" ] && [ -n "$payload" ] || exit 0
 command -v curl >/dev/null 2>&1 || exit 0
 inst="\${AURA_TERM_SESSION%%#*}"
 base="\${OS_API_BASE:-http://localhost:3000}"
+auth=/dev/null
+[ -n "\${AURA_INSTANCE_TOKEN:-}" ] && auth=/dev/fd/3
 printf '{"session":"%s","source":"%s","payload":%s}' "$AURA_TERM_SESSION" "$src" "$payload" \\
-  | curl -s -m 2 -o /dev/null -X POST -H 'content-type: application/json' --data-binary @- \\
-      "$base/api/proxy/$inst/api/sessions/events" >/dev/null 2>&1
+  | curl -s -m 2 -o /dev/null -X POST -H 'content-type: application/json' -H "@$auth" --data-binary @- \\
+      "$base/api/proxy/$inst/api/sessions/events" 3<<<"Authorization: Bearer \${AURA_INSTANCE_TOKEN:-}" >/dev/null 2>&1
 exit 0
 `;
 
@@ -172,6 +176,20 @@ export function installHooks(paths = defaultPaths()): HookStatus {
   const codex = addCodexNotify(readText(paths.codex), paths.script);
   if (!codex.conflict) backupAndWrite(paths.codex, codex.toml);
   return hookStatus(paths);
+}
+
+/**
+ * Bring an installed hook script up to this version (D89: older scripts post
+ * without the instance token, which the shell now refuses). Only when ours is
+ * already there: never installs the hooks for someone who has not.
+ */
+export function refreshHookScript(paths = defaultPaths()): boolean {
+  if (!existsSync(paths.script)) return false;
+  const current = readText(paths.script);
+  if (current === HOOK_SCRIPT || !current.includes(HOOK_MARK)) return false;
+  writeFileSync(paths.script, HOOK_SCRIPT);
+  chmodSync(paths.script, 0o755);
+  return true;
 }
 
 export function uninstallHooks(paths = defaultPaths()): HookStatus {

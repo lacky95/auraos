@@ -24,6 +24,7 @@ import {
 } from './provisioning.js';
 import { BUILD_STAGING_DIR, serveState } from './appBuild.js';
 import { BASE_IMAGE, whenBaseImageReady } from './BaseImage.js';
+import { rawSocketArgs } from './spawn/networkArgs.js';
 import {
   checkHealthGuard, classifyHealthIdentity, healthIdentityRefusal, lifecycleHeaders, lifecycleStatusRefusal,
   newLifecycleToken, type HealthIdentityClass, type LifecycleStatus,
@@ -685,6 +686,8 @@ export class ContainerRunner implements SandboxRunner {
       // even when something resets `hostname`.
       '--hostname', appId,
       '--network', SHARED_NETWORK,
+      // No raw sockets: its address can't be forged on a shell network (D28, D88 S1).
+      ...rawSocketArgs(),
       // Lets InstanceTokens re-learn the nonce of a container adopted after a
       // shell restart. Not `aura.parent`: that label marks sidecars, which
       // orphan adoption must skip.

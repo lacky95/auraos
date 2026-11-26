@@ -11,9 +11,11 @@
  *   - the lifecycle token header: only the kernel's runner sends it, straight
  *     to the app, so no caller can present one through the shell
  *   - the host operator's one-time ticket (`X-Aura-Operator`, lib/access/identify.ts)
+ *   - instance tokens (`aura1.`) and API keys (`aura_k1_`): the shell has
+ *     already judged the caller by them, and an app holding one could act as
+ *     that caller (the System Terminal's is an owner agent's). D89 / B2.
  *
- * App cookies and app-owned auth pass through byte for byte. Instance tokens
- * and API keys are still forwarded and only counted: Phase 3 decides them.
+ * App cookies and app-owned auth pass through byte for byte.
  */
 import { GATEWAY_IDENTITY_HEADER, LIFECYCLE_TOKEN_HEADER, OWNER_SSR_HEADER } from '@aura/core/host-rules';
 import { INTERNAL_SERVICE_HEADER, SESSION_COOKIES, countCredential } from './access-bridge.mjs';
@@ -49,8 +51,9 @@ function cleanAuthorization(value, surface) {
     countCredential(shell[1].toLowerCase() === 'admin1' ? 'stripped-admin-bearer' : 'stripped-login-bearer', surface);
     return null;
   }
-  if (INSTANCE_BEARER.test(text)) countCredential('forwarded-instance-token', surface);
-  else if (API_KEY_BEARER.test(text)) countCredential('forwarded-api-key', surface);
+  // D89 B2: an AuraOS credential never reaches an app.
+  if (INSTANCE_BEARER.test(text)) { countCredential('stripped-instance-token', surface); return null; }
+  if (API_KEY_BEARER.test(text)) { countCredential('stripped-api-key', surface); return null; }
   return value;
 }
 

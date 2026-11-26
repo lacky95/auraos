@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { reduce, parseEventBody, recordEvent, agentFor, forgetAgent, subscribeAgents } from '../src/agent-state.ts';
 import {
-  HOOK_MARK, HOOK_SCRIPT, addClaudeHooks, removeClaudeHooks, claudeHooksInstalled,
+  HOOK_MARK, HOOK_SCRIPT, refreshHookScript, addClaudeHooks, removeClaudeHooks, claudeHooksInstalled,
   addCodexNotify, removeCodexNotify, codexNotifyInstalled, installHooks, uninstallHooks, hookStatus,
 } from '../src/agent-hooks.ts';
 
@@ -103,6 +103,17 @@ test('install / uninstall on disk, with backups', () => {
   assert.equal(hookStatus(paths).script, true);
 });
 
+test('refreshHookScript: brings an older installed script up to date, never installs one', () => {
+  const home = mkdtempSync(join(tmpdir(), 'agent-hooks-'));
+  const paths = { script: join(home, 's', HOOK_MARK), claude: join(home, 'c/settings.json'), codex: join(home, 'x/config.toml') };
+  assert.equal(refreshHookScript(paths), false, 'not installed: nothing written');
+  installHooks(paths);
+  assert.equal(refreshHookScript(paths), false, 'current: untouched');
+  writeFileSync(paths.script, '#!/usr/bin/env bash\n# ' + HOOK_MARK + ' old version\n');
+  assert.equal(refreshHookScript(paths), true);
+  assert.equal(readFileSync(paths.script, 'utf-8'), HOOK_SCRIPT);
+});
+
 test('hook script posts the event and never blocks or fails', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'agent-hook-'));
   const script = join(dir, 'agent-hook.sh');
@@ -111,7 +122,7 @@ test('hook script posts the event and never blocks or fails', async () => {
   const server = createServer((req, res) => {
     let b = '';
     req.on('data', (d) => { b += d; });
-    req.on('end', () => { got.push({ url: req.url, body: JSON.parse(b) }); res.end('{}'); });
+    req.on('end', () => { got.push({ url: req.url, auth: req.headers.authorization ?? null, body: JSON.parse(b) }); res.end('{}'); });
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -121,7 +132,7 @@ test('hook script posts the event and never blocks or fails', async () => {
     p.on('exit', (code) => resolve(code));
   });
 
-  assert.equal(await run(['claude'], '{"hook_event_name":"Stop"}', { AURA_TERM_SESSION: 'com.aura.terminal-2#a3' }), 0);
+  assert.equal(await run(['claude'], '{"hook_event_name":"Stop"}', { AURA_TERM_SESSION: 'com.aura.terminal-2#a3', AURA_INSTANCE_TOKEN: 'aura1.t.k' }), 0);
   assert.equal(await run(['codex', '{"type":"agent-turn-complete"}'], '', { AURA_TERM_SESSION: 'com.aura.terminal-2#a3' }), 0);
   assert.equal(await run(['claude'], '{"hook_event_name":"Stop"}', {}), 0, 'outside a terminal session: silent no-op');
   for (let i = 0; i < 50 && got.length < 2; i++) await new Promise((r) => setTimeout(r, 50));
@@ -129,6 +140,9 @@ test('hook script posts the event and never blocks or fails', async () => {
 
   assert.equal(got.length, 2);
   assert.equal(got[0].url, '/api/proxy/com.aura.terminal-2/api/sessions/events');
+  // D89 B3: the post carries the session's instance token (never on the command line); none without one.
+  assert.deepEqual(got.map((g) => g.body.source + ':' + g.auth).sort(), ['claude:Bearer aura1.t.k', 'codex:null']);
+  assert.ok(!/curl[^\n]*Bearer \$/.test(HOOK_SCRIPT), 'the token is read from a descriptor, not passed as an argument');
   const bodies = got.map((g) => g.body).sort((a, b) => a.source.localeCompare(b.source));
   assert.deepEqual(bodies[0], { session: 'com.aura.terminal-2#a3', source: 'claude', payload: { hook_event_name: 'Stop' } });
   assert.deepEqual(bodies[1], { session: 'com.aura.terminal-2#a3', source: 'codex', payload: { type: 'agent-turn-complete' } });
