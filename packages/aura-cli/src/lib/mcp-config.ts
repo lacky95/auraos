@@ -10,7 +10,7 @@
  *   Codex        url = "<OS_API_BASE>/api/proxy/<app>/<path>"
  *                bearer_token_env_var = "AURA_INSTANCE_TOKEN"
  *
- * `~` is shared by every app (until per-user homes), so a literal token there
+ * `~` is read by every process that shares the home (an App Home, a Private Home), so a literal token there
  * hands one instance's identity to all of them; the reference gives each
  * container its own. Nothing here ever returns, prints or writes a token
  * value: entries are classified, and a rewrite only writes the reference.

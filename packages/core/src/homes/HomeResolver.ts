@@ -40,10 +40,10 @@
 import { chmodSync, chownSync, lstatSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { LinuxIdentity } from '../identity/types.js';
-import { RuntimeCapabilityError, type RuntimeCapability } from '../runtimes/types.js';
+import { RuntimeCapabilityError, missingCapabilities, type RuntimeCapabilities, type RuntimeCapability } from '../runtimes/types.js';
 import { APP_HOMES_SUBPATH, planHomeTarget } from './plan.js';
 import { HOMES_ROOT_SUBPATH } from '../scopes/home.js';
-import { HomeDeniedError, LOGICAL_HOME_PATH, type HomeRequest, type HomeResolver, type ResolvedHome } from './types.js';
+import { HomeDeniedError, LOGICAL_HOME_PATH, type ExecutionContext, type HomeRequest, type HomeResolver, type JumpHomeMode, type ResolvedHome } from './types.js';
 
 /** Mode of every home directory (D65: private by default). */
 export const HOME_DIR_MODE = 0o700;
@@ -65,20 +65,50 @@ export interface KernelHomeResolverDeps {
   create?: boolean;
 }
 
-/** Runtime capabilities a request needs (fail closed on a miss). */
+/**
+ * What a home request needs, as plain data (no functions, JSON-serializable):
+ * the runtime capabilities (`missingCapabilities` semantics: `isolation` is a
+ * minimum level, booleans must be true) and the non-capability conditions the
+ * resolver enforces. Stable export for Phase 5b's one `requirementsOf()`
+ * (D85 A5): a runtime check can ask it without resolving a home.
+ */
+export interface HomeRequirements {
+  executionContext: ExecutionContext;
+  jumpHomeMode?: JumpHomeMode;
+  /** Runtime capabilities the target runtime must declare. */
+  capabilities: Partial<RuntimeCapabilities>;
+  /** A recorded installation (App Homes). */
+  installation: boolean;
+  /** A verified human principal acting for itself (sessions). */
+  principal: boolean;
+  /** The target instance must not run as root (J.5: `private`, `ephemeral`). */
+  nonRootTarget: boolean;
+  /** An `app.jump` authorization unless the principal is the owner (D79). */
+  jumpAuthorization: boolean;
+}
+
+export function homeRequirements(req: { executionContext: ExecutionContext; jumpHomeMode?: JumpHomeMode }): HomeRequirements {
+  const ctx = req.executionContext;
+  const mode = ctx === 'jump' ? req.jumpHomeMode ?? 'private' : undefined;
+  const capabilities: Partial<RuntimeCapabilities> = {};
+  // The Terminal instance is the user's session context: a namespace boundary at least (PRoot never, D65 §11).
+  if (ctx === 'terminal-session') capabilities.isolation = 'namespace';
+  if (ctx === 'jump') {
+    capabilities.sessionExec = true;
+    if (mode !== 'app') capabilities.privateHomeSession = true;
+  }
+  return {
+    executionContext: ctx, ...(mode ? { jumpHomeMode: mode } : {}), capabilities,
+    installation: ctx === 'application' || ctx === 'sidecar' || mode === 'app',
+    principal: ctx === 'jump' || ctx === 'terminal-session',
+    nonRootTarget: ctx === 'jump' && mode !== 'app',
+    jumpAuthorization: mode === 'app',
+  };
+}
+
+/** Runtime capabilities a request needs and its runtime lacks (fail closed on a miss). */
 function neededCapabilities(req: HomeRequest): RuntimeCapability[] {
-  const caps = req.runtime;
-  const missing: RuntimeCapability[] = [];
-  if (req.executionContext === 'terminal-session') {
-    // The instance is the user's session context: a namespace boundary at least (PRoot never, D65 §11).
-    if (caps.isolation !== 'namespace' && caps.isolation !== 'vm') missing.push('isolation');
-  }
-  if (req.executionContext === 'jump') {
-    if (!caps.sessionExec) missing.push('sessionExec');
-    const mode = req.jumpHomeMode ?? 'private';
-    if (mode !== 'app' && !caps.privateHomeSession) missing.push('privateHomeSession');
-  }
-  return missing;
+  return missingCapabilities(req.runtime, homeRequirements(req).capabilities);
 }
 
 export function kernelHomeResolver(deps: KernelHomeResolverDeps): HomeResolver {

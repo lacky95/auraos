@@ -9,7 +9,7 @@ AuraOS is a WebOS for humans and their agents. It is a desktop that runs in the 
 - **The shell** is the master container, `aura-shell`. It hosts the API and window manager at `$OS_API_BASE`.
 - **Apps** run in sandboxes. A sandbox is either a PRoot (lightweight) or a container (full Docker).
 - **Windows** show apps on the desktop. This terminal is itself one of those apps.
-- **`~` (`/home/aura`) is one home shared by every app.** A `claude` or `codex` login, your git config and your dotfiles follow you into every app you jump into.
+- **`~` (`/home/aura`) is your Private Home.** Your `claude` or `codex` login, git config and dotfiles live here, and only your own sessions (your Terminal) see it. Each app has its own **App Home** at the same path instead: an app never sees your home (`aura admin homes import` copies something into one, explicitly).
 - **`/data` persists.** Everything outside `/data` and `~` inside a sandbox is throwaway.
 
 ## When the user asks "what is Aura?"
@@ -124,7 +124,7 @@ Humans browse the same registry in Settings → Interfaces.
 **Connect an MCP server you found.** The full address is `$OS_API_BASE` + the entry's `url`. Offer to add it, e.g. the docs server, with `aura mcp add aura-docs com.aura.docs` (both clients; see below).
 
 <!-- aura:section mcp-token-by-reference -->
-**Aura MCP servers carry your instance token by reference, never by value.** Every call through the shell (`$OS_API_BASE/api/proxy/…`) should send `Authorization: Bearer $AURA_INSTANCE_TOKEN`. Write the *reference* into a config, never the token itself: `~` is shared by every app, so a literal token there would let all of them act as you, and the reference gives each app its own identity.
+**Aura MCP servers carry your instance token by reference, never by value.** Every call through the shell (`$OS_API_BASE/api/proxy/…`) should send `Authorization: Bearer $AURA_INSTANCE_TOKEN`. Write the *reference* into a config, never the token itself: a config is read by every process that shares its home, so a literal token there would let all of them act as you, and the reference gives each process its own identity.
 - `aura mcp ls` shows every Aura MCP entry in `~/.claude.json` and `~/.codex/config.toml` and how it authenticates (never a value). `aura mcp fix` rewrites tokenless or literal-token entries to the reference, with a backup and the owner's confirmation at the terminal. `aura mcp add <name> <app>[/<interface>]` adds one to both clients.
 - By hand, Claude Code (single quotes, so the shell does not expand it): `claude mcp add --scope user --transport http aura-docs '${OS_API_BASE}/api/proxy/com.aura.docs/mcp' -H 'Authorization: Bearer ${AURA_INSTANCE_TOKEN}'`.
 - By hand, Codex: `codex mcp add aura-docs --url "$OS_API_BASE/api/proxy/com.aura.docs/mcp" --bearer-token-env-var AURA_INSTANCE_TOKEN` (in `config.toml`: `bearer_token_env_var = "AURA_INSTANCE_TOKEN"`).

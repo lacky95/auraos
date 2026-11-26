@@ -115,7 +115,7 @@ export function containerIdentityArgs(identity: SpawnIdentity | undefined, opts?
     ...processIdentityFlags(identity),
     ...identityFileMounts(opts.appDataVolume, opts.instanceId),
     '-e', 'AURA_RUN_AS=app',
-    // The shared home is not writable for an app uid in 5-apps: Astro must not try to write its telemetry config there.
+    // No Astro telemetry state in the App Home (and no first-run notice).
     '-e', 'ASTRO_TELEMETRY_DISABLED=1',
   ];
 }

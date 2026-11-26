@@ -12,7 +12,7 @@
  *
  * 5-pre2 semantics (phase5-plan.md, stream X): an Engine exec into the
  * instance's existing app container as root (`User: "0"`, explicit, because
- * 5-apps containers run with `--user`), with today's shared home. Never a
+ * 5-apps containers run with `--user`), with the app's own home (its App Home). Never a
  * new container (D74). Stream J swaps the target for the in-environment
  * session broker; the transport and this API stay. Runtimes without an
  * engine container (PRoot) have no sessions here; their logs come from the
@@ -147,7 +147,7 @@ const dimension = (v: unknown, fallback: number): number =>
 
 /**
  * Validate a session's first frame (`{op:'open', …}`). `home` is J's (D74):
- * this release has only today's shared home, so asking for one is refused
+ * until then a session sees the app's own App Home, so asking for one is refused
  * rather than silently ignored.
  */
 export function parseSessionOpen(frame: unknown): SessionOpen {
@@ -155,7 +155,7 @@ export function parseSessionOpen(frame: unknown): SessionOpen {
   const f = frame as Record<string, unknown>;
   if (f['kind'] !== 'jump' && f['kind'] !== 'exec') throw bad('kind must be jump or exec');
   if (f['home'] !== undefined) {
-    throw new ExecBridgeError(409, 'capability-missing', 'home modes come with the in-environment session (privateHomeSession); this release enters with the shared home');
+    throw new ExecBridgeError(409, 'capability-missing', 'home modes come with the in-environment session (privateHomeSession); this release enters with the app\'s own App Home');
   }
   const argv = f['argv'] === undefined ? undefined : checkArgv(f['argv'], 'argv');
   if (f['kind'] === 'exec' && !argv) throw bad('exec needs argv');

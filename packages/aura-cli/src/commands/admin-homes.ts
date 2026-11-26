@@ -5,7 +5,7 @@
  *
  * Stream I (5-pre2) adds the read-only reports only:
  *
- *   aura admin homes plan                    today's /home/aura per instance against the Phase 5 target
+ *   aura admin homes plan                    each instance's /home/aura against the Home Resolver's target
  *   aura admin homes ownership --dry-run     what stream H would chown (P5-2): rows, counts, digest
  *   aura admin homes import-report           what each app may want from the shared home (Q15)
  *   aura admin identity check                the uid registry and account invariants (by id only)
@@ -78,7 +78,7 @@ export function registerAdminHomes(admin: Command): void {
 
   homes
     .command('plan')
-    .description('Per running instance: today\'s /home/aura source against the Phase 5 target (report mode; mounts nothing).')
+    .description('Per running instance: the /home/aura it runs with against the Home Resolver\'s target (an instance started by an earlier release shows the move it makes at its next start).')
     .option('-o, --output <format>', 'json')
     .action(async (opts: { output?: string }) => {
       const r = await read<{ rows: Array<{ instanceId: string; appId: string; executionContext: string; current: string; target: { kind: string; hostPath: string | null } | null; change: string; denied?: string }>; summary: Record<string, number> }>('/api/admin/homes/plan');
@@ -115,7 +115,7 @@ export function registerAdminHomes(admin: Command): void {
 
   homes
     .command('import-report')
-    .description('What each installed app may want from today\'s shared home (Q15). Personal logins are marked; nothing is copied.')
+    .description('What each installed app may want from your Private Home (the shared home before App Homes, Q15). Personal logins are marked; nothing is copied.')
     .option('-o, --output <format>', 'json')
     .action(async (opts: { output?: string }) => {
       const r = await read<{ home: string; installations: Array<{ appId: string; candidates: Array<{ path: string; source: string; files: number; bytes: number; personal?: string[]; note?: string }> }> }>('/api/admin/homes/import-report');

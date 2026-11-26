@@ -143,7 +143,7 @@ aura build app --all                      # build every app that changed
 | `aura install cap [names...]` | Install capabilities into the shared toolchain (apt/npm/curl per registry entry). **No names → picker** of what is not installed yet (needs a TTY). | — |
 | `aura install svc <name>` | Install a service. | — |
 | `aura install sdk` | Pull every `@aura/*` package the cwd's `package.json` declares (in `auraDependencies`) from the local OCI registry. | `--quiet`, `--registry <url>`, `--cwd <path>` |
-| `aura rm app <app...>` | Delete apps (asks first). | `-y, --yes` |
+| `aura rm app <app...>` | Delete apps (asks first). Their [App Homes](/docs/core-concepts#homes) are kept unless `--delete-home`; a Private Home is never touched. | `-y, --yes`, `--delete-home` |
 | `aura rm act <act...>` | Close windows (activity ids from `aura get act`). | — |
 | `aura rm svc <svc...>` | Uninstall services. | — |
 | `aura rm cap <cap...>` | Uninstall capabilities and strip them from every manifest that declares them. | — |
@@ -231,8 +231,8 @@ Aura MCP servers (URLs through `$OS_API_BASE/api/proxy/…`) in Claude Code's
 `~/.claude.json` and Codex's `~/.codex/config.toml`, with the caller's
 instance token **by reference** (`${AURA_INSTANCE_TOKEN}` in Claude Code,
 `bearer_token_env_var = "AURA_INSTANCE_TOKEN"` in Codex), never by value: the
-home is shared by every app, and the reference gives each app its own
-identity (D89 B5). No command prints or writes a token value.
+home is read by every process that shares it, and the reference gives each
+process its own identity (D89 B5). No command prints or writes a token value.
 
 | Command | What it does | Key flags |
 |---|---|---|
@@ -372,6 +372,10 @@ aura dev validate --all
 | `aura runtime default [<id>]` · `set <id> <key>=<value>` · `enable\|disable <id>` | Change the default runtime, a runtime's settings (e.g. `set proot placement=master`) or whether it is enabled. Needs your password; applies to the next start of an app. | `disable --stop-instances` |
 | `aura runtime check <id>` | Would an app run there? A read-only capability check. | `--app <appId>`, `--need jump,mount,closed` |
 | `aura runtime override ls\|rm <app>` · `migrate` | Per-installation runtime overrides, and the open runtime migration decisions of the runtime release (apps that wait for you and do not start). | `migrate --adopt-default <app>`, `migrate --keep <app> proot` |
+| `aura admin homes plan` · `import-report` · `ownership --dry-run` | Read-only [home](/docs/core-concepts#homes) reports: each instance's home, what each app may want from your Private Home, and the targeted ownership changes. | `-o json` |
+| `aura admin homes ownership --apply <digest>` | Apply exactly the ownership report you reviewed (its digest), journaled. Needs your password. | — |
+| `aura admin homes import <app> <path...>` | Copy paths (e.g. `.claude.json`) from your Private Home into the app's App Home. A dry run unless `--apply` (the app stopped); never overwrites; personal logins only with `--personal`. | `--apply`, `--personal`, `--user <id>` |
+| `aura admin homes reset <app>` | Empty the app's App Home (the app stopped); it starts with a fresh one. Needs your password. | `--user <id>` |
 | `aura admin security set <id> <value>` | Set a writable security option, e.g. `set fresh-auth-require-https on`. Needs your password in the desktop (from the Terminal), or runs directly on the host. Options set on the host (env) answer where to set them. | — |
 
 ```bash

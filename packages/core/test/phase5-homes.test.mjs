@@ -408,3 +408,15 @@ test('pool: a member warmed for a user is that user\'s only; one from before App
   self.poolHomes.set('g-1', '');
   assert.equal(claim('org.g', 'u-bob').owner, 'u-bob');
 });
+
+test('homeRequirements: plain, serializable data per context and mode (5b requirementsOf, D85 A5)', async () => {
+  const { homeRequirements } = await import('../dist/homes/HomeResolver.js');
+  const app = homeRequirements({ executionContext: 'application' });
+  assert.deepEqual(app, { executionContext: 'application', capabilities: {}, installation: true, principal: false, nonRootTarget: false, jumpAuthorization: false });
+  assert.deepEqual(JSON.parse(JSON.stringify(app)), app);
+  assert.deepEqual(homeRequirements({ executionContext: 'terminal-session' }).capabilities, { isolation: 'namespace' });
+  const priv = homeRequirements({ executionContext: 'jump' });
+  assert.deepEqual([priv.jumpHomeMode, priv.capabilities, priv.nonRootTarget], ['private', { sessionExec: true, privateHomeSession: true }, true]);
+  const appJump = homeRequirements({ executionContext: 'jump', jumpHomeMode: 'app' });
+  assert.deepEqual([appJump.capabilities, appJump.jumpAuthorization, appJump.nonRootTarget], [{ sessionExec: true }, true, false]);
+});

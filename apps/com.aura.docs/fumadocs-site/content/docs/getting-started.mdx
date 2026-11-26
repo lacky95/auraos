@@ -45,9 +45,12 @@ Done when `claude` or `codex` is in the toolchain.
 
 ## 2. Log in to your agent
 
-Run `claude` (or `codex`) in the Terminal and sign in. `~` is one home
-shared by every app, so the login follows you into every sandbox you
-`aura jump` into. Done when the agent's login file exists in that home.
+Run `claude` (or `codex`) in the Terminal and sign in. The login lands in
+your **Private Home** (`~` in your Terminal sessions), which no app can read:
+every app has its own **App Home** instead (see
+[Homes](/docs/core-concepts#homes)). Done when the agent's login file exists in
+your home. An app that needs its own login (the Improvement Board) gets it in
+its App Home: `aura jump <app> --home app`, then `claude` / `codex login`.
 
 ## 3. Pick a theme
 

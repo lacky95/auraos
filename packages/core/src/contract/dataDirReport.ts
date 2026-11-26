@@ -9,10 +9,9 @@
  *   container-layer `docker diff` of a running container instance: files the
  *                   app wrote into its image layer, outside every mount. They
  *                   are lost on every restart today.
- *   home            the shared home `~` is mounted read-write (the mount
- *                   info). Writes to it can't be told apart per app before
- *                   Phase 5 gives each app its own home, so this says only
- *                   that the app can write there.
+ *   home            the app's home `~` (its App Home since Phase 5) is
+ *                   mounted read-write (the mount info). It is no data
+ *                   store: this says only that the app can write there.
  *
  * The documented place for app data is the SDK's `getAppContext().dataDir`
  * (`/data` in the sandbox): it persists and is private to the app.
