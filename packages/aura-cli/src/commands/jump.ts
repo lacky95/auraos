@@ -7,7 +7,7 @@ import { color, fail, info, ok, warn } from '../lib/format.js';
 import { existsSync } from 'node:fs';
 import { enterSandbox, enterSidecar, parseHomeMode, setTerminalHost, callerHostLabel } from '../lib/enter-sandbox.js';
 import type { HomeMode } from '../lib/exec-client.js';
-import { resolveInstance, resolveSidecar } from '../lib/resolve.js';
+import { resolveInstance, resolveSessionTarget, resolveSidecar } from '../lib/resolve.js';
 import { sidecarId } from '../lib/resources.js';
 import { truncateAnsi } from '../lib/tui.js';
 import { jumpWorkspace } from '../lib/jump-workspace.js';
@@ -109,7 +109,8 @@ Examples:
 
 /** The session into an instance, landing in the app's workspace when it has one. */
 async function jumpInto(instanceId: string, appId: string, home: HomeMode | undefined): Promise<void> {
-  const apps = await api.get<Array<{ manifest: { id: string; metadata?: Record<string, unknown> } }>>('/api/apps');
+  // The listing is the owner's; a member jumps without the workspace hint (the bridge authorizes the session).
+  const apps = await api.get<Array<{ manifest: { id: string; metadata?: Record<string, unknown> } }>>('/api/apps').catch(() => []);
   const app = apps.find(a => a.manifest.id === appId);
   const startDir = app && jumpWorkspace(app.manifest);
   enterSandbox(instanceId, appId, { ...(startDir ? { startDir } : {}), ...(home ? { home } : {}) });
@@ -123,7 +124,7 @@ async function jumpInto(instanceId: string, appId: string, home: HomeMode | unde
 async function jumpDirect(target: string | undefined, sidecar: string | undefined, home: HomeMode | undefined): Promise<void> {
   const token = target ?? procEnv['APP_INSTANCE_ID'];
   if (!token) fail('aura jump --sidecar <id> needs a target outside an app: aura jump <app|instance> --sidecar <id>');
-  const inst = await resolveInstance(token);
+  const inst = sidecar ? await resolveInstance(token) : await resolveSessionTarget(token);
   if (sidecar) {
     const sc = await resolveSidecar(inst.instanceId, sidecar);
     enterSidecar(inst.instanceId, sc.service || sc.id, `${inst.instanceId}/${sidecarId(sc)}`);

@@ -45,6 +45,27 @@ export function matchInstance(apps: AppDto[], token: string): InstanceMatch {
   return { ok: false, reason: `no app or instance '${token}'${best ? ` — did you mean ${best.n}?` : ''}` };
 }
 
+/** An instance id as the exec bridge accepts it (shell server/exec-bridge.mjs). */
+const INSTANCE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+/**
+ * The target of a jump or exec. The instance list is the owner's
+ * (`GET /api/apps`); a member (its login or its own System Terminal) can't
+ * read it, so an exact instance id then goes straight to the exec bridge,
+ * where the kernel authorizes the session per target (`app.jump`; owner
+ * decision 5-main: the same check from every entry point). The app id is
+ * only the Terminal's host label here, so the instance id stands in for it.
+ */
+export async function resolveSessionTarget(token: string): Promise<{ instanceId: string; appId: string }> {
+  try {
+    return await resolveInstance(token);
+  } catch (err) {
+    const status = (err as { status?: number }).status;
+    if ((status === 401 || status === 403) && INSTANCE_ID.test(token)) return { instanceId: token, appId: token };
+    throw err;
+  }
+}
+
 /** Resolve or exit with the reason. */
 export async function resolveInstance(token: string): Promise<InstanceDto> {
   const m = matchInstance(await fetchApps(), token);

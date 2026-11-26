@@ -17,7 +17,7 @@ import { enterSidecar, parseHomeMode } from '../lib/enter-sandbox.js';
 import { printLogs } from '../lib/exec-client.js';
 import { BACK, PromptCancelled, promptConfirm, promptMultiSelect } from '../lib/prompts.js';
 import { parseOutput, renderDocument, renderObjects, type OutputFormat } from '../lib/output.js';
-import { ownersOf, resolveInstance, resolveSidecar } from '../lib/resolve.js';
+import { ownersOf, resolveInstance, resolveSessionTarget, resolveSidecar } from '../lib/resolve.js';
 import { reportRestart, type RestartResult } from './app.js';
 import {
   RESOURCES, fetchApps, findResource, fetchSidecars, liveInstances, resourcesFor, shortName, sidecarId, sidecarMatches,
@@ -282,7 +282,7 @@ async function execCmd(resource: string, name: string, cmd: string[], opts: { co
   if (def.name === 'sidecars') fail('use: aura exec inst <instanceId> -c <sidecar> [-- cmd…]');
   const home = parseHomeMode(opts.home);
   if (home && opts.container) fail('--home does not apply to a sidecar');
-  const inst = await resolveInstance(name);
+  const inst = opts.container ? await resolveInstance(name) : await resolveSessionTarget(name);
   if (opts.container) {
     const sc = await resolveSidecar(inst.instanceId, opts.container);
     enterSidecar(inst.instanceId, sc.service || sc.id, `${inst.instanceId}/${sidecarId(sc)}`, cmd);

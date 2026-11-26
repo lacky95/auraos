@@ -81,7 +81,9 @@ export function registerInst(program: Command): void {
     .option('--home <mode>', 'private (default) | app | ephemeral')
     .description('A session inside the running instance (the same as aura jump; with -c, aura exec).')
     .action(async (instanceId: string, opts: { cmd?: string; home?: string }) => {
-      const dto = await api.get<{ instance: { appId: string } }>(`/api/instances/${encodeURIComponent(instanceId)}/status`);
+      // The status read is the owner's; refused (a member), the exec bridge authorizes the session per target itself.
+      const dto = await api.get<{ instance: { appId: string } }>(`/api/instances/${encodeURIComponent(instanceId)}/status`)
+        .catch((err: { status?: number }) => { if (err.status === 401 || err.status === 403) return { instance: { appId: instanceId } }; throw err; });
       if (!dto.instance?.appId) fail(`Instance not found: ${instanceId}`);
       const home = parseHomeMode(opts.home);
       enterSandbox(instanceId, dto.instance.appId, { ...(opts.cmd ? { cmd: opts.cmd } : {}), ...(home ? { home } : {}) });
