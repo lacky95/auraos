@@ -23,11 +23,15 @@
  * cookie, on an unlocked tab (`X-Aura-Client-Session`), and never with a
  * bearer: instance tokens and API keys are refused. A `fresh` approval also
  * needs the owner's password, checked by core's `verifyPassword` under the
- * login rate limit, over HTTPS; over HTTP it is the host operator's (D18).
+ * login rate limit. Over HTTP too by default (D63); with the security option
+ * `fresh-auth-require-https` on, HTTP is the host operator's (D18). The
+ * access decision's `freshAuthPath` decides it, and every owner view says
+ * which (`freshVia`), so the dialog asks for what the server will take.
  */
 import * as core from '@aura/core';
 import type { AccessPrincipal, ApprovalAction, ApprovalRecord } from '@aura/core';
 import type { CallerPrincipal } from '../access/identify.ts';
+import { freshAuthPath, type FreshAuthPath } from '../access/decide.ts';
 import { GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
 import {
   confirmDisplay, confirmPayload, contextDisplay, contextWrite, credentialAsk, requesterReason, type CredentialAsk,
@@ -63,6 +67,10 @@ export interface ApprovalRouteDeps extends ApprovalServiceDeps {
   shellOwner(ctx: RouteCtx): Promise<{ owner: OwnerSession; scheme: string } | { error: string; status: number }>;
   /** The owner's login session from the cookie, for a read (no Origin on a same-origin GET). */
   ownerRead(ctx: RouteCtx): Promise<OwnerSession | null>;
+  /** The scheme the browser used: HTTPS only on a trusted proxy's word (host-policy `edgeView`). */
+  scheme(ctx: RouteCtx): string;
+  /** D63: the security option `fresh-auth-require-https` (access/decide.ts `freshAuthRequiresHttps`). */
+  freshAuthRequiresHttps(): Promise<boolean>;
   /** A shell tab's lock state, from its client session id. */
   lockOf(sid: string): Promise<'locked' | 'unlocked'>;
   /** The owner's password, through core's login rate limit. */
@@ -94,6 +102,12 @@ async function readBody(request: Request): Promise<Record<string, unknown> | Res
   return json({ error: 'invalid-request' }, 400);
 }
 
+/** How a `fresh` approval is given on this request's transport (D18, D63). */
+async function freshVia(scheme: string, deps: ApprovalRouteDeps): Promise<FreshAuthPath> {
+  if (scheme === 'https') return freshAuthPath('https', false);
+  return freshAuthPath('http', await deps.freshAuthRequiresHttps());
+}
+
 /** The owner, directly in the shell's own document (no app, no bearer). */
 const isShellDocumentRequest = (request: Request) =>
   !request.headers.has('authorization') && !request.headers.has(GATEWAY_IDENTITY_HEADER);
@@ -111,8 +125,8 @@ export async function listApprovals(ctx: RouteCtx, deps: ApprovalRouteDeps): Pro
   if (url.searchParams.has('seen') && Number.isInteger(seen)) {
     await waitForApprovals(seen, LONG_POLL_MS, request.signal);
   }
-  const [pending, blocked] = await Promise.all([deps.store.listPending(), deps.store.listBlocked()]);
-  return json({ version: approvalsVersion(), pending: pending.map(ownerView), blocked });
+  const [pending, blocked, via] = await Promise.all([deps.store.listPending(), deps.store.listBlocked(), freshVia(deps.scheme(ctx), deps)]);
+  return json({ version: approvalsVersion(), freshVia: via, pending: pending.map((r) => ({ ...ownerView(r), freshVia: via })), blocked });
 }
 
 // ── POST /api/approvals ─────────────────────────────────────────────────────
@@ -174,7 +188,7 @@ export async function getApproval(ctx: RouteCtx, id: string | undefined, deps: A
   if (isShellDocumentRequest(request)) {
     const site = request.headers.get('sec-fetch-site');
     if ((site === null || site === 'same-origin') && await deps.ownerRead(ctx)) {
-      return record ? json(ownerView(record)) : refusal('not-found');
+      return record ? json({ ...ownerView(record), freshVia: await freshVia(deps.scheme(ctx), deps) }) : refusal('not-found');
     }
   }
   const principal = await deps.authenticate(request);
@@ -226,8 +240,8 @@ export async function decideApproval(
 
   let fresh = false;
   if (decision === 'approve' && record.level === 'fresh') {
-    // D18: the password travels only over HTTPS; on HTTP the host operator approves.
-    if (shell.scheme !== 'https') {
+    // D18, D63: over HTTP the password is taken unless the owner requires HTTPS; then the host operator approves.
+    if (await freshVia(shell.scheme, deps) === 'operator') {
       return json({ error: 'operator-required', message: `This needs HTTPS, or approve on the host with \`aura approve ${id}\`.` }, 403);
     }
     const password = body[PASSWORD_FIELD];

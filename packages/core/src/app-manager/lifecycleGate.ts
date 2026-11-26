@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { LIFECYCLE_TOKEN_HEADER } from '../app-hosts/hostRules.js';
+import { securityEnvValue } from '../security/options.js';
 
 /**
  * The kernel side of the lifecycle token and the health identity check,
@@ -28,7 +29,8 @@ export function lifecycleStrictMode(): LifecycleStrictMode {
   if (raw && raw !== 'warn' && raw !== 'strict') {
     console.warn(`[lifecycle] AURA_LIFECYCLE_STRICT=${raw} is not warn|strict; using warn`);
   }
-  cachedMode = raw === 'strict' ? 'strict' : 'warn';
+  // The security options registry (D64) parses it, so the list shows what runs.
+  cachedMode = securityEnvValue('lifecycle-strict') === 'strict' ? 'strict' : 'warn';
   return cachedMode;
 }
 

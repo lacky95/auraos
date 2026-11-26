@@ -205,7 +205,10 @@ test('refusals: a further step is named in error', async () => {
   };
   const r = await accessGate(ctx({ method: 'POST', path: '/api/x', route: '/api/x' }), deps('enforce', { principal: owner, via: 'login-session' }), fresh);
   assert.equal(r.refused?.status, 403);
-  assert.equal((await r.refused!.json() as { error: string }).error, 'needs-operator');
+  assert.equal((await r.refused!.json() as { error: string }).error, 'needs-fresh-auth', 'D63: HTTP takes the password by default');
+  const strict = await accessGate(ctx({ method: 'POST', path: '/api/x', route: '/api/x' }),
+    { ...deps('enforce', { principal: owner, via: 'login-session' }), freshAuthRequiresHttps: async () => true }, fresh);
+  assert.equal((await strict.refused!.json() as { error: string }).error, 'needs-operator', 'HTTPS required: the host operator');
 });
 
 // ── D29: trusted owner agents ───────────────────────────────────────────────

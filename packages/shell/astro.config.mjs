@@ -44,11 +44,13 @@ export default defineConfig({
   output: 'server',
   adapter: node({ mode: 'standalone' }),
   integrations: [react()],
-  // No image transcoding: the shell doesn't use astro:assets, and Sharp behind
-  // `/_image` carries the Astro 6 AVIF RCE (GHSA-26w7-cxv4-gfx2) and the
-  // libvips/libheif advisories until the Astro 7 upgrade (apps: the same via
-  // auraAppIntegration).
+  // No image transcoding: the shell doesn't use astro:assets, so Sharp behind
+  // `/_image` would only be an image decoder anyone can feed
+  // (GHSA-26w7-cxv4-gfx2 was one). Apps: the same via auraAppIntegration.
   image: { service: passthroughImageService() },
+  // Astro 7 defaults to 'jsx', which drops the whitespace between inline
+  // elements. Keep Astro 6's lossless compression (apps: auraAppIntegration).
+  compressHTML: true,
   // Astro's floating dev toolbar (audits / settings / x-ray) sits in the
   // bottom-right of every page in dev mode and gets in the way of OS
   // chrome — covers the launcher button, intercepts clicks on the dock

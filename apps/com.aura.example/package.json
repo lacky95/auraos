@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@aura/app-sdk": "workspace:*",
-    "@astrojs/node": "^10.0.0",
-    "astro": "^6.0.0"
+    "@astrojs/node": "^11.1.14",
+    "astro": "^7.4.13"
   }
 }

@@ -4,37 +4,23 @@
     {
       "check": "deps/advisory",
       "file": "pnpm-lock.yaml",
-      "id": "GHSA-26w7-cxv4-gfx2",
-      "reason": "astro 6: RCE through AVIF image optimization; fixed only in Astro 7 (a major). AuraOS apps do not use the astro:assets image service on untrusted input.",
-      "owner": "Owner: major upgrades (Astro 7, zod 4) planned right after Phase 3a"
-    },
-    {
-      "check": "deps/advisory",
-      "file": "pnpm-lock.yaml",
-      "id": "GHSA-qh8j-hqjv-7m4x",
-      "reason": "@astrojs/node 10: a malformed Host port can crash the adapter; fixed only in 11, which needs Astro 7.",
-      "owner": "Owner: major upgrades (Astro 7, zod 4) planned right after Phase 3a"
-    },
-    {
-      "check": "deps/advisory",
-      "file": "pnpm-lock.yaml",
       "id": "GHSA-f88m-g3jw-g9cj",
-      "reason": "sharp 0.34 (libvips CVEs): astro 6 pins sharp ^0.34; 0.35 is a breaking release and comes with the Astro 7 upgrade.",
-      "owner": "Owner: major upgrades (Astro 7, zod 4) planned right after Phase 3a"
+      "reason": "sharp 0.34 (libvips CVEs): Astro 7 uses sharp 0.35.5; 0.34 is left only under next 15 (the Docs app, no next/image).",
+      "owner": "Owner: Next 16 upgrade (before 2027-01-31)"
     },
     {
       "check": "deps/advisory",
       "file": "pnpm-lock.yaml",
       "id": "GHSA-rgj7-g3m4-5g8c",
-      "reason": "sharp 0.34 (libheif): same as the libvips advisory, comes with the Astro 7 upgrade.",
-      "owner": "Owner: major upgrades (Astro 7, zod 4) planned right after Phase 3a"
+      "reason": "sharp 0.34 (libheif): same as the libvips advisory, left only under next 15 (Docs).",
+      "owner": "Owner: Next 16 upgrade (before 2027-01-31)"
     },
     {
       "check": "deps/advisory",
       "file": "pnpm-lock.yaml",
       "id": "GHSA-wq5f-xc86-pv6w",
-      "reason": "sharp 0.34 (librsvg): same as the libvips advisory, comes with the Astro 7 upgrade.",
-      "owner": "Owner: major upgrades (Astro 7, zod 4) planned right after Phase 3a"
+      "reason": "sharp 0.34 (librsvg): same as the libvips advisory, left only under next 15 (Docs).",
+      "owner": "Owner: Next 16 upgrade (before 2027-01-31)"
     },
     {
       "check": "deps/advisory",

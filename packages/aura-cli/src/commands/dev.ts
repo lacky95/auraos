@@ -918,10 +918,14 @@ Skips node_modules, dist, .astro and .next. ${DOCS_HINT}; ${CONTRACT_DOCS_HINT}.
       // system-scope apps and fails on user/global installs.
       const dir = resolveAppDir(appId);
       if (!dir || !existsSync(join(dir, 'package.json'))) fail(`App not found: ${appId} (searched all scopes)`);
-      const child = spawn('pnpm', ['exec', 'astro', 'dev'], {
+      // In the foreground and without the .astro/dev.json lock, like the
+      // runners (provisioning.ts ASTRO_START_SHELL): Astro 7 would otherwise
+      // detach when an agent runs this, and refuse to start next to the
+      // app's running instance.
+      const child = spawn('pnpm', ['exec', 'astro', 'dev', '--ignore-lock'], {
         cwd: dir,
         stdio: 'inherit',
-        env: { ...process.env, APP_ID: appId },
+        env: { ...process.env, APP_ID: appId, ASTRO_DEV_BACKGROUND: '0' },
       });
       child.on('exit', (code) => process.exit(code ?? 0));
     });

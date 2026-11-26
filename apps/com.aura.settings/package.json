@@ -10,13 +10,13 @@
     "typecheck": "astro check"
   },
   "dependencies": {
-    "@astrojs/node": "^10.0.0",
-    "@astrojs/react": "^4.4.0",
+    "@astrojs/node": "^11.1.14",
+    "@astrojs/react": "^7.1.9",
     "@aura/app-sdk": "workspace:*",
     "@aura/ui": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@tailwindcss/vite": "^4.1.0",
-    "astro": "^6.0.0",
+    "@tailwindcss/vite": "^4.3.5",
+    "astro": "^7.4.13",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "tailwindcss": "^4.1.0",

@@ -220,4 +220,7 @@ if [ "$SHELL_MODE" = prod ]; then
   cd /workspace/packages/shell || fail starting
   PATH="/workspace/packages/shell/node_modules/.bin:$PATH" exec node server.mjs
 fi
-exec pnpm --filter @aura/shell dev --host 0.0.0.0
+# Astro 7: stay in the foreground under an agent (ASTRO_DEV_BACKGROUND=0) and
+# skip the .astro/dev.json lock (--ignore-lock) — boot supervises the shell,
+# exactly as with Astro 6 (provisioning.ts ASTRO_START_SHELL does the same).
+ASTRO_DEV_BACKGROUND=0 exec pnpm --filter @aura/shell dev --host 0.0.0.0 --ignore-lock

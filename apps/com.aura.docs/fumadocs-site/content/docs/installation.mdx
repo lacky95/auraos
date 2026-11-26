@@ -119,6 +119,21 @@ Existing passwords keep working after the rules get stricter. A password is
 never typed into the Settings page itself, only into the dialog that the
 desktop owns.
 
+**Password confirmations over HTTP.** Some approvals ask for your password
+again (Aura Context writes, privileged grants, new API keys). By default
+this works over plain HTTP too: the dialog notes "(HTTP: password sent
+unencrypted)". To require HTTPS, check **Require HTTPS for password
+confirmations** under **Global** (it asks for your password), or on the host:
+
+```bash
+docker exec -it aura-shell aura admin security set fresh-auth-require-https on
+```
+
+Over HTTP those approvals then show `aura approve <id>`, which you run on the
+host; over HTTPS the dialog still takes the password. While it is on,
+turning it off over HTTP also needs HTTPS or the host. See
+[Security options](/docs/security-options).
+
 ## Troubleshooting
 
 **`pull access denied for aura-base, repository does not exist`.**

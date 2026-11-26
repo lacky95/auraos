@@ -1,7 +1,7 @@
 /**
  * `aura approve <id>`: the host operator decides a pending approval (D18),
- * e.g. a `fresh` one requested over HTTP, where the desktop cannot take the
- * password. Host only: it proves itself with an operator code, a one-time
+ * e.g. a `fresh` one over HTTP when the owner requires HTTPS for password
+ * confirmations (D63), where the desktop then does not take the password. Host only: it proves itself with an operator code, a one-time
  * ticket file that no app sandbox can write.
  *
  *   aura approve <id>            show the request, ask, approve

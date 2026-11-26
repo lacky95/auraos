@@ -19,9 +19,10 @@ import { defaultIdentityKeyFile } from './identityKey.js';
 import { LoginSessionStore } from './LoginSessionStore.js';
 import { defaultSetupTicketDir, FileSetupTickets } from './setupTickets.js';
 import { ValkeyUserStore } from './ValkeyUserStore.js';
+import { SECURITY_AUDIT_ACTIONS, SecurityPolicyStore } from '../security/SecurityPolicyStore.js';
 
 /** Bump when the shape changes, so a singleton made by an older module copy is replaced. */
-export const AUTH_SERVICES_VERSION = 8;
+export const AUTH_SERVICES_VERSION = 9;
 
 export interface AuthServices {
   version: number;
@@ -39,6 +40,8 @@ export interface AuthServices {
   setupTickets: FileSetupTickets;
   /** Owner approvals (5.10). */
   approvals: ValkeyApprovalStore;
+  /** The writable security options (D64, security/options.ts). */
+  securityPolicy: SecurityPolicyStore;
 }
 
 const GLOBAL_KEY = '__auraAuthServices';
@@ -103,6 +106,14 @@ export function getAuthServices(): AuthServices {
     clientSessions: new ClientSessionStore({ redis }),
     users, loginSessions, setupTickets,
     approvals: new ValkeyApprovalStore({ redis }),
+    securityPolicy: new SecurityPolicyStore({
+      identityKeyFile: defaultIdentityKeyFile(),
+      redis,
+      onTampered: () => {
+        console.warn('[auth] the security options failed their integrity check; the defaults apply');
+        void audit.record({ by: { kind: 'system' }, action: SECURITY_AUDIT_ACTIONS.policyTampered, outcome: 'failed' }).catch(() => undefined);
+      },
+    }),
   };
   g[GLOBAL_KEY] = svc;
   void auditCreatedTickets().catch((err) => console.warn(`[auth] ticket audit failed: ${(err as Error).message}`));
