@@ -40,7 +40,7 @@ function fakeDocker(t, { failStart = false, dieOnBoot = false, missingImages = [
     else if (verb === 'pull') { missingImages.splice(missingImages.indexOf(args[1]), 1); reply(cb, 0); }
     else if (verb === 'inspect') {
       const ref = args[args.length - 1];
-      if (args[2]?.startsWith('{{range .Config.Env}}')) { reply(cb, 0, 'PARENT_ONLY=yes\nK1=from-parent\n'); return { stdin: { end() {} } }; }
+      if (args[2]?.startsWith('{{range .Config.Env}}')) { reply(cb, 0, 'PARENT_ONLY=yes\nK1=from-parent\nUNGRANTED_KEY=leaked-from-a-pre-C-container\n'); return { stdin: { end() {} } }; }
       const c = byRef(ref);
       if (!c) reply(cb, 1, '', `No such object: ${ref}`);
       else reply(cb, 0, `/${c.name}\t${c.state}\t${JSON.stringify(c.labels)}\t${c.restarts ?? 0}\n`);
@@ -85,7 +85,7 @@ function fixture(t, opts = {}) {
   const tokens = new InstanceTokens(join(dataDir, 'aura', 'secrets', 'k'));
   const mountCalls = [];
   const services = [
-    { name: 'box', image: 'alpine:3', command: ['sleep', 'infinity'], env: { A: '1' }, envInherit: ['CTX_KEY', 'K1'],
+    { name: 'box', image: 'alpine:3', command: ['sleep', 'infinity'], env: { A: '1' }, envInherit: ['CTX_KEY', 'K1', 'UNGRANTED_KEY'],
       volumes: [{ name: 'data', target: '/data' }], inheritIdentity: true, inheritMounts: true },
     ...(opts.services ?? []),
   ];
@@ -103,7 +103,6 @@ function fixture(t, opts = {}) {
       mountRootSubpath: (k) => `aura/mounts/${k}`,
       toolsDir: (k) => join(dataDir, 'aura', 'runtime', k, 'tools'),
       clearToolsDir: (k) => rmSync(join(dataDir, 'aura', 'runtime', k, 'tools'), { recursive: true, force: true }),
-      resolveContextEnv: async () => ({ CTX_KEY: 'ctx-value' }),
     },
     registry: { getById: (id) => (id === APP ? { id: APP, services, tools: opts.appTools?.() ?? opts.tools ?? [], permissions: ['sidecars.spawn'] } : undefined) },
     permissions: { hasPermission: (_app, p) => perms.includes(p) },
@@ -113,6 +112,8 @@ function fixture(t, opts = {}) {
       removeAll: (k) => mountCalls.push(['removeAll', k]),
       forgetConsumer: (k) => mountCalls.push(['forget', k]),
     },
+    // Stream C: the parent's granted Context keys, and every Context key name.
+    context: async () => ({ env: { CTX_KEY: 'ctx-value' }, known: new Set(['CTX_KEY', 'UNGRANTED_KEY']) }),
     instance: (id) => (id === INST ? { appId: APP, instanceDataDir: join(dataDir, 'scopes/users/default/apps', APP, INST) } : null),
     // D65: the parent's App Home (AppManager.appHomeOf).
     appHome: async (id) => (opts.appHome !== undefined ? opts.appHome : id === INST ? {
@@ -144,6 +145,7 @@ test('spawn: labels, network, env order, own token, mount root, no socket', asyn
   assert.equal(env.A, '2', 'request env wins over the template');
   assert.equal(env.CTX_KEY, 'ctx-value', 'envInherit from OS Context');
   assert.equal(env.K1, 'from-parent', 'envInherit falls back to the app container env');
+  assert.equal(env.UNGRANTED_KEY, undefined, 'a Context key the app does not hold never comes from its container env (stream C)');
   assert.equal(env.AURA_INSTANCE_ID, INST);
   assert.equal(env.AURA_SIDECAR_NAME, 'box');
   assert.deepEqual(tokens.verify(env.AURA_INSTANCE_TOKEN), { instanceId: INST, sidecar: 'box' }, 'the sidecar gets its OWN token');
@@ -280,12 +282,12 @@ test("an app-managed container of the same name is never touched — unless the 
   assert.equal(d.containers.get(`aura-${INST}--box`).labels['aura.managed'], 'os');
 });
 
-test('the docker socket is forwarded only with the docker tool', async (t) => {
+test('no sidecar gets the docker socket, whatever the app\'s tools (J.7, stream C)', async (t) => {
   const d = fakeDocker(t);
   const svc = [{ name: 'sock', image: 'x:1', inheritDockerSocket: true, command: [], env: {}, volumes: [] }];
-  await assert.rejects(fixture(t, { services: svc }).mgr.spawn(INST, { template: 'sock' }, { instanceId: INST }), /does not grant docker/);
-  await fixture(t, { services: svc, tools: ['docker'] }).mgr.spawn(INST, { template: 'sock' }, { instanceId: INST });
-  assert.ok(d.containers.get(`aura-${INST}--sock`).args.includes('/var/run/docker.sock:/var/run/docker.sock'));
+  await assert.rejects(fixture(t, { services: svc }).mgr.spawn(INST, { template: 'sock' }, { instanceId: INST }), /no sidecar gets the Docker socket/);
+  await assert.rejects(fixture(t, { services: svc, tools: ['docker'] }).mgr.spawn(INST, { template: 'sock' }, { instanceId: INST }), /no sidecar gets the Docker socket/);
+  assert.equal(d.containers.has(`aura-${INST}--sock`), false);
 });
 
 test('a sidecar caller manages only its own subtree; sidecars.manageAll lifts that', async (t) => {

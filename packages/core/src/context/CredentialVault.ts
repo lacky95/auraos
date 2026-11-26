@@ -4,10 +4,13 @@
  *
  *   context:user:<userId>   <NAME> → { kind: 'secret', sealed, inject: [], credential }
  *
- * An entry is a Context entry injected nowhere (`inject: []`): sealed with the
- * Context master key (seal.ts), never mounted into `/run/context`, never put
- * into an app's env. `credential` holds what the owner sees about it: who
- * may hold a handle (`consumers`), and when it was last used.
+ * An entry is a Context entry injected nowhere by itself (`inject: []`):
+ * sealed with the Context master key (seal.ts), never materialised as a file.
+ * It reaches an app's env or `osClient.context.get` only when the app
+ * declares the name in `context[]` AND holds this user's raw-read grant
+ * (context/grantedContext.ts, Phase 5 stream C); each such read is audited.
+ * `credential` holds what the owner sees about it: who may hold a handle
+ * (`consumers`), and when it was last used.
  *
  * A **handle** (`cred_…`) names one entry for one consuming app of one user.
  * It is what a requester gets back (`osClient.credentials.request`), and it

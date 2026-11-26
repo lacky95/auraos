@@ -16,6 +16,10 @@
     "system.overlay",
     "credentials.request"
   ],
+  "context": [
+    "LAKNERIO_REGISTRY_USER",
+    "LAKNERIO_REGISTRY_PASSWORD"
+  ],
   "tools": [
     "*",
     "aura",

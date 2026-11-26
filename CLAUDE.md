@@ -136,8 +136,10 @@ keeps the label legible in both modes.
 - App scopes, in registry priority order: `system` = `/workspace/apps` (the
   in-repo apps), `global` = `/data/scopes/global/apps`, `user` =
   `/data/scopes/users/default/apps`. `aura dev new` targets user/global.
-- Aura Context: env/secrets via `ContextStore` (sealed in KV, materialised to
-  `/run/context`), shared volumes via `VolumeStore` under
+- Aura Context: env/secrets via `ContextStore` (sealed in KV; an app gets a
+  key only when it declares it in `context[]` and holds the grant
+  `context.read:<KEY>`, `context/grantedContext.ts`; `file` keys go to the
+  master's `/run/context` only), shared volumes via `VolumeStore` under
   `/data/context/volumes/<name>`. Both are server-internal — the public
   `/api/kv/...` proxy rejects the `context:*` namespaces; use `/api/os/context`
   and `/api/os/volumes`.

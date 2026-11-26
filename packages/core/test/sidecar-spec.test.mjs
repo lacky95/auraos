@@ -27,7 +27,6 @@ const ctx = (over = {}) => ({
   appDataSubpath: 'scopes/users/default/apps/io.test.app',
   appDataVolume: 'aura_aura-app-data',
   legacyVolumeExists: () => false,
-  hasDockerTool: false,
   ...over,
 });
 
@@ -83,9 +82,10 @@ test('privileged / publish need sidecars.privileged even when the template decla
   assert.deepEqual(resolveSidecarSpec({ template: 'pub' }, ctx({ can })).publish, [{ host: 8080, container: 80 }]);
 });
 
-test('the docker socket only if the app itself holds the docker tool', () => {
-  rejects(() => resolveSidecarSpec({ template: 'sock' }, ctx()), 403, /does not grant docker/);
-  assert.equal(resolveSidecarSpec({ template: 'sock' }, ctx({ hasDockerTool: true })).inheritDockerSocket, true);
+test('no sidecar gets the docker socket (J.7); the spec has no socket field (stream C)', () => {
+  rejects(() => resolveSidecarSpec({ template: 'sock' }, ctx()), 403, /no sidecar gets the Docker socket/);
+  rejects(() => resolveSidecarSpec({ template: 'sock' }, ctx({ manifest: { services, tools: ['docker'] } })), 403, /no sidecar gets the Docker socket/);
+  assert.equal('inheritDockerSocket' in resolveSidecarSpec({ template: 'box' }, ctx()), false);
 });
 
 test('volumes: per sidecar by default, per template when shared, legacy per-app volume wins; overrides refused', () => {

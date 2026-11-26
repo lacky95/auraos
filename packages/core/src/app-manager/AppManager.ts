@@ -49,6 +49,12 @@ import { HomeDeniedError, type HomeResolver, type ResolvedHome } from '../homes/
 import { kernelHomeResolver } from '../homes/HomeResolver.js';
 import { TERMINAL_SESSION_APPS } from '../homes/plan.js';
 import { appJumpPermission } from '../auth/GrantStore.js';
+import { grantedContextEnv, liveGrantedContextDeps, type GrantedContextDeps } from '../context/grantedContext.js';
+import { ContextStore } from '../context/ContextStore.js';
+import { CredentialVault } from '../context/CredentialVault.js';
+import { migratePhase5Context } from '../context/migratePhase5.js';
+import { scanContractSources } from '../contract/sourceScan.js';
+import { defaultKv } from '@aura/kv-store';
 import type { AppRunAs, SpawnIdentity, SpawnIdentityProvider } from '../identity/types.js';
 import { appIdentityProvider } from '../identity/appIdentityProvider.js';
 import { appOwnershipSpecs, applyAppOwnership } from '../identity/appOwnership.js';
@@ -109,6 +115,8 @@ export class AppManager {
   /** Phase 5 spawn seams, used only by `spawnContext`. */
   private readonly homes: HomeResolver;
   private readonly identities: SpawnIdentityProvider;
+  /** Stream C: which Context keys a start gets (declared AND granted, context/grantedContext.ts). */
+  private readonly context: GrantedContextDeps;
   private instances = new Map<string, AppInstance>();
   private nextInstanceNum = new Map<string, number>();
   private activities = new Map<string, AppActivity>();
@@ -177,6 +185,8 @@ export class AppManager {
     /** Spawn seams (Phase 5): see `spawnContext`. Defaults reproduce today. */
     homes?: HomeResolver;
     identities?: SpawnIdentityProvider;
+    /** Stream C: the granted-Context lookups; default GrantStore, the system Context and the vault. */
+    context?: GrantedContextDeps;
     /** More runtimes next to the built-in ones (ARI; tests register a fake one). */
     runtimes?: RuntimeModule[];
     /** The Runtime Settings store; default: the sealed record in Valkey. */
@@ -230,6 +240,17 @@ export class AppManager {
     });
     // The installation's runAs decides (P5-3): root as today, or its app identity from the one registry.
     this.identities = opts.identities ?? appIdentityProvider(async () => (await import('../auth/services.js')).getAuthServices().identity);
+    // Stream C (Q7): only declared AND granted Context keys reach an app; personal keys from its user's vault (D56).
+    this.context = opts.context ?? (() => {
+      const auth = async () => (await import('../auth/services.js')).getAuthServices();
+      return liveGrantedContextDeps({
+        grants: { get: async (...a) => (await auth()).grants.get(...a) },
+        appScope: (appId) => this.registry.getScopeId(appId) ?? undefined,
+        store: new ContextStore(opts.dataDir),
+        vault: new CredentialVault({ dataDir: opts.dataDir }),
+        audit: (entry) => new AdminAudit(() => defaultRedis()).record(entry),
+      });
+    })();
     this.permissions = new PermissionManager(this.registry);
     this.tokens      = new InstanceTokens(join(opts.dataDir, 'aura', 'secrets', 'instance-token.key'));
     this.providers   = new ContentProviderRegistry();
@@ -296,6 +317,7 @@ export class AppManager {
         };
       },
       appHome: (instanceId) => this.appHomeOf(instanceId),
+      context: (instanceId) => this.instanceContext(instanceId),
       changed: () => { void this.syncSidecars(2).catch(() => undefined); },
     });
     // services[].prePull: fetch template images as soon as an app is
@@ -505,6 +527,40 @@ export class AppManager {
       }
     } catch (err) {
       console.warn(`[AppManager] runtime migration failed: ${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * Stream C (Q7), in kernel init after the runtime migration (D78): the
+   * Context migration (context/migratePhase5.ts: continuity grants, owner
+   * keys to the owner's vault, a report). Idempotent; never fatal: on an
+   * error the next boot retries, and until then apps get only what is
+   * already granted (no broadcast fallback).
+   */
+  private async migrateContext(): Promise<void> {
+    try {
+      const auth = (await import('../auth/services.js')).getAuthServices();
+      const r = await migratePhase5Context({
+        dataDir: this.dataDir,
+        kv: () => defaultKv() as never,
+        store: new ContextStore(this.dataDir),
+        vault: new CredentialVault({ dataDir: this.dataDir }),
+        grants: auth.grants,
+        apps: () => this.registry.getAll().map((m) => ({
+          appId: m.id, scope: String(this.registry.getScopeId(m.id) ?? m.scopeId), dir: m.appDir, context: m.context ?? [],
+        })),
+        scan: (app, keys) => {
+          const m = this.registry.getById(app.appId);
+          return m ? scanContractSources(app.dir, m, keys) : [];
+        },
+        audit: (entry) => auth.audit.record(entry),
+      });
+      if (r.ran) {
+        for (const l of r.losers) console.log(`[AppManager] context migration: ${l.appId} no longer gets ${l.keys.join(', ')}`);
+        console.log(`[AppManager] context migration recorded: ${r.reportFile}`);
+      }
+    } catch (err) {
+      console.warn(`[AppManager] context migration failed: ${(err as Error).message}`);
     }
   }
 
@@ -1165,6 +1221,8 @@ export class AppManager {
     await this.migrateAppHosts();
     // D75: before any pool fill or service start, so every start resolves on the recorded runtimes.
     await this.migrateRuntimes();
+    // Stream C (Q7): before any start, so the first spawn already gets only granted keys.
+    await this.migrateContext();
     this.startReconciler();
     // Background, missing images only — never delays boot.
     for (const m of this.registry.getAll()) {
@@ -1716,8 +1774,7 @@ export class AppManager {
       manifest: AppManifest; runtime: ResolvedRuntime; owner?: string; inPool?: boolean; preview?: boolean;
       installation: { installationId: string; runAs?: AppRunAs } | null;
     },
-  ): Promise<Pick<InstanceSpawnContext, 'home' | 'identity'>> {
-    void instanceId; // a runtime handle only: never a durable reference (D85 A7)
+  ): Promise<Pick<InstanceSpawnContext, 'home' | 'identity' | 'contextEnv'>> {
     if (!opts.installation) {
       throw new HomeDeniedError('installation-unresolved', `${appId}: its installation identity is unavailable, so it has no App Home; not started`);
     }
@@ -1730,8 +1787,35 @@ export class AppManager {
       throw new RuntimeCapabilityError(opts.runtime.runtime, ['identity'],
         `${appId} runs as its app identity, and runtime ${opts.runtime.runtime} can't enforce one: not started (no root fallback)`);
     }
-    const home = await this.homes.resolve(this.homeRequest(appId, opts.manifest, opts.installation.installationId, identity, opts.runtime.capabilities, opts.owner ?? (opts.inPool ? this.poolHomeUser(appId, opts.manifest) : undefined), !!opts.preview));
-    return { home, identity };
+    const user = opts.owner ?? (opts.inPool ? this.poolHomeUser(appId, opts.manifest) : undefined);
+    const home = await this.homes.resolve(this.homeRequest(appId, opts.manifest, opts.installation.installationId, identity, opts.runtime.capabilities, user, !!opts.preview));
+    // Stream C (Q7): the declared AND granted Context keys, the user's vault first.
+    // A pool member is warmed for the user it is claimed by (poolHomeUser), like its home.
+    // `instanceId` is named in the vault audit row only, as the runtime handle it is (D85 A7).
+    const { env: contextEnv } = await grantedContextEnv({
+      appId, declared: opts.manifest.context, ...(user ? { userId: user } : {}), instanceId,
+    }, this.context);
+    return { home, identity, contextEnv };
+  }
+
+  /**
+   * The Context keys a running instance's app holds now (sidecar `envInherit`,
+   * stream C): the same rule as its start, never every key. `known`: every
+   * Context key name the instance could be asked for (the system Context and
+   * its declaration), so an inherited name that is a Context key is never
+   * taken from the parent container's own env instead.
+   */
+  async instanceContext(instanceId: string): Promise<{ env: Record<string, string>; known: Set<string> }> {
+    const inst = this.instances.get(instanceId);
+    const manifest = inst ? this.registry.getById(inst.appId) : undefined;
+    const known = new Set<string>(manifest?.context ?? []);
+    try { for (const e of await new ContextStore(this.dataDir).list()) known.add(e.key); } catch { /* names only; best effort */ }
+    if (!inst || !manifest) return { env: {}, known };
+    const user = inst.owner ?? (inst.inPool ? this.poolHomes.get(instanceId) || undefined : undefined);
+    const { env } = await grantedContextEnv({
+      appId: inst.appId, declared: manifest.context, ...(user ? { userId: user } : {}), instanceId,
+    }, this.context, 'sidecar-env');
+    return { env, known };
   }
 
   /** The Home Resolver request of an app process (spawn, sidecars, the report). */

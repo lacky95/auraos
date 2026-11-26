@@ -22,6 +22,11 @@ export function computePermissionDiff(
   const permissionsAdded   = [...nextPerms].filter((p) => !currentPerms.has(p)).sort();
   const permissionsRemoved = [...currentPerms].filter((p) => !nextPerms.has(p)).sort();
 
+  const currentContext = new Set(current?.context ?? []);
+  const nextContext    = new Set(next.context ?? []);
+  const contextAdded   = [...nextContext].filter((k) => !currentContext.has(k)).sort();
+  const contextRemoved = [...currentContext].filter((k) => !nextContext.has(k)).sort();
+
   const dataProviderAdded   = !current?.dataProvider && !!next.dataProvider;
   const dataProviderRemoved = !!current?.dataProvider && !next.dataProvider;
 
@@ -45,6 +50,8 @@ export function computePermissionDiff(
     dataProviderAdded,
     dataProviderRemoved,
     intentFiltersAdded,
+    contextAdded,
+    contextRemoved,
   };
 }
 

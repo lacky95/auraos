@@ -13,7 +13,6 @@ import type { RuntimeCapabilities } from '../runtimes/types.js';
 import type { SandboxExecOpts, SandboxRunner, SandboxRunnerOpts } from './SandboxRunner.js';
 import { OutputLog } from './outputLog.js';
 import type { SpawnContext } from '../scopes/types.js';
-import { ContextStore } from '../context/ContextStore.js';
 import { VolumeStore, type VolumeEntry } from '../context/VolumeStore.js';
 import {
   ASTRO_START_SHELL, RAW_START_SHELL, PROVISION_TIMEOUT_MS, ProvisionWatch, nextHealthDeadline,
@@ -70,7 +69,7 @@ export interface ProotBindSpec {
   appDir: string;
   /** The `/home/aura` bind (spawn/homeArgs.ts). */
   homeBind: string;
-  /** /run/context and the Context Volumes (spawn/contextArgs.ts). */
+  /** The Context Volumes (spawn/contextArgs.ts); no /run/context (stream C). */
   contextBinds: string[];
   /** The allowlist dir, and the store too in legacy symlink mode; null without a toolchain. */
   tools: { myTools: string; allTools: string | null } | null;
@@ -107,7 +106,7 @@ export function prootBinds(spec: ProotBindSpec): string[] {
     // tool dotfile written there is destroyed by the next `compose up
     // --build` or container recreate.
     spec.homeBind,
-    // OS Context: /run/context and the shared Context Volumes (spawn/contextArgs.ts).
+    // The shared Context Volumes (spawn/contextArgs.ts); no /run/context (stream C).
     ...spec.contextBinds,
     // Expose the app's own source dir at its real absolute path. Required for
     // user/global-scope apps, whose appDir lives UNDER /data (e.g.
@@ -172,8 +171,6 @@ export class ProotRunner implements SandboxRunner {
   private appsDir: string;
   private dataDir: string;
   private osApiBase: string;
-  /** OS-wide env/secret store, injected into every sandbox. */
-  private contextStore: ContextStore;
   /** OS-managed shared volumes, bound into every sandbox. */
   private volumeStore: VolumeStore;
 
@@ -183,7 +180,6 @@ export class ProotRunner implements SandboxRunner {
     this.appsDir = opts.appsDir;
     this.dataDir = opts.dataDir;
     this.osApiBase = opts.osApiBase;
-    this.contextStore = new ContextStore(opts.dataDir);
     this.volumeStore = new VolumeStore(opts.dataDir);
   }
 
@@ -263,9 +259,6 @@ export class ProotRunner implements SandboxRunner {
     // (the args reference the dir). Wildcard apps get the whole store mirrored;
     // explicit apps get just their declared tools.
     if (prooted) this.provisionToolsDir(instanceId, manifest);
-    // Resolve OS Context (env/secret) LIVE from Valkey on every spawn.
-    this.contextStore.ensureDir();
-    const contextEnv = await this.contextStore.resolveEnv();
     // OS-managed shared volumes — bound into the proot (RW; proot --bind can't
     // enforce read-only, so RO volumes are effectively RW here).
     await this.volumeStore.ensureAll();
@@ -287,9 +280,10 @@ export class ProotRunner implements SandboxRunner {
     // would shadow newer copies of the same sonames in the app's own runtime.
     const env: Record<string, string> = {
       ...process.env as Record<string, string>,
-      // OS Context env FIRST — the fixed OS vars below override, so a context
-      // key can't clobber PATH/APP_ID/OS_API_BASE etc.
-      ...contextEnv,
+      // The Context keys the kernel granted this start (declared AND granted,
+      // stream C) FIRST — the fixed OS vars below override, so a context key
+      // can't clobber PATH/APP_ID/OS_API_BASE etc.
+      ...(ctx.contextEnv ?? {}),
       PATH: path,
       // The App Home, through the bind in buildProotArgs (never the master's
       // home). Set unconditionally — inheriting the master's $HOME here would
@@ -461,7 +455,7 @@ export class ProotRunner implements SandboxRunner {
       instanceDataDir: dataDir,
       appDir,
       homeBind: prootHomeBind({ home }),
-      contextBinds: prootContextBinds({ systemDir: this.contextStore.systemDir, volumesDir: this.volumeStore.volumesDir, volumes: contextVolumes }),
+      contextBinds: prootContextBinds({ volumesDir: this.volumeStore.volumesDir, volumes: contextVolumes }),
       tools: hasTools ? { myTools, allTools: currentToolsMode(this.dataDir) === 'symlink' ? toolBinDir : null } : null,
       socketBinds: prootSocketBinds(manifest.tools),
     });

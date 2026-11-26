@@ -110,6 +110,10 @@ export interface PermissionDiff {
   /** New intent filters added by the incoming manifest. Each formatted
    *  as `<action> [mime…] [scheme…]` for display. */
   intentFiltersAdded:  string[];
+  /** Context keys the incoming manifest declares that the previous did not
+   *  (stream C: an approved install or update grants them). */
+  contextAdded:        string[];
+  contextRemoved:      string[];
 }
 
 /**
@@ -174,6 +178,8 @@ export interface InstallBinding {
   /** Everything the app declares, sorted; the diff is shown, this is bound. */
   tools:       string[];
   permissions: string[];
+  /** The Context keys it declares (`context[]`), sorted: the approval grants them (stream C, Q7). */
+  context:     string[];
   /** It replaces a dev checkout (`force`): the owner's working tree, uncommitted work included (M1). */
   replaceCheckout: boolean;
 }

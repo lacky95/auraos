@@ -120,6 +120,8 @@ test('source scan: undeclared context keys, raw Context reads, permissions, dock
   ]);
   assert.match(f[3].message, /storage\.read/);
   assert.equal(scanContractText('a.ts', "execFile('docker', ['ps']);", parse({ tools: ['docker'] })).length, 0);
+  // Stream C: a declared key is in the env once granted, so its env read is not a finding.
+  assert.equal(scanContractText('a.ts', 'const k = process.env.GOOD_KEY;', m, ['GOOD_KEY']).length, 0);
   const dir = mkdtempSync(join(tmpdir(), 'scan-'));
   mkdirSync(join(dir, 'src'));
   mkdirSync(join(dir, 'node_modules'));

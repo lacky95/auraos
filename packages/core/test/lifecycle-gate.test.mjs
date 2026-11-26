@@ -167,7 +167,6 @@ function makeRunner() {
   const dataDir = mkdtempSync(join(tmpdir(), 'lc-data-'));
   const runner = new ProotRunner({ baseRootfs: '/nonexistent', toolchainDir: dataDir, appsDir: dataDir, dataDir, osApiBase: 'http://127.0.0.1:9' });
   // No Valkey in tests: an empty OS Context and no shared volumes.
-  runner.contextStore = { ensureDir() {}, resolveEnv: async () => ({}) };
   runner.volumeStore = { ensureAll: async () => {}, resolveMounts: async () => [] };
   return { runner, dataDir };
 }

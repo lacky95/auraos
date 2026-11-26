@@ -12,6 +12,10 @@
 // the System Terminal its owner's Private Home; an unwrapped PRoot spawn
 // (`direct`) is refused, since it has no home of its own.
 //
+// Stream C (owner-approved difference, Q7): no `/run/context` mount or bind;
+// the context env is what the kernel resolved for the start (`ctx.contextEnv`:
+// declared AND granted keys), which the runners pass through unchanged.
+//
 // Run via: node tools/run-tests.mjs --only=core
 
 import { test } from 'node:test';
@@ -43,8 +47,7 @@ const toolchain = join(TMP, 'toolchain');
 for (const d of [dataDir, rootfs, join(toolchain, 'bin')]) mkdirSync(d, { recursive: true });
 
 const opts = { baseRootfs: rootfs, toolchainDir: toolchain, appsDir: join(TMP, 'apps'), dataDir, osApiBase: 'http://127.0.0.1:3000' };
-const stubStores = (runner, contextEnv, volumes) => {
-  runner.contextStore = { ensureDir() {}, resolveEnv: async () => ({ ...contextEnv }), systemDir: join(dataDir, 'context', 'system') };
+const stubStores = (runner, volumes) => {
   runner.volumeStore = { ensureAll: async () => {}, resolveMounts: async () => volumes.map((v) => ({ ...v })), volumesDir: join(dataDir, 'context', 'volumes') };
 };
 
@@ -149,8 +152,8 @@ async function containerArgv(fx) {
   const appDir = typeof fx.appDir === 'function' ? fx.appDir() : fx.appDir;
   const m = manifest(fx.manifest);
   const instanceId = `${m.id}-1`;
-  const ctx = { appDir, instanceDataDir: join(dataDir, 'scopes', 'users', 'default', 'apps', m.id, instanceId), ...fx.ctx };
-  const argv = runner.buildDockerArgs(instanceId, m.id, 4321, m, `aura-${instanceId}`, ctx, fx.contextEnv, fx.volumes, fx.term ?? null);
+  const ctx = { appDir, instanceDataDir: join(dataDir, 'scopes', 'users', 'default', 'apps', m.id, instanceId), contextEnv: { ...fx.contextEnv }, ...fx.ctx };
+  const argv = runner.buildDockerArgs(instanceId, m.id, 4321, m, `aura-${instanceId}`, ctx, fx.volumes, fx.term ?? null);
   const granted = (m.tools ?? []).some((t) => t === '*' || t === 'docker');
   return norm(stripSocket(argv, granted));
 }
@@ -160,7 +163,7 @@ async function prootLaunch(fx, useProot) {
   if (useProot) process.env['AURA_USE_PROOT'] = 'true'; else delete process.env['AURA_USE_PROOT'];
   try {
     const runner = new ProotRunner(opts);
-    stubStores(runner, fx.contextEnv, fx.volumes);
+    stubStores(runner, fx.volumes);
     let captured;
     runner.startProcess = async (_i, _a, _p, _m, args, appDir, env, prooted, entrypointArgv) => {
       captured = { args, appDir, env, prooted, entrypointArgv };
@@ -170,7 +173,7 @@ async function prootLaunch(fx, useProot) {
     const m = manifest(fx.manifest);
     const instanceId = `${m.id}-1`;
     try {
-      await runner.spawn(instanceId, m.id, 4321, m, { appDir, instanceDataDir: join(dataDir, 'inst', instanceId), ...fx.ctx });
+      await runner.spawn(instanceId, m.id, 4321, m, { appDir, instanceDataDir: join(dataDir, 'inst', instanceId), contextEnv: { ...fx.contextEnv }, ...fx.ctx });
     } catch (err) {
       if (useProot) throw err;
       return { refused: err.message };

@@ -265,9 +265,10 @@ settings that the shell or other apps need to react to. For everything
 else — documents, user preferences private to your app, caches,
 session state — write to `/data`.
 
-`/data` is also distinct from **`/run/context`**: that path holds OS-managed
-environment variables and secrets injected by [Aura Context](./context) and is
-**read-only** to your app. Write your own persistent data to `/data`.
+`/data` is also distinct from [Aura Context](./context): OS-managed
+environment variables and secrets, which your app gets only when it declares a
+key in `context[]` and the owner grants it (as `$KEY` and through
+`osClient.context.get`). Write your own persistent data to `/data`.
 
 ### What survives a restart
 

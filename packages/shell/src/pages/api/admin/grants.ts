@@ -29,8 +29,10 @@ import { ownerUiApp } from '../../../../server/gateway-identity.mjs';
  * `permissions:changed`; the record and the audit name the owner (or the
  * operator) who decided, and the requester of an approved request.
  * Grantable: notifications.locked, notifications.popup, notifications.read,
- * notifications.systemModal (phase 6; revoking it releases that sender's modals).
- * An app must also REQUEST the permission in its manifest for the grant to count.
+ * notifications.systemModal (phase 6; revoking it releases that sender's modals),
+ * context.read:<KEY> (Phase 5 stream C: a system Context key reaches the app).
+ * An app must also REQUEST the permission in its manifest for the grant to count
+ * (a Context key: declare it in `context[]`).
  */
 function fail(err: unknown): Response {
   const status = (err as { status?: unknown }).status;
@@ -72,7 +74,11 @@ export const GET: APIRoute = async (ctx) => {
   const apps = [];
   for (const m of mgr.registry.getAll()) {
     // Deprecated names in permissions[] count as their current name (desktopModal → systemModal).
-    const declared = [...new Set((m.permissions ?? []).map((x: string) => core.canonicalPermission(x)).filter((x: string) => core.isPrivilegedPermission(x)))];
+    const declared = [...new Set([
+      ...(m.permissions ?? []).map((x: string) => core.canonicalPermission(x)).filter((x: string) => core.isPrivilegedPermission(x)),
+      // Stream C: each declared Context key is requested as context.read:<KEY>.
+      ...(m.context ?? []).map((k: string) => core.contextReadPermission(k)),
+    ])];
     const scope = mgr.registry.getScopeId(m.id) ?? null;
     const asOwner = asOwnerPermissions(m.id, scope, declared);
     const requested = declared.filter((x) => !asOwner.includes(x));
@@ -110,7 +116,11 @@ export const POST: APIRoute = async (ctx) => {
     const m = mgr.registry.getById(a.id);
     if (!m) return jsonResponse({ error: `unknown app ${a.id}` }, 404);
     appScope = mgr.registry.getScopeId(a.id);
-    if (!(m.permissions ?? []).some((x: string) => core.canonicalPermission(x) === a.permission)) {
+    if (core.CONTEXT_READ_PERMISSION_RE.test(a.permission)) {
+      // Stream C: a Context key counts only while the app declares it in context[].
+      const key = a.permission.slice('context.read:'.length);
+      if (!(m.context ?? []).includes(key)) warnings.push(`${a.id} does not declare '${key}' in its manifest context[] — the grant has no effect until it does`);
+    } else if (!(m.permissions ?? []).some((x: string) => core.canonicalPermission(x) === a.permission)) {
       warnings.push(`${a.id} does not request '${a.permission}' in its manifest — the grant has no effect until it does`);
     }
   } else if (a.kind === 'apiKey') {

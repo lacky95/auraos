@@ -1,28 +1,30 @@
 /**
  * Aura Context — the OS-wide env-var / secret manager.
  *
- * v1 scope: a single global **System Context** (`context:system:<KEY>`),
- * read by the OS/master AND mounted into every app container. The schema
- * (`context:app:<appId>:<KEY>`) leaves room for granular per-app App Context
- * later, which is deliberately NOT implemented here.
+ * The **System Context** (`context:system:<KEY>`) is read by the OS/master.
+ * An app gets a key only when it declares it (manifest `context[]`) AND the
+ * owner granted it (`context.read:<KEY>`, Phase 5 stream C, Q7): the rule is
+ * context/grantedContext.ts, for the spawn env and `osClient.context.get`
+ * alike. Personal keys live in the user's vault (CredentialVault, D56).
  *
  * Each entry has a **kind** and an **inject** target set:
  *   • kind `variable` — non-sensitive config; value shown/editable in the UI
  *     and returned by the list API.
  *   • kind `secret`   — sensitive; value NEVER returned by the API, masked in
  *     the UI.
- *   • inject `env`    — injected as `-e KEY=VALUE` at spawn (respawn to change).
- *   • inject `file`   — materialised to `/run/context/<KEY>` (updates live).
- * An entry may target env, file, or both. Values are sealed (AES-256-GCM) at
- * rest so nothing sits plaintext in the Valkey AOF/RDB on disk.
+ *   • inject `env`    — may reach an app as `-e KEY=VALUE` at spawn, when the
+ *     app declares and holds it (respawn to change).
+ *   • inject `file`   — materialised to `/run/context/<KEY>` for the AuraOS
+ *     shells only (the master; `ensureMasterAccess`). No app mounts it.
+ * An entry may target env, file, both or neither. Values are sealed
+ * (AES-256-GCM) at rest so nothing sits plaintext in the Valkey AOF/RDB.
  *
  * Two representations, kept in lock-step by `set`/`del`:
  *   • Valkey (`context:system:<KEY>`) — source of truth: `{ kind, sealed, inject }`.
  *   • Files (`<dataDir>/context/system/<KEY>`) — plaintext, materialised
- *     atomically, ONLY for entries whose inject set contains `file`. This dir
- *     is the mount source for `/run/context` in every app container, so a value
- *     change reaches a RUNNING app on its next file read — no app restart, and
- *     never a master restart (the master reads Valkey live at point-of-use).
+ *     atomically, ONLY for entries whose inject set contains `file`. The
+ *     master's `/run/context` points here (a value change reaches its next
+ *     shell without a restart).
  *
  * Access is server-internal only. The public `/api/kv/...` proxy rejects the
  * `context:*` namespace; callers go through `/api/os/context`.
@@ -65,12 +67,8 @@ export interface ContextEntry {
  * Normalise an arbitrary inject value to a valid, deduped set.
  *
  * An EMPTY array is meaningful and is preserved: "sealed in the KV, injected
- * nowhere" — an OS-only credential. That matters because both targets are
- * broadcast: `env` hands the value to every app container at spawn, and `file`
- * materialises it into `/run/context`, which every app container mounts. A
- * credential the OS needs but apps must not see (a GitHub token used to open a
- * store pull request, say) has no safe home under the old behaviour, where an
- * empty selection silently widened to both.
+ * nowhere" — an OS-only credential (a GitHub token used to open a store pull
+ * request, say): no env even for an app that declares and holds it, no file.
  *
  * A NON-array (legacy rows written before `inject` existed) still defaults to
  * every target, so existing entries keep behaving exactly as before.
@@ -83,7 +81,7 @@ export function normaliseInject(raw: unknown): InjectTarget[] {
 export class ContextStore {
   private readonly dataDir: string;
   private readonly key: Buffer;
-  /** Filesystem dir that mounts into containers at `/run/context`. */
+  /** The master's `/run/context` (File-injected entries; no app mounts it). */
   readonly systemDir: string;
 
   constructor(dataDir: string = process.env['AURA_DATA_DIR'] ?? '/data') {
@@ -123,17 +121,14 @@ export class ContextStore {
     return null;
   }
 
-  /**
-   * Ensure the mount-source dir exists so docker `volume-subpath` mounts (and
-   * proot binds) at spawn time don't fail on a missing path. Idempotent.
-   */
+  /** Ensure the master's file dir exists. Idempotent. */
   ensureDir(): void {
     mkdirSync(this.systemDir, { recursive: true });
   }
 
   /**
-   * Make File-injected context available INSIDE the master (shell) container,
-   * matching the `/run/context` path the apps see. Two best-effort steps
+   * Make File-injected context available INSIDE the master (shell) container
+   * at `/run/context` (the `file` target is the AuraOS shells' only). Two best-effort steps
    * (each wrapped in try/catch — a non-root master or a pre-existing mount just
    * skips):
    *   1. Symlink `/run/context` → the live system dir, so `cat /run/context/<KEY>`
@@ -145,8 +140,7 @@ export class ContextStore {
    *      opened master shell has `$<KEY>` set (already-open shells pick it up on
    *      next shell). A real env var can't change in the running master process
    *      itself without a restart, so this is the no-restart equivalent.
-   * Only File-injected entries appear (they're the only ones with files);
-   * env-only entries remain app-container-only.
+   * Only File-injected entries appear (they're the only ones with files).
    */
   ensureMasterAccess(): void {
     try {
@@ -268,20 +262,30 @@ export class ContextStore {
   }
 
   /**
-   * Decrypted `KEY → value` map for spawn-time `-e` env injection. Only entries
-   * whose inject set contains `env`. Read live from Valkey on every spawn so a
-   * respawned app gets current values.
+   * Decrypted `KEY → value` map of the given keys whose inject set contains
+   * `env`: the system part of an app's spawn env (context/grantedContext.ts
+   * decides which keys: declared AND granted, Q7). Read live from Valkey on
+   * every spawn, so a respawned app gets current values. Never every key.
    */
-  async resolveEnv(): Promise<Record<string, string>> {
-    const all = await this.resolveAll();
+  async resolveEnv(keys: readonly string[]): Promise<Record<string, string>> {
     const env: Record<string, string> = {};
-    for (const e of all) if (e.inject.includes('env')) env[e.key] = e.plaintext;
-    return env;
+    if (keys.length === 0) return env;
+    const kv = defaultKv();
+    try {
+      for (const key of new Set(keys)) {
+        if (!KEY_PATTERN.test(key)) continue;
+        const dec = this.decode((await kv.get(SYSTEM_NS, key))?.value);
+        if (dec?.inject.includes('env')) env[key] = dec.plaintext;
+      }
+      return env;
+    } finally {
+      await kv.close().catch(() => undefined);
+    }
   }
 
   /**
    * Rebuild the whole `system/` dir from Valkey. Called once at OS boot so the
-   * files exist before the first app mount. Writes files ONLY for entries whose
+   * master's files exist. Writes files ONLY for entries whose
    * inject set contains `file`, and prunes every other file (deleted keys or
    * entries toggled to env-only).
    */

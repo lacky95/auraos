@@ -588,6 +588,7 @@ export class NexusManager {
         digest: resolved.digest || treeDigest(stagingDir),
         scope: targetScope, identity: opts.identity ?? null,
         tools: [...new Set(manifest.tools)].sort(), permissions: [...new Set(manifest.permissions)].sort(),
+        context: [...new Set(manifest.context ?? [])].sort(),
         replaceCheckout: replacesCheckout,
       };
 

@@ -118,11 +118,13 @@ const key = await osClient.context.get('OPENAI_API_KEY');   // null: the owner h
 - Server side only, with the instance token. A page never sees a value.
 - Only the keys in `context[]` are handed out. Another key is refused
   (`OsError` 403 `context-undeclared`) and counted in the access report.
-- Today it reads the one global Context (Settings → Context). Phase 5 swaps
-  in values granted per app and user; your call stays the same.
-- Reading `/run/context/<KEY>` or the injected env var still works until
-  Phase 5, but it is not the contract: `aura dev validate` warns and the
-  contract report lists the app.
+- A declared key still needs the owner's grant (`context.read:<KEY>`, given
+  with your app's install approval or by `aura admin grant <app> context.read:<KEY>`); until then the
+  call is refused with 403 `context-not-granted`. For an instance acting for
+  a user, that user's vault is asked first (D56).
+- The same declared and granted keys are in your server's env. There is no
+  `/run/context` for apps; `aura dev validate` warns about reads of it and of
+  undeclared keys from the env.
 
 **A secret of the user's own** (a GitHub token, an API key they hold): don't
 build a field for it. Ask with `osClient.credentials.request` (needs

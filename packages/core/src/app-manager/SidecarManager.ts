@@ -11,7 +11,6 @@ import type { FanoutTarget, MountManager } from './MountManager.js';
 import { MOUNT_ROOT_PATH } from './MountManager.js';
 import type { PermissionManager } from '../permissions/PermissionManager.js';
 import type { AppManifest } from '../types/manifest.js';
-import { toolsGrant } from './tool-allowlist.js';
 import { rawSocketArgs } from './spawn/networkArgs.js';
 import { sidecarIdentityArgs } from './spawn/identityArgs.js';
 import { BASE_IMAGE } from './BaseImage.js';
@@ -146,6 +145,11 @@ interface SidecarManagerOpts {
    */
   appHome(instanceId: string): Promise<ResolvedHome | null>;
   /**
+   * Stream C: the Context keys the parent's app holds now (declared AND
+   * granted) and every Context key name (`known`), for `envInherit`.
+   */
+  context(instanceId: string): Promise<{ env: Record<string, string>; known: Set<string> }>;
+  /**
    * A sidecar was created or removed — lets AppManager refresh its sidecar
    * cache now instead of at the next reconciler tick (else `GET sidecars`
    * and `aura get sc` show the old state for up to a tick).
@@ -173,7 +177,6 @@ const MAX_OUTPUT = 4 * 1024 * 1024;
 const PULL_TIMEOUT_MS = 10 * 60_000;
 /** Readiness waits ask docker whether the container is still up on every Nth failed probe. */
 const UP_CHECK_EVERY = 4;
-const DOCKER_SOCK = '/var/run/docker.sock';
 
 interface DockerResult { code: number | null; stdout: string; stderr: string; timedOut: boolean; truncated: boolean }
 
@@ -334,7 +337,6 @@ export class SidecarManager {
       appDataSubpath,
       appDataVolume: rt.appDataVolume,
       legacyVolumeExists: (n) => legacy.has(n),
-      hasDockerTool: toolsGrant(manifest.tools ?? [], 'docker'),
     });
     const hash = specHash(spec);
     const container = sidecarContainerName(instanceId, spec.name);
@@ -497,14 +499,20 @@ export class SidecarManager {
     await pull;
   }
 
-  /** Env from envInherit (OS Context, then the app container's env), then the spec's own. */
+  /**
+   * Env from envInherit, then the spec's own. A Context key comes only from
+   * the parent's granted keys (stream C: a sidecar never sees more than its
+   * app); any other name from the app container's env.
+   */
   private async environment(instanceId: string, appId: string, spec: ResolvedSidecarSpec): Promise<Record<string, string>> {
     const env: Record<string, string> = {};
     if (spec.envInherit.length) {
-      const ctx = await this.opts.runner.resolveContextEnv().catch(() => ({} as Record<string, string>));
+      const ctx = await this.opts.context(instanceId).catch(() => ({ env: {} as Record<string, string>, known: null }));
       let parentEnv: Record<string, string> | null = null;
       for (const name of spec.envInherit) {
-        if (ctx[name] !== undefined) { env[name] = ctx[name]; continue; }
+        if (ctx.env[name] !== undefined) { env[name] = ctx.env[name]; continue; }
+        // A Context key the app does not hold, or names unknown (Valkey down): never from the container's env.
+        if (!ctx.known || ctx.known.has(name)) continue;
         parentEnv ??= await this.containerEnv(`aura-${instanceId}`);
         if (parentEnv[name] !== undefined) env[name] = parentEnv[name];
       }
@@ -650,8 +658,6 @@ export class SidecarManager {
       a.push('--mount', `type=volume,source=${rt.appDataVolume},target=${MOUNT_ROOT_PATH},volume-subpath=${this.opts.runner.mountRootSubpath(consumer)}`,
         '-e', `AURA_MOUNT_ROOT=${MOUNT_ROOT_PATH}`);
     }
-    // resolveSidecarSpec already refused this unless the app holds docker itself.
-    if (spec.inheritDockerSocket) a.push('-v', `${DOCKER_SOCK}:${DOCKER_SOCK}`);
     a.push(spec.image, ...spec.command);
     return a;
   }

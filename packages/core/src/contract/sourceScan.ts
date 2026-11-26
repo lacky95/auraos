@@ -5,9 +5,10 @@
  * output, no dependencies): it finds the usual spellings, not every one.
  *
  *   context-undeclared   `context.get('KEY')` with KEY missing from `context[]`
- *   context-raw          a read of the raw mounted Context (`/run/context`), or,
- *                        when the live keys are given, of a Context key from
- *                        the env. Works until Phase 5, not the contract.
+ *   context-raw          a read of the raw mounted Context (`/run/context`,
+ *                        gone for apps in Phase 5), or, when the live keys are
+ *                        given, of an undeclared Context key from the env
+ *                        (never injected: only declared and granted keys are).
  *   permission-undeclared an SDK call whose permission isn't in `permissions[]`
  *   docker-undeclared    the docker CLI or socket without "docker" in `tools[]`
  *   interface-undeclared `interfaces.resolve('…')` of a name `consumes[]` lacks
@@ -86,13 +87,14 @@ export function scanContractText(rel: string, text: string, m: ScanManifest, con
     }
     if (RAW_CONTEXT_RE.test(l)) {
       out.push({ file: rel, line, severity: 'warn', code: 'context-raw',
-        message: 'reads the raw mounted Context (/run/context): use osClient.context.get(key) and declare the key in context[]; the mount goes in Phase 5' });
+        message: 'reads the raw mounted Context (/run/context), which apps no longer get (Phase 5): use osClient.context.get(key) and declare the key in context[]' });
     } else if (envKeyRe) {
       const m2 = envKeyRe.exec(l);
-      if (m2) {
-        const key = m2[1] ?? m2[2];
+      const key = m2 ? m2[1] ?? m2[2] : undefined;
+      // A declared key is in the env once the owner grants it (Phase 5 stream C); an undeclared one never is.
+      if (key && !d.context.includes(key)) {
         out.push({ file: rel, line, severity: 'warn', code: 'context-raw',
-          message: `reads the Context key ${key} from the env: use osClient.context.get('${key}') and declare it in context[]; the injection goes in Phase 5` });
+          message: `reads the Context key ${key} from the env without declaring it: it reaches the app only when declared in context[] and granted (or use osClient.context.get('${key}'))` });
       }
     }
     for (const u of PERMISSION_USES) {

@@ -49,4 +49,11 @@ export interface SpawnContext {
   env?: Record<string, string>;
   /** The app's installation (names its account in the generated passwd, stream A). */
   installationId?: string;
+  /**
+   * Stream C (Q7): the Context keys this start may see, as the kernel
+   * resolved them: declared in `context[]` AND granted, from the instance
+   * user's vault first, then the system Context (context/grantedContext.ts).
+   * Runners put exactly these into the env; absent means none.
+   */
+  contextEnv?: Record<string, string>;
 }

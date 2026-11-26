@@ -98,9 +98,19 @@ export const credentialReadPermission = (name: string): string => `credential.re
 /** The grant scope of one user's vault. */
 export const userScope = (userId: string): GrantScope => ({ kind: 'user', id: userId });
 
+/**
+ * A key of the system Context reaching an app (stream C, Q7): one grant per
+ * app and key, OS-wide, pinned to the app's install scope. It counts only
+ * while the app also declares the key in its manifest `context[]`; given by
+ * the owner's install or update approval, by the owner directly, or by the
+ * Phase 5 migration.
+ */
+export const CONTEXT_READ_PERMISSION_RE = /^context\.read:[A-Z_][A-Z0-9_]{0,127}$/;
+export const contextReadPermission = (key: string): string => `context.read:${key}`;
+
 export function isPrivilegedPermission(p: string): boolean {
   return (PRIVILEGED_PERMISSIONS as readonly string[]).includes(p) || KV_OS_WRITE_PERMISSION_RE.test(p)
-    || CREDENTIAL_READ_PERMISSION_RE.test(p);
+    || CREDENTIAL_READ_PERMISSION_RE.test(p) || CONTEXT_READ_PERMISSION_RE.test(p);
 }
 
 const SUBJECT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
@@ -174,7 +184,10 @@ export class GrantStore {
       return;
     }
     if (!isPrivilegedPermission(permission)) {
-      throw new GrantError(400, `'${permission}' cannot be granted here — grantable: ${GRANTABLE_PERMISSIONS.join(', ')}, system.kv.os.<topic>.write, credential.read:<NAME>`);
+      throw new GrantError(400, `'${permission}' cannot be granted here — grantable: ${GRANTABLE_PERMISSIONS.join(', ')}, system.kv.os.<topic>.write, credential.read:<NAME>, context.read:<KEY>`);
+    }
+    if (CONTEXT_READ_PERMISSION_RE.test(permission) && (subject.kind !== 'app' || scope.kind !== 'os')) {
+      throw new GrantError(400, 'a context.read:<KEY> grant is an app\'s, OS-wide');
     }
     const credential = CREDENTIAL_READ_PERMISSION_RE.test(permission);
     if (credential || scope.kind === 'user') {

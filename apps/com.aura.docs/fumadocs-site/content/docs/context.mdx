@@ -1,22 +1,53 @@
 ---
 title: Context
-description: Aura Context — the OS-wide store for environment variables and secrets, injected into every app and the master container.
+description: Aura Context — the OS-wide store for environment variables and secrets. An app gets a key only when it declares it and the owner grants it.
 ---
 
 **Aura Context** is where AuraOS keeps environment variables and secrets —
 things like `GITHUB_TOKEN`, `OPENAI_API_KEY`, or a plain `LOG_LEVEL`. You set
-them once in **Settings → Context**, and the OS makes them available to your
-apps (and to the master shell) as environment variables and/or files.
+them once in **Settings → Context**. **An app gets a key only when it declares
+it and you grant it**; nothing is handed to every app.
 
-The name is deliberately broad: today it's a single global **System Context**;
-the model leaves room for per-app **App Context** later.
+There are two places a value lives:
+
+- the **System Context** (`context:system:*`): set in Settings → Context;
+- each user's **vault** (`context:user:<userId>`, Settings → Users & Identities
+  → Secrets): personal keys, which belong to that user. An app acting for that
+  user reads one only with the user's own raw-read grant, and every read is
+  audited.
+
+---
+
+## How a key reaches an app
+
+1. The app **declares** the key in its manifest:
+   ```json
+   { "context": ["OPENAI_API_KEY"] }
+   ```
+2. The owner **grants** it: the install or update approval of an app that
+   declares keys grants them (the dialog lists them), or directly:
+   ```sh
+   aura admin grant com.example.app context.read:OPENAI_API_KEY
+   ```
+   A personal key in a user's vault needs that user's `credential.read:<KEY>`
+   grant instead (asked for with `osClient.credentials.request`).
+3. At the app's next start, the key is in its env as `$OPENAI_API_KEY`, and
+   `osClient.context.get('OPENAI_API_KEY')` returns it. For an instance that
+   acts for a user, the user's vault is asked first, then the System Context.
+
+A key the app does not declare is never in its env, and `context.get` refuses
+it (403 `context-undeclared`). A declared key the owner has not granted is
+refused too (403 `context-not-granted`). Revoking the grant takes effect for
+`context.get` at once and for the env at the next start. A sidecar's
+`envInherit` gets only keys its app holds.
+
+There is no `/run/context` in apps any more.
 
 ---
 
 ## The two choices per entry
 
-Every entry has a **kind** and one or more **inject** targets — chosen
-independently, per variable.
+Every System Context entry has a **kind** and zero or more **inject** targets.
 
 ### Kind — how it's shown
 
@@ -25,18 +56,16 @@ independently, per variable.
 | `secret` | masked (`••••`), never shown again | value withheld |
 | `variable` | value visible and editable | value included |
 
-The kind only affects *visibility*. It does **not** change how the value
-reaches your app — both kinds are encrypted at rest and injected the same way.
-
-### Inject — how it reaches containers
+### Inject — where it may appear
 
 | Target | Delivered as | Update behaviour |
 |---|---|---|
-| `env` | `-e KEY=VALUE` at spawn → `$KEY` | app **respawn** to pick up a change |
-| `file` | `/run/context/KEY` inside the app | **live** — no respawn |
+| `env` | `$KEY` in the apps that declare and hold it | app **respawn** to pick up a change |
+| `file` | `/run/context/KEY` in the AuraOS shells only (the master) | **live** — no respawn |
 
-Tick either, or both. A key must be a valid env-var name: `[A-Z_][A-Z0-9_]*`
-(e.g. `GITHUB_TOKEN`, `LOG_LEVEL`).
+No target at all keeps the key OS-only: no app gets it, even with a grant
+(`context.get` of a granted OS-only key still works). A key must be a valid
+env-var name: `[A-Z_][A-Z0-9_]*` (e.g. `GITHUB_TOKEN`, `LOG_LEVEL`).
 
 ---
 
@@ -45,18 +74,11 @@ Tick either, or both. A key must be a valid env-var name: `[A-Z_][A-Z0-9_]*`
 ### In an app container
 
 ```sh
-echo "$GITHUB_TOKEN"        # if injected as env  (set at spawn)
-cat /run/context/GITHUB_TOKEN   # if injected as file (updates live)
+echo "$GITHUB_TOKEN"        # declared, granted and injected as env (set at spawn)
 ```
 
-- **env** entries are baked into the container at start, so changing one
-  needs the app to respawn.
-- **file** entries live-mirror from the master, so editing the value shows up
-  on the app's next read — no restart.
-
-`/run/context` is **read-only** and OS-managed — it is *not* app storage. For
-data your app writes and owns, use the per-instance `/data` directory instead;
-see [Persisting app data](./develop-an-app#persisting-app-data).
+On the server, prefer `osClient.context.get('GITHUB_TOKEN')`: it reads the
+current value without a restart.
 
 ### In the master (shell) container
 
@@ -69,9 +91,8 @@ aura jump -m                        # new master shell...
 echo "$GITHUB_TOKEN"                # ...exports File entries automatically
 ```
 
-Any newly-opened master shell (including `aura jump -m`) auto-exports the
-File-injected values as `$KEY`. Already-open shells pick them up on the next
-shell. Env-only entries stay app-container-only.
+Any newly-opened master shell auto-exports the File-injected values as
+`$KEY`. Already-open shells pick them up on the next shell.
 
 ---
 
@@ -98,7 +119,8 @@ curl -X POST localhost:3000/api/os/context \
 curl -X DELETE localhost:3000/api/os/context/GITHUB_TOKEN
 ```
 
-`kind` defaults to `secret`, `inject` defaults to both targets.
+`kind` defaults to `secret`, `inject` defaults to both targets. Setting a
+value grants it to nobody: grant `context.read:<KEY>` per app.
 
 ---
 
@@ -111,17 +133,19 @@ curl -X DELETE localhost:3000/api/os/context/GITHUB_TOKEN
   `openssl rand -base64 32`). In dev, a key is generated automatically; set it
   explicitly in production.
 - The public KV proxy (`/api/kv/...`) **refuses** the `context:*` namespace, so
-  an app can't read another entry's raw value out of band. Context reaches apps
-  only through the OS-controlled env/file injection.
-- The materialised `/run/context/<KEY>` files are plaintext by necessity — the
-  app has to read them. Encryption covers the store, not the delivered file.
+  an app can't read another entry's raw value out of band. Context reaches an
+  app only as its granted env and through `osClient.context.get`.
+- The master's materialised `/run/context/<KEY>` files are plaintext by
+  necessity; no app mounts them.
 
 ---
 
 ## Gotchas
 
 - **Env changes need a respawn.** Container env is fixed at start. Change an
-  `env` value → restart the app to see it. `file` values update live.
+  `env` value or a grant → restart the app to see it in its env
+  (`context.get` sees it at once).
+- **Declared but not granted** means not there: check `aura admin grants`.
 - **Already-running apps** spawned before an entry existed won't have it until
   their next spawn.
 - **Master shells** must be freshly opened after a change to see updated
@@ -132,6 +156,5 @@ curl -X DELETE localhost:3000/api/os/context/GITHUB_TOKEN
 
 ## Not yet
 
-- **App Context** (`context:app:<id>:*`) — per-app entries with granular grants.
-  The schema is reserved; only the global System Context ships today.
-- Manifest-declared context requirements.
+- **App Context** (`context:app:<id>:*`) — per-app entries. The schema is
+  reserved; the System Context with per-app grants and the users' vaults ship today.
