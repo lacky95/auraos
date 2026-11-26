@@ -94,7 +94,7 @@ export async function grantNotif(verb: 'grant' | 'revoke', appId: string, featur
   }
 }
 
-function fmtTime(ms: number): string {
+export function fmtTime(ms: number): string {
   return new Date(ms).toISOString().replace('T', ' ').replace(/\.\d+Z$/, 'Z');
 }
 
@@ -157,6 +157,25 @@ export function registerAdmin(program: Command): void {
     });
 
   admin
+    .command('contract-report')
+    .description('The app contract (D48) per app: the contract it was built for, what it declares, undeclared use (source scan and access-report signals), raw Context reads. --datadir adds the writes outside each app\'s data directory.')
+    .option('--datadir', 'also list writes outside dataDir (install folder, container layer, home mount)')
+    .option('-o, --output <format>', 'json')
+    .action(async (opts: { datadir?: boolean; output?: string }) => {
+      let report: unknown;
+      try {
+        report = await api.get<unknown>(`/api/admin/contract-report${opts.datadir ? '?datadir=1' : ''}`);
+      } catch (err) {
+        const e = err as Error & { status?: number };
+        if (e.status === 404) fail('this shell has no contract report yet.');
+        fail(e.message);
+        return;
+      }
+      if (opts.output === 'json') { console.log(JSON.stringify(report, null, 2)); return; }
+      printContractReport(report);
+    });
+
+  admin
     .command('audit')
     .description('The audit trail, newest first: who (the owner or the host operator) changed what.')
     .option('-n, --limit <n>', 'entries', '30')
@@ -209,6 +228,48 @@ export function printAccessReport(report: unknown): void {
     console.log(table(rowsOf(report.samples, columns), columns));
   }
   if (report.pending) console.log(`\npending flush: ${report.pending.events} event(s) in ${report.pending.keys} key(s)`);
+}
+
+interface ContractReportBody {
+  contract: number;
+  summary: Record<string, number>;
+  apps: Array<{
+    appId: string; scope: string;
+    contract: { version: number | null; status: string };
+    findings: Array<{ code: string; message: string }>;
+    source: Array<{ file: string; line: number; code: string; message: string }>;
+    signals: Record<string, number>;
+    readsRawContext: boolean;
+    dataDir?: { outside: boolean; home: string; installFolder: { writes: string[] }; containerLayer: Array<{ instanceId: string; writes?: string[]; error?: string }> };
+  }>;
+}
+
+/** GET /api/admin/contract-report as a table plus the details per app. */
+export function printContractReport(report: unknown): void {
+  const r = report as Partial<ContractReportBody> | null;
+  if (!r || !Array.isArray(r.apps) || typeof r.contract !== 'number') { console.log(JSON.stringify(report, null, 2)); return; }
+  const withDataDir = r.apps.some((a) => a.dataDir);
+  console.log(table(r.apps.map((a) => ({
+    APP: a.appId,
+    SCOPE: a.scope,
+    CONTRACT: a.contract.version === null ? color.yellow('none') : a.contract.status === 'current' ? String(a.contract.version) : color.yellow(`${a.contract.version}?`),
+    FINDINGS: String(a.findings.length + a.source.length),
+    'RAW-CONTEXT': a.readsRawContext ? color.yellow('yes') : '-',
+    SIGNALS: Object.entries(a.signals).map(([k, n]) => `${k}=${n}`).join(' ') || '-',
+    ...(withDataDir ? { 'OUTSIDE-DATADIR': a.dataDir?.outside ? color.yellow('yes') : '-' } : {}),
+  }))));
+  for (const a of r.apps) {
+    const lines = [
+      ...a.findings.map((f) => `manifest: ${f.message}`),
+      ...a.source.map((f) => `${f.file}:${f.line}: ${f.message}`),
+      ...(a.dataDir?.installFolder.writes.length ? [`writes in its install folder: ${a.dataDir.installFolder.writes.join(', ')}`] : []),
+      ...(a.dataDir?.containerLayer ?? []).flatMap((c) => (c.writes?.length ? [`${c.instanceId} wrote outside its mounts: ${c.writes.join(', ')}`] : c.error ? [`${c.instanceId}: ${c.error}`] : [])),
+    ];
+    if (lines.length === 0) continue;
+    console.log(`\n${color.bold(a.appId)}`);
+    for (const l of lines) console.log(`  ${l}`);
+  }
+  console.log(`\ncontract ${r.contract}: ${Object.entries(r.summary ?? {}).map(([k, n]) => `${k}=${n}`).join(' ')}`);
 }
 
 // ─── aura admin notif … ─────────────────────────────────────────────────────

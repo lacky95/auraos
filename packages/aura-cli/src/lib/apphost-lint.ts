@@ -15,6 +15,7 @@
  */
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { dirname, extname, join, relative, resolve, sep } from 'node:path';
+import { contractFindings, scanContractSources, type AppManifest } from '@aura/core';
 
 export type Severity = 'error' | 'warn' | 'info';
 
@@ -22,7 +23,7 @@ export interface Finding {
   file: string;
   line: number;
   severity: Severity;
-  rule: 'manifest-key' | 'sdk-import' | 'removed-global' | 'proxy-path' | 'upgrade-catch-all' | 'hmr-off';
+  rule: 'manifest-key' | 'sdk-import' | 'removed-global' | 'proxy-path' | 'upgrade-catch-all' | 'hmr-off' | 'contract';
   message: string;
 }
 
@@ -400,6 +401,32 @@ export function lintUpgradeAndHmr(file: string, text: string): Finding[] {
     for (const m of text.matchAll(/\bhmr\s*:\s*false\b/g)) {
       out.push({ file, line: lineAt(text, m.index!), severity: 'info', rule: 'hmr-off',
         message: 'Vite HMR is off (hmr: false): edits need a page reload' });
+    }
+  }
+  return out;
+}
+
+// ─── the app contract (D48) ─────────────────────────────────────────────────
+
+export const CONTRACT_DOCS_HINT = 'Aura Docs: "The Aura app contract" (app-contract)';
+
+/**
+ * The app contract checks: the manifest declares what the app uses
+ * (contract version, Context keys, permissions, sidecars and their privileges,
+ * docker, consumed interfaces), and the source uses only what it declares.
+ * Warnings: nothing is enforced beyond Phase 3a. Core holds the rules
+ * (contract/appContract.ts, contract/sourceScan.ts), shared with the shell's
+ * contract report.
+ */
+export function lintContract(manifestFile: string, text: string, parsed: AppManifest, opts: { source?: boolean } = {}): Finding[] {
+  const lines = text.split('\n');
+  const out: Finding[] = contractFindings(parsed).map((f) => ({
+    file: manifestFile, line: jsonKeyLine(lines, f.path.split('.')), severity: f.severity, rule: 'contract' as const, message: f.message,
+  }));
+  if (opts.source !== false) {
+    const appDir = dirname(manifestFile);
+    for (const f of scanContractSources(appDir, parsed)) {
+      out.push({ file: join(appDir, f.file), line: f.line, severity: f.severity, rule: 'contract', message: f.message });
     }
   }
   return out;

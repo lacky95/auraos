@@ -47,6 +47,13 @@ export const FINAL_APPROVAL_STATES: ReadonlySet<ApprovalState> = new Set(['denie
  *   user.confirm       an app asks the owner to confirm (D49, `osClient.user.confirm`)
  *   terminal.agent-hooks  an app installs or removes the Terminal's agent hooks in
  *                      the owner's home (`/api/terminal/agent-hooks`)
+ *   credential.store   an app or the CLI asks the owner for a secret (D56,
+ *                      `osClient.credentials.request`, `aura secret ask`); the
+ *                      owner types it into the shell's dialog, which stores
+ *                      it in the owner's vault; the requester gets a handle
+ *   credential.read    an app reads a credential's raw value (D56,
+ *                      `osClient.credentials.get`): `fresh`, and approving it
+ *                      grants `credential.read:<NAME>` until revoked
  *
  * The owner's management routes (D50), asked for from a sandbox (the CLI in
  * the System Terminal) or through Settings; shell `lib/approvals/admin.ts`:
@@ -59,10 +66,18 @@ export const FINAL_APPROVAL_STATES: ReadonlySet<ApprovalState> = new Set(['denie
  *   admin.change       any other owner change: release system modals, reset
  *                      onboarding, reassign an app's origin, overwrite an app
  *                      (`clone-app` / `scaffold` with `force`)
+ *
+ * App patches (Track P, D9):
+ *   app.patch.activate install a prepared app tree from a patch workspace, or
+ *                      its rollback tree (`/api/apps/<id>/activate`)
+ *   app.source.open    open an installed app's source for direct development
+ *                      (`/api/apps/<id>/source-mode`, `aura dev open`)
  */
 export const APPROVAL_ACTIONS = [
   'nexus.install', 'nexus.update', 'os.context.write', 'user.confirm', 'terminal.agent-hooks',
+  'credential.store', 'credential.read',
   'admin.grant', 'admin.revoke', 'admin.api-key', 'admin.manifest-edit', 'admin.read', 'admin.change',
+  'app.patch.activate', 'app.source.open',
 ] as const;
 export type ApprovalAction = (typeof APPROVAL_ACTIONS)[number];
 
@@ -122,6 +137,12 @@ export interface ApprovalRecord {
   expiresAt: number;
   /** Set on `approved` and `denied`. */
   decidedBy?: ApprovalDecider;
+  /**
+   * The payload itself, for the actions whose decision acts on it
+   * (`credential.store`: the name and the consuming app). Never a secret;
+   * its `payloadHash()` equals `payloadHash`.
+   */
+  payload?: unknown;
 }
 
 /** What a requester supplies. The store adds id, state and times. */
@@ -131,6 +152,8 @@ export interface ApprovalRequest {
   payloadHash: string;
   display: ApprovalDisplay;
   level: ApprovalLevel;
+  /** See `ApprovalRecord.payload`. */
+  payload?: unknown;
 }
 
 /** What the requester presents when it retries the action. All three must match. */

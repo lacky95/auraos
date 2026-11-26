@@ -2,17 +2,20 @@ import type { Command } from 'commander';
 import { existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, statSync, chmodSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { AppManifestSchema, AURA_NPMRC, needsNpmrc, newOriginId, portPackageJsonForScope, portToolsForScope } from '@aura/core';
+import { AppManifestSchema, AURA_CONTRACT, AURA_NPMRC, initRepo, needsNpmrc, newOriginId, portPackageJsonForScope, portToolsForScope } from '@aura/core';
 import { color, error, fail, info, ok, warn } from '../lib/format.js';
-import { DOCS_HINT, lintAppSources, lintManifestKeys, type Finding } from '../lib/apphost-lint.js';
+import { CONTRACT_DOCS_HINT, DOCS_HINT, lintAppSources, lintContract, lintManifestKeys, type Finding } from '../lib/apphost-lint.js';
 import { promptText, promptChoice, promptConfirm, promptMultiSelect, PromptCancelled, BACK, type MultiSelectMode } from '../lib/prompts.js';
 import { ensureRegistry, loadRegistry, loadState, type CapabilityEntry } from '../lib/registry.js';
 import { api } from '../lib/client.js';
+import { inSandbox } from '../lib/identity.js';
 import {
   ALL_SCOPES, PKG_RE, SELECTABLE_SCOPES, defaultIconFor, scopeAppsDir, stdoutDivider,
   type ScopeId, type SelectableScope,
 } from '../lib/appid.js';
 import { registerDevClone } from './dev-clone.js';
+import { apiOrBody, registerDevSource } from './dev-source.js';
+import { registerDevPatch } from './dev-patch.js';
 import { registerDevRestart } from './systemMode.js';
 
 const TEMPLATE_DIR = (() => {
@@ -97,6 +100,8 @@ interface ScaffoldConfig {
    *    • whether a `.npmrc` pointing at the local registry is emitted
    *    • whether pnpm install runs after scaffold (skipped for non-system) */
   scope:        ScopeId;
+  /** What an installed copy starts as (manifest `source.defaultMode`). Default `closed`. */
+  sourceMode?:  'closed' | 'open';
 }
 
 /**
@@ -113,6 +118,8 @@ function manifestFromConfig(cfg: ScaffoldConfig): Record<string, unknown> {
     originId:    newOriginId(),
     name:        cfg.name,
     version:     '0.1.0',
+    // The app contract it is built for (D48); `aura dev validate` checks it.
+    auraContract: AURA_CONTRACT,
     description: cfg.description ?? 'Scaffolded by `aura dev new`.',
   };
   if (cfg.icon) m['icon'] = cfg.icon;
@@ -146,6 +153,11 @@ function manifestFromConfig(cfg: ScaffoldConfig): Record<string, unknown> {
   // applies the same union server-side, hence the shared helper.
   const merged = portToolsForScope(cfg.tools, cfg.scope);
   if (merged.length > 0) m['tools'] = merged;
+
+  // Written out even at its default: whoever publishes the app decides
+  // whether installed copies are read-only (closed, changed only through
+  // patches) or open for direct development (Track P, AGENTS.md).
+  m['source'] = { defaultMode: cfg.sourceMode ?? 'closed' };
 
   return m;
 }
@@ -630,8 +642,13 @@ async function scaffoldFromConfig(cfg: ScaffoldConfig): Promise<void> {
   let viaShell = false;
   let installed = false;
   let installError: string | undefined;
+  let gitCommit: string | null = null;
+  let gitError: string | undefined;
   try {
-    const res = await api.post<{ ok: boolean; dest?: string; error?: string; message?: string; installed?: boolean; installError?: string }>(
+    const res = await api.post<{
+      ok: boolean; dest?: string; error?: string; message?: string; installed?: boolean; installError?: string;
+      git?: { commit: string | null; error?: string };
+    }>(
       '/api/admin/scaffold',
       { appId: cfg.appId, force: true, files, scope: cfg.scope },
     );
@@ -640,18 +657,24 @@ async function scaffoldFromConfig(cfg: ScaffoldConfig): Promise<void> {
     viaShell = true;
     installed = res.installed === true;
     installError = res.installError;
+    gitCommit = res.git?.commit ?? null;
+    gitError = res.git ? res.git.error : 'the shell did not report a git step (older shell)';
   } catch (err) {
     // Shell isn't running (or we hit a network error). Fall back to a local
     // write — useful for `aura dev new` on the host with no aura-os up.
     // If we're inside a sliced-bind sandbox, the write will succeed in our
     // overlay but the host AppManager won't see it; warn the caller.
     const msg = (err as Error).message;
+    // In a sandbox a local write lands in the sandbox's own volume, where AppManager never sees it.
+    if (inSandbox()) fail(`scaffold via the shell failed: ${msg.split('\n')[0]}`);
     warn(`shell scaffold unreachable (${msg.split('\n')[0]}); writing locally instead.`);
     const localDest = join(scopeAppsDir(cfg.scope), cfg.appId);
     if (existsSync(localDest)) {
       fail(`${localDest} already exists.`);
     }
     dest = writeFilesLocal(cfg, files);
+    try { gitCommit = initRepo(dest, `Scaffold ${cfg.appId} (aura dev new)`); }
+    catch (e) { gitError = (e as Error).message; }
     // Only system-scope apps live in the pnpm workspace and need a workspace
     // install to get their @aura/* + astro symlinks. user/global apps live
     // outside the workspace globs; their deps resolve at app-start time via
@@ -668,6 +691,8 @@ async function scaffoldFromConfig(cfg: ScaffoldConfig): Promise<void> {
   }
 
   ok(`scaffolded ${color.bold(cfg.appId)} at ${dest}${viaShell ? color.dim(' (via shell)') : ''}`);
+  if (gitCommit) info(`git: ${color.dim(`main @ ${gitCommit.slice(0, 12)} (initial commit)`)}`);
+  else if (gitError) warn(`git: ${gitError.split('\n')[0]} — run \`git init -b main\` and commit in the app dir yourself.`);
   if (cfg.scope === 'system') {
     if (installed) {
       info(`pnpm install: ${color.dim('ok')}`);
@@ -686,7 +711,8 @@ async function scaffoldFromConfig(cfg: ScaffoldConfig): Promise<void> {
     // Local-write fallback (shell unreachable): deps resolve on first launch.
     info(`@aura/* deps resolve on first launch via ${color.dim('aura sdk install')}.`);
   }
-  info(`Run \`aura run ${cfg.appId}\` to launch it.`);
+  info(`Run \`aura run ${cfg.appId}\` to launch it. Agents: read its AGENTS.md first.`);
+  info(`Publish it with its history: ${color.cyan(`aura dev publish --repo <url>`)} (in the app dir).`);
 }
 
 /**
@@ -720,6 +746,7 @@ export function registerDev(program: Command): void {
     .option('--sandbox <kind>',        'proot | container', 'proot')
     .option('--tools <list>',          'Comma-separated capabilities to declare', '')
     .option('--scope <id>',            'user | global — where to install (default: user). system is reserved and cannot be targeted.', 'user')
+    .option('--source-mode <mode>',    'closed | open — what installed copies start as (manifest source.defaultMode)', 'closed')
     .option('--force',                 'Overwrite if target directory exists')
     .option('--non-interactive',       'Never prompt; require flags + appId')
     .description('Scaffold a new AuraOS app. Interactive wizard if no appId is given (or pass flags to script it).')
@@ -729,6 +756,7 @@ export function registerDev(program: Command): void {
         name?: string; icon?: string; description?: string;
         shape?: ComponentShape; instanceMode: 'single' | 'multi';
         sandbox: 'proot' | 'container'; tools: string; scope: ScopeId;
+        sourceMode: 'closed' | 'open';
         force?: boolean;
         nonInteractive?: boolean;
       },
@@ -740,7 +768,7 @@ export function registerDev(program: Command): void {
       if (wantInteractive && !appId) {
         const cfg = await runWizard({ ...(opts.force ? { force: true } : {}) });
         if (!cfg) { info('cancelled'); return; }
-        await scaffoldFromConfig(cfg);
+        await scaffoldFromConfig({ ...cfg, sourceMode: opts.sourceMode });
         return;
       }
 
@@ -763,6 +791,7 @@ export function registerDev(program: Command): void {
       enumGuard('--shape',          opts.shape,        ['activity', 'activity-bg', 'service'] as const);
       enumGuard('--instance-mode',  opts.instanceMode, ['single', 'multi'] as const);
       enumGuard('--sandbox',        opts.sandbox,      ['proot', 'container'] as const);
+      enumGuard('--source-mode',    opts.sourceMode,   ['closed', 'open'] as const);
       // `system` is reserved for the immutable in-repo OS scope and must never
       // be a scaffold target — surface a dedicated message before the generic
       // enum guard so the reason is obvious.
@@ -771,8 +800,10 @@ export function registerDev(program: Command): void {
       }
       enumGuard('--scope',          opts.scope,        SELECTABLE_SCOPES);
 
+      // On the host the scope dir is real: refuse an existing app unless --force. In a sandbox `/data`
+      // is the sandbox's own volume, so the shell decides (overwriting asks the owner).
       const dest = join(scopeAppsDir(opts.scope), appId);
-      if (existsSync(dest) && !opts.force) fail(`${dest} already exists. Pass --force to overwrite.`);
+      if (!inSandbox() && existsSync(dest) && !opts.force) fail(`${dest} already exists. Pass --force to overwrite.`);
 
       const cfg: ScaffoldConfig = {
         appId,
@@ -784,6 +815,7 @@ export function registerDev(program: Command): void {
         sandbox:      opts.sandbox,
         tools:        opts.tools.split(',').map((t) => t.trim()).filter(Boolean),
         scope:        opts.scope,
+        sourceMode:   opts.sourceMode,
       };
       await scaffoldFromConfig(cfg);
     });
@@ -796,7 +828,7 @@ export function registerDev(program: Command): void {
     .command('validate [path]')
     .option('--all', 'Validate every app across all scopes (system/global/user)')
     .option('--no-source', 'Only check the manifest, not the app\'s source files')
-    .description('Validate one or all app manifests against the AuraOS schema, and check the app against the App Host contract.')
+    .description('Validate one or all app manifests against the AuraOS schema, and check the app against the App Host contract and the Aura app contract.')
     .addHelpText('after', `
 Besides the schema, the App Host checks (warnings unless noted) report with file:line:
   - removed or unknown manifest keys (e.g. proxy.rewriteHtml), which the schema drops silently
@@ -804,7 +836,13 @@ Besides the schema, the App Host checks (warnings unless noted) report with file
   - reads of the AURA_APP_BASE_PATH / AURA_APP_ID / AURA_INSTANCE_ID globals or aura-* meta tags
   - /api/proxy/ URLs in browser-served files (pages are served from / on their App Host)
   - notes: on('upgrade') handlers with no path check, hmr: false
-Skips node_modules, dist, .astro and .next. ${DOCS_HINT}.`)
+The app contract checks (D48, warnings: report only):
+  - auraContract missing, or newer than this AuraOS (${AURA_CONTRACT})
+  - context.get('KEY') of a key not in context[]; reads of the raw Context (/run/context)
+  - SDK calls whose permission is missing (user.confirm, storage, osSidecars, notifications)
+  - services[] without sidecars.spawn or docker; privileged sidecars without sidecars.privileged
+  - the docker CLI or socket without "docker" in tools[]; interfaces.resolve() of a name not in consumes[]
+Skips node_modules, dist, .astro and .next. ${DOCS_HINT}; ${CONTRACT_DOCS_HINT}.`)
     .action((path: string | undefined, opts: { all?: boolean; source?: boolean }) => {
       const targets: string[] = [];
       if (opts.all) {
@@ -848,6 +886,7 @@ Skips node_modules, dist, .astro and .next. ${DOCS_HINT}.`)
               warn(`  no originId — run ${color.cyan(`aura dev origin --assign ${result.data.id}`)}`);
             }
             findings.push(...lintManifestKeys(m, text, data, result.data, REMOVED_MANIFEST_KEYS));
+            findings.push(...lintContract(m, text, result.data, { source: opts.source !== false }));
           }
         } catch (err) { warn(`${m}: ${String(err)}`); failed++; }
         if (opts.source !== false) findings.push(...lintAppSources(dirname(m)));
@@ -867,6 +906,8 @@ Skips node_modules, dist, .astro and .next. ${DOCS_HINT}.`)
 
   registerDevOrigin(dev);
   registerDevCheckout(dev);
+  registerDevSource(dev);
+  registerDevPatch(dev);
   registerDevRestart(dev);
 
   dev
@@ -953,6 +994,7 @@ const SCHEMA_DEFAULTS: Record<string, unknown> = {
   entrypoint:              'entrypoint.sh',
   permissions:             [],
   tools:                   [],
+  context:                 [],
   rootfsMode:              'shared',
   category:                'utility',
   instanceMode:            'single',
@@ -1070,17 +1112,6 @@ function registerDevCheckout(dev: Command): void {
       }
       if (res.created) info(`Nexus no longer updates this app over your work (update/install need --force). Jump in with ${color.cyan(`aura jump ${appId}`)}.`);
     });
-}
-
-/** Admin routes answer errors with a JSON body; surface it instead of throwing. */
-async function apiOrBody<T>(call: () => Promise<unknown>): Promise<T> {
-  try {
-    return await call() as T;
-  } catch (err) {
-    const raw = (err as { body?: string }).body;
-    if (raw) { try { return JSON.parse(raw) as T; } catch { /* not JSON */ } }
-    throw err;
-  }
 }
 
 // ─── dev origin ─────────────────────────────────────────────────────────────

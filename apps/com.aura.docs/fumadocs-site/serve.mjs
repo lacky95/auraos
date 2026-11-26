@@ -32,6 +32,9 @@ import {
   existsSync, readFileSync, writeFileSync, statSync, readdirSync, rmSync, renameSync, watch,
 } from 'node:fs';
 import { join } from 'node:path';
+import {
+  LIFECYCLE_TOKEN_HEADER, lifecycleRequestRefused,
+} from '@aura/app-sdk/runtime/lifecycle-guard';
 
 const ROOT = process.cwd();
 const PORT = Number(process.env.APP_PORT || 4101);
@@ -43,6 +46,8 @@ const SOURCES = [
   'content', 'app', 'lib',
   'mdx-components.tsx', 'middleware.ts', 'next.config.mjs', 'source.config.ts',
   'postcss.config.mjs', 'package.json',
+  // The SDK is bundled into the build (runtime/next, the lifecycle guard): a new one rebuilds.
+  'node_modules/@aura/app-sdk/dist',
   // NOT tsconfig.json: `next build` rewrites its `include` on every run,
   // which would make every build look like a new source change.
 ];
@@ -151,6 +156,18 @@ function identityHeaders() {
   return { 'X-Aura-App-Id': APP_ID, 'X-Aura-Instance-Id': INSTANCE_ID };
 }
 
+/**
+ * The SDK's lifecycle-token check, here at the front for every request (the
+ * placeholder and `next start` alike): the guard never depends on what the
+ * current build bundled. True when it answered (401).
+ */
+function refusedLifecycle(req, res) {
+  if (!lifecycleRequestRefused(req.url || '/', req.headers[LIFECYCLE_TOKEN_HEADER])) return false;
+  res.writeHead(401, { 'Content-Type': 'application/json', ...identityHeaders() });
+  res.end('{"ok":false,"error":"lifecycle-token-required"}');
+  return true;
+}
+
 function placeholder(req, res) {
   const url = req.url || '/';
   if (/^\/api\/lifecycle\/health(\?|$)/.test(url)) {
@@ -187,7 +204,10 @@ function forward(req, res) {
 }
 
 function startFront() {
-  const srv = createServer((req, res) => (next.ready ? forward(req, res) : placeholder(req, res)));
+  const srv = createServer((req, res) => {
+    if (refusedLifecycle(req, res)) return;
+    if (next.ready) forward(req, res); else placeholder(req, res);
+  });
   // A production build opens no WebSocket.
   srv.on('upgrade', (_req, socket) => socket.destroy());
   return new Promise((resolve, reject) => {

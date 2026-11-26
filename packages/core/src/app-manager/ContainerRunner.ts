@@ -1,4 +1,4 @@
-import { spawn, spawnSync, execSync, execFile, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, execSync, execFile, execFileSync, type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { hostname } from 'node:os';
@@ -16,7 +16,7 @@ import type { SandboxExecOpts, SandboxRunner, SandboxRunnerOpts } from './Sandbo
 import type { ResourceUsage, SidecarInfo } from '../types/instance.js';
 import { SIDECAR_PS_FORMAT, USAGE_STATS_FORMAT, parseSidecarPs, parseUsageStats } from './sidecars.js';
 import type { InstanceSpawnContext } from './SandboxRunner.js';
-import { OWNER_LABEL } from './instanceOwner.js';
+import { OWNER_LABEL, PREVIEW_LABEL } from './instanceOwner.js';
 import { ContextStore } from '../context/ContextStore.js';
 import { VolumeStore, type VolumeEntry } from '../context/VolumeStore.js';
 import {
@@ -24,6 +24,10 @@ import {
 } from './provisioning.js';
 import { BUILD_STAGING_DIR, serveState } from './appBuild.js';
 import { BASE_IMAGE, whenBaseImageReady } from './BaseImage.js';
+import {
+  checkHealthGuard, classifyHealthIdentity, healthIdentityRefusal, lifecycleHeaders, lifecycleStatusRefusal,
+  newLifecycleToken, type HealthIdentityClass, type LifecycleStatus,
+} from './lifecycleGate.js';
 
 const HEALTH_CHECK_INTERVAL_MS = 200;
 const HEALTH_CHECK_TIMEOUT_MS = 60_000; // slightly higher than PRoot because container spawn adds ~100 ms
@@ -163,6 +167,32 @@ async function dockerInspectState(name: string): Promise<ContainerNameState | nu
   }
 }
 
+/**
+ * The pid and shared-network address of the container `docker run` just
+ * created, by its id (never by name). `address` is null when docker reports
+ * none — the caller then can't bind lifecycle calls to it.
+ */
+export function inspectSpawned(containerId: string, run: (args: string[]) => string = dockerOut): { pid: number; address: string | null } {
+  try {
+    const out = run(['inspect', '-f', '{{.State.Pid}} {{json .NetworkSettings.Networks}}', containerId]).trim();
+    const space = out.indexOf(' ');
+    const pid = parseInt(out.slice(0, space), 10) || 0;
+    const networks = JSON.parse(out.slice(space + 1)) as Record<string, { IPAddress?: string }> | null;
+    return { pid, address: networks?.[SHARED_NETWORK]?.IPAddress || null };
+  } catch {
+    return { pid: 0, address: null };
+  }
+}
+
+function dockerOut(args: string[]): string {
+  return execFileSync('docker', args, { encoding: 'utf-8', timeout: 5_000, stdio: ['ignore', 'pipe', 'ignore'] });
+}
+
+/** `http://<address>:<port>/api/lifecycle/<hook>`; an IPv6 address gets brackets. */
+function lifecycleUrl(address: string, port: number, hook: string): string {
+  return `http://${address.includes(':') ? `[${address}]` : address}:${port}${lifecyclePath(hook)}`;
+}
+
 interface TrackedContainer {
   /** Watches the app's log to tell "installing dependencies" from "failing
    *  to boot", so the health deadline can stay open for the former. */
@@ -171,6 +201,19 @@ interface TrackedContainer {
   containerId: string;
   /** Hostname siblings reach this container by — `aura-<sanitized-instanceId>`. */
   hostname: string;
+  /**
+   * The container's own address on the shared network, read from `docker
+   * inspect` of the container id `docker run` returned. Lifecycle calls go
+   * here, never to the DNS name: anyone who can create a container can add a
+   * network alias `aura-<id>`, and a stale container can hold the name.
+   * Null only for an adopted container whose address couldn't be read; it
+   * then gets lifecycle calls by name and without the token.
+   */
+  address: string | null;
+  /** This start's lifecycle secret (`AURA_LIFECYCLE_TOKEN` in the container's env). */
+  lifecycleToken?: string;
+  /** Health identity and runtime-check result, once healthy (not for adopted containers). */
+  lifecycle?: LifecycleStatus;
   port: number;
   appId: string;
   /** `docker logs --follow` child process so we can stream stdout/stderr into the shell's. */
@@ -368,8 +411,14 @@ export class ContainerRunner implements SandboxRunner {
 
     // Use spawnSync (not execSync with a joined string) so multi-word args
     // like `bash -c '<SYNTHESISED_ENTRYPOINT>'` don't get re-split by the
-    // shell — every entry in `args` ends up as a separate argv slot.
-    const r = spawnSync('docker', args, { stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000, encoding: 'utf-8' });
+    // shell — every entry in `args` ends up as a separate argv slot. The
+    // lifecycle token reaches the container through the client's env
+    // (`-e AURA_LIFECYCLE_TOKEN` without a value), not its command line.
+    const lifecycleToken = newLifecycleToken();
+    const r = spawnSync('docker', args, {
+      stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000, encoding: 'utf-8',
+      env: { ...process.env, AURA_LIFECYCLE_TOKEN: lifecycleToken },
+    });
     if (r.status !== 0) {
       throw new Error(`docker run failed for ${instanceId} (status=${r.status}): ${r.stderr?.trim() || r.error?.message || 'no stderr'}`);
     }
@@ -394,14 +443,13 @@ export class ContainerRunner implements SandboxRunner {
       if (t && t.containerId === containerId) t.logTail = c;   // a retried tail replaces the failed one
     }, stillTracked);
 
-    // `docker inspect` for the pid; useful for orphan-reaper accounting.
-    let pid = 0;
-    try {
-      const out = execSync(`docker inspect -f '{{.State.Pid}}' ${containerId}`, { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
-      pid = parseInt(out, 10) || 0;
-    } catch { /* leave 0; reaper will ignore */ }
+    // `docker inspect` of the id we just created: the pid (orphan-reaper
+    // accounting) and the address the lifecycle calls are bound to. No
+    // address on the shared network = the destination can't be bound to this
+    // container, so the token is never sent and the start fails.
+    const { pid, address } = inspectSpawned(containerId);
 
-    const tracked: TrackedContainer = { containerId, hostname, port, appId, logTail, pid, exitCb: null, expectingKill: false, provision };
+    const tracked: TrackedContainer = { containerId, hostname, address, lifecycleToken, port, appId, logTail, pid, exitCb: null, expectingKill: false, provision };
     this.containers.set(instanceId, tracked);
 
     // Watch for container exit so we can fire the exit callback.
@@ -413,7 +461,12 @@ export class ContainerRunner implements SandboxRunner {
     }, stillTracked, () => this.handleExit(instanceId, null, containerId));
 
     try {
-      await this.waitHealthy(instanceId, appId, hostname, port);
+      if (!address) throw new Error(`cannot bind ${instanceId} to container ${containerId.slice(0, 12)}: no address on ${SHARED_NETWORK}; lifecycle token not sent`);
+      const identity = await this.waitHealthy(instanceId, appId, containerId, port);
+      const lifecycle: LifecycleStatus = { identity, guard: await checkHealthGuard(lifecycleUrl(address, port, 'health')) };
+      const refusal = lifecycleStatusRefusal(instanceId, lifecycle);
+      if (refusal) throw new Error(refusal);
+      tracked.lifecycle = lifecycle;
     } catch (err) {
       console.error(`[ContainerRunner] ${instanceId} health-check failed: ${(err as Error).message}`);
       this.forceKill(instanceId);
@@ -577,7 +630,7 @@ export class ContainerRunner implements SandboxRunner {
     //     volume's storage dir isn't a stable host path — so we use the
     //     same volume-subpath pattern already used for /data, /aura/*-tools,
     //     /home/aura below.
-    const appDirMount = this.buildAppDirMount(ctx.appDir, appId, appDataVolume);
+    const appDirMount = this.buildAppDirMount(ctx.appDir, appId, appDataVolume, undefined, ownSourceReadOnly(ctx, manifest));
     // Cap allowlist mounts. We can't bind host paths here: /os/toolchain and
     // /data/... only exist inside the aura-shell mount namespace, but
     // sibling-container binds go through the HOST docker daemon, which would
@@ -634,6 +687,8 @@ export class ContainerRunner implements SandboxRunner {
       // orphan adoption must skip.
       ...(ctx.instanceToken ? ['--label', `aura.token.nonce=${ctx.instanceToken.nonce}`] : []),
       ...(ctx.owner ? ['--label', `${OWNER_LABEL}=${ctx.owner}`] : []),
+      // A preview (Track P) is known again after a shell restart, and reaped.
+      ...(ctx.preview ? ['--label', `${PREVIEW_LABEL}=${ctx.preview}`] : []),
       '--workdir', `/workspace/apps/${appId}`,
       // Per-app slice of /workspace. Sibling apps in apps/<other> are not
       // visible — the individual app folder is bound directly, with no parent
@@ -769,6 +824,10 @@ export class ContainerRunner implements SandboxRunner {
       // Bearer for the token-gated OS routes (sidecars). After contextEnv so a
       // context key of the same name can't replace it.
       ...(ctx.instanceToken ? ['-e', `AURA_INSTANCE_TOKEN=${ctx.instanceToken.token}`] : []),
+      // Per-start shell→app lifecycle secret (lifecycleGate.ts). Name only:
+      // docker takes the value from spawn()'s env, so it stays off the
+      // command line. After contextEnv, like the instance token.
+      '-e', 'AURA_LIFECYCLE_TOKEN',
       BASE_IMAGE,
     );
     a.push(...entrypoint);
@@ -808,24 +867,26 @@ export class ContainerRunner implements SandboxRunner {
    *    and /home/aura below.
    *
    *  Both paths produce the same in-container view: `/workspace/apps/<id>`. */
-  private buildAppDirMount(ctxAppDir: string, appId: string, appDataVolume: string, target = `/workspace/apps/${appId}`): string[] {
+  private buildAppDirMount(
+    ctxAppDir: string, appId: string, appDataVolume: string, target = `/workspace/apps/${appId}`, ro = false,
+  ): string[] {
     if (ctxAppDir.startsWith('/workspace/')) {
       // toHostPath rewrites the /workspace prefix to AURA_HOST_WORKSPACE so the
       // bind source resolves on the HOST daemon (no-op on Linux, required for
       // Mac VM-based daemons).
       const hostPath = this.toHostPath(ctxAppDir);
-      return ['-v', `${hostPath}:${target}`];
+      return ['-v', `${hostPath}:${target}${ro ? ':ro' : ''}`];
     }
     if (ctxAppDir.startsWith(`${this.dataDir}/`) || ctxAppDir.startsWith('/data/')) {
       // Strip the dataDir prefix to get the volume-internal path.
       const prefix = ctxAppDir.startsWith(this.dataDir + '/') ? this.dataDir : '/data';
       const subpath = ctxAppDir.slice(prefix.length).replace(/^\/+/, '');
-      return ['--mount', `type=volume,source=${appDataVolume},target=${target},volume-subpath=${subpath}`];
+      return ['--mount', `type=volume,source=${appDataVolume},target=${target},volume-subpath=${subpath}${ro ? ',readonly' : ''}`];
     }
     // Unrecognised prefix — fall back to the plain bind and log. Most likely
     // a misconfigured scope; the bind will probably fail at container start.
     console.warn(`[ContainerRunner] unrecognised appDir prefix for ${appId}: ${ctxAppDir} — falling back to plain bind`);
-    return ['-v', `${ctxAppDir}:${target}`];
+    return ['-v', `${ctxAppDir}:${target}${ro ? ':ro' : ''}`];
   }
 
   private containerName(instanceId: string): string {
@@ -987,8 +1048,14 @@ export class ContainerRunner implements SandboxRunner {
     pid:        number;
     tokenNonce?: string;
     ownerLabel?: string;
+    address?:   string;
+    lifecycleToken?: string;
+    preview?: string;
   }> | null> {
-    type DockerInspect = { Config: { Env: string[]; Labels?: Record<string, string> }; State: { Pid: number } };
+    type DockerInspect = {
+      Config: { Env: string[]; Labels?: Record<string, string> }; State: { Pid: number };
+      NetworkSettings?: { Networks?: Record<string, { IPAddress?: string }> };
+    };
     let psOut: string;
     try {
       // Names only. `{{json .}}` made the daemon compute every container's
@@ -1003,7 +1070,7 @@ export class ContainerRunner implements SandboxRunner {
       return null;
     }
     const names = psOut.split('\n').map((l) => l.trim()).filter(Boolean);
-    const out: Array<{ instanceId: string; appId: string; port: number; hostname: string; pid: number; tokenNonce?: string; ownerLabel?: string}> = [];
+    const out: Array<{ instanceId: string; appId: string; port: number; hostname: string; pid: number; tokenNonce?: string; ownerLabel?: string; address?: string; lifecycleToken?: string; preview?: string }> = [];
     for (const name of names) {
       if (!name.startsWith('aura-')) continue;
       // Skip aura-shell itself — it's not an app instance, just the
@@ -1043,6 +1110,11 @@ export class ContainerRunner implements SandboxRunner {
         pid: inspect.State?.Pid ?? 0,
         tokenNonce: inspect.Config?.Labels?.['aura.token.nonce'],
         ownerLabel: inspect.Config?.Labels?.[OWNER_LABEL],
+        // The survivor's own address and lifecycle secret, read from the very
+        // container inspected here (absent on containers from before tokens).
+        address: inspect.NetworkSettings?.Networks?.[SHARED_NETWORK]?.IPAddress || undefined,
+        lifecycleToken: env['AURA_LIFECYCLE_TOKEN'] || undefined,
+        ...(inspect.Config?.Labels?.[PREVIEW_LABEL] ? { preview: inspect.Config.Labels[PREVIEW_LABEL] } : {}),
       });
     }
     return out;
@@ -1061,6 +1133,8 @@ export class ContainerRunner implements SandboxRunner {
     port:       number;
     hostname:   string;
     pid:        number;
+    address?:   string;
+    lifecycleToken?: string;
   }): void {
     if (this.containers.has(rec.instanceId)) return;
     // We don't have the container ID handy — docker inspect would have it,
@@ -1085,6 +1159,8 @@ export class ContainerRunner implements SandboxRunner {
     this.containers.set(rec.instanceId, {
       containerId:   rec.hostname,
       hostname:      rec.hostname,
+      address:       rec.address ?? null,
+      ...(rec.address && rec.lifecycleToken ? { lifecycleToken: rec.lifecycleToken } : {}),
       port:          rec.port,
       appId:         rec.appId,
       logTail,
@@ -1106,8 +1182,13 @@ export class ContainerRunner implements SandboxRunner {
     }, stillTracked, () => this.handleExit(rec.instanceId, null, rec.hostname));
   }
 
-  /** Probe the app's health endpoint until ready or timeout. */
-  private async waitHealthy(instanceId: string, appId: string, hostname: string, port: number): Promise<void> {
+  /**
+   * Probe the app's health endpoint until ready or timeout, at the address of
+   * the container `docker run` created, with the lifecycle token. Stops as
+   * soon as that container is no longer the one tracked (it exited: its
+   * address may go to someone else).
+   */
+  private async waitHealthy(instanceId: string, appId: string, containerId: string, port: number): Promise<HealthIdentityClass> {
     // Two clocks, because "not answering yet" has two very different causes.
     //
     // A cold user/global-scope app installs its whole dependency tree in the
@@ -1121,35 +1202,35 @@ export class ContainerRunner implements SandboxRunner {
     const hardDeadline = startedAt + PROVISION_TIMEOUT_MS;
     const provision   = this.containers.get(instanceId)?.provision;
     let   deadline    = startedAt + HEALTH_CHECK_TIMEOUT_MS;
-    const healthUrl = `http://${hostname}:${port}${lifecyclePath('health')}`;
     let lastBody: string | null = null;
     while (Date.now() < deadline) {
+      const tracked = this.containers.get(instanceId);
+      if (!tracked || tracked.containerId !== containerId || !tracked.address) {
+        throw new Error(`container ${instanceId} exited before it became healthy`);
+      }
+      let refusal: string | null = null;
       try {
-        const res = await fetch(healthUrl);
+        const res = await fetch(lifecycleUrl(tracked.address, port, 'health'), {
+          headers: lifecycleHeaders(tracked.lifecycleToken), signal: AbortSignal.timeout(5_000),
+        });
         // Capture body regardless of status so the timeout error message
         // surfaces what the app actually said (403 = host gate, etc.).
         const body = await res.text();
         lastBody = body;
         if (res.ok) {
-          // Identity check parallels ProotRunner — guard against the
-          // "wrong app squatting our port" hazard. With container-per-app
-          // this is extremely unlikely (one container, one app), but
-          // keeping the check costs nothing and catches misconfig.
-          try {
-            const j = JSON.parse(body);
-            if (j.appId && j.appId !== appId) {
-              throw new Error(`identity mismatch — health endpoint claims appId=${j.appId} but spawned for ${appId}`);
-            }
-          } catch (e) {
-            if ((e as Error).message?.startsWith('identity mismatch')) throw e;
-            // non-JSON body, ignore identity check
+          // The shared identity check (lifecycleGate.ts), same as ProotRunner.
+          const identity = classifyHealthIdentity(body, appId, instanceId);
+          refusal = healthIdentityRefusal(identity, appId, instanceId);
+          if (!refusal) {
+            if (identity.kind === 'legacy') console.warn(`[ContainerRunner] ${instanceId} health endpoint returned no identity body; admitted as a known legacy app (warn mode).`);
+            return identity.kind;
           }
-          return;
         }
       } catch (e) {
         // Network refused / not ready yet — retry until deadline.
         void e;
       }
+      if (refusal) throw new Error(refusal);
       // Re-arm only while provisioning is actually in flight, so the boot
       // budget starts counting from the moment dependencies are ready.
       deadline = nextHealthDeadline({
@@ -1171,13 +1252,13 @@ export class ContainerRunner implements SandboxRunner {
   async callLifecycle(instanceId: string, hook: string, opts: { reason?: string } = {}): Promise<void> {
     const tracked = this.containers.get(instanceId);
     if (!tracked) return;
-    const url = `http://${tracked.hostname}:${tracked.port}${lifecyclePath(hook)}`;
+    const url = lifecycleUrl(tracked.address ?? tracked.hostname, tracked.port, hook);
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), LIFECYCLE_TIMEOUT_MS);
     try {
       const res = await fetch(url, {
         method: 'POST', signal: ctrl.signal,
-        ...(opts.reason ? { headers: { 'x-aura-stop-reason': opts.reason } } : {}),
+        headers: lifecycleHeaders(tracked.lifecycleToken, opts.reason ? { 'x-aura-stop-reason': opts.reason } : {}),
       });
       if (!res.ok) throw new Error(`${hook} → HTTP ${res.status}`);
     } finally { clearTimeout(t); }
@@ -1185,14 +1266,14 @@ export class ContainerRunner implements SandboxRunner {
   async callOptionalLifecycle(instanceId: string, hook: string, body?: unknown): Promise<unknown> {
     const tracked = this.containers.get(instanceId);
     if (!tracked) return null;
-    const url = `http://${tracked.hostname}:${tracked.port}${lifecyclePath(hook)}`;
+    const url = lifecycleUrl(tracked.address ?? tracked.hostname, tracked.port, hook);
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), LIFECYCLE_TIMEOUT_MS);
     try {
       const res = await fetch(url, {
         method: 'POST',
         signal: ctrl.signal,
-        headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+        headers: lifecycleHeaders(tracked.lifecycleToken, body !== undefined ? { 'Content-Type': 'application/json' } : {}),
         body: body !== undefined ? JSON.stringify(body) : undefined,
       });
       if (!res.ok) return null;
@@ -1258,6 +1339,45 @@ export class ContainerRunner implements SandboxRunner {
   }
   getHost(instanceId: string): string | null {
     return this.containers.get(instanceId)?.hostname ?? null;
+  }
+  lifecycleStatus(instanceId: string): LifecycleStatus | null {
+    return this.containers.get(instanceId)?.lifecycle ?? null;
+  }
+
+  /**
+   * The same two measurements a fresh start makes (spawn → waitHealthy +
+   * checkHealthGuard), for a container adopted after a shell restart. The
+   * health probe carries the token only to the bound address, as every
+   * lifecycle call does; without an address it asks by name and without the
+   * token (health still answers). The runtime check sends a deliberately
+   * wrong token, which is no secret. The result is recorded and logged by
+   * the mode (`lifecycleStatusRefusal`); in `strict` the refusal is reported,
+   * and the running instance is left alone.
+   */
+  async measureAdopted(instanceId: string): Promise<LifecycleStatus | null> {
+    const t = this.containers.get(instanceId);
+    if (!t) return null;
+    const url = t.address
+      ? lifecycleUrl(t.address, t.port, 'health')
+      : `http://${t.hostname}:${t.port}${lifecyclePath('health')}`;
+    let identity: LifecycleStatus['identity'];
+    try {
+      const res = await fetch(url, {
+        headers: lifecycleHeaders(t.address ? t.lifecycleToken : undefined), signal: AbortSignal.timeout(5_000),
+      });
+      const body = await res.text();
+      if (!res.ok) return null;
+      identity = classifyHealthIdentity(body, t.appId, instanceId).kind;
+    } catch {
+      return null;
+    }
+    const lifecycle: LifecycleStatus = { identity, guard: await checkHealthGuard(url) };
+    // Still the container we measured (it may have exited meanwhile).
+    if (this.containers.get(instanceId) !== t) return null;
+    t.lifecycle = lifecycle;
+    const refusal = lifecycleStatusRefusal(instanceId, lifecycle);
+    if (refusal) console.warn(`[ContainerRunner] adopted ${refusal}; left running (it was started by a previous shell)`);
+    return lifecycle;
   }
   /**
    * `astro build` an app in a throwaway container — never in aura-shell
@@ -1431,4 +1551,20 @@ export class ContainerRunner implements SandboxRunner {
     } catch { /* not in a container / no procfs */ }
     return this.shellHostname || hostname() || null;
   }
+}
+
+/**
+ * Whether an app's own source is mounted read-only into its container (Track
+ * P): a closed install that is an agent workspace — granted every tool (`*`),
+ * like the System Terminal, where Claude and Codex run — and that serves its
+ * build. Other apps keep writing their own dir (`.data/`, astro dev's
+ * `.astro/` and vite cache), and so does an agent workspace in dev mode
+ * (no matching build), which could not start otherwise.
+ *
+ * Known limit: the System Terminal holds the Docker socket, so read-only is
+ * a guardrail for agents until Phase 5 removes the socket (D30).
+ */
+export function ownSourceReadOnly(ctx: { appDir: string; sourceMode?: 'closed' | 'open' }, manifest: AppManifest): boolean {
+  if (ctx.sourceMode !== 'closed' || !(manifest.tools ?? []).includes('*')) return false;
+  return serveState(ctx.appDir, manifest).mode === 'prod';
 }

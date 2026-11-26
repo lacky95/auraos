@@ -2,7 +2,7 @@ import type { APIRoute } from 'astro';
 import { mkdirSync, writeFileSync, chmodSync, existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join, normalize, dirname, resolve } from 'node:path';
-import { getAppManager } from '@aura/core';
+import { getAppManager, initRepo } from '@aura/core';
 import { auditOwner, ownerAction } from '../../../lib/approvals/admin.ts';
 
 /**
@@ -149,6 +149,16 @@ export const POST: APIRoute = async (ctx) => {
     return json({ error: 'write-failed', message: (err as Error).message }, 500);
   }
 
+  // The app is a git repo from the first minute (D51/Track P): `git init -b
+  // main` plus one commit of the scaffold, before deps land (the template's
+  // .gitignore keeps node_modules out either way). A forced overwrite of a
+  // dir that already is a repo leaves its history alone — the new files show
+  // up as changes. A git failure is reported, not fatal: the app is usable.
+  let gitCommit: string | null = null;
+  let gitError: string | undefined;
+  try { gitCommit = initRepo(dest, `Scaffold ${appId} (aura dev new)`); }
+  catch (err) { gitError = (err as Error).message; console.warn(`[scaffold] ${gitError}`); }
+
   // Register the new app with pnpm so its workspace-dep symlinks (@aura/
   // app-sdk, astro, etc.) get created under apps/<id>/node_modules. Without
   // this, the next `aura app start <id>` spawns a container, hits the
@@ -197,6 +207,7 @@ export const POST: APIRoute = async (ctx) => {
     ok: true, appId, scope, dest, fileCount: files.length,
     installed: installOk,
     ...(installError ? { installError } : {}),
+    git: { commit: gitCommit, ...(gitError ? { error: gitError } : {}) },
   });
 };
 

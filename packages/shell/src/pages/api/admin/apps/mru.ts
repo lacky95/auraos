@@ -1,5 +1,7 @@
 import type { APIRoute } from 'astro';
 import { defaultKv } from '@aura/kv-store';
+import { readUserPrefValue } from '@aura/core';
+import { localOwnerId, requestUserId } from '../../../../lib/userContext.js';
 
 /**
  * Read the per-app MRU (most-recently-used) timestamp map. Used by the
@@ -14,11 +16,11 @@ import { defaultKv } from '@aura/kv-store';
  * alphabetical tiebreak.
  */
 
-export const GET: APIRoute = async () => {
+export const GET: APIRoute = async ({ request }) => {
   let mru: Record<string, number> = {};
   try {
     const kv = defaultKv();
-    try { mru = (await kv.getValue<Record<string, number>>('os', 'app-mru')) ?? {}; }
+    try { mru = (await readUserPrefValue<Record<string, number>>(kv, (await requestUserId(request)) ?? localOwnerId(), 'app-mru')) ?? {}; }
     finally { await kv.close().catch(() => undefined); }
   } catch (err) {
     console.warn(`[apps/mru] read failed: ${(err as Error).message}`);

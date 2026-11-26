@@ -31,6 +31,9 @@ import { dropServiceWorkerScope, stripSessionCookie, stripShellCredentials } fro
 import { attachWsProxy } from '../server/attach.mjs';
 import { ACCESS_MODES, accessMode, parseAccessMode, wouldEnforce } from '../server/access-mode.mjs';
 import { enumerateRoutes } from './helpers/enumerateRoutes.ts';
+import { localSystemId } from '@aura/core/system-identity';
+/** The test data dir's own system id (D47): every resolved principal carries it. */
+const SYS = localSystemId();
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BRIDGE = Symbol.for('aura.access');
@@ -300,7 +303,7 @@ test('identity: a live login cookie or session bearer is the owner; expired or r
   for (const headers of [{ cookie: `app=1; aura_session=${LIVE_LOGIN}` }, { cookie: `__Host-aura_session=${LIVE_LOGIN}` }, { authorization: `Bearer ${LIVE_LOGIN}` }] as Record<string, string>[]) {
     const seen = await identityOf(headers, live);
     assert.equal(seen.via, 'login-session');
-    assert.deepEqual(seen.principal, { kind: 'user', userId: 'default', role: 'owner', sessionId: 'f'.repeat(32), verification: 'verified' });
+    assert.deepEqual(seen.principal, { kind: 'user', userId: 'default', role: 'owner', sessionId: 'f'.repeat(32), verification: 'verified', systemId: SYS });
   }
   for (const services of [loginServices({ revoked: true }), loginServices({ disabled: true })]) {
     const seen = await identityOf({ cookie: `aura_session=${LIVE_LOGIN}` }, deps({ services: () => services }));
@@ -323,7 +326,7 @@ test('identity: a verified App Host session is the owner acting through that app
   const v = await bridge.identify(facts);
   assert.deepEqual(v, {
     principal: {
-      kind: 'user', userId: 'default', role: 'owner', sessionId: 's'.repeat(32), verification: 'verified',
+      kind: 'user', userId: 'default', role: 'owner', sessionId: 's'.repeat(32), verification: 'verified', systemId: SYS,
       through: { appId: 'com.a.app', instanceId: 'com.a.app-1' },
     },
     via: 'app-host',

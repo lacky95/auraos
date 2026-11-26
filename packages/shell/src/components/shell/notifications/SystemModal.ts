@@ -13,6 +13,11 @@
  * It closes only by being resolved (or removed by AuraOS) — no Later, no
  * Escape. The controller suspends it while the screen is locked.
  *
+ * The owner dialog (OwnerPasswordDialog.astro, a native modal <dialog> in the
+ * top layer) takes precedence: it is never made inert, events inside it pass
+ * the guards, and this modal waits behind it — it does not take the focus
+ * while the owner dialog is open and takes it back when that closes.
+ *
  * Phase 6 — APP system modals (`systemModal`, granted notifications.systemModal)
  * use the same blocking shell, but are visibly NOT AuraOS: an identity bar
  * "Requested by <App>" with its glyph and verified / unverified attribution,
@@ -40,6 +45,9 @@ export interface SystemModalOptions {
 }
 
 export const FORCE_HIDE_SHORTCUT_LABEL = 'Ctrl+Alt+Shift+Esc';
+
+/** The shell's owner dialog (components/shell/OwnerPasswordDialog.astro). */
+const ownerDialog = () => document.getElementById('aura-owner-password') as HTMLDialogElement | null;
 
 /** Make every body child except `keep` inert; returns the restore. */
 function inertSiblings(keep: Element[]): () => void {
@@ -129,15 +137,21 @@ export function mountSystemModal(n: Notification, opts: SystemModalOptions): Mou
   document.body.appendChild(overlay);
 
   const lock = document.getElementById('lockscreen');
-  const restoreInert = inertSiblings([overlay, ...(lock ? [lock] : []), ...Array.from(document.querySelectorAll('.aura-dlg-system')).filter((e) => e !== overlay)]);
+  const owner = ownerDialog();
+  const ownerOpen = () => !!owner?.open;
+  const restoreInert = inertSiblings([
+    overlay, ...(lock ? [lock] : []), ...(owner ? [owner] : []),
+    ...Array.from(document.querySelectorAll('.aura-dlg-system')).filter((e) => e !== overlay),
+  ]);
 
   const inside = (e: Event) => {
     const path = typeof e.composedPath === 'function' ? e.composedPath() : [];
-    return path.includes(overlay) || (!!lock && path.includes(lock));
+    return path.includes(overlay) || (!!lock && path.includes(lock)) || (ownerOpen() && path.includes(owner!));
   };
   const guard = (e: Event) => {
-    // Phase 6: the protected force-hide shortcut wins over everything (apps never see it).
-    if (app && e.type === 'keydown' && isForceHideShortcut(e as KeyboardEvent)) {
+    // Phase 6: the protected force-hide shortcut wins over everything (apps never see it),
+    // except the owner dialog, which is in front.
+    if (app && e.type === 'keydown' && !ownerOpen() && isForceHideShortcut(e as KeyboardEvent)) {
       e.preventDefault();
       e.stopPropagation();
       askHide();
@@ -162,8 +176,14 @@ export function mountSystemModal(n: Notification, opts: SystemModalOptions): Mou
   window.addEventListener('touchstart', guard, { capture: true, passive: false });
   overlay.addEventListener('keydown', trapTab);
 
-  try { (document.activeElement as HTMLElement | null)?.blur?.(); } catch { /* ignore */ }
-  if (!focusFirst(frame.root)) frame.root.focus({ preventScroll: true });
+  const takeFocus = () => {
+    try { (document.activeElement as HTMLElement | null)?.blur?.(); } catch { /* ignore */ }
+    if (!focusFirst(frame.root)) frame.root.focus({ preventScroll: true });
+  };
+  // Behind an open owner dialog: wait, and take the focus once it closes (unless it reopened).
+  const onOwnerClose = () => { if (!ownerOpen() && !overlay.contains(document.activeElement)) takeFocus(); };
+  owner?.addEventListener('close', onOwnerClose);
+  if (!ownerOpen()) takeFocus();
 
   let disposed = false;
   return {
@@ -176,6 +196,7 @@ export function mountSystemModal(n: Notification, opts: SystemModalOptions): Mou
       window.removeEventListener('mousedown', guard, { capture: true });
       window.removeEventListener('touchstart', guard, { capture: true });
       overlay.removeEventListener('keydown', trapTab);
+      owner?.removeEventListener('close', onOwnerClose);
       confirm?.dispose();
       frame.dispose();
       restoreInert();

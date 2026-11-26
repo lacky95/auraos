@@ -269,6 +269,8 @@ export interface AccessBridge {
   /** A high-frequency event on a surface: a counter only. */
   countEvent(subject: string): void;
   countCredential(kind: string, surface: string): void;
+  /** An app contract signal (CONTRACT_SIGNALS) of an installed app: a counter only. */
+  countContract(signal: string, appId: string): void;
   pending(): { keys: number; events: number; meta: Record<string, number> };
   dispose(): void;
 }
@@ -340,6 +342,16 @@ export interface RequestSnapshot {
    */
   bodyVariant?: string | null;
 }
+
+/**
+ * App contract signals (D48), counted per app as `contract|<signal>|<appId>`:
+ *   context-get          a declared Context key read through `osClient.context.get`
+ *   context-undeclared   a Context key the manifest doesn't declare (refused)
+ *   interface-undeclared an interface looked up by name that `consumes[]` doesn't name
+ * Report only: the D39 gate reads them like the would-denies.
+ */
+export const CONTRACT_SIGNALS = ['context-get', 'context-undeclared', 'interface-undeclared'] as const;
+export type ContractSignal = (typeof CONTRACT_SIGNALS)[number];
 
 export const CREDENTIAL_COUNT_KINDS = [
   'stripped-session-cookie', 'stripped-login-bearer', 'stripped-admin-bearer',

@@ -2,11 +2,13 @@
   "id": "{{APP_ID}}",
   "name": "{{APP_NAME}}",
   "version": "0.1.0",
+  "auraContract": 1,
   "description": "Scaffolded by `aura dev new`.",
   "category": "utility",
   "permissions": [],
   "tools": {{TOOLS_JSON}},
   "instanceMode": "{{INSTANCE_MODE}}",
   "activityMode": "{{ACTIVITY_MODE}}",
-  "keymapActions": []
+  "keymapActions": [],
+  "source": { "defaultMode": "closed" }
 }

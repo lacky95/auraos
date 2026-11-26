@@ -7,6 +7,7 @@ export {
   KV_KEY_PATTERN,
   KV_NAMESPACE_PATTERN,
   KV_CONTEXT_NAMESPACE_PATTERN,
+  KV_USER_NAMESPACE_PATTERN,
 } from './types.js';
 export type { KvNamespace, KvValue } from './types.js';
 

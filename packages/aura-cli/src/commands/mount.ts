@@ -182,7 +182,7 @@ function printMounts(instanceId: string, mounts: AuraMount[], apps: AppDto[]): v
     .map((m) => ({
       TARGET: m.targetAppId,
       SCOPE:  m.kind === 'workspace' ? color.dim('os') : scopeColor(scopeOf(apps, m.targetAppId)),
-      KIND:   m.kind === 'data' ? color.yellow(m.kind) : m.kind === 'workspace' ? color.red(m.kind) : m.kind,
+      KIND:   m.kind === 'data' ? color.yellow(m.kind) : m.kind === 'workspace' ? color.red(m.kind) : m.kind === 'patches' || m.kind === 'work' ? color.cyan(m.kind) : m.kind,
       MODE:   modeSign(m.mode),
       PATH:   m.containerPath,
       ORIGIN: originLabel(m),
@@ -239,7 +239,7 @@ async function printActiveMounts(instanceId: string, apps: AppDto[]): Promise<vo
  */
 function mountedLine(m: AuraMount): string {
   return (
-    `mounted ${color.bold(m.targetAppId)}${m.kind === 'data' ? color.dim(':data') : ''} ` +
+    `mounted ${color.bold(m.targetAppId)}${m.kind === 'source' ? '' : color.dim(`:${m.kind}`)} ` +
     `${modeSign(m.mode)} at ${color.bold(m.containerPath)}`
   );
 }
@@ -361,8 +361,12 @@ async function pickTargets(apps: AppDto[], mounted: Set<string>, kind: 'source' 
 
 async function addMounts(
   appIds: string[],
-  opts: { instance?: string; rw?: boolean; data?: boolean },
+  opts: { instance?: string; rw?: boolean; data?: boolean; patches?: boolean },
 ): Promise<void> {
+  // The patch repo (Track P) is always writable for those who may patch the
+  // app; workspaces are `aura dev patch start`'s alone.
+  if (opts.patches && (opts.rw || opts.data)) fail('--patches binds the app\'s patch repository (writable); it takes no --wr or --data');
+  if (opts.patches && appIds.length === 0) fail('--patches needs the app: aura mount <app> --patches');
   const apps = await fetchApps();
   const instanceId = await resolveInstance(opts.instance, apps);
 
@@ -391,7 +395,7 @@ async function addMounts(
     try {
       const res = await api.post<AddResponse>(
         `/api/instances/${encodeURIComponent(instanceId)}/mounts`,
-        { targetAppId, mode, data: opts.data === true },
+        opts.patches ? { targetAppId, kind: 'patches' } : { targetAppId, mode, data: opts.data === true },
       );
       ok(mountedLine(res.mount));
     } catch (err) {
@@ -766,6 +770,9 @@ function planChanges(
   desired: Map<string, { rw: boolean; data: boolean }>,
 ): ChangePlan {
   const plan: ChangePlan = { adds: [], removes: [] };
+  // The wizard manages source and data mounts; a patch repo or workspace
+  // (Track P) is not its to detach.
+  existing = existing.filter((m) => m.kind === 'source' || m.kind === 'data');
   const byApp = new Map<string, AuraMount[]>();
   for (const m of existing) {
     byApp.set(m.targetAppId, [...(byApp.get(m.targetAppId) ?? []), m]);
@@ -882,7 +889,7 @@ function guard<A extends unknown[]>(fn: (...args: A) => Promise<void>) {
   };
 }
 
-interface MountOpts { instance?: string; rw?: boolean; wr?: boolean; data?: boolean; all?: boolean }
+interface MountOpts { instance?: string; rw?: boolean; wr?: boolean; data?: boolean; patches?: boolean; all?: boolean }
 
 /**
  * Read the effective options for a subcommand.
@@ -909,11 +916,19 @@ export function registerMount(program: Command): void {
       "Mount another app's files into this app's container, live and without a restart. " +
       'Read-only by default. Container sandboxes only.',
     )
+    .argument('[appId...]', 'Apps to mount (as `aura mount add`); none: the interactive wizard')
     .option('--instance <id>', 'Target instance (default: $APP_INSTANCE_ID)')
+    .addOption(new Option('--wr', 'Mount WRITE (default: read-only)'))
+    .option('--data', "Mount the target's data dir instead of its source")
+    .option('--patches', "Mount the app's patch repository at /mnt/aura/patches/<appId> (writable; Track P)")
     // Bare `aura mount` opens the interactive wizard: pick a target app and
     // instance, then manage its whole mount set on one screen. `ls` stays
-    // available explicitly for scripting and non-TTY use.
-    .action(guard(async () => { await runWizard(); }));
+    // available explicitly for scripting and non-TTY use. `aura mount <app>`
+    // is `aura mount add <app>`.
+    .action(guard(async (appIds: string[], _opts: MountOpts, cmd: Command) => {
+      if (appIds?.length) await addMounts(appIds, effectiveOpts(cmd));
+      else await runWizard();
+    }));
 
   mount
     .command('ls')
@@ -934,6 +949,7 @@ export function registerMount(program: Command): void {
     .addOption(new Option('--wr', 'Mount WRITE (default: read-only)'))
     .addOption(new Option('--rw', 'Deprecated alias for --wr').hideHelp())
     .option('--data', "Mount the target's data dir instead of its source")
+    .option('--patches', "Mount the app's patch repository at /mnt/aura/patches/<appId> (writable; Track P)")
     .option('--instance <id>', 'Target instance (default: $APP_INSTANCE_ID)')
     .action(guard(async (appIds: string[], _opts: MountOpts, cmd: Command) => {
       await addMounts(appIds ?? [], effectiveOpts(cmd));
@@ -951,8 +967,8 @@ export function registerMount(program: Command): void {
     .command('rm [appId...]')
     .alias('remove')
     .description(
-      'Detach mounts. A bare appId detaches both its source and data mounts; ' +
-      'pass `<appId>:data` for just the data one. With no args, opens a picker.',
+      'Detach mounts. A bare appId detaches all of its mounts (source, data, patches, work); ' +
+      'pass `<appId>:data`, `<appId>:patches` or `<appId>:work` for just that one. With no args, opens a picker.',
     )
     .option('--all', 'Detach every mount from the instance')
     .option('--instance <id>', 'Target instance (default: $APP_INSTANCE_ID)')

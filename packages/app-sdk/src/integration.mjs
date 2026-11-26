@@ -18,6 +18,9 @@ import { AURA_RUNTIME_LOADER_JS, SHELL_ASSET_ROUTES } from './runtime/loader.js'
  *     (runtime/shell-asset-route) keep existing references working there.
  *   • Logs identity at server start so container logs make it obvious which
  *     app each port belongs to.
+ *   • The same middleware refuses every `/api/lifecycle/*` request without
+ *     the kernel's lifecycle token (401, before any route — hand-written hook
+ *     files included). See runtime/lifecycle-guard.
  *
  * `.mjs` because `astro.config.mjs` imports it through Node's resolver before
  * Astro/Vite boot — it cannot be a `.ts` file.
@@ -39,7 +42,8 @@ export function auraAppIntegration(opts = {}) {
     hooks: {
       'astro:config:setup': ({ injectRoute, injectScript, updateConfig, addMiddleware }) => {
         // Identity headers on every rendered response, in dev AND in a
-        // production build (the astro:server:setup hook below is dev-only).
+        // production build (the astro:server:setup hook below is dev-only),
+        // and the lifecycle-token check in front of every /api/lifecycle route.
         addMiddleware({
           entrypoint: new URL('./runtime/identity-middleware.js', import.meta.url),
           order: 'pre',

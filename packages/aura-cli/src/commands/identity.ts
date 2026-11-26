@@ -3,6 +3,8 @@ import { color, fail, warn } from '../lib/format.js';
 import { shellUrl } from '../lib/client.js';
 import { inSandbox, isRunnerShellUrl, isTrustedShellUrl, resolveIdentity, shellFetch } from '../lib/identity.js';
 import { issueSetupCode, SetupCodeRefused, type SetupTicketInput } from '../lib/setup-ticket.js';
+// The file-only entry, like setup tickets: no Valkey, no server runtime.
+import { reidentifySystem } from '@aura/core/system-identity';
 
 export type WhoamiResult =
   | { state: 'verified'; identity: Record<string, string>; login?: Record<string, string> }
@@ -123,6 +125,25 @@ export function registerIdentity(program: Command): void {
       const name = username.trim();
       if (!name) fail('aura user reset-password <username>');
       return printCode({ purpose: 'reset', username: name });
+    });
+
+  const system = program.command('system').description('This Aura\'s identity (host commands).');
+  system
+    .command('reidentify')
+    .description('Host command: give a copied /data a new systemId and system key (D47). Run it with the shell stopped.')
+    .option('--yes', 'do not ask; for scripts (the test-instance copy runs it this way)')
+    .action(async (opts: { yes?: boolean }) => {
+      if (inSandbox()) fail('this is a host command. Run it from the host: docker exec -it aura-shell aura system reidentify');
+      if (!opts.yes) {
+        if (!process.stdin.isTTY) fail('pass --yes to run without a prompt');
+        process.stderr.write('A new systemId breaks every reference other systems hold to this one. Only for a COPY of /data. Type "reidentify": ');
+        const answer = await new Promise<string>((resolve) => process.stdin.once('data', (d) => resolve(String(d).trim())));
+        process.stdin.pause();
+        if (answer !== 'reidentify') fail('cancelled');
+      }
+      const { previous, current } = reidentifySystem(process.env['AURA_DATA_DIR'] ?? '/data');
+      console.log(`systemId ${previous ?? '(none)'} -> ${current.systemId}`);
+      console.log('New system key written. Restart the shell for it to take effect.');
     });
 }
 

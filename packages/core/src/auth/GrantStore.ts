@@ -70,14 +70,27 @@ export const GRANTABLE_PERMISSIONS: readonly string[] = [...PRIVILEGED_PERMISSIO
  */
 export const KV_OS_WRITE_PERMISSION_RE = /^system\.kv\.os\.[A-Za-z0-9_-]{1,128}\.write$/;
 
+/**
+ * Reading the raw value of a credential in a user's vault (D56): one grant
+ * per app, credential and user (scope `{kind: 'user', id}`), given on the
+ * owner's `fresh` approval and revocable. Never OS-wide. A handle alone
+ * never reads a value.
+ */
+export const CREDENTIAL_READ_PERMISSION_RE = /^credential\.read:[A-Z_][A-Z0-9_]{0,63}$/;
+export const credentialReadPermission = (name: string): string => `credential.read:${name}`;
+/** The grant scope of one user's vault. */
+export const userScope = (userId: string): GrantScope => ({ kind: 'user', id: userId });
+
 export function isPrivilegedPermission(p: string): boolean {
-  return (PRIVILEGED_PERMISSIONS as readonly string[]).includes(p) || KV_OS_WRITE_PERMISSION_RE.test(p);
+  return (PRIVILEGED_PERMISSIONS as readonly string[]).includes(p) || KV_OS_WRITE_PERMISSION_RE.test(p)
+    || CREDENTIAL_READ_PERMISSION_RE.test(p);
 }
 
 const SUBJECT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
 /** A Terminal session id, `<instanceId>#<label>` (com.aura.terminal pty-server). */
 const TERMINAL_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}#[A-Za-z0-9._-]{1,64}$/;
 const SUBJECT_KINDS: readonly GrantSubjectKind[] = ['app', 'apiKey'];
+const USER_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 /** Who grants: the owner, the host operator or AuraOS itself (D50). */
 export type GrantedBy = ChangeAttribution | { kind: 'system' };
@@ -134,7 +147,14 @@ export class GrantStore {
     if (!SUBJECT_KINDS.includes(subject.kind)) throw new GrantError(400, `subject kind must be one of ${SUBJECT_KINDS.join(', ')}`);
     if (typeof subject.id !== 'string' || !SUBJECT_ID.test(subject.id)) throw new GrantError(400, 'invalid subject id');
     if (!isPrivilegedPermission(permission)) {
-      throw new GrantError(400, `'${permission}' cannot be granted here — grantable: ${GRANTABLE_PERMISSIONS.join(', ')}, system.kv.os.<topic>.write`);
+      throw new GrantError(400, `'${permission}' cannot be granted here — grantable: ${GRANTABLE_PERMISSIONS.join(', ')}, system.kv.os.<topic>.write, credential.read:<NAME>`);
+    }
+    const credential = CREDENTIAL_READ_PERMISSION_RE.test(permission);
+    if (credential || scope.kind === 'user') {
+      if (!credential || scope.kind !== 'user' || subject.kind !== 'app' || typeof scope.id !== 'string' || !USER_ID.test(scope.id)) {
+        throw new GrantError(400, 'a credential.read:<NAME> grant is an app\'s, for one user\'s vault');
+      }
+      return;
     }
     if (scope.kind === 'os') return;
     if (scope.kind !== 'terminal-session' || permission !== TERMINAL_EMBED_PERMISSION || subject.kind !== 'app'

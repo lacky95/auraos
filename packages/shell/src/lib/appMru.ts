@@ -1,4 +1,5 @@
-import { OsEventBus } from '@aura/core';
+import { OsEventBus, readUserPrefValue, writeUserPref } from '@aura/core';
+import { localOwnerId } from './userContext.js';
 import { defaultKv } from '@aura/kv-store';
 
 /**
@@ -19,13 +20,14 @@ import { defaultKv } from '@aura/kv-store';
  *                                            tile reuses the instance and
  *                                            never hits /start).
  */
-export async function bumpMru(appId: string): Promise<void> {
+export async function bumpMru(appId: string, userId: string = localOwnerId()): Promise<void> {
   try {
     const kv = defaultKv();
     try {
-      const map = (await kv.getValue<Record<string, number>>('os', 'app-mru')) ?? {};
+      // The user's own MRU (D46), seeded from the shared one from before the move.
+      const map = (await readUserPrefValue<Record<string, number>>(kv, userId, 'app-mru')) ?? {};
       map[appId] = Date.now();
-      await kv.set('os', 'app-mru', map);
+      await writeUserPref(kv, userId, 'app-mru', map);
       // Topic the sioPlugin already relays — see astro.config.mjs EVENT_TYPES.
       OsEventBus.emit('app:mruChanged', { appId, at: map[appId] });
     } finally {

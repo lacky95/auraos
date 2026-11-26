@@ -44,6 +44,8 @@ export const ENFORCED_PERMISSIONS: readonly string[] = [
   'terminal.screen.read',
   // Owner confirmation through the shell's dialog (D49). Declaring it is enough.
   'user.confirm',
+  // Ask the owner for a credential through the shell's dialog (D56). Declaring it is enough.
+  'credentials.request',
 ];
 const ENFORCED = new Set<string>(ENFORCED_PERMISSIONS);
 

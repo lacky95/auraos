@@ -3,6 +3,7 @@ import type {
 } from '@aura/core';
 // The file-only entry, as the CLI uses it: one subject rule on both sides.
 import { operatorRequestSubject } from '@aura/core/setup-tickets';
+import { localSystemId } from '@aura/core/system-identity';
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { loadAppHostServices, type AppHostServices } from '../../../server/app-host-auth.mjs';
@@ -28,7 +29,7 @@ export function gatewayInstance(
 
 /** What `gatewayOwner` reads. Structural, so tests can fake it. */
 export interface GatewayOwnerDeps {
-  mgr: Pick<AppManager, 'getInstance' | 'getManifest'>;
+  mgr: Pick<AppManager, 'getInstance' | 'isTrustedSystemCopy'>;
   services?: () => Promise<Pick<AppHostServices, 'registry' | 'sessionLive'> | null>;
 }
 
@@ -76,10 +77,11 @@ export const OWNER_AGENT_EXCLUDED_TARGETS: ReadonlySet<AccessTarget> = new Set(
  * live state, so a claim minted a moment before any of it changed buys nothing:
  *
  *   - a verified claim for a live instance of that app (gatewayInstance)
- *   - its installed copy is the `system` one, and the one scope decision
+ *   - its installed copy is the trusted system one (its `system` copy, or the
+ *     owner's approved overlay of it: AppManager `isTrustedSystemCopy`), and the one scope decision
  *     (gateway-identity.mjs `ownerUiActs`) holds for the path called: an
  *     OWNER_UI_APPS entry that covers it, the claim's installation is that
- *     active `system` installation, and the owner's session is live
+ *     active `system` installation or its approved overlay, and the owner's session is live
  *
  * The route manifest check (gatewayCaller.ts) and `authenticate()` (auth.ts)
  * both ask this, so no caller can skip the path scope.
@@ -120,15 +122,14 @@ async function ownerThrough(
   ref: { installationId: string; userId: string; sid: string }, deps: GatewayOwnerDeps,
 ): Promise<UserPrincipal | null> {
   if (!ownerUiApp(inst.appId)) return null;
-  const installed = deps.mgr.getManifest(inst.appId) as { scopeId?: string } | undefined;
-  if (installed?.scopeId !== 'system') return null;
+  if (!deps.mgr.isTrustedSystemCopy(inst.appId)) return null;
   const svc = await (deps.services ?? loadAppHostServices)();
   if (!svc) return null;
   const path = new URL(request.url).pathname;
   if (!(await ownerUiActs({ appId: inst.appId, path, ...ref }, svc))) return null;
   return {
     kind: 'user', userId: ref.userId, role: 'owner', sessionId: ref.sid,
-    verification: 'verified', through: { appId: inst.appId, instanceId: inst.instanceId },
+    verification: 'verified', ...systemOf(), through: { appId: inst.appId, instanceId: inst.instanceId },
   };
 }
 
@@ -157,7 +158,7 @@ export interface ResolvedPrincipal extends VerifiedIdentity {
 
 /** The live objects the resolver reads. A missing one makes what needs it `unverified`. */
 export interface PrincipalDeps {
-  mgr: (Pick<AppManager, 'getInstance' | 'getManifest'> & {
+  mgr: (Pick<AppManager, 'getInstance' | 'getManifest' | 'isTrustedSystemCopy'> & {
     tokens: Pick<AppManager['tokens'], 'verify'> & Partial<Pick<AppManager['tokens'], 'hasNonce'>>;
   }) | null;
   apiKeys: { verify(key: string): Promise<{ id: string; name: string; scopes: string[] } | null> } | null;
@@ -215,8 +216,16 @@ export function bearerToken(request: Request): string | null {
   return /^Bearer\s+(\S+)\s*$/i.exec(header)?.[1] ?? '';
 }
 
+/**
+ * The Aura a verified principal belongs to (D47): always this one in the
+ * alpha, read rather than assumed. Left out if the identity is unreadable.
+ */
+export function systemOf(): { systemId?: string } {
+  try { return { systemId: localSystemId() }; } catch { return {}; }
+}
+
 function userPrincipal(userId: string, sessionId: string, through?: UserPrincipal['through']): UserPrincipal {
-  return { kind: 'user', userId, role: 'owner', sessionId, verification: 'verified', ...(through ? { through } : {}) };
+  return { kind: 'user', userId, role: 'owner', sessionId, verification: 'verified', ...systemOf(), ...(through ? { through } : {}) };
 }
 
 /**
@@ -242,6 +251,7 @@ function instancePrincipal(
     ...(extra.sidecar ? { sidecar: extra.sidecar } : {}),
     ...(extra.userId ? { userId: extra.userId } : {}),
     verification: 'verified',
+    ...systemOf(),
   };
 }
 
@@ -396,17 +406,17 @@ export const OWNER_AGENT_APPS: ReadonlySet<string> = new Set(['com.aura.terminal
 
 /**
  * D29: the owner and trusted terminals have full control. A trusted owner
- * agent is an instance of the installed `system` copy of an OWNER_AGENT_APPS
- * app, calling with its own instance token (never one of its sidecars). A
- * gateway call is judged as the app's page, by its instance rules only
- * (gatewayCaller.ts never asks this).
+ * agent is an instance of the trusted system copy of an OWNER_AGENT_APPS
+ * app (its `system` copy, or the owner's approved overlay of it, Track P:
+ * AppManager `isTrustedSystemCopy`), calling with its own instance token
+ * (never one of its sidecars). A gateway call is judged as the app's page,
+ * by its instance rules only (gatewayCaller.ts never asks this).
  */
 export function isTrustedOwnerAgent(
-  p: InstancePrincipal, mgr: Pick<AppManager, 'getManifest'> | null,
+  p: InstancePrincipal, mgr: Pick<AppManager, 'isTrustedSystemCopy'> | null,
 ): boolean {
   if (!OWNER_AGENT_APPS.has(p.appId) || p.sidecar) return false;
-  const installed = mgr?.getManifest(p.appId) as { scopeId?: string } | undefined;
-  return installed?.scopeId === 'system';
+  return mgr?.isTrustedSystemCopy(p.appId) === true;
 }
 
 // ── D28: tokenless callers by their container network address ───────────────

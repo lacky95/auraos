@@ -2,7 +2,7 @@
 import OSLayout from '../layouts/OSLayout.astro';
 import Icon from '../components/ui/Icon.astro';
 import LayoutManager from '../components/layout/LayoutManager.astro';
-import { getAppManager, DEFAULT_WORKSPACE_STATE, type WorkspaceState } from '@aura/core';
+import { getAppManager, DEFAULT_WORKSPACE_STATE, readUserPref, readUserPrefValue, type WorkspaceState } from '@aura/core';
 import { sharedKv } from '../lib/sharedKv';
 import { sessionBootInfo, waitForRestore } from '../lib/desktopSession';
 import { slotInnerHtml, iframeHtml, SLOT_STYLE } from '../lib/desktop/slotMarkup';
@@ -10,6 +10,7 @@ import { escapeJsonForScript } from '@aura/ui/lib/utils';
 import { ssrGridLayout } from '../lib/layout/gridShape';
 import { logicalFrameUrl } from '../lib/appFrame';
 import { desktopSignIn } from '../lib/authSurface';
+import { localOwnerId, requestUserId } from '../lib/userContext';
 
 // The shell page must never be served stale: WebView hosts (Android) cache
 // heuristically when no Cache-Control is present, which leaves devices
@@ -39,10 +40,13 @@ await waitForRestore(15_000);
 const session = sessionBootInfo();
 
 // Both SSR reads in one round of the shared KV connection (lib/sharedKv.ts).
+// Per-user preferences (D46): the caller's own value, the same one
+// `/api/kv/os/<pref>` serves the browser, else the shared one from before the move.
 const kv = sharedKv();
+const userId = (await requestUserId(Astro.request)) ?? localOwnerId();
 const [mruMap, workspacesEntry] = await Promise.all([
-  kv.getValue<Record<string, number>>('os', 'app-mru').then((v) => v ?? {}).catch(() => ({} as Record<string, number>)),
-  kv.get<WorkspaceState>('os', 'workspaces').catch(() => null),
+  readUserPrefValue<Record<string, number>>(kv, userId, 'app-mru').then((v) => v ?? {}).catch(() => ({} as Record<string, number>)),
+  readUserPref<WorkspaceState>(kv, userId, 'workspaces').catch(() => null),
 ]);
 const storedWorkspaces = workspacesEntry?.value ?? null;
 const pinnedApps = [...allApps]
@@ -60,9 +64,10 @@ const pinnedApps = [...allApps]
   })
   .slice(0, 5);
 
-// SSR workspace state — comes from the OS KV (`os/workspaces`), populated
-// by bootstrapKv() before any request hits this route. Defaults are used
-// only if Redis is unhealthy (shouldn't happen in steady state).
+// SSR workspace state — the user's `workspaces` preference, else the shared
+// `os/workspaces` that bootstrapKv() populates before any request hits this
+// route. Defaults are used only if Redis is unhealthy (shouldn't happen in
+// steady state).
 let workspaceState: WorkspaceState = DEFAULT_WORKSPACE_STATE;
 // The stored version: the browser's writes are conditional on it
 // (lib/workspaceClient.ts), so a page that grew stale can't roll newer

@@ -1,0 +1,72 @@
+// `aura dev validate`'s app contract checks (D48, lib/apphost-lint.ts
+// `lintContract`) and the contract report printer.
+//
+//   pnpm --filter @aura/cli test
+import { test, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { AppManifestSchema, AURA_CONTRACT } from '@aura/core';
+import { lintContract } from '../src/lib/apphost-lint.js';
+import { printContractReport } from '../src/commands/admin.js';
+
+const root = mkdtempSync(join(tmpdir(), 'aura-contract-lint-'));
+after(() => rmSync(root, { recursive: true, force: true }));
+
+function app(name: string, manifest: Record<string, unknown>, files: Record<string, string> = {}) {
+  const dir = join(root, name);
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  const text = JSON.stringify({ id: `com.example.${name}`, name, version: '1.0.0', ...manifest }, null, 2);
+  writeFileSync(join(dir, 'app.manifest.json'), text);
+  for (const [rel, body] of Object.entries(files)) writeFileSync(join(dir, rel), body);
+  const file = join(dir, 'app.manifest.json');
+  return { file, text, parsed: AppManifestSchema.parse(JSON.parse(text)) };
+}
+
+test('a manifest on the contract with matching source is quiet', () => {
+  const a = app('clean', { auraContract: AURA_CONTRACT, context: ['API_KEY'], permissions: ['user.confirm'] }, {
+    'src/server.ts': "const k = await osClient.context.get('API_KEY');\nawait osClient.user.confirm({ action: 'x' });\n",
+  });
+  assert.deepEqual(lintContract(a.file, a.text, a.parsed), []);
+});
+
+test('missing contract version, undeclared Context key and permission, raw Context: file:line warnings', () => {
+  const a = app('dirty', { services: [{ name: 'db', image: 'postgres:16', privileged: true }] }, {
+    'src/server.ts': "const k = await osClient.context.get('API_KEY');\nconst raw = readFileSync('/run/context/API_KEY');\n",
+  });
+  const f = lintContract(a.file, a.text, a.parsed);
+  assert.ok(f.every((x) => x.rule === 'contract' && x.severity === 'warn'));
+  const at = f.map((x) => [x.file.replace(root, ''), x.line, x.message.split(':')[0]]);
+  assert.deepEqual(at.map((x) => x[0]), ['/dirty/app.manifest.json', '/dirty/app.manifest.json', '/dirty/app.manifest.json', '/dirty/src/server.ts', '/dirty/src/server.ts']);
+  assert.match(f[0]!.message, /auraContract/);
+  assert.equal(f[0]!.line, 1, 'auraContract is absent: the top of the manifest');
+  assert.match(f[1]!.message, /sidecars\.privileged/);
+  assert.ok(f[1]!.line > 1, 'points at services');
+  assert.match(f[3]!.message, /context\[\]/);
+  assert.equal(f[3]!.line, 1);
+  assert.match(f[4]!.message, /raw mounted Context/);
+  assert.equal(lintContract(a.file, a.text, a.parsed, { source: false }).length, 3, '--no-source: the manifest checks only');
+});
+
+test('printContractReport prints a table and the details', () => {
+  const out: string[] = [];
+  const log = console.log;
+  console.log = (...a: unknown[]) => { out.push(a.join(' ')); };
+  try {
+    printContractReport({
+      contract: 1, summary: { apps: 1, noContract: 1 },
+      apps: [{
+        appId: 'com.example.x', scope: 'user', contract: { version: null, status: 'none' },
+        findings: [{ code: 'contract-missing', message: 'no auraContract' }],
+        source: [{ file: 'src/a.ts', line: 3, code: 'context-raw', message: 'reads /run/context' }],
+        signals: { 'context-undeclared': 2 }, readsRawContext: true,
+      }],
+    });
+  } finally { console.log = log; }
+  const text = out.join('\n');
+  assert.match(text, /com\.example\.x/);
+  assert.match(text, /context-undeclared=2/);
+  assert.match(text, /src\/a\.ts:3: reads \/run\/context/);
+  assert.match(text, /contract 1: apps=1 noContract=1/);
+});

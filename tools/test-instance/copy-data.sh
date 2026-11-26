@@ -73,7 +73,8 @@ fi
 
 # Exclusions. Copying is allowlist-based (ROOTS), so anything else at the top
 # level is left behind too. This list also vets symlink targets and hardlinks.
-EXCLUDED=(aura/secrets context/.masterkey kv-redis-backup.orig kv-migration.json
+# aura/system.json is this Aura's identity (D47): a copy must never share it.
+EXCLUDED=(aura/secrets aura/system.json context/.masterkey kv-redis-backup.orig kv-migration.json
   aura/runtime aura/mounts aura/warm-pool.json aura/boot aura/update)
 [ "$INCLUDE_KV" = 1 ] || EXCLUDED+=(kv)
 # The one credential denylist. Lowercase globs, matched case-insensitively on
@@ -337,6 +338,14 @@ while IFS= read -r -d '' rel; do
   fi
 done < <(cd "$DEST" && find . -mindepth 1 -print0)
 [ "$bad" = 0 ] || { echo "Copy failed verification. Inspect or delete: $DEST" >&2; exit 1; }
+
+# D47: the copy is its own Aura. Its identity was not copied; give it a new
+# one now, so it never comes up under the source's systemId.
+if command -v aura >/dev/null 2>&1; then
+  AURA_DATA_DIR="$DEST" aura system reidentify --yes || die "could not give the copy a new system identity: run AURA_DATA_DIR=$DEST aura system reidentify --yes"
+else
+  echo "NOTE: aura CLI not found: the copy creates its own system identity on first boot (or run: AURA_DATA_DIR=$DEST aura system reidentify --yes)."
+fi
 
 echo
 echo "Copied and verified: $DEST"

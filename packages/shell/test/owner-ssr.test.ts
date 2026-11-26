@@ -8,7 +8,7 @@ import { after, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { GATEWAY_IDENTITY_HEADER, OWNER_SSR_HEADER } from '@aura/core/host-rules';
+import { GATEWAY_IDENTITY_HEADER, LIFECYCLE_TOKEN_HEADER, OWNER_SSR_HEADER } from '@aura/core/host-rules';
 import type { GatewayIdentityClaim } from '@aura/core';
 import { createAppHostRouter } from '../server/app-hosts.mjs';
 import { createAppHostAuth } from '../server/app-host-auth.mjs';
@@ -18,6 +18,9 @@ import {
 import { stripShellCredentials } from '../server/shell-credentials.mjs';
 import type { GatewayOwnerDeps } from '../src/lib/access/identify.ts';
 import { authenticate, type AuthDeps } from '../src/lib/auth.ts';
+import { localSystemId } from '@aura/core/system-identity';
+/** The test data dir's own system id (D47): every resolved principal carries it. */
+const SYS = localSystemId();
 
 const listen = (s: http.Server) =>
   new Promise<number>((r) => s.listen(0, '127.0.0.1', () => r((s.address() as AddressInfo).port)));
@@ -184,6 +187,16 @@ test('the shell strips the owner claim from anything leaving for an app', () => 
   assert.deepEqual(node, {});
 });
 
+test('the shell strips a lifecycle token header from anything leaving for an app', () => {
+  const headers = new Headers({ [LIFECYCLE_TOKEN_HEADER]: 'guess', accept: 'text/html' });
+  stripShellCredentials(headers, 'test');
+  assert.equal(headers.get(LIFECYCLE_TOKEN_HEADER), null);
+  assert.deepEqual(stripShellCredentials(['X-Aura-Lifecycle', 'guess', 'accept', 'x'], 'test'), ['accept', 'x']);
+  const node: Record<string, string> = { [LIFECYCLE_TOKEN_HEADER]: 'guess', accept: 'x' };
+  stripShellCredentials(node, 'test');
+  assert.deepEqual(node, { accept: 'x' });
+});
+
 // ── the claim itself ────────────────────────────────────────────────────────
 
 test('an owner SSR claim and a gateway claim never stand in for each other', () => {
@@ -223,11 +236,19 @@ const deps = {
     tokens: { verify: (t: string) => TOKENS[t] ?? null },
     getInstance: (id: string) => instances[id],
     getManifest: (id: string) => (installedScope[id] ? { scopeId: installedScope[id] } : undefined),
+    // Track P: the system copy (no approved overlay here; overlays are off in v1).
+    isTrustedSystemCopy: (id: string) => installedScope[id] === 'system',
   },
   ownerServices: (async () => svc) as unknown as GatewayOwnerDeps['services'],
   apiKeys: { verify: async () => null },
 } as unknown as AuthDeps;
 
+/** Flip the signature's first character: 6 full MAC bits (the last one is mostly padding and could still verify). */
+const forgedSig = (claim: string) => {
+  const [prefix, payload, sig = ''] = claim.split('.');
+  assert.ok(sig.length > 1);
+  return `${prefix}.${payload}.${sig[0] === 'A' ? 'B' : 'A'}${sig.slice(1)}`;
+};
 const settingsClaim = (over: Record<string, string> = {}) =>
   signOwnerSsrClaim({ appId: SETTINGS, installationId: 'inst-settings', instanceId: 'com.aura.settings-1', ...OWNER, ...over });
 const shellRequest = (path: string, headers: Record<string, string>, method = 'GET') =>
@@ -241,7 +262,7 @@ async function who(path: string, headers: Record<string, string>, method = 'GET'
 test('authenticate(): Settings\' token plus its owner claim is the owner through Settings', async () => {
   const p = await who('/api/apps', { authorization: 'Bearer aura1.settings', [OWNER_SSR_HEADER]: settingsClaim() });
   assert.deepEqual(p, {
-    kind: 'user', userId: OWNER.userId, role: 'owner', sessionId: OWNER.sid, verification: 'verified',
+    kind: 'user', userId: OWNER.userId, role: 'owner', sessionId: OWNER.sid, verification: 'verified', systemId: SYS,
     through: { appId: SETTINGS, instanceId: 'com.aura.settings-1' },
   });
   const nexus = signOwnerSsrClaim({ appId: NEXUS, installationId: 'inst-nexus', instanceId: 'com.aura.nexus-1', ...OWNER });
@@ -268,7 +289,7 @@ test('authenticate(): the claim is ignored without the right token, session, sco
     ['the user-scope installation', '/api/apps', { authorization: 'Bearer aura1.settings', [OWNER_SSR_HEADER]: settingsClaim({ installationId: 'inst-settings-user' }) }, 'GET', 'instance'],
     ['a mutation', '/api/admin/apps/enabled', { authorization: 'Bearer aura1.settings', [OWNER_SSR_HEADER]: settingsClaim() }, 'POST', 'instance'],
     ['a path outside Settings\' scope', '/api/nexus/installed', { authorization: 'Bearer aura1.settings', [OWNER_SSR_HEADER]: settingsClaim() }, 'GET', 'instance'],
-    ['a forged signature', '/api/apps', { authorization: 'Bearer aura1.settings', [OWNER_SSR_HEADER]: settingsClaim().replace(/.$/, (c) => (c === 'A' ? 'B' : 'A')) }, 'GET', 'instance'],
+    ['a forged signature', '/api/apps', { authorization: 'Bearer aura1.settings', [OWNER_SSR_HEADER]: forgedSig(settingsClaim()) }, 'GET', 'instance'],
   ];
   for (const [why, path, headers, method, kind] of cases) {
     assert.equal((await who(path, headers, method)).kind, kind, why);

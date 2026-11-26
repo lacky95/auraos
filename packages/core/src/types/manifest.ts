@@ -70,6 +70,13 @@ export const BUILTIN_PERMISSIONS = [
    * declaring it is enough.
    */
   'user.confirm',
+  /**
+   * Ask the owner for a credential in the shell's own dialog
+   * (`osClient.credentials.request`, D56). The app gets back a handle, never
+   * the value; reading the value is a separate grant the owner gives with
+   * a fresh approval. ENFORCED: declaring it is enough.
+   */
+  'credentials.request',
   'system.clipboard',
   'system.overlay',
   'system.theme.broadcast',
@@ -413,6 +420,19 @@ export const AppManifestSchema = z.object({
   }).optional(),
   permissions: z.array(PermissionSchema).default([]),
   tools: z.array(z.string()).default([]),
+  /**
+   * The app contract this app was built for (D48, `AURA_CONTRACT` in the SDK
+   * and in core's contract/appContract.ts). Absent: built before the contract.
+   * AuraOS reports it per app (`aura get apps -o wide`, the contract report);
+   * from Phase 6 it refuses an unknown major version with a clear message.
+   */
+  auraContract: z.number().int().min(1).optional(),
+  /**
+   * The Aura Context keys this app reads with `osClient.context.get(key)`
+   * (D48). Only these are handed to it; reading another key is refused and
+   * shows in the access report. Env-var names, like the Context keys.
+   */
+  context: z.array(z.string().regex(/^[A-Z_][A-Z0-9_]*$/, { message: 'context[] entries are Context keys: env-var names (A-Z, 0-9, _)' })).default([]),
   rootfsMode: z.enum(['shared', 'isolated']).default('shared'),
   category: z.enum(['system', 'productivity', 'media', 'communication', 'utility', 'game', 'developer']).default('utility'),
   /** Instance policy: 'single' = at most one running BACKEND process, 'multi' = multiple concurrent processes allowed. */
@@ -637,6 +657,22 @@ export const AppManifestSchema = z.object({
     url:    z.string().min(1),
     branch: z.string().min(1).optional(),
     commit: z.string().regex(/^([0-9a-f]{7,64})?$/, { message: 'commit must be a git commit hash (or "")' }).optional(),
+  }).optional(),
+  /**
+   * Who may change the installed copy's source (Track P). `defaultMode` is
+   * the release's default for every installation; the owner's choice per
+   * installation is the install record's `sourceMode` (nexus/AppSource.ts
+   * `effectiveSourceMode`).
+   *   • `closed` — the source is read-only to agents and other apps
+   *                (`aura mount` read-only, `--wr` refused); changes go
+   *                through a patch workspace and an approved activation.
+   *   • `open`   — a writable developer checkout, after the owner's approval
+   *                (`aura dev open`).
+   * An app built here (`aura dev new`, no install record) is its author's
+   * own checkout and is always open.
+   */
+  source: z.object({
+    defaultMode: z.enum(['closed', 'open']).default('closed'),
   }).optional(),
   /**
    * Optional Nexus publish metadata. Drives `aura nexus publish` — none of

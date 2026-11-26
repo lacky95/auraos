@@ -77,12 +77,16 @@ const CONTEXT_Q31 = decide(5,
 const PROXY_ACCESS = why(
   'D28: the owner, and a tokenless call from an app container (Claude Code\'s MCP URLs, the Terminal\'s session calls, the agent hooks), known by its network address. The SDK never sends a token on this path, and a gateway call stays refused. Caller-scoped grants are Phase 5.');
 
+const STORAGE_ACCESS = why(
+  'Only app <id> (and the owner), and only while the app declares storage.read / storage.write. The value is the caller\'s user\'s (D46), from the verified principal.');
+
 // ── group baselines ─────────────────────────────────────────────────────────
 
 const groups: RouteAccessManifest['groups'] = {
   activities:    rule(INSTANCE, 'activity'),
   admin:         rule(OWNER, 'system'),
   approvals:     rule(OWNER, 'session'),
+  credentials:   rule(INSTANCE, 'system'),
   apps:          rule(OWNER, 'app'),
   auth:          rule(OWNER, 'session'),
   data:          rule(['app-permission'], 'data-provider'),
@@ -99,6 +103,7 @@ const groups: RouteAccessManifest['groups'] = {
   scopes:        rule(OWNER, 'system'),
   // The owner's System Terminal, for apps the owner granted (D25, D29).
   terminal:      rule(APP_PERMISSION, 'app', { permissions: ['terminal.embed'] }),
+  user:          rule(OWNER, 'system'),
 };
 
 // ── reusable refinements ────────────────────────────────────────────────────
@@ -150,6 +155,7 @@ const routes: RouteAccessManifest['routes'] = {
     variants: [{ id: 'build-log', methods: ['GET'], match: { on: 'query', name: 'log' }, rule: rule(OWNER, 'system') }],
   },
   '/api/admin/access-report': { methods: { GET: ownerManages('The access report names apps and callers.') } },
+  '/api/admin/contract-report': { methods: { GET: ownerManages('The app contract report (D48) names apps, their declarations and where they write: an owner view.') } },
   '/api/admin/onboarding': {
     methods: {
       GET: rule(OWNER, 'system', decide(1, 'Reports setupDoneAt. Decide whether the setup page reads it before login or uses first-boot status instead.')),
@@ -260,6 +266,21 @@ const routes: RouteAccessManifest['routes'] = {
       'Reflects only the caller: any verified one, API keys too. An anonymous caller gets 401 in enforce, which `aura whoami` reports as rejected.')) },
   },
 
+  // D46: who the caller acts for. Reflects only the caller, like whoami, but
+  // on target `system` so the owner reads it through Settings too (D45).
+  '/api/user/me': {
+    methods: { GET: rule(['own-instance', 'app-permission', 'owner'], 'system', why(
+      'Any verified caller: its own user and the profile fields it may read (the registry filters per app). Anonymous callers get 401.')) },
+  },
+  '/api/user/me/permissions': {
+    methods: { GET: rule(['own-instance', 'app-permission', 'owner'], 'system', why(
+      'D48 `osClient.permissions`: any verified caller asks which permissions its own app holds; reflects only the caller.')) },
+  },
+  '/api/user/me/profile': {
+    methods: { PATCH: rule(OWNER, 'system', why(
+      'The user changes their own profile: the desktop login or Settings (D45). The handler refuses every app and agent.')) },
+  },
+
   // Static candidates for the login page; everything else in `os` stays owner.
   '/api/os/theme.css': staticAsset,
   '/api/os/icons.svg': staticAsset,
@@ -282,7 +303,13 @@ const routes: RouteAccessManifest['routes'] = {
     },
   },
   '/api/os/context/[key]': {
-    methods: { DELETE: rule(OWNER, 'system', { freshAuth: true, ...decide(5, 'Holds secrets and is never public. Settle with the Q31 migration of /api/os/context.') }) },
+    methods: {
+      // D48 `osClient.context.get`: the app's own server, by its instance
+      // token, and only the keys its manifest declares (the handler checks).
+      GET: rule(['own-instance'], 'system', { credentials: ['instance-token'], ...why(
+        'An app instance reads a Context key its manifest declares in context[], with its own instance token (lib/appContract.ts). Never a page, never the owner: the Context API discloses no secret otherwise. Phase 5 swaps the backend for per-app granted Context.') }),
+      DELETE: rule(OWNER, 'system', { freshAuth: true, ...decide(5, 'Holds secrets and is never public. Settle with the Q31 migration of /api/os/context.') }),
+    },
   },
   '/api/os/volumes': { methods: on(['GET', 'POST'], rule(OWNER, 'system', SYSTEM_APP_CALLER)) },
   '/api/os/volumes/[name]': { methods: { DELETE: rule(OWNER, 'system', SYSTEM_APP_CALLER) } },
@@ -316,6 +343,23 @@ const routes: RouteAccessManifest['routes'] = {
   '/api/approvals/[id]': { methods: { GET: rule(INSTANCE, 'system') } },
   '/api/approvals/[id]/[decision]': { methods: { POST: rule(INSTANCE, 'session') } },
   '/api/approvals/blocked/[appId]': { methods: { DELETE: rule(OWNER, 'session') } },
+
+  // Credentials (D56, lib/credentials.ts). Asking needs the declared
+  // permission; collecting is the requester's own approval; the value goes
+  // only to the consuming app's server by its token, and only with the
+  // owner's `credential.read:<NAME>` grant, which the handler checks.
+  '/api/credentials/requests': {
+    methods: { POST: rule(APP_PERMISSION, 'app', { permissions: ['credentials.request'] }) },
+  },
+  '/api/credentials/requests/[id]': { methods: { POST: rule(INSTANCE, 'system') } },
+  '/api/credentials/[handle]': {
+    methods: {
+      GET: rule(['own-instance'], 'system', { credentials: ['instance-token'], ...why(
+        'The consuming app\'s own server reads a credential it holds a handle to, with its instance token and the owner\'s credential.read:<NAME> grant for its user (lib/credentials.ts). Never a page, never another user\'s handle.') }),
+    },
+  },
+  '/api/admin/credentials': { methods: { GET: ownerManages('The owner\'s personal vault (D56): names, consumers, last use; never a value.') } },
+  '/api/admin/credentials/[name]': { methods: { DELETE: ownerManages('Revoking a secret or one app\'s access to it (D56), through the owner\'s approval.') } },
 
   // Instances: the URL names the target, so the check is on that instance.
   // `targetPermissions` here were the routes' own hasPermission checks: every mode.
@@ -367,6 +411,20 @@ const routes: RouteAccessManifest['routes'] = {
         ...why('D60 `aura mount workspace`: the System Terminal mounts the AuraOS checkout into itself, in Developer Mode only, with the owner\'s click. The route refuses every other caller and target.'),
       }),
     }],
+  },
+  // Track P: the source view and patch workspace land in the calling instance
+  // only (its own token, or the owner), like `aura mount`.
+  '/api/instances/[instanceId]/app-source': {
+    methods: on(['GET', 'POST'], rule(INSTANCE, 'instance', {
+      targetPermissions: ['apps.mount'], guard: 'target-permissions',
+      ...why('Track P: an agent finds an app\'s source. Read-only for a closed install; writable only for an open one and only in the owner\'s Terminal (the handler).'),
+    })),
+  },
+  '/api/instances/[instanceId]/app-workspace/clean': {
+    methods: { POST: rule(INSTANCE, 'instance', {
+      targetPermissions: ['apps.mount'], guard: 'target-permissions',
+      ...why('Track P: deletes the caller\'s own old patch workspaces of one app (never the one bound in the caller); the owner or the instance itself.'),
+    }) },
   },
   '/api/instances/[instanceId]/mounts/[mountId]': {
     methods: { DELETE: rule(INSTANCE, 'instance', { targetPermissions: ['apps.mount'], guard: 'target-permissions' }) },
@@ -490,6 +548,13 @@ const routes: RouteAccessManifest['routes'] = {
   // only with the owner's approval of the exact artifact, scope and
   // permissions, consumed once (lib/approvals/nexus.ts).
   '/api/nexus/install': { methods: { POST: TERMINAL_ASKS } },
+  // Track P: installing a patched tree and opening an app's source are the
+  // owner's decision (D9); the System Terminal asks for each.
+  '/api/apps/[id]/activate': { methods: { POST: TERMINAL_ASKS } },
+  // Track P: a preview runs the caller's own workspace as a separate instance
+  // (nothing installed, no approval); the owner or the System Terminal.
+  '/api/apps/[id]/preview': { methods: { POST: TERMINAL_ASKS, DELETE: TERMINAL_ASKS } },
+  '/api/apps/[id]/source-mode': { methods: { POST: TERMINAL_ASKS } },
   '/api/nexus/update/[id]': { methods: { POST: TERMINAL_ASKS } },
 
   '/api/nexus/assets/[source]/[appId]/[digest]': {
@@ -552,11 +617,19 @@ const routes: RouteAccessManifest['routes'] = {
           ...why('The owner (also through Settings, D45, and the trusted owner agents, D29), or an app holding system.kv.os.<topic>.write. A caller without a credential is no longer `system` in enforce.'),
         }),
       },
+      // D46: per-user app storage (and `?shared=1`), enforced by the app's own
+      // manifest declaration (Phase 3a's model: declared, not auto-granted, in enforce).
       {
-        id: 'app-entry',
-        methods: ['GET', 'HEAD', 'POST', 'PUT', 'DELETE'],
+        id: 'app-read',
+        methods: ['GET', 'HEAD'],
         match: { on: 'namespace', namespace: 'app' },
-        rule: rule(INSTANCE, 'app', { guard: 'app-callers' }),
+        rule: rule(INSTANCE, 'app', { guard: 'app-callers', targetPermissions: ['storage.read'], ...STORAGE_ACCESS }),
+      },
+      {
+        id: 'app-write',
+        methods: ['POST', 'PUT', 'DELETE'],
+        match: { on: 'namespace', namespace: 'app' },
+        rule: rule(INSTANCE, 'app', { guard: 'app-callers', targetPermissions: ['storage.write'], ...STORAGE_ACCESS }),
       },
     ],
   },

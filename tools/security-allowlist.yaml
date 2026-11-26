@@ -38,3 +38,8 @@
   file: packages/core/test/identity.test.mjs
   id: 6141dc0b88de
   reason: A made-up secret the audit test feeds in to prove the audit log never records it.
+
+- check: patterns/html-sink
+  file: apps/com.aura.settings/src/pages/users.astro
+  match: $('secrets-body').innerHTML = list.length ? list.map((c) =>
+  reason: The D56 Secrets table (3b). Every dynamic value goes through esc() (name, label, last use, consumer appId and name, data attributes); used(c) adds only constant markup around those escaped values.

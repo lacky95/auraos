@@ -4,14 +4,17 @@
   "name": "Terminal",
   "icon": "T",
   "version": "0.1.0",
+  "auraContract": 1,
   "description": "System terminal with AI toolchain access",
   "category": "system",
   "permissions": [
     "storage.read",
     "storage.write",
     "network.local",
+    "system.notifications",
     "apps.mount",
-    "system.overlay"
+    "system.overlay",
+    "credentials.request"
   ],
   "tools": [
     "*",

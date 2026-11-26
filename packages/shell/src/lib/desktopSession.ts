@@ -45,6 +45,7 @@ import { randomUUID } from 'node:crypto';
 import * as core from '@aura/core';
 import type { AppActivity, FlightState } from '@aura/core';
 import { defaultKv } from '@aura/kv-store';
+import { localOwnerId } from './userContext.js';
 import { allMembers, overdueDeadMembers, remapWorkspaceIds, type RemapState } from './workspaceRemap.js';
 
 export interface SessionActivity {
@@ -127,11 +128,12 @@ export async function buildSnapshot(reason: DesktopSnapshot['reason']): Promise<
   const mgr = core.getAppManager();
   const members = new Set<string>();
   try {
-    const ws = await withKv((kv) => kv.getValue<RemapState>('os', 'workspaces'));
+    const ws = await readWorkspaces();
     if (ws?.workspaces) for (const m of allMembers(ws)) members.add(m);
   } catch { /* no workspaces: instance views unknown */ }
 
   const activities: SessionActivity[] = mgr.getAllActivities()
+    .filter((a: AppActivity) => !mgr.getInstance(a.parentInstanceId)?.preview)
     .map((a: AppActivity) => ({
       activityId: a.activityId,
       parentInstanceId: a.parentInstanceId,
@@ -161,7 +163,8 @@ export function sessionInstances(
 ): SessionInstance[] {
   const instances: SessionInstance[] = [];
   for (const inst of mgr.getAllInstances()) {
-    if (inst.inPool) continue;
+    // A preview (Track P) is not restored after a restart: it is reaped.
+    if (inst.inPool || inst.preview) continue;
     if (inst.state === 'destroyed' || inst.state === 'error') continue;
     const m = mgr.getManifest(inst.appId);
     if (!m || m.componentType === 'service') continue;
@@ -175,7 +178,7 @@ export function sessionInstances(
 
 async function writeSnapshot(reason: DesktopSnapshot['reason']): Promise<void> {
   const snap = await buildSnapshot(reason);
-  await withKv((kv) => kv.set('os', SESSION_KEY, snap));
+  await withKv((kv) => core.writeUserPref(kv, localOwnerId(), SESSION_KEY, snap));
 }
 
 function scheduleSave(): void {
@@ -222,7 +225,7 @@ export async function flushAndFreeze(reason: DesktopSnapshot['reason'] = 'planne
   if (st.timer) { clearTimeout(st.timer); st.timer = null; }
   if (st.writing) await st.writing.catch(() => undefined);
   const snap = await buildSnapshot(reason);
-  await withKv((kv) => kv.set('os', SESSION_KEY, snap));
+  await withKv((kv) => core.writeUserPref(kv, localOwnerId(), SESSION_KEY, snap));
   return snap;
 }
 
@@ -298,7 +301,7 @@ async function doRestore(): Promise<RestoreReport> {
   const [enabled, skip, snap, restartDaemon] = await withKv(async (kv) => [
     await kv.getValue<boolean>('os', RESTORE_SETTING_KEY),
     await kv.getValue<boolean>('os', SKIP_KEY),
-    await kv.getValue<DesktopSnapshot>('os', SESSION_KEY),
+    await core.readUserPrefValue<DesktopSnapshot>(kv, localOwnerId(), SESSION_KEY),
     await kv.getValue<boolean>('os', RESTART_DAEMON_KEY),
   ] as const);
   if (skip) await withKv((kv) => kv.del('os', SKIP_KEY));
@@ -419,7 +422,7 @@ export async function reopenActivities(
 
 /** Rename restored ids in the workspaces; drop members that are not live. */
 async function remapWorkspaces(mgr: Mgr, idMap: Record<string, string>): Promise<number> {
-  const state = await withKv((kv) => kv.getValue<RemapState>('os', 'workspaces'));
+  const state = await readWorkspaces();
   if (!state?.workspaces) return 0;
   const live = liveViewIds(mgr);
   const renamed = remapWorkspaceIds(state, idMap).state;
@@ -442,10 +445,15 @@ function liveViewIds(mgr: Mgr): Set<string> {
   return live;
 }
 
-/** Store the workspace document and tell the browsers (same events as a KV PUT). */
+/** The owner's workspaces (D46): their own, else the shared ones from before the move. */
+function readWorkspaces(): Promise<RemapState | null> {
+  return withKv((kv) => core.readUserPrefValue<RemapState>(kv, localOwnerId(), 'workspaces'));
+}
+
+/** Store the owner's workspace document and tell the browsers (same events as a KV PUT). */
 async function writeWorkspaces(next: RemapState): Promise<void> {
-  const stored = await withKv((kv) => kv.set('os', 'workspaces', next));
-  core.OsEventBus.emit('kv:changed', { namespace: 'os', key: 'workspaces', value: stored.value });
+  const stored = await withKv((kv) => core.writeUserPref(kv, localOwnerId(), 'workspaces', next));
+  core.OsEventBus.emit('kv:changed', { namespace: 'os', key: 'workspaces', value: stored.value, userId: localOwnerId() });
   core.OsEventBus.emit('workspaces:changed', {
     workspaces: next.workspaces.map((w) => ({
       id: String(w.id ?? ''),
@@ -510,14 +518,14 @@ async function runSweep(sweep: MemberSweep): Promise<void> {
   sweep.running = true;
   try {
     const mgr = core.getAppManager();
-    const state = await withKv((kv) => kv.getValue<RemapState>('os', 'workspaces'));
+    const state = await readWorkspaces();
     if (!state?.workspaces) return;
     const overdue = overdueDeadMembers(allMembers(state), liveViewIds(mgr), sweep.deadSince, Date.now(), DEAD_GRACE_MS);
     // Dead but still in grace: look again right after it ends.
     if (sweep.deadSince.size > overdue.length) scheduleSweep(sweep, DEAD_GRACE_MS + 1_000);
     if (!overdue.length) return;
     // Re-read: a browser may have written meanwhile. Only ids still dead go.
-    const current = await withKv((kv) => kv.getValue<RemapState>('os', 'workspaces'));
+    const current = await readWorkspaces();
     if (!current?.workspaces) return;
     const live = liveViewIds(mgr);
     const gone = overdue.filter((id) => !live.has(id));

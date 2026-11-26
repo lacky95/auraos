@@ -11,6 +11,7 @@
  * snapshot adopts it instead of asking again.
  */
 import { createLogger } from '@aura/core/logger';
+import { leaveIfSignedOut } from './desktop/signedOut.ts';
 
 const log = createLogger('shell:fetch');
 
@@ -52,7 +53,8 @@ async function fetchNetwork(): Promise<AppsList> {
   counts.network++;
   log.debug('/api/apps: network', `#${counts.network}`);
   const res = await fetch('/api/apps');
-  if (!res.ok) throw new Error(`/api/apps → HTTP ${res.status}`);
+  // The login ended: the sign-in, once, instead of asking on every refresh.
+  if (!res.ok) { leaveIfSignedOut(res.status); throw new Error(`/api/apps → HTTP ${res.status}`); }
   return await res.json() as AppsList;
 }
 

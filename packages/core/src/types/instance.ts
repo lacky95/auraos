@@ -1,4 +1,5 @@
 import type { AppLifecycleState } from './lifecycle.js';
+import type { LifecycleStatus } from '../app-manager/lifecycleGate.js';
 
 /**
  * A running (or transitioning) instance of an app.
@@ -35,6 +36,20 @@ export interface AppInstance {
    * undefined only while the instance is an unclaimed pool member.
    */
   owner?: string;
+  /**
+   * How this start passed the lifecycle checks (`AURA_LIFECYCLE_STRICT`): the
+   * health identity class and the runtime check of the health guard. Absent
+   * when not measured (an instance adopted from a previous shell).
+   */
+  lifecycle?: LifecycleStatus;
+  /**
+   * A preview (Track P, `aura dev patch preview`): this instance runs a patch
+   * workspace (`workspace`, relative to the root dataDir) instead of the
+   * installed tree, on a copy of the app's data, with its own App Host slot.
+   * It is never reused for launches, intents, content providers or
+   * interfaces, never restored after a restart, and reaped when idle.
+   */
+  preview?: { workspace: string; startedAt: string };
 }
 
 export type SidecarState = 'running' | 'starting' | 'stopped' | 'error' | 'unknown';

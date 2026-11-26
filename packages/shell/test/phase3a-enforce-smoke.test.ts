@@ -15,9 +15,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Authorizer } from '@aura/core';
 import type { AccessPrincipal, GatewayIdentityClaim, InstallBinding } from '@aura/core';
+import * as setupTickets from '@aura/core/setup-tickets';
 import { createSetupTicket, defaultSetupTicketDir, FileSetupTickets, operatorRequestSubject } from '@aura/core/setup-tickets';
 import { GATEWAY_IDENTITY_HEADER, OWNER_SSR_HEADER } from '@aura/core/host-rules';
 import { signGatewayClaim, signOwnerSsrClaim } from '../server/gateway-identity.mjs';
+import { stripShellCredentials } from '../server/shell-credentials.mjs';
 import { ACCESS_MODE_ENV } from '../server/access-mode.mjs';
 import { createDecide } from '../src/lib/access/decide.ts';
 import { accessGate, type GateDeps } from '../src/lib/access/enforce.ts';
@@ -26,6 +28,9 @@ import { isTrustedOwnerAgent, type GatewayOwnerDeps } from '../src/lib/access/id
 import type { ObserverManager } from '../src/lib/access/observer.ts';
 import { installGate } from '../src/lib/approvals/nexus.ts';
 import { resolveCaller, type AuthDeps } from '../src/lib/auth.ts';
+import { localSystemId } from '@aura/core/system-identity';
+/** The test data dir's own system id (D47): every resolved principal carries it. */
+const SYS = localSystemId();
 
 // ── the system ──────────────────────────────────────────────────────────────
 
@@ -43,7 +48,7 @@ const scopes: Record<string, string> = { [TERMINAL]: 'system', [AURASHELLD]: 'sy
 const declared: Record<string, string[]> = {
   [TERMINAL]: [], [AURASHELLD]: [], [SETTINGS]: ['system.kv.os.theme.write'],
   // Declared, never granted: a privileged permission (stream C) does nothing on its own.
-  [COUNTER]: ['system.kv.os.theme.write'],
+  [COUNTER]: ['system.kv.os.theme.write', 'storage.read'],
   // Declared and granted by the owner (D29): TerminalX's watcher.
   [TERMINALX]: ['terminal.embed', 'terminal.sessions.list'],
 };
@@ -59,6 +64,7 @@ const mgr = {
   getInstancesByApp: (appId: string) => Object.values(instances).filter((i) => i.appId === appId),
   getAllInstances: () => Object.values(instances),
   getManifest: (id: string) => (scopes[id] ? { scopeId: scopes[id] } : undefined),
+  isTrustedSystemCopy: (id: string) => scopes[id] === 'system',
   getActivity: () => undefined,
   registry: { getById: (id: string) => (scopes[id] ? { id } : undefined) },
 } as unknown as ObserverManager;
@@ -189,6 +195,8 @@ test('enforce: App Host gateway calls: an app on its own rules, Settings as the 
   assert.equal(await middleware({ ...themes, headers: gatewayClaim(COUNTER, 'GET', themes.path) }), 'pass');
   const own = { path: `/api/kv/app/${COUNTER}/k`, route: '/api/kv/[...path]', params: { path: `app/${COUNTER}/k` } };
   assert.equal(await middleware({ ...own, headers: gatewayClaim(COUNTER, 'GET', own.path) }), 'pass');
+  // D46: its own storage only with the declaration: Counter declares storage.read, not storage.write.
+  assert.equal(await middleware({ ...own, method: 'PUT', headers: gatewayClaim(COUNTER, 'PUT', own.path) }), '403 gateway-denied');
   const asOwner = gatewayClaim(SETTINGS, 'PUT', THEME_PUT.path, { installationId: 'inst-settings', owner: { userId: 'default', sid: OWNER_SID } } as Partial<GatewayIdentityClaim>);
   assert.equal(await middleware({ ...THEME_PUT, headers: asOwner }), 'pass');
 });
@@ -253,6 +261,45 @@ test('enforce: an operator ticket is good once, for its own request only', async
   assert.equal(await middleware({ ...APPS, headers: h }), '401 unauthenticated', 'used up');
   assert.equal(await middleware({ ...INSTALL, headers: operator('GET', '/api/apps') }), '401 unauthenticated', 'another request');
   assert.equal(await middleware({ ...APPS, headers: { 'x-aura-operator': 'AAAAA-AAAAA-AAAAA-AAAAA' } }), '401 unauthenticated');
+});
+
+// The live smoke tool (tools/smoke), run in the master as the deploy does.
+const smokeLib = (file: string) => import(String(new URL(`../../../tools/smoke/lib/${file}`, import.meta.url)));
+const SMOKE_ROUTES: Array<[RegExp, string, (m: RegExpExecArray) => Record<string, string>]> = [
+  [/^\/api\/apps\/([^/]+)\/instances$/, '/api/apps/[id]/instances', (m) => ({ id: m[1]! })],
+  [/^\/api\/instances\/([^/]+)\/(status|sidecars|mounts|ports)$/, '/api/instances/[instanceId]/$2', (m) => ({ instanceId: m[1]! })],
+  [/^\/api\/proxy\/([^/]+)\/(.+)$/, '/api/proxy/[id]/[...path]', (m) => ({ id: m[1]!, path: m[2]! })],
+];
+function smokeCall(path: string): Call {
+  const pathname = path.split('?')[0]!;
+  for (const [re, route, params] of SMOKE_ROUTES) {
+    const m = re.exec(pathname);
+    if (m) return { path, route: route.replace('$2', m[2] ?? ''), params: params(m) };
+  }
+  return { path, route: pathname };
+}
+
+test('enforce: the smoke tool in the master is the host operator on every request it may send, the Terminal proxy included', async () => {
+  const { ALLOWED_LIVE_REQUESTS } = await smokeLib('guard.mjs');
+  const { loadOperatorIdentity } = await smokeLib('operator.mjs');
+  const target = 'http://127.0.0.1:3000';
+  const { identity } = await loadOperatorIdentity(target, { env: { AURA_DATA_DIR: dataDir }, tickets: setupTickets });
+  assert.ok(identity);
+  for (const r of ALLOWED_LIVE_REQUESTS as Array<{ method: string; path?: string; template?: string }>) {
+    const path = r.path ?? r.template!.replace(/\{\w+\}/, `${TERMINAL}-1`);
+    const call = smokeCall(path);
+    assert.equal(await middleware(call), '401 unauthenticated', `anonymous ${path}`);
+    assert.equal(await middleware({ ...call, headers: identity(r.method, path) }), 'pass', `operator ${path}`);
+  }
+  // Never from a sandbox, never to another origin: then it stays anonymous, as before.
+  for (const [t, env] of [[target, { AURA_INSTANCE_TOKEN: 'x' }], ['http://10.0.0.9:3000', {}], [target, { OS_API_BASE: 'http://aura-shell:3000' }]] as const) {
+    assert.equal((await loadOperatorIdentity(t, { env: { ...env, AURA_DATA_DIR: dataDir }, tickets: setupTickets })).identity, null, `${t} ${JSON.stringify(env)}`);
+  }
+  // The proxy never hands the (used) ticket on to the app.
+  const headers = new Headers({ ...identity('GET', '/api/proxy/x/y'), accept: 'x' });
+  stripShellCredentials(headers, 'test');
+  assert.equal(headers.get('x-aura-operator'), null);
+  assert.equal(headers.get('accept'), 'x');
 });
 
 test('enforce: an install without the owner\'s approval is not approved', async () => {
@@ -350,6 +397,7 @@ test('enforce: apps send intents; only the System Terminal and the owner carry a
   const view = intent({ action: 'aura.intent.action.VIEW', uri: 'http://com.example.counter.apps.test/' });
   const embed = intent({ action: 'aura.intent.action.OPEN_TERMINAL', appId: TERMINAL, extras: { background: true } });
   const command = intent({ action: 'aura.intent.action.OPEN_TERMINAL', extras: { command: 'ls' } });
+  const selfIntent = intent({ action: 'com.example.counter.action.OPEN_LIVE', appId: COUNTER, instanceId: `${COUNTER}-1` });
   for (const [c, h] of [
     [view, bearer('aura1.counter')], [embed, bearer('aura1.terminalx')], [command, bearer('aura1.terminal')],
     [view, gatewayClaim(COUNTER, 'POST', '/api/intents/start')], [command, desktop],
@@ -370,9 +418,15 @@ test('enforce: apps send intents; only the System Terminal and the owner carry a
     assert.deepEqual(await settled(embed, bearer('aura1.terminalx')), ['pass', null]);
     assert.deepEqual(await settled(command, bearer('aura1.counter')), [403, 'terminal-command']);
     assert.deepEqual(await settled(command, bearer('aura1.terminal')), ['pass', 'terminal-command']);
+    // Steel's live view: an explicit intent to itself, no extras (io.lakner.steelaibrowser src/lib/live-view.ts).
+    assert.deepEqual(await settled(selfIntent, bearer('aura1.counter')), ['pass', null]);
   } finally {
     process.env[ACCESS_MODE_ENV] = 'enforce';
   }
+  assert.equal(await middleware({ ...selfIntent, headers: bearer('aura1.counter') }), 'pass');
+  // A gateway call is decided at the gateway; the report still gets the settled variant (else: ambiguous-rule).
+  const viaGateway = await accessGate(ctx({ ...view, headers: gatewayClaim(COUNTER, 'POST', '/api/intents/start') }), gateDeps());
+  assert.deepEqual([viaGateway.refused, viaGateway.bodyVariant], [null, null]);
 });
 
 test('enforce: TerminalX\'s agent watch by its list grant; another app none, in report mode too', async () => {
@@ -419,7 +473,7 @@ test('enforce: Settings\' page render reads as the owner with its token and the 
   }
   const resolved = await resolveCaller(ctx({ ...APPS, headers: { ...bearer('aura1.settings'), ...ownerSsr() } }).request, authDeps());
   assert.deepEqual(resolved.principal, {
-    kind: 'user', userId: 'default', role: 'owner', sessionId: OWNER_SID, verification: 'verified',
+    kind: 'user', userId: 'default', role: 'owner', sessionId: OWNER_SID, verification: 'verified', systemId: SYS,
     through: { appId: SETTINGS, instanceId: `${SETTINGS}-1` },
   });
 });
@@ -434,9 +488,13 @@ test('enforce: the owner SSR claim grants nothing on its own, replayed, stale, f
       } as unknown as GatewayIdentityClaim),
     };
   })();
-  // Not the last character: in a 43-character base64url HMAC its two low bits are padding, so A↔B there
-  // decodes to the same signature (the test then failed now and then).
-  const forged = { [OWNER_SSR_HEADER]: ownerSsr()[OWNER_SSR_HEADER].replace(/.(?=.{4}$)/, (ch) => (ch === 'A' ? 'B' : 'A')) };
+  // Flip the signature's first character: it carries 6 full bits of the MAC's first byte. (The last
+  // base64url character of a 32-byte MAC is mostly padding bits, so flipping it could still verify.)
+  const forged = (() => {
+    const [prefix, payload, sig = ''] = ownerSsr()[OWNER_SSR_HEADER].split('.');
+    assert.ok(sig.length > 1);
+    return { [OWNER_SSR_HEADER]: `${prefix}.${payload}.${sig[0] === 'A' ? 'B' : 'A'}${sig.slice(1)}` };
+  })();
   for (const c of SSR_READS) {
     const cases: Array<[string, Record<string, string>, string]> = [
       ['no instance token', ownerSsr(), '401 unauthenticated'],

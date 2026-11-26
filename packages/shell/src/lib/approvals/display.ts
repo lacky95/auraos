@@ -8,7 +8,7 @@
  * approval is created and where it is consumed, so the hashes can only match
  * for the same request.
  */
-import { normaliseInject } from '@aura/core';
+import { isCredentialName, normaliseInject, SENSITIVE_APPS } from '@aura/core';
 import type { ApprovalDisplay, ApprovalLevel, ApprovalRequester, InstallBinding, PermissionDiff } from '@aura/core';
 
 /** Tools and permissions that hand over the host or its container runtime: `fresh` (5.10). */
@@ -53,7 +53,9 @@ export function installLevel(binding: InstallBinding): ApprovalLevel {
 
 export function installDisplay(binding: InstallBinding, diff: PermissionDiff, requestedBy: string): ApprovalDisplay {
   const update = binding.action === 'nexus.update' || diff.versionFrom !== null;
-  const title = `${update ? 'Update' : 'Install'} ${binding.name} ${diff.versionFrom ? `${diff.versionFrom} → ` : ''}${binding.version}`;
+  const title = binding.action === 'app.patch.activate'
+    ? `Activate patched ${binding.name} ${binding.version}${binding.scope === 'user' && diff.versionFrom === null ? ' (as your own copy)' : ''}`
+    : `${update ? 'Update' : 'Install'} ${binding.name} ${diff.versionFrom ? `${diff.versionFrom} → ` : ''}${binding.version}`;
   const details = [
     `App: ${binding.appId}`,
     `Scope: ${binding.scope}`,
@@ -61,6 +63,9 @@ export function installDisplay(binding: InstallBinding, diff: PermissionDiff, re
     `Artifact: ${binding.digest}`,
   ];
   if (binding.replaceCheckout) details.push(`Replaces your dev checkout of ${binding.appId} (uncommitted work is lost)`);
+  if (binding.action === 'app.patch.activate') {
+    details.push('Replaces the installed source with this prepared tree; the previous tree is kept for rollback.');
+  }
   if (binding.identity) details.push(`Identity: ${binding.identity.action}${binding.identity.appId ? ` as ${binding.identity.appId}` : ''}`);
   if (diff.toolsAdded.length) details.push(`Tools it gains: ${list(diff.toolsAdded)}`);
   if (diff.permissionsAdded.length) details.push(`Permissions it gains: ${list(diff.permissionsAdded)}`);
@@ -74,6 +79,29 @@ export function installDisplay(binding: InstallBinding, diff: PermissionDiff, re
   else if (binding.tools.includes('*')) details.push('Warning: * grants every tool AuraOS can provide.');
   if (binding.permissions.some(isRiskyPermission)) details.push('Warning: it may start privileged or arbitrary sidecar images.');
   return { title: clip(title), details: details.map((d) => clip(d)), requestedBy };
+}
+
+// ── app.patch.activate / app.source.open (Track P, D9) ──────────────────────
+
+/**
+ * An app patch: one click, but the password for a sensitive app (Settings,
+ * Terminal, Nexus), for a patch that changes the app's tools or permissions,
+ * and for Docker or every tool.
+ */
+export function patchLevel(appId: string, binding: InstallBinding, diff: PermissionDiff): ApprovalLevel {
+  const changes = diff.toolsAdded.length + diff.toolsRemoved.length + diff.permissionsAdded.length + diff.permissionsRemoved.length > 0;
+  return SENSITIVE_APPS.has(appId) || changes ? 'fresh' : installLevel(binding);
+}
+
+/** Opening an app's source: one click, the password for a sensitive app. */
+export const sourceOpenLevel = (appId: string): ApprovalLevel => (SENSITIVE_APPS.has(appId) ? 'fresh' : 'session');
+
+export function sourceOpenDetails(appId: string, scope: string): string[] {
+  return [
+    `App: ${appId} (${scope} scope)`,
+    'Its installed source becomes writable to agents and the Terminal (`aura mount --wr`, `aura dev checkout`).',
+    'Updates no longer go through patches you can review; close it again with `aura dev close`.',
+  ];
 }
 
 // ── os.context.write ────────────────────────────────────────────────────────
@@ -159,4 +187,51 @@ export function agentHooksDisplay(change: AgentHooksChange, requestedBy: string)
 /** What an owner-management request shows: its own title and facts, built by the route from what it validated. */
 export function adminDisplay(title: string, details: readonly string[], requestedBy: string): ApprovalDisplay {
   return { title: clip(title), details: details.map((d) => clip(d)), requestedBy };
+}
+
+// ── credential.store / credential.read (D56) ────────────────────────────────
+
+/**
+ * The exact credential request an approval allows: which name, for which
+ * consuming app. The value is not part of it; the owner types it into the
+ * shell's dialog, and the approve request carries it straight to the vault.
+ */
+export interface CredentialAsk { name: string; for: string }
+
+const APP_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
+
+export function credentialAsk(input: unknown): CredentialAsk | null {
+  if (!input || typeof input !== 'object') return null;
+  const { name, for: consumer } = input as Record<string, unknown>;
+  if (!isCredentialName(name) || typeof consumer !== 'string' || !APP_ID_RE.test(consumer)) return null;
+  return { name, for: consumer };
+}
+
+/** What the dialog says: the verified requester and consuming app; label and purpose only as the labelled reason. */
+export function credentialDisplay(ask: CredentialAsk, consumerName: string, requestedBy: string, reason?: string): ApprovalDisplay {
+  return {
+    title: `Enter the secret ${ask.name}`,
+    details: [
+      `Used by: ${consumerName === ask.for ? ask.for : `${consumerName} (${ask.for})`}`,
+      `Kept in your personal vault as ${ask.name}; an earlier value of ${ask.name} is replaced.`,
+      'The app gets a handle, not the value. Reading the value needs your separate approval with your password.',
+    ],
+    requestedBy,
+    ...(reason ? { reason } : {}),
+  };
+}
+
+/** The exact raw read an approval allows: one app, one credential. */
+export interface CredentialRead { name: string; app: string }
+
+export function credentialReadDisplay(read: CredentialRead, appName: string, requestedBy: string): ApprovalDisplay {
+  return {
+    title: `Let ${appName} read the secret ${read.name}`,
+    details: [
+      `App: ${read.app}`,
+      'It gets the value itself, on its server, until you revoke it in Settings → Users & Identities → Secrets.',
+      'An app that holds a value can leak it.',
+    ],
+    requestedBy,
+  };
 }

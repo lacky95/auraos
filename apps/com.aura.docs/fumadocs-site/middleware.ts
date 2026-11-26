@@ -18,4 +18,6 @@ export function middleware(_req: NextRequest) {
   return res;
 }
 
-export const config = { matcher: '/(.*)' };
+// Node.js runtime, not Edge: `@aura/app-sdk/runtime/next` also carries the
+// lifecycle guard, which uses node:crypto (the Edge bundle cannot load it).
+export const config = { matcher: '/(.*)', runtime: 'nodejs' };

@@ -43,17 +43,22 @@ export function terminalSessionInstance(sessionId) {
 
 /**
  * The decisions over a grant store. `deps` (tests pass fakes):
- *   scopeOf(appId)                 the install scope the app id resolves to
+ *   systemCopy(appId)              whether the copy the app id resolves to is the trusted
+ *                                  system app: its `system` copy or an approved overlay of
+ *                                  it (core AppManager `isTrustedSystemCopy`, Track P)
  *   authorize(appId, permission)   core's Authorizer for an instance of the app
  *   sessionGrant(appId, sessionId) the session's own `terminal.embed` record, or null
  *   sessionLife(sessionId)         the current life of the session's Terminal
  *                                  instance (`InstanceTokens.lifetimeId`), or null
  */
 export function createTerminalAccess(deps) {
-  /** The System Terminal: its own id in the `system` scope. A same-id copy elsewhere is an ordinary app. */
+  /**
+   * The System Terminal: its own id, in the `system` scope or as the owner's
+   * approved overlay of it. A same-id copy from anywhere else is an ordinary app.
+   */
   async function isSystemTerminal(appId) {
     if (appId !== TERMINAL_APP_ID) return false;
-    try { return (await deps.scopeOf(appId)) === 'system'; } catch { return false; }
+    try { return (await deps.systemCopy(appId)) === true; } catch { return false; }
   }
 
   /** Whether the owner granted `appId` Terminal embedding at all (requested in its manifest and granted). */
@@ -135,7 +140,7 @@ export async function fetchTerminal(mgr, instanceId, path, init = {}, timeoutMs 
 }
 
 const live = createTerminalAccess({
-  scopeOf: async (appId) => (await core()).getAppManager().registry.getScopeId(appId),
+  systemCopy: async (appId) => (await core()).getAppManager().isTrustedSystemCopy(appId),
   authorize: async (appId, permission) => {
     const principal = { kind: 'instance', appId, instanceId: `${appId}-grant-check`, verification: 'verified' };
     return (await (await core()).getAuthServices().authorizer.authorize(principal, permission)).allow;

@@ -18,6 +18,19 @@ import Icon from '../components/Icon.astro';
  *
  * Reads go through the gateway as the owner acting through Settings (D45):
  * `/api/auth/account` and the public `/api/auth/password-policy`.
+ *
+ * Profile (D46): `GET /api/user/me` (with `ref`, `userId@systemId`, D47)
+ * and `PATCH /api/user/me/profile`, which validates each field by the
+ * shell's profile field registry; an empty input clears the field.
+ *
+ * Secrets (D56): `GET /api/admin/credentials` lists the owner's personal
+ * vault (names, the apps holding a handle, whether each may read the value,
+ * last use; never a value) as the owner through Settings (D45). Revoke
+ * (`DELETE /api/admin/credentials/<NAME>[?app=]`) answers 202 and goes
+ * through AuraOS's approval dialog, then the same call again with the
+ * approval. Secrets are added only by an app or the CLI asking
+ * (`osClient.credentials.request`, `aura secret ask`): the value is typed
+ * into the shell's dialog, never into this page.
  */
 const MIN = 4;
 const MAX = 128;
@@ -58,6 +71,7 @@ const MAX = 128;
     .row-inline label { font-size: 0.68rem; letter-spacing: 0.06em; display: inline-flex; align-items: center; gap: 8px; }
     .row-inline input[type="number"], .row-inline select { font: inherit; font-size: 0.7rem; padding: 3px 6px; background: var(--aura-color-bg); color: var(--aura-color-text); border: var(--aura-border); }
     .row-inline input[type="number"] { width: 7ch; }
+    .row-inline input.prof-input { font: inherit; font-size: 0.7rem; padding: 3px 6px; background: var(--aura-color-bg); color: var(--aura-color-text); border: var(--aura-border); width: 32ch; }
     #status { font-size: 0.65rem; letter-spacing: 0.06em; color: var(--aura-color-text-dim); }
     #status[data-tone="error"] { color: var(--aura-color-danger, #ff4a4a); }
   </style>
@@ -84,7 +98,39 @@ const MAX = 128;
         </dl>
         <p class="acc-note">
           The password is typed only into AuraOS's own dialog, never into this page. Changing it signs out
-          your other sessions; this one stays. Display name, language and avatar come with the profile in Phase 3.
+          your other sessions; this one stays.
+        </p>
+      </section>
+
+      <section class="acc-section">
+        <div class="acc-head">
+          <span class="acc-title"><Icon name="user" /> Profile</span>
+          <button class="btn" id="btn-profile" type="button" disabled>SAVE</button>
+        </div>
+        <div class="row-inline"><label>Display name <input class="prof-input" data-field="displayName" type="text" maxlength="64" /></label></div>
+        <div class="row-inline"><label>Language <input class="prof-input" data-field="locale" type="text" maxlength="35" placeholder="en, de-AT" /></label></div>
+        <div class="row-inline"><label>Avatar URL <input class="prof-input" data-field="avatar" type="text" placeholder="https://…" /></label></div>
+        <dl class="usr-facts">
+          <dt>Reference</dt><dd><code id="acc-ref">—</code></dd>
+        </dl>
+        <p class="acc-note">
+          Apps can read these three fields without asking. Leave a field empty to clear it. The reference
+          (<code>user@system</code>) is how apps and other Auras name you; copy it from here.
+        </p>
+      </section>
+
+      <section class="acc-section">
+        <div class="acc-head">
+          <span class="acc-title"><Icon name="key" /> Secrets</span>
+        </div>
+        <table class="acc-table">
+          <thead><tr><th>NAME</th><th>USED BY</th><th>LAST USE</th><th></th></tr></thead>
+          <tbody id="secrets-body"><tr><td colspan="4" class="acc-note">Loading…</td></tr></tbody>
+        </table>
+        <p class="acc-note">
+          Your personal vault. Apps and the CLI (<code>aura secret ask</code>) ask for a secret; you type it into
+          AuraOS's own dialog, and the app gets a handle, not the value. <span class="pill on">READS</span> marks an app
+          you allowed to read the value. Revoking asks for your approval.
         </p>
       </section>
 
@@ -137,7 +183,7 @@ const MAX = 128;
     </div>
   </main>
 
-  <footer class="settings-foot">PROVIDER · /api/auth/account · /api/auth/password-policy · /api/auth/sessions/revoke-others</footer>
+  <footer class="settings-foot">PROVIDER · /api/auth/account · /api/admin/credentials · /api/user/me · /api/user/me/profile · /api/auth/password-policy · /api/auth/sessions/revoke-others</footer>
 
   <script is:inline define:vars={{ MIN, MAX }}>
     (() => {
@@ -185,6 +231,51 @@ const MAX = 128;
         }
       }
 
+      // ── profile (D46) ────────────────────────────────────────────────
+      let savedProfile = {};
+      const profileInputs = () => [...document.querySelectorAll('.prof-input[data-field]')];
+      const profileChanges = () => {
+        const out = {};
+        for (const el of profileInputs()) {
+          const v = el.value.trim();
+          const was = savedProfile[el.dataset.field] ?? '';
+          if (v !== was) out[el.dataset.field] = v === '' ? null : v;
+        }
+        return out;
+      };
+      const updateProfileSave = () => { $('btn-profile').disabled = Object.keys(profileChanges()).length === 0; };
+      function showProfile(me) {
+        savedProfile = me.profile || {};
+        for (const el of profileInputs()) el.value = savedProfile[el.dataset.field] ?? '';
+        $('acc-ref').textContent = me.ref || '—';
+        updateProfileSave();
+      }
+      async function loadProfile() {
+        try { showProfile(await getJson('/api/user/me')); }
+        catch (err) { setStatus(`ERROR — profile: ${err.message}`, 'error'); }
+      }
+      document.getElementById('panel-account').addEventListener('input', (e) => {
+        if (e.target.closest('.prof-input[data-field]')) updateProfileSave();
+      });
+      $('btn-profile').addEventListener('click', async () => {
+        const btn = $('btn-profile');
+        btn.disabled = true;
+        try {
+          const r = await fetch(window.auraOs.url('/api/user/me/profile'), {
+            method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(profileChanges()),
+          });
+          const data = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(data.field ? `${data.field}: ${data.message || data.error}` : (data.error || `HTTP ${r.status}`));
+          savedProfile = data.profile || {};
+          for (const el of profileInputs()) el.value = savedProfile[el.dataset.field] ?? '';
+          setStatus('Profile saved.');
+        } catch (err) {
+          setStatus(`ERROR — ${err.message}`, 'error');
+        }
+        updateProfileSave();
+        void loadProfile();
+      });
+
       $('btn-revoke-others').addEventListener('click', async () => {
         const btn = $('btn-revoke-others');
         btn.disabled = true;
@@ -199,6 +290,46 @@ const MAX = 128;
           setStatus(`ERROR — ${err.message}`, 'error');
         }
         await loadAccount();
+      });
+
+      // ── secrets (D56) ────────────────────────────────────────────────
+      /* An owner call through the gateway, approval included (scripts/os.ts). */
+      const owner = (method, path) => window.auraOs.owner(method, path);
+      function renderSecrets(list) {
+        const used = (c) => c.consumers.length ? c.consumers.map((a) => `
+          <div class="row-inline">
+            <span title="${esc(a.appId)}">${esc(a.name)}</span>
+            ${a.canRead ? '<span class="pill on">READS</span>' : ''}
+            <button class="btn" type="button" data-secret="${esc(c.name)}" data-app="${esc(a.appId)}">REVOKE</button>
+          </div>`).join('') : '<span class="acc-note">no app</span>';
+        $('secrets-body').innerHTML = list.length ? list.map((c) => `
+          <tr>
+            <td><code>${esc(c.name)}</code>${c.label ? `<div class="acc-note">${esc(c.label)}</div>` : ''}</td>
+            <td>${used(c)}</td>
+            <td class="acc-note">${esc(fmt(c.lastUsedAt))}${c.lastUsedBy ? ` · ${esc(c.lastUsedBy)}` : ''}</td>
+            <td><button class="btn" type="button" data-secret="${esc(c.name)}">REVOKE</button></td>
+          </tr>`).join('') : '<tr><td colspan="4" class="acc-note">No secrets yet.</td></tr>';
+      }
+      async function loadSecrets() {
+        try { renderSecrets((await owner('GET', '/api/admin/credentials')).credentials || []); }
+        catch (err) {
+          $('secrets-body').innerHTML = '<tr><td colspan="4" class="acc-note">Unavailable.</td></tr>';
+          setStatus(`ERROR — secrets: ${err.message}`, 'error');
+        }
+      }
+      $('secrets-body').addEventListener('click', async (e) => {
+        const btn = e.target.closest('button[data-secret]');
+        if (!btn) return;
+        const name = btn.dataset.secret;
+        const app = btn.dataset.app;
+        btn.disabled = true;
+        try {
+          await owner('DELETE', `/api/admin/credentials/${encodeURIComponent(name)}${app ? `?app=${encodeURIComponent(app)}` : ''}`);
+          setStatus(app ? `${app} no longer has ${name}.` : `${name} revoked.`);
+        } catch (err) {
+          if (err.message !== 'cancelled') setStatus(`ERROR — ${err.message}`, 'error');
+        }
+        await loadSecrets();
       });
 
       // ── asking the shell ─────────────────────────────────────────────
@@ -289,7 +420,7 @@ const MAX = 128;
         if (window.auraOs) return fn();
         setTimeout(() => whenReady(fn), 10);
       }
-      whenReady(() => { void loadAccount(); void loadPolicy(); });
+      whenReady(() => { void loadAccount(); void loadProfile(); void loadSecrets(); void loadPolicy(); });
     })();
   </script>
   <script>

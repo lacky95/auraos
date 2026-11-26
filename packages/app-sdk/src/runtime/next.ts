@@ -7,6 +7,16 @@
  *   • POST /api/lifecycle/onActivityCreate (activity-mode apps only)
  *   • POST /api/lifecycle/onActivityDestroy/[activityId]
  *   • POST /api/lifecycle/onIntent         (non-multi-activity apps + services)
+ *   • POST /api/lifecycle/onSaveState      (optional, before a planned restart)
+ *   • POST /api/lifecycle/onAssign         (optional, a warm-pool instance handed to a user)
+ *
+ * Every hook runs through the same functions as the Astro factories
+ * (`run*` in ../lifecycle.ts), so the bodies, the user, the stop reason and
+ * `IntentRejectedError` work the same in both runtimes.
+ *
+ * Both factories refuse a call without the kernel's lifecycle token with 401
+ * before any hook runs (see ./lifecycle-guard); health still answers a probe
+ * that sends no token.
  *
  * Astro apps get this for free via `auraAppIntegration()` + the `createLifecycleHandler`
  * factories in `../lifecycle.ts`. Next.js apps don't have an integration, so this
@@ -31,7 +41,8 @@
  *     for (const [k, v] of Object.entries(auraIdentityHeaders())) res.headers.set(k, v);
  *     return res;
  *   }
- *   export const config = { matcher: '/(.*)' };
+ *   // Node.js runtime (Next 15.5+): this module's lifecycle guard uses node:crypto, which Edge can't load.
+ *   export const config = { matcher: '/(.*)', runtime: 'nodejs' };
  *
  * Implementation note: we deliberately do NOT take a runtime dependency on `next`.
  * The Route Handler signature `(req: Request, ctx: { params: ... }) => Response` is
@@ -39,11 +50,27 @@
  * onto whichever NextResponse they construct.
  */
 
-import { parseIntentPayload, type IntentPayload } from '../intent.js';
+import {
+  healthResponse, lifecycleContextOf, runActivityCreate, runActivityDestroy, runAssign, runIntent, runPlainHook, runSaveState,
+  type ActivityCreateRequest, type ActivityCreateResult, type AssignRequest, type IntentHandlerResult, type IntentRequest,
+  type LifecycleContext, type LifecycleHookName, type SaveStateRequest, type SaveStateResult,
+} from '../lifecycle.js';
+import { identityResponseHeaders } from '../context.js';
+import { LIFECYCLE_TOKEN_HEADER, lifecycleRefusalResponse, lifecycleRequestRefused } from './lifecycle-guard.js';
 export type { IntentPayload } from '../intent.js';
+// One set of hook types for both runtimes (they used to be copied here).
+export type {
+  ActivityCreateRequest, ActivityCreateResult, AssignRequest, IntentRequest, LifecycleContext, LifecycleHookName,
+  SaveStateRequest, SaveStateResult,
+} from '../lifecycle.js';
+export { lifecycleContextOf };
 
-const APP_ID = () => process.env['APP_ID'] ?? 'unknown';
-const INSTANCE_ID = () => process.env['APP_INSTANCE_ID'] ?? null;
+/** The shared pre-handler check: a 401 response, or null to go on. */
+function refused(request: Request): Response | null {
+  return lifecycleRequestRefused(new URL(request.url).pathname, request.headers.get(LIFECYCLE_TOKEN_HEADER))
+    ? lifecycleRefusalResponse()
+    : null;
+}
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -63,59 +90,40 @@ function json(body: unknown, status = 200): Response {
  * the headers the gate is silently bypassed, which works at first but breaks
  * the moment a port gets reused after a crash.
  *
- * `process.env.APP_ID` + `APP_INSTANCE_ID` are set by the runner at spawn
- * (see `ProotRunner.ts:132–149`). If they're unset (e.g. running the app
- * standalone outside Aura) the headers fall back to placeholders that won't
- * match anything — the gate is permissive in that case.
+ * `process.env.APP_ID` + `APP_INSTANCE_ID` are set by the runner at spawn.
+ * Unset (the app started by hand outside Aura): no headers.
  */
 export function auraIdentityHeaders(): Record<string, string> {
-  const out: Record<string, string> = {};
-  const appId = APP_ID();
-  const instanceId = INSTANCE_ID();
-  if (appId && appId !== 'unknown') out['X-Aura-App-Id'] = appId;
-  if (instanceId) out['X-Aura-Instance-Id'] = instanceId;
-  return out;
+  return identityResponseHeaders();
 }
 
 // =========================================================================
 //  Lifecycle catch-all (POST /api/lifecycle/[...hook])
 // =========================================================================
 
-export type LifecycleHookName =
-  | 'onCreate' | 'onStart' | 'onResume'
-  | 'onPause'  | 'onStop'  | 'onDestroy';
-
-export interface ActivityCreateRequest {
-  activityId: string;
-  data?: Record<string, unknown>;
-  intent?: IntentPayload;
-}
-
-export interface IntentRequest {
-  intent: IntentPayload;
-  newInstance: boolean;
-}
-
-export interface ActivityCreateResult {
-  path?: string;
-  title?: string;
-  metadata?: Record<string, unknown>;
-}
+/** A plain hook; stop hooks get `ctx.reason` (`user` | `restart`) from the kernel. */
+type PlainHook = (ctx: LifecycleContext) => void | Promise<void>;
 
 export interface NextLifecycleImpl {
-  onCreate?: () => void | Promise<void>;
-  onStart?:  () => void | Promise<void>;
-  onResume?: () => void | Promise<void>;
-  onPause?:  () => void | Promise<void>;
-  onStop?:   () => void | Promise<void>;
-  onDestroy?: () => void | Promise<void>;
+  onCreate?: PlainHook;
+  onStart?:  PlainHook;
+  onResume?: PlainHook;
+  onPause?:  PlainHook;
+  onStop?:   PlainHook;
+  onDestroy?: PlainHook;
   /** Optional handler for `onActivityCreate`. Return path/title/metadata. */
   onActivityCreate?: (req: ActivityCreateRequest) => ActivityCreateResult | Promise<ActivityCreateResult>;
   /** Optional handler for `onActivityDestroy/[activityId]`. */
   onActivityDestroy?: (activityId: string) => void | Promise<void>;
-  /** Optional handler for `onIntent` (Android onNewIntent / onStartCommand). */
-  onIntent?: (req: IntentRequest) => void | Promise<void>;
+  /** Optional handler for `onIntent` (Android onNewIntent / onStartCommand). Return `{ result }` for the caller. */
+  onIntent?: (req: IntentRequest) => IntentHandlerResult | Promise<IntentHandlerResult>;
+  /** Optional handler for `onSaveState` (before a planned restart). Return each activity's state. */
+  onSaveState?: (req: SaveStateRequest) => SaveStateResult | Promise<SaveStateResult>;
+  /** Optional handler for `onAssign` (D46): a warm-pool instance now runs for `userId`. */
+  onAssign?: (req: AssignRequest) => void | Promise<void>;
 }
+
+const PLAIN_HOOKS: readonly LifecycleHookName[] = ['onCreate', 'onStart', 'onResume', 'onPause', 'onStop', 'onDestroy'];
 
 /**
  * Returns `{ POST }` for `app/api/lifecycle/[...hook]/route.ts`.
@@ -124,86 +132,27 @@ export interface NextLifecycleImpl {
  * convention). The catch-all simplifies the on-disk layout from 6–8 separate
  * route files to a single one; apps wanting per-hook files can still ship
  * them — Next's filesystem routes win over the catch-all on path collision.
+ * An optional hook without an impl (onIntent, onSaveState, onAssign) answers
+ * 404, which the OS reads as "not implemented".
  */
 export function createNextLifecycleRoutes(impl: NextLifecycleImpl = {}) {
   type NextCtx = { params: Promise<{ hook?: string | string[] }> };
 
   return {
     POST: async (request: Request, ctx: NextCtx): Promise<Response> => {
+      const denied = refused(request);
+      if (denied) return denied;
       const params = await Promise.resolve(ctx.params);
       const raw = params?.hook;
       const segments = Array.isArray(raw) ? raw : raw ? [raw] : [];
       const hook = segments[0] ?? '';
 
-      // Plain lifecycle hooks — onCreate / onStart / onResume / onPause / onStop / onDestroy.
-      const plain: Record<string, (() => void | Promise<void>) | undefined> = {
-        onCreate:  impl.onCreate,
-        onStart:   impl.onStart,
-        onResume:  impl.onResume,
-        onPause:   impl.onPause,
-        onStop:    impl.onStop,
-        onDestroy: impl.onDestroy,
-      };
-      if (hook in plain) {
-        console.log(`[${APP_ID()}] ${hook}`);
-        try {
-          const fn = plain[hook];
-          if (fn) await fn();
-          return json({ ok: true });
-        } catch (err) {
-          console.error(`[${APP_ID()}] ${hook} failed:`, err);
-          return json({ ok: false, error: String(err) }, 500);
-        }
-      }
-
-      // onActivityCreate — POST body { activityId, data? } → { ok, path?, title?, metadata? }
-      if (hook === 'onActivityCreate') {
-        const body = await request.json().catch(() => ({})) as Partial<ActivityCreateRequest>;
-        const activityId = typeof body.activityId === 'string' ? body.activityId : '';
-        if (!activityId) return json({ ok: false, error: 'missing activityId' }, 400);
-        const data = body.data ?? undefined;
-        const intent = parseIntentPayload(body.intent);
-        try {
-          const result = impl.onActivityCreate
-            ? await impl.onActivityCreate({ activityId, ...(data ? { data } : {}), ...(intent ? { intent } : {}) })
-            : {};
-          console.log(`[${APP_ID()}] onActivityCreate ${activityId}`);
-          return json({ ok: true, ...result });
-        } catch (err) {
-          console.error(`[${APP_ID()}] onActivityCreate ${activityId} failed:`, err);
-          return json({ ok: false, error: String(err) }, 500);
-        }
-      }
-
-      // onActivityDestroy — the hook segment is followed by the activityId in the URL.
-      if (hook === 'onActivityDestroy') {
-        const activityId = segments[1] ? decodeURIComponent(segments[1]) : '';
-        if (!activityId) return json({ ok: false, error: 'missing activityId' }, 400);
-        try {
-          if (impl.onActivityDestroy) await impl.onActivityDestroy(activityId);
-          console.log(`[${APP_ID()}] onActivityDestroy ${activityId}`);
-          return json({ ok: true });
-        } catch (err) {
-          console.error(`[${APP_ID()}] onActivityDestroy ${activityId} failed:`, err);
-          return json({ ok: false, error: String(err) }, 500);
-        }
-      }
-
-      // onIntent — POST body { intent, newInstance } → { ok }. Without an impl
-      // the hook is "not implemented" (404) so the OS reports intentDelivered=false.
-      if (hook === 'onIntent' && impl.onIntent) {
-        const body = await request.json().catch(() => ({})) as { intent?: unknown; newInstance?: unknown };
-        const intent = parseIntentPayload(body.intent);
-        if (!intent) return json({ ok: false, error: 'missing intent.action' }, 400);
-        try {
-          await impl.onIntent({ intent, newInstance: body.newInstance === true });
-          console.log(`[${APP_ID()}] onIntent ${intent.action}`);
-          return json({ ok: true });
-        } catch (err) {
-          console.error(`[${APP_ID()}] onIntent ${intent.action} failed:`, err);
-          return json({ ok: false, error: String(err) }, 500);
-        }
-      }
+      if ((PLAIN_HOOKS as readonly string[]).includes(hook)) return runPlainHook(hook, request, impl[hook as LifecycleHookName]);
+      if (hook === 'onActivityCreate') return runActivityCreate(request, impl.onActivityCreate);
+      if (hook === 'onActivityDestroy') return runActivityDestroy(segments[1] ? decodeURIComponent(segments[1]) : '', impl.onActivityDestroy);
+      if (hook === 'onIntent' && impl.onIntent) return runIntent(request, impl.onIntent);
+      if (hook === 'onSaveState' && impl.onSaveState) return runSaveState(request, impl.onSaveState);
+      if (hook === 'onAssign' && impl.onAssign) return runAssign(request, impl.onAssign);
 
       // Unknown hook — return 404 so the AppManager's `callOptionalLifecycle`
       // path treats it as "not implemented" rather than a hard failure.
@@ -217,17 +166,14 @@ export function createNextLifecycleRoutes(impl: NextLifecycleImpl = {}) {
 // =========================================================================
 
 /**
- * Returns `{ GET }` for `app/api/lifecycle/health/route.ts`. The shell's
- * `verifyHealthIdentity` (`ProotRunner.ts:427`) parses the body as
- * `{ ok, appId, instanceId }` and matches against the resolved instance —
- * a mismatch fails the spawn (port-squat protection).
+ * Returns `{ GET }` for `app/api/lifecycle/health/route.ts`. The kernel's
+ * health identity check (`lifecycleGate.ts`) parses the body as
+ * `{ ok, appId, instanceId }` and matches it against the instance it started —
+ * a mismatch fails the spawn (port-squat protection). A probe with a wrong
+ * lifecycle token gets 401; one without a token still gets the body.
  */
 export function createNextHealthRoute() {
   return {
-    GET: async (): Promise<Response> => json({
-      ok: true,
-      appId: APP_ID(),
-      instanceId: INSTANCE_ID(),
-    }),
+    GET: async (request: Request): Promise<Response> => refused(request) ?? healthResponse(),
   };
 }

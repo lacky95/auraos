@@ -30,6 +30,23 @@ export interface AppInstallation {
   state: AppInstallationState;
   createdAt: number;
   updatedAt: number;
+  /**
+   * A user-scope overlay of a system app (Track P, D52): the link to the
+   * system installation it patches, set only by an owner-approved patch
+   * activation. It carries the system app's trust (D29, D45) while it holds
+   * (AppHostStore `approvedOverlay`); any other install clears it.
+   */
+  overlay?: AppOverlayLink;
+}
+
+/** An overlay's link to the system installation, and the activation the owner approved. */
+export interface AppOverlayLink {
+  /** The system app's installation id. */
+  of: string;
+  /** When the owner's approval of an activation (`app.patch.activate`) set or renewed it. */
+  approvedAt: number;
+  /** The source the approved tree was installed as: a later source change breaks the link. */
+  source: AppSourceFingerprint;
 }
 
 /** Who shares a running instance (D19). `shared` is model-only in the alpha. */
@@ -174,6 +191,8 @@ export interface AppHostCookiePayload {
 /** Signed by the router and sent in `GATEWAY_IDENTITY_HEADER`. */
 export interface GatewayIdentityClaim {
   v: 1;
+  /** The Aura that signed it (D47). Absent only if its identity was unreadable. */
+  sys?: string;
   appId: string;
   installationId: string;
   instanceId: string | null;

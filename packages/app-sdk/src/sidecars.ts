@@ -27,8 +27,10 @@ import net from 'node:net';
 import { existsSync } from 'node:fs';
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { osSidecars, OsSidecarError, type OsSidecarsClient } from './os-sidecars.js';
+import { OsError } from './errors.js';
 import { APP_HOST_ROUTE_HEADER } from './hostRules.js';
 import { AURA_RUNTIME_LOADER_JS, appHostAssetLocation } from './runtime/loader.js';
+import { LIFECYCLE_REFUSAL, LIFECYCLE_TOKEN_HEADER, lifecycleRequestRefused } from './runtime/lifecycle-guard.js';
 
 // The OS-managed client lives in its own child_process-free module; re-export
 // it so `@aura/app-sdk/sidecars` is the one import for both paths.
@@ -451,7 +453,7 @@ export class SidecarHost {
       ? (!existsSync(DOCKER_SOCK) && process.env['AURA_INSTANCE_TOKEN'] ? 'os' : 'docker')
       : wanted;
     if (this.mode === 'os' && options.onSeed) {
-      throw new Error("createSidecars: onSeed is not available in mode 'os' — the OS seeds from services[].seed (a one-shot command in the service image)");
+      throw new OsError(0, 'invalid-option', "createSidecars: onSeed is not available in mode 'os' — the OS seeds from services[].seed (a one-shot command in the service image)");
     }
   }
 
@@ -982,6 +984,13 @@ export class SidecarHost {
     };
 
     const handleLifecycle = (req: http.IncomingMessage, res: http.ServerResponse, url: string): boolean => {
+      // The shared pre-handler check: no hook (nor anything forwarded under
+      // /api/lifecycle) runs without the kernel's lifecycle token.
+      if (lifecycleRequestRefused(url, req.headers[LIFECYCLE_TOKEN_HEADER])) {
+        req.resume();
+        json(res, 401, LIFECYCLE_REFUSAL);
+        return true;
+      }
       if (req.method === 'GET' && url === '/api/lifecycle/health') {
         json(res, 200, { ok: true, appId: this.opts.appId, instanceId: this.opts.instanceId, runtime: this.phase });
         return true;
@@ -1041,7 +1050,7 @@ export class SidecarHost {
 
     // WebSocket upgrades → pipe raw to the dashboard, injecting the same auth.
     server.on('upgrade', (req, sock, head) => {
-      if (!dashHost) { sock.destroy(); return; }
+      if (!dashHost || lifecycleRequestRefused(req.url || '/', req.headers[LIFECYCLE_TOKEN_HEADER])) { sock.destroy(); return; }
       void (async () => {
         const headers: http.OutgoingHttpHeaders = { ...req.headers, host: `${dashHost}:${dashPort}` };
         // The App Host serves from `/`; only the machine path has a prefix.

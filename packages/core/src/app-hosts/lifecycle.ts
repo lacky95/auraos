@@ -65,6 +65,13 @@ function readManifestHostNames(manifestPath: string): string[] {
 export class AppHostLifecycle {
   /** `<scope>/<appId>` whose files an install is landing right now. */
   private readonly landing = new Set<string>();
+  /**
+   * App id → installation id of its approved user-scope overlay (Track P),
+   * for the synchronous access checks (`trustedOverlay`). Filled by every
+   * sync (the boot migration included) and install; emptied for an app while
+   * an install lands, so the checks fail closed until it is decided again.
+   */
+  private readonly overlays = new Map<string, string>();
 
   constructor(
     private readonly registry: AppHostStore,
@@ -76,7 +83,10 @@ export class AppHostLifecycle {
    * `completeInstall`. A file-watcher event in that window must not decide the
    * restore on its own, so `syncDiscovered` skips it.
    */
-  beginInstall(appId: string, scope: ScopeId): void { this.landing.add(`${scope}/${appId}`); }
+  beginInstall(appId: string, scope: ScopeId): void {
+    this.landing.add(`${scope}/${appId}`);
+    if (scope === 'user') this.overlays.delete(appId);
+  }
   endInstall(appId: string, scope: ScopeId): void { this.landing.delete(`${scope}/${appId}`); }
 
   /** `sync` for an app found by a registry event (clone, scaffold, copied dir). */
@@ -91,6 +101,7 @@ export class AppHostLifecycle {
    */
   async sync(app: AppIdentityFacts): Promise<{ installation: AppInstallation; record: AppHostRecord }> {
     const installation = await this.resolveActive(app);
+    await this.noteOverlay(installation);
     const record = await this.registry.allocate({
       installation, instanceScope: userScope(installation.userId), isSystemApp: app.scope === 'system',
     });
@@ -142,8 +153,46 @@ export class AppHostLifecycle {
     return { kind: 'confirm', installation: candidate, reason: 'source-changed' };
   }
 
-  /** After the files landed: record the outcome of the restore check. */
-  async completeInstall(app: AppIdentityFacts, check: AppRestoreCheck, manifestHosts: readonly string[]): Promise<void> {
+  /**
+   * The installation id of `appId`'s approved user-scope overlay of its
+   * system app, or null (synchronous; see `overlays`). The access rules give
+   * such an overlay its system app's trust (AppManager `isTrustedSystemCopy`).
+   */
+  trustedOverlay(appId: string): string | null {
+    return this.overlays.get(appId) ?? null;
+  }
+
+  private async noteOverlay(installation: AppInstallation): Promise<void> {
+    if (installation.scope !== 'user') return;
+    if (await this.registry.approvedOverlay(installation)) this.overlays.set(installation.appId, installation.installationId);
+    else if (this.overlays.get(installation.appId) === installation.installationId) this.overlays.delete(installation.appId);
+  }
+
+  /**
+   * The system installation an approved patch activation into `scope` links
+   * to (Track P): the existing overlay's link when the copy it replaces is an
+   * approved overlay, the system app's installation when no copy is in that
+   * scope yet; null otherwise (a store or local copy stays what it is).
+   */
+  async overlayLinkFor(appId: string, scope: ScopeId, copyInScope: boolean): Promise<string | null> {
+    if (scope !== 'user') return null;
+    if (copyInScope) {
+      const current = await this.registry.findInstallation(appId, scope);
+      return current && await this.registry.approvedOverlay(current) ? current.overlay!.of : null;
+    }
+    const system = await this.registry.findInstallation(appId, 'system');
+    return system?.state === 'active' ? system.installationId : null;
+  }
+
+  /**
+   * After the files landed: record the outcome of the restore check.
+   * `overlayOf`: an owner-approved patch activation of a system app (or of its
+   * overlay) links this installation to that system installation; any other
+   * install removes such a link.
+   */
+  async completeInstall(
+    app: AppIdentityFacts, check: AppRestoreCheck, manifestHosts: readonly string[], opts: { overlayOf?: string | null } = {},
+  ): Promise<void> {
     if (check.kind === 'restore' || (check.kind === 'confirm' && check.installation)) {
       await this.registry.reactivate({
         installationId: check.installation!.installationId, originId: app.originId, source: app.source,
@@ -151,18 +200,29 @@ export class AppHostLifecycle {
       });
     }
     await this.acceptManifestHosts(app.appId, manifestHosts);
-    await this.sync(app);
+    const { installation } = await this.sync(app);
+    let linked = installation;
+    if (opts.overlayOf) {
+      linked = await this.registry.updateInstallation(installation.installationId, {
+        overlay: { of: opts.overlayOf, approvedAt: Date.now(), source: installation.source },
+      });
+    } else if (installation.overlay) {
+      linked = await this.registry.updateInstallation(installation.installationId, { overlay: null });
+    }
+    await this.noteOverlay(linked);
   }
 
   /** Keep-data uninstall. */
   async reserveApp(appId: string, scope: ScopeId): Promise<void> {
     const i = await this.registry.findInstallation(appId, scope);
+    if (scope === 'user') this.overlays.delete(appId);
     if (i && i.state !== 'retired') await this.registry.reserve(i.installationId);
   }
 
   /** Delete app data: every installation of this app in this scope, for good. */
   async retireApp(appId: string, scope: ScopeId): Promise<string[]> {
     const ids: string[] = [];
+    if (scope === 'user') this.overlays.delete(appId);
     for (const i of await this.registry.listInstallations(appId)) {
       if (i.scope !== scope || i.state === 'retired') continue;
       await this.registry.retire(i.installationId);

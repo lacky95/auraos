@@ -1,5 +1,6 @@
 import type { APIRoute } from 'astro';
-import { ThemeManager } from '@aura/core';
+import { ThemeManager, readUserPrefValue } from '@aura/core';
+import { localOwnerId, requestUserId } from '../../../lib/userContext.js';
 import type { ColorMode } from '@aura/core';
 import { sharedKv } from '../../../lib/sharedKv.js';
 import { withEtag } from '../../../lib/etag.js';
@@ -16,14 +17,14 @@ import { withEtag } from '../../../lib/etag.js';
  * it, but defence-in-depth keeps the desktop usable on a corrupted RDB).
  */
 export const GET: APIRoute = async ({ request }) => {
-  const sel = await readSelection();
+  const sel = await readSelection(request);
   const css = ThemeManager.toCss(sel.themeIdLight, sel.themeIdDark, sel.colorMode);
   // no-cache + ETag: every app iframe links this sheet, so a reload of the
   // desktop asks for it once per app — those repeats are 304s now.
   return withEtag(request, css, 'text/css; charset=utf-8');
 };
 
-async function readSelection(): Promise<{ themeIdDark: string; themeIdLight: string; colorMode: ColorMode }> {
+async function readSelection(request?: Request): Promise<{ themeIdDark: string; themeIdLight: string; colorMode: ColorMode }> {
   const fallback = {
     themeIdDark:  ThemeManager.DEFAULT_THEME_ID_DARK,
     themeIdLight: ThemeManager.DEFAULT_THEME_ID_LIGHT,
@@ -31,9 +32,10 @@ async function readSelection(): Promise<{ themeIdDark: string; themeIdLight: str
   };
   const kv = sharedKv();
   try {
-    const stored = await kv.getValue<{
+    // The caller's user's theme (D46): the desktop's, or the user an app acts for.
+    const stored = await readUserPrefValue<{
       themeIdDark?: string; themeIdLight?: string; colorMode?: ColorMode;
-    }>('os', 'theme');
+    }>(kv, (request && await requestUserId(request)) || localOwnerId(), 'theme');
     if (!stored) return fallback;
     return {
       themeIdDark:  stored.themeIdDark  ?? fallback.themeIdDark,

@@ -2,6 +2,7 @@ import type { KeepSiblings } from './sidecarParking.js';
 import type { AppManifest } from '../types/manifest.js';
 import type { SpawnContext } from '../scopes/types.js';
 import type { ResourceUsage, SidecarInfo } from '../types/instance.js';
+import type { LifecycleStatus } from './lifecycleGate.js';
 
 /**
  * Shared abstraction for "spawn an isolated bash process that runs an app".
@@ -46,10 +47,15 @@ export interface SandboxRunner {
   forceKill(instanceId: string): boolean;
 
   /** Invoke a required lifecycle hook (onCreate/onStart/onResume/onPause/onStop/onDestroy).
-   *  `reason` (stop hooks) is sent as `x-aura-stop-reason: user|restart`. */
+   *  `reason` (stop hooks) is sent as `x-aura-stop-reason: user|restart`. Every
+   *  lifecycle call carries this start's `x-aura-lifecycle` token, and only to
+   *  a destination bound to the instance (lifecycleGate.ts). */
   callLifecycle(instanceId: string, hook: string, opts?: { reason?: string }): Promise<void>;
   /** Invoke a best-effort lifecycle hook with optional payload. */
   callOptionalLifecycle(instanceId: string, hook: string, body?: unknown): Promise<unknown>;
+  /** Health identity class and runtime-check outcome of this start; null when
+   *  not measured (not healthy yet, or adopted from a previous shell). */
+  lifecycleStatus(instanceId: string): LifecycleStatus | null;
 
   /** Port assigned to this instance, or null if it's already dead. */
   getPort(instanceId: string): number | null;
@@ -93,14 +99,31 @@ export interface SandboxRunner {
     tokenNonce?: string;
     /** `aura.owner` label — absent on containers from before owners and on pool members. */
     ownerLabel?: string;
+    /** The container's own address on the shared network (lifecycle calls go there). */
+    address?:   string;
+    /** `AURA_LIFECYCLE_TOKEN` from its env — absent on containers from before the token. */
+    lifecycleToken?: string;
+    /** `aura.preview` label: a preview instance's workspace (Track P). */
+    preview?: string;
   }> | null>;
+
   registerAdopted?(rec: {
     instanceId: string;
     appId:      string;
     port:       number;
     hostname:   string;
     pid:        number;
+    address?:   string;
+    lifecycleToken?: string;
   }): void;
+  /**
+   * The lifecycle checks again for an instance adopted from a previous shell
+   * (`registerAdopted`): its health identity and the runtime check of the
+   * health guard, as a fresh start measures them. Reported only: a running
+   * instance is never stopped for it. Null when the health endpoint gave no
+   * answer. Container-only; PRoot instances don't survive a shell restart.
+   */
+  measureAdopted?(instanceId: string): Promise<LifecycleStatus | null>;
   /**
    * Remove EVERY host sandbox belonging to an app (all instances, incl.
    * untracked survivors) — used as a belt-and-braces step before uninstall.

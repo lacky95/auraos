@@ -33,17 +33,10 @@ export type {
   ThemeSummary,
 };
 
-/** Full theme selection persisted in Settings. */
-export interface ThemeSelection {
-  themeIdDark:  string;
-  themeIdLight: string;
-  colorMode:    ColorMode;
-}
+import type { ThemeSelection, ThemeStrategy } from './theme.js';
+export type { ThemeSelection, ThemeStrategy } from './theme.js';
 
-/** How an app participates in OS theming (manifest `themeStrategy`). */
-export type ThemeStrategy = 'inherit' | 'themed' | 'override';
-
-import { appHostRuntime, bodylessMutationHeaders, osAuthHeaders, osBase } from './os-auth.js';
+import { bodylessMutationHeaders, osAuthHeaders, osBase } from './os-auth.js';
 import { isFromShell } from './channel.js';
 import { KeymapApi } from './keymap.js';
 import { NavApi } from './nav.js';
@@ -54,6 +47,16 @@ import { InterfacesApi } from './interfaces.js';
 import { NotificationsApi, type CreateResult } from './notifications.js';
 import { FlightApi } from './flight.js';
 import { UserApi } from './user.js';
+import { StorageApi } from './storage.js';
+import { ContextApi } from './aura-context.js';
+import { ApprovalsApi } from './approvals.js';
+import { CredentialsApi } from './credentials.js';
+import { PermissionsApi } from './permissions.js';
+import { ThemeApi } from './theme.js';
+import { DataApi } from './data.js';
+import { IntentsApi, type StartIntent, type StartIntentResult } from './intents.js';
+import { ownInstanceId } from './context.js';
+import { osErrorFrom } from './errors.js';
 export type { KeymapHandler, KeymapHandlerCtx, KeymapChangeInfo } from './keymap.js';
 export type { BackEvent, BackHandler } from './nav.js';
 export type { NavigateOptions } from './activity.js';
@@ -108,10 +111,36 @@ export class OsClient {
    */
   readonly flight: FlightApi;
   /**
-   * The owner: `confirm()` asks for their yes in AuraOS's own dialog, with
-   * the password for `level: 'fresh'` (D49). Needs `user.confirm`. See ./user.ts.
+   * The user this app acts for: `get()` and `onChange()` (D46). The owner's
+   * `confirm()` asks for their yes in AuraOS's own dialog, with the password
+   * for `level: 'fresh'` (D49); it needs `user.confirm`. See ./user.ts.
    */
   readonly user: UserApi;
+  /**
+   * This app's storage, per user (D46), with `.shared` for every user of the
+   * app. Needs `storage.read` / `storage.write`. See ./storage.ts.
+   */
+  readonly storage: StorageApi;
+  /**
+   * The Aura Context values this app declared in `context[]`, on its server
+   * (D48). See ./aura-context.ts.
+   */
+  readonly context: ContextApi;
+  /** Ask the owner to approve an action; the answer carries a single-use grant (5.10). See ./approvals.ts. */
+  readonly approvals: ApprovalsApi;
+  /**
+   * Ask the owner for a secret in AuraOS's dialog and get a handle; read the
+   * value on the server with the owner's separate grant (D56). See ./credentials.ts.
+   */
+  readonly credentials: CredentialsApi;
+  /** What this app may do now, to hide what it may not. See ./permissions.ts. */
+  readonly permissions: PermissionsApi;
+  /** The OS theme: selection, inventory, palette, changes. See ./theme.ts. */
+  readonly theme: ThemeApi;
+  /** Other apps' content providers. See ./data.ts. */
+  readonly data: DataApi;
+  /** Start an intent. See ./intents.ts. */
+  readonly intents: IntentsApi;
 
   constructor() {
     // Safe in both Node and the browser. In a browser this is the page's
@@ -125,7 +154,16 @@ export class OsClient {
     this.interfaces = new InterfacesApi(this);
     this.notifications = new NotificationsApi();
     this.flight = new FlightApi(this);
-    this.user = new UserApi();
+    this.user = new UserApi(this);
+    this.storage = new StorageApi();
+    this.context = new ContextApi();
+    this.approvals = new ApprovalsApi();
+    this.credentials = new CredentialsApi();
+    this.permissions = new PermissionsApi();
+    const base = () => this.base;
+    this.theme = new ThemeApi(base);
+    this.data = new DataApi(base);
+    this.intents = new IntentsApi(base);
   }
 
   // -------- OS event subscription (BroadcastReceiver-equivalent) --------
@@ -193,6 +231,8 @@ export class OsClient {
    * is sent as a Bearer, so the shell attributes it to this app as *verified*
    * (needs `system.notifications` in the manifest). In the browser no token is
    * sent (unverified) — it works there too now.
+   *
+   * @deprecated Use `notifications.create({ type: 'simple', title, text })`.
    */
   async sendNotification(title: string, body = ''): Promise<CreateResult> {
     return this.notifications.create({ type: 'simple', title, text: body });
@@ -200,10 +240,10 @@ export class OsClient {
 
   /** Returns this instance's lifecycle state via the OS status endpoint. */
   async getState(): Promise<string> {
-    // Bare `process.env` throws in the browser (see the constructor).
-    const env = (typeof process !== 'undefined' && process.env) ? process.env : {};
-    const instanceId = appHostRuntime()?.instanceId ?? env['APP_INSTANCE_ID'] ?? env['APP_ID'] ?? 'unknown';
-    const res = await fetch(`${this.base}/api/instances/${encodeURIComponent(instanceId)}/status`);
+    const instanceId = ownInstanceId() ?? 'unknown';
+    const url = `${this.base}/api/instances/${encodeURIComponent(instanceId)}/status`;
+    const res = await fetch(url, { headers: osAuthHeaders(url) });
+    if (!res.ok) throw await osErrorFrom(res, 'getState');
     const data = await res.json() as { instance: { state: string } };
     return data.instance.state;
   }
@@ -211,56 +251,12 @@ export class OsClient {
   // -------- Intent dispatch (Android `startActivity(intent)` equivalent) --------
 
   /**
-   * Resolve + start an intent. Implicit (no `appId`): the OS picks the
-   * highest-scored handler from declared `intentFilters` across all installed
-   * apps. Explicit (`appId` set): that app gets the intent directly. Returns the OS's
-   * verdict — a single chosen handler, a disambiguation list, or `noHandler`.
-   * Apps use this instead of hand-coding `start()` + `openActivity()` so the
-   * routing logic stays in one place.
+   * Resolve + start an intent.
    *
-   * The handler receives the whole intent: multi-activity apps in
-   * `onActivityCreate` (`data` = extras), everything else in `onIntent` (see
-   * `createIntentHandler`). `intentDelivered` is false when the handler has no
-   * such hook — it was started anyway.
-   *
-   * Throws on transport errors or non-JSON responses; HTTP 404 (no handler)
-   * is returned as `{ kind: 'noHandler' }` so the caller doesn't have to
-   * catch for the common case.
+   * @deprecated Use `intents.start(intent)` (./intents.ts), the same call.
    */
-  async startIntent(intent: {
-    action:    string;
-    /** Explicit target app (Android `setPackage`): skips resolution + chooser; no filter needed. */
-    appId?:    string;
-    category?: string[];
-    type?:     string;
-    uri?:      string;
-    extras?:   Record<string, unknown>;
-    /** Deliver to exactly this running instance of the app (unknown/dead → error). */
-    instanceId?: string;
-    /** Launch flags: `NEW_INSTANCE` starts a fresh instance (multi-instance apps only). */
-    flags?:    string[];
-  }): Promise<
-    | { kind: 'started'; appId: string; instanceId: string; activityId?: string; intentDelivered?: boolean; result?: Record<string, unknown> }
-    | { kind: 'rejected'; appId: string; instanceId: string; code: string; message: string; hint?: string; status: number }
-    | { kind: 'disambiguation'; candidates: Array<{ appId: string; score: number }> }
-    | { kind: 'noHandler' }
-  > {
-    const url = `${this.base}/api/intents/start`;
-    // Server side, the instance token says which app asks (OPEN_TERMINAL grants, D29).
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...osAuthHeaders(url, { base: this.base }) },
-      body: JSON.stringify(intent),
-    });
-    const body = await res.json().catch(() => null) as { kind?: string; error?: string; code?: string; hint?: string } | null;
-    // The handler declining is an answer, not a failure — whatever status it chose.
-    if (body?.kind === 'rejected') return body as Awaited<ReturnType<OsClient['startIntent']>>;
-    if (res.status === 404 && body?.kind !== 'error') return { kind: 'noHandler' };
-    if (!res.ok) {
-      const detail = body?.error ? `: ${body.code ? `${body.code} — ` : ''}${body.error}${body.hint ? ` (${body.hint})` : ''}` : '';
-      throw new Error(`startIntent: HTTP ${res.status}${detail}`);
-    }
-    return body as Awaited<ReturnType<OsClient['startIntent']>>;
+  startIntent(intent: StartIntent): Promise<StartIntentResult> {
+    return this.intents.start(intent);
   }
 
   // -------- BackStack (Android-`Activity.finish()`-equivalent) --------
@@ -277,287 +273,58 @@ export class OsClient {
   async finish(): Promise<void> {
     const activityId = this.activity.getActivityId();
     if (!activityId) return;
-    await fetch(`${this.base}/api/activities/${encodeURIComponent(activityId)}/back`, {
+    const url = `${this.base}/api/activities/${encodeURIComponent(activityId)}/back`;
+    await fetch(url, {
       method: 'POST',
-      headers: bodylessMutationHeaders(),
+      headers: { ...bodylessMutationHeaders(), ...osAuthHeaders(url) },
     });
   }
 
-  // -------- Content-Provider Access --------
+  // -------- Deprecated flat aliases (kept so existing apps keep working) --------
 
-  /**
-   * Read from another app's content provider.
-   *
-   * `resource` is the path SEGMENT after `/api/data/<authority>/` — e.g. for
-   * Settings's theme endpoint declared as `/api/data/theme` in its manifest,
-   * pass `"theme"` here. Don't include the `/api/data/` prefix.
-   */
-  async queryProvider<T = unknown>(authority: string, resource: string): Promise<T> {
-    const r = resource.replace(/^\/+/, '');
-    const url = `${this.base}/api/data/${encodeURIComponent(authority)}/${r}`;
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`queryProvider ${authority}/${r} → HTTP ${res.status}`);
-    return (await res.json()) as T;
+  /** @deprecated Use `data.query(authority, resource)`. */
+  queryProvider<T = unknown>(authority: string, resource: string): Promise<T> {
+    return this.data.query<T>(authority, resource);
   }
 
-  /**
-   * Write to another app's content provider. Method defaults to PUT; pass POST/PATCH/DELETE
-   * to override. Body is JSON-encoded. `resource` is the short segment (see queryProvider).
-   */
-  async writeProvider<T = unknown>(
-    authority: string,
-    resource: string,
-    body: unknown,
-    method: 'PUT' | 'POST' | 'PATCH' | 'DELETE' = 'PUT',
+  /** @deprecated Use `data.write(authority, resource, body, method)`. */
+  writeProvider<T = unknown>(
+    authority: string, resource: string, body: unknown, method: 'PUT' | 'POST' | 'PATCH' | 'DELETE' = 'PUT',
   ): Promise<T> {
-    const r = resource.replace(/^\/+/, '');
-    const url = `${this.base}/api/data/${encodeURIComponent(authority)}/${r}`;
-    const res = await fetch(url, {
-      method,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) throw new Error(`writeProvider ${authority}/${r} → HTTP ${res.status}`);
-    return (await res.json()) as T;
+    return this.data.write<T>(authority, resource, body, method);
   }
 
-  /**
-   * Open an SSE stream against a provider with `?watch=1` appended. The provider must
-   * implement its own watch handler; the shell just streams the response.
-   */
+  /** @deprecated Use `data.watch(authority, resource)`. */
   watchProvider(authority: string, resource: string): EventSource {
-    const r = resource.replace(/^\/+/, '');
-    const sep = r.includes('?') ? '&' : '?';
-    const url = `${this.base}/api/data/${encodeURIComponent(authority)}/${r}${sep}watch=1`;
-    return new EventSource(url);
+    return this.data.watch(authority, resource);
   }
 
-  // -------- Theme (v3) — selection + inventory --------
-
-  /**
-   * Current selection from the OS KV: both slot ids plus colorMode. The
-   * value lives at `/api/kv/os/theme` (shell-served); writes require the
-   * `system.kv.os.theme.write` permission, reads are public.
-   */
-  async getThemeSelection(): Promise<ThemeSelection> {
-    const res = await fetch(`${this.base}/api/kv/os/theme`);
-    if (!res.ok) throw new Error(`getThemeSelection → HTTP ${res.status}`);
-    const body = await res.json() as { value: ThemeSelection };
-    return body.value;
-  }
-
-  /** Lightweight inventory of every theme the OS ships (no palettes). */
-  async listThemes(): Promise<ThemeSummary[]> {
-    const res = await fetch(`${this.base}/api/os/themes`);
-    if (!res.ok) throw new Error(`listThemes → HTTP ${res.status}`);
-    const body = await res.json() as { themes: ThemeSummary[] };
-    return body.themes;
-  }
-
-  /**
-   * Persist a theme pick for a specific tone slot. Slots are independent:
-   * setting the dark slot doesn't disturb the light slot, and vice versa.
-   * `colorMode` decides which slot is currently rendered.
-   *
-   * Read-modify-write against `/api/kv/os/theme` because KV PUT replaces
-   * the entire value at a key.
-   */
-  async setOsThemeForTone(tone: ThemeTone, themeId: string): Promise<void> {
-    const previous = await this.getThemeSelection().catch(() => null);
-    const next = { ...(previous ?? {}), [tone === 'dark' ? 'themeIdDark' : 'themeIdLight']: themeId };
-    await this.kvPut('os', 'theme', next);
-  }
-
-  private async kvPut(namespace: string, key: string, value: unknown): Promise<void> {
-    const segs = `${namespace}/${key}`.split('/').map(encodeURIComponent).join('/');
-    const res = await fetch(`${this.base}/api/kv/${segs}`, {
-      method:  'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ value }),
-    });
-    if (!res.ok) throw new Error(`kv PUT ${namespace}/${key} → HTTP ${res.status}: ${await res.text()}`);
-  }
-
-  /**
-   * The OS theme active when this page loaded, from the runtime bootstrap
-   * (synchronous). Null on the server or outside AuraOS. `onThemeChange`
-   * reports later changes.
-   */
-  getActiveThemeId(): string | null {
-    return appHostRuntime()?.theme.themeId ?? null;
-  }
-
-  // -------- Theme (v2) — mode (light / dark / auto) --------
-
-  /** User pref including `'auto'`. */
-  async getModePreference(): Promise<ColorMode> {
-    const { colorMode } = await this.getThemeSelection();
-    return colorMode;
-  }
-
-  /** Resolved mode — turns `'auto'` into `'light'` or `'dark'` via the browser media query. */
-  async getMode(): Promise<ResolvedMode> {
-    const pref = await this.getModePreference();
-    return resolveMode(pref);
-  }
-
-  /** Persist a colorMode preference. Broadcasts on the OS bus. */
-  async setMode(mode: ColorMode): Promise<void> {
-    const previous = await this.getThemeSelection().catch(() => null);
-    const next = { ...(previous ?? {}), colorMode: mode };
-    await this.kvPut('os', 'theme', next);
-  }
-
-  // -------- Theme (v3) — palette + framework --------
-
-  /**
-   * Active palette read off `--aura-color-*` CSS vars (`/_aura/runtime.js`
-   * links /api/os/theme.css for `inherit`-strategy apps). Most apps don't need this —
-   * `var(--aura-color-*)` works directly in CSS. Use this for things like an
-   * in-app theme preview swatch or canvas painting.
-   */
-  getPalette(): ColorPalette {
-    return readPaletteFromCss('current');
-  }
-
-  /**
-   * Returns design-framework metadata. Reads the runtime bootstrap
-   * synchronously when available, else looks up the active theme's framework
-   * in the theme inventory.
-   */
-  async getDesignFramework(): Promise<DesignFramework> {
-    const fw = appHostRuntime()?.theme.framework;
-    if (fw) {
-      // `source` isn't in the bootstrap: the framework registry is static
-      // for now (scificn only). Hardcode here; if we ever ship multiple
-      // frameworks we'll add it there too.
-      return { id: fw.id, name: fw.id, source: 'https://www.scificn.dev', version: fw.version };
-    }
-    const themes  = await this.listThemes();
-    const activeId = this.getActiveThemeId() ?? themes[0]?.id ?? '';
-    const meta    = themes.find((t) => t.id === activeId);
-    if (!meta) throw new Error(`getDesignFramework: unknown active themeId '${activeId}'`);
-    return meta.framework;
-  }
-
-  /**
-   * Full active theme object — single palette + tone + framework + tags.
-   * Useful for theme-picker UIs that want all the metadata in one call.
-   * The palette is reconstructed from the live CSS vars.
-   */
-  async getTheme(): Promise<OsTheme> {
-    const themes = await this.listThemes();
-    const id     = this.getActiveThemeId() ?? themes[0]?.id ?? '';
-    const meta   = themes.find((t) => t.id === id);
-    if (!meta) throw new Error(`getTheme: unknown active themeId '${id}'`);
-    return {
-      id:           meta.id,
-      name:         meta.name,
-      ...(meta.description !== undefined ? { description: meta.description } : {}),
-      ...(meta.tags        !== undefined ? { tags:        meta.tags        } : {}),
-      tone:         meta.tone,
-      framework:    meta.framework,
-      palette:      readPaletteFromCss('current'),
-    };
-  }
-
-  /** This app's theme strategy, from the runtime bootstrap. Defaults to `'inherit'`. */
-  getThemeStrategy(): ThemeStrategy {
-    return appHostRuntime()?.theme.strategy ?? 'inherit';
-  }
-
-  // -------- Theme (v2) — subscriptions --------
-
-  /**
-   * Subscribe to theme-id changes (NOT mode changes; see `onModeChange`).
-   * Browser-only — no-op on the server. Returns an unsubscribe function.
-   * Callback receives the FULL new selection so apps can react without an
-   * extra `getThemeSelection()` round-trip.
-   */
-  onThemeChange(cb: (info: ThemeSelection & {
-    themeId:      string;            // active (resolved) theme id
-    resolvedMode: ResolvedMode;
-    framework?:   DesignFramework;
-  }) => void): () => void {
-    if (typeof window === 'undefined') return () => undefined;
-    const handler = (ev: MessageEvent) => {
-      if (!isFromShell(ev)) return;
-      const d = ev.data as Partial<ThemeSelection> & {
-        type?: string; themeId?: string; resolvedMode?: ResolvedMode; framework?: DesignFramework;
-      };
-      if (d?.type === 'aura.theme.changed'
-          && d.themeId && d.themeIdDark && d.themeIdLight && d.colorMode && d.resolvedMode) {
-        cb({
-          themeId:      d.themeId,
-          themeIdDark:  d.themeIdDark,
-          themeIdLight: d.themeIdLight,
-          colorMode:    d.colorMode,
-          resolvedMode: d.resolvedMode,
-          ...(d.framework ? { framework: d.framework } : {}),
-        });
-      }
-    };
-    window.addEventListener('message', handler);
-    return () => window.removeEventListener('message', handler);
-  }
-
-  /**
-   * Subscribe to color-mode changes. Fires on:
-   *   • `aura.mode.changed` postMessage from the shell (user toggled the picker), AND
-   *   • `(prefers-color-scheme: light)` media-query change when the user's pref is `'auto'`
-   *     (so apps see the resolved mode flip even if the OS itself didn't broadcast).
-   */
-  onModeChange(cb: (info: ThemeSelection & {
-    themeId:      string;            // active (resolved) theme id
-    resolvedMode: ResolvedMode;
-  }) => void): () => void {
-    if (typeof window === 'undefined') return () => undefined;
-    const handler = (ev: MessageEvent) => {
-      if (!isFromShell(ev)) return;
-      const d = ev.data as Partial<ThemeSelection> & {
-        type?: string; themeId?: string; resolvedMode?: ResolvedMode;
-      };
-      if (d?.type === 'aura.mode.changed'
-          && d.themeId && d.themeIdDark && d.themeIdLight && d.colorMode && d.resolvedMode) {
-        cb({
-          themeId:      d.themeId,
-          themeIdDark:  d.themeIdDark,
-          themeIdLight: d.themeIdLight,
-          colorMode:    d.colorMode,
-          resolvedMode: d.resolvedMode,
-        });
-      }
-    };
-    window.addEventListener('message', handler);
-
-    // Auto-mode bridge: if the persisted pref is 'auto', changes to the OS
-    // `prefers-color-scheme` need to be surfaced too — the shell can't
-    // broadcast that itself. Fire-and-forget lookup; only wire the listener
-    // if the current pref is 'auto'.
-    let mql: MediaQueryList | null = null;
-    let mqlHandler: ((e: MediaQueryListEvent) => void) | null = null;
-    this.getThemeSelection()
-      .then((sel) => {
-        if (sel.colorMode !== 'auto' || typeof window.matchMedia !== 'function') return;
-        mql = window.matchMedia('(prefers-color-scheme: light)');
-        mqlHandler = (e) => {
-          const resolved: ResolvedMode = e.matches ? 'light' : 'dark';
-          const activeId = resolved === 'light' ? sel.themeIdLight : sel.themeIdDark;
-          cb({ ...sel, themeId: activeId, resolvedMode: resolved });
-        };
-        if (mql.addEventListener) mql.addEventListener('change', mqlHandler);
-        else                       mql.addListener(mqlHandler); // legacy Safari
-      })
-      .catch(() => undefined);
-
-    return () => {
-      window.removeEventListener('message', handler);
-      if (mql && mqlHandler) {
-        if (mql.removeEventListener) mql.removeEventListener('change', mqlHandler);
-        else                          mql.removeListener(mqlHandler);
-      }
-    };
-  }
+  /** @deprecated Use `theme.getSelection()`. */
+  getThemeSelection(): Promise<ThemeSelection> { return this.theme.getSelection(); }
+  /** @deprecated Use `theme.list()`. */
+  listThemes(): Promise<ThemeSummary[]> { return this.theme.list(); }
+  /** @deprecated Use `theme.setForTone(tone, themeId)`. */
+  setOsThemeForTone(tone: ThemeTone, themeId: string): Promise<void> { return this.theme.setForTone(tone, themeId); }
+  /** @deprecated Use `theme.getActiveId()`. */
+  getActiveThemeId(): string | null { return this.theme.getActiveId(); }
+  /** @deprecated Use `theme.getModePreference()`. */
+  getModePreference(): Promise<ColorMode> { return this.theme.getModePreference(); }
+  /** @deprecated Use `theme.getMode()`. */
+  getMode(): Promise<ResolvedMode> { return this.theme.getMode(); }
+  /** @deprecated Use `theme.setMode(mode)`. */
+  setMode(mode: ColorMode): Promise<void> { return this.theme.setMode(mode); }
+  /** @deprecated Use `theme.getPalette()`. */
+  getPalette(): ColorPalette { return this.theme.getPalette(); }
+  /** @deprecated Use `theme.getDesignFramework()`. */
+  getDesignFramework(): Promise<DesignFramework> { return this.theme.getDesignFramework(); }
+  /** @deprecated Use `theme.get()`. */
+  getTheme(): Promise<OsTheme> { return this.theme.get(); }
+  /** @deprecated Use `theme.getStrategy()`. */
+  getThemeStrategy(): ThemeStrategy { return this.theme.getStrategy(); }
+  /** @deprecated Use `theme.onChange(cb)`. */
+  onThemeChange(cb: Parameters<ThemeApi['onChange']>[0]): () => void { return this.theme.onChange(cb); }
+  /** @deprecated Use `theme.onModeChange(cb)`. */
+  onModeChange(cb: Parameters<ThemeApi['onModeChange']>[0]): () => void { return this.theme.onModeChange(cb); }
 
   // -------- Viewport --------
 
@@ -648,56 +415,3 @@ export function viewportGrid(
   return { cols, rows };
 }
 
-// -------- internals --------
-
-function resolveMode(pref: ColorMode): ResolvedMode {
-  if (pref === 'light') return 'light';
-  if (pref === 'dark')  return 'dark';
-  // 'auto' — use the live browser media query when available; SSR default = dark
-  if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
-    return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
-  }
-  return 'dark';
-}
-
-/**
- * Reconstruct a `ColorPalette` from the live CSS variables. Reads the active
- * palette by default (`mode = current`), or pins to light/dark via the
- * `--aura-{light,dark}-color-*` variants always present in /api/os/theme.css.
- */
-function readPaletteFromCss(mode: ResolvedMode | 'current' = 'current'): ColorPalette {
-  if (typeof document === 'undefined') {
-    // SSR fallback — return zeroed palette; the shape is what callers care about
-    return zeroPalette();
-  }
-  const prefix = mode === 'current' ? '' : `${mode}-`;
-  const cs = getComputedStyle(document.documentElement);
-  const read = (name: string) => cs.getPropertyValue(`--aura-${prefix}${name}`).trim();
-  return {
-    primary:   read('color-primary'),
-    secondary: read('color-secondary'),
-    danger:    read('color-danger'),
-    info:      read('color-info'),
-    warning:   read('color-warning'),
-    success:   read('color-success'),
-    bg:        read('color-bg'),
-    surface:   read('color-surface'),
-    surface2:  read('color-surface-2'),
-    text:      read('color-text'),
-    textDim:   read('color-text-dim'),
-    border:    read('color-border'),
-    glowPrimary:   read('glow-primary'),
-    glowSecondary: read('glow-secondary'),
-    glowDanger:    read('glow-danger'),
-    glowSubtle:    read('glow-subtle'),
-  };
-}
-
-function zeroPalette(): ColorPalette {
-  const z = '';
-  return {
-    primary: z, secondary: z, danger: z, info: z, warning: z, success: z,
-    bg: z, surface: z, surface2: z, text: z, textDim: z, border: z,
-    glowPrimary: z, glowSecondary: z, glowDanger: z, glowSubtle: z,
-  };
-}

@@ -10,6 +10,9 @@ import { join } from 'node:path';
 import { InstanceTokens } from '@aura/core';
 import { authenticate, type AuthDeps } from '../src/lib/auth.ts';
 import { withDeclaredAppHint, senderTokenFrom } from '../src/lib/notificationCaller.ts';
+import { localSystemId } from '@aura/core/system-identity';
+/** The test data dir's own system id (D47): every resolved principal carries it. */
+const SYS = localSystemId();
 
 const tokens = new InstanceTokens(join(mkdtempSync(join(tmpdir(), 'aura-nc-')), 'secrets', 'k.key'));
 const instances = new Map([
@@ -27,7 +30,7 @@ const req = (headers: Record<string, string> = {}) => new Request('http://aura-s
 test('valid Bearer → verified instance caller (appId from the instance record)', async () => {
   const token = tokens.mint('com.example.notes-1').token;
   const c = await authenticate(req({ authorization: `Bearer ${token}`, 'x-aura-instance-id': 'com.other-1' }), deps);
-  assert.deepEqual(c, { kind: 'instance', appId: 'com.example.notes', instanceId: 'com.example.notes-1', verification: 'verified' });
+  assert.deepEqual(c, { kind: 'instance', appId: 'com.example.notes', instanceId: 'com.example.notes-1', verification: 'verified', systemId: SYS });
 });
 
 test('sidecar token keeps the sidecar name', async () => {

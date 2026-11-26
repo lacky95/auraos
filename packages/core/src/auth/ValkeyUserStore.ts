@@ -18,8 +18,10 @@ import { IDENTITY_AUDIT_ACTIONS, userAttribution, type AuditInput } from './Admi
 import { deriveIdentitySubkey, IdentityKeyError, identityKeyStatus, type IdentityKeyStatus } from './identityKey.js';
 import {
   DEFAULT_OWNER_ID,
-  type LoginSessions, type PasswordCheck, type SetupTicket, type UserAccount, type UserStore,
+  type LoginSessions, type PasswordCheck, type SetupTicket, type UserAccount, type UserProfiles, type UserStore,
 } from './identityContracts.js';
+import { PROFILE_FIELDS, PROFILE_FIELD_NAMES, type ProfileFieldName, type UserProfile } from '../users/profileRegistry.js';
+import { readUserPref, userPrefsNamespace, type UserDataKv } from '../users/userData.js';
 import {
   DEFAULT_PASSWORD_POLICY, PASSWORD_MAX_BYTES, parsePasswordPolicy, passwordViolation,
   type PasswordPolicy, type PasswordRule,
@@ -27,6 +29,8 @@ import {
 import type { UserRole } from './types.js';
 
 export const OWNER_RECORD_KEY = `user:${DEFAULT_OWNER_ID}`;
+/** The profile record (D46), versioned. Not sealed: it holds nothing that grants anything. */
+export const profileKey = (userId: string): string => `user:${userId}:profile`;
 /** The sealed password policy (passwordPolicy.ts). Missing means the defaults. */
 export const PASSWORD_POLICY_KEY = 'user:policy:password';
 export const USERNAME_PATTERN = /^[a-z0-9][a-z0-9._-]{0,31}$/;
@@ -174,7 +178,7 @@ export interface ValkeyUserStoreOptions {
   onPolicyTampered?: () => void;
 }
 
-export class ValkeyUserStore implements UserStore {
+export class ValkeyUserStore implements UserStore, UserProfiles {
   private readonly redis: () => Redis;
   private readonly now: () => number;
   private readonly identityKeyFile: string;
@@ -394,6 +398,75 @@ export class ValkeyUserStore implements UserStore {
       });
     } catch { /* the recovery itself succeeded */ }
     return { ok: true, user: accountOf(user), recordTrusted: !!trusted, sessionsRevoked };
+  }
+
+  // ── user and profile (D46) ───────────────────────────────────────────────
+
+  /** The account, if `userId` is the (only, alpha) account. Reuses `getOwner`, which strips the hash. */
+  async getUser(userId: string): Promise<UserAccount | null> {
+    const owner = await this.getOwner();
+    return owner && owner.id === userId ? owner : null;
+  }
+
+  /** The KV view of the raw connection, for the preferences that back profile fields. */
+  private prefsKv(): Pick<UserDataKv, 'get' | 'set'> {
+    const r = this.redis();
+    return {
+      get: async <T>(ns: string, key: string) => {
+        const raw = await r.get(`${ns}:${key}`);
+        if (raw === null) return null;
+        try { return JSON.parse(raw) as { value: T; updatedAt: number }; } catch { return null; }
+      },
+      set: async <T>(ns: string, key: string, value: T) => {
+        const entry = { value, updatedAt: this.now() };
+        await r.set(`${ns}:${key}`, JSON.stringify(entry));
+        return entry;
+      },
+    };
+  }
+
+  private async storedProfile(userId: string): Promise<Record<string, unknown>> {
+    try {
+      const o = JSON.parse((await this.redis().get(profileKey(userId))) ?? 'null') as Record<string, unknown> | null;
+      return o && o['v'] === 1 ? o : {};
+    } catch {
+      return {};
+    }
+  }
+
+  async getProfile(userId: string): Promise<UserProfile | null> {
+    if (!(await this.getUser(userId))) return null;
+    const stored = await this.storedProfile(userId);
+    const out: UserProfile = {};
+    for (const name of PROFILE_FIELD_NAMES) {
+      const field = PROFILE_FIELDS[name] as { pref?: 'locale' };
+      const value = field.pref
+        ? (await readUserPref<unknown>(this.prefsKv(), userId, field.pref))?.value
+        : stored[name];
+      // A stored value that no longer validates (hand-edited, older rules) is left out.
+      if (typeof value === 'string' && PROFILE_FIELDS[name].validate(value) === null) out[name] = value;
+    }
+    return out;
+  }
+
+  async updateProfile(userId: string, patch: { set: UserProfile; clear: readonly ProfileFieldName[] }): Promise<UserProfile | null> {
+    if (!(await this.getUser(userId))) return null;
+    const stored = await this.storedProfile(userId);
+    const next: Record<string, unknown> = { ...stored, v: 1 };
+    let recordChanged = false;
+    for (const name of [...Object.keys(patch.set) as ProfileFieldName[], ...patch.clear]) {
+      const value = patch.set[name] ?? null;
+      const field = PROFILE_FIELDS[name] as { pref?: 'locale' };
+      if (field.pref) {
+        if (value !== null) await this.prefsKv().set(userPrefsNamespace(userId), field.pref, value);
+        else await this.redis().del(`${userPrefsNamespace(userId)}:${field.pref}`);
+        continue;
+      }
+      if (value === null) delete next[name]; else next[name] = value;
+      recordChanged = true;
+    }
+    if (recordChanged) await this.redis().set(profileKey(userId), JSON.stringify(next));
+    return this.getProfile(userId);
   }
 
   // ── password policy ───────────────────────────────────────────────────────

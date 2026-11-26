@@ -1,8 +1,10 @@
 import type { APIRoute } from 'astro';
 import { getAppManager } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
-import { auditOwner, ownerAction } from '../../../../lib/approvals/admin.ts';
+import { auditOwner, liveOwnerActionDeps, ownerAction } from '../../../../lib/approvals/admin.ts';
 import { authenticate } from '../../../../lib/auth.ts';
+import { liveApprovalDeps } from '../../../../lib/approvals/service.ts';
+import { liveAppSourceDeps, mountAppVolume } from '../../../../lib/appSource.ts';
 import { isDeveloperMode } from '../../../../lib/systemMode.ts';
 
 /** The System Terminal: the only app the AuraOS checkout is ever mounted into (D60). */
@@ -13,6 +15,10 @@ const SYSTEM_TERMINAL = 'com.aura.terminal';
  *
  *   GET  → { capable, reason?, mounts[] }      (?includeSidecars=1 → + sidecarMounts[])
  *   POST → { targetAppId, mode?: 'ro'|'rw', data?: boolean } → { ok, mount }
+ *          { targetAppId, kind: 'patches' }            the installation's patch repo
+ *          { targetAppId, kind: 'work', n?, new? }     a patch workspace of this user
+ *          → { ok, mount, installationId, path, created, n? } (Track P, lib/appSource.ts
+ *          `mountAppVolume`; always writable; `targetAppId` may also be the app's name)
  *   POST { kind: 'workspace' } → `aura mount workspace` (D60): /workspace,
  *        read-write, at /mnt/aura/workspace of the CALLING System Terminal
  *        instance, by its own token. Developer Mode only; the owner approves
@@ -50,21 +56,22 @@ export const POST: APIRoute = async (ctx) => {
   const instance = mgr.getInstance(instanceId);
   if (!instance) return errorResponse(`Instance not found: ${instanceId}`, 404);
 
-  if (request.headers.get('content-type')?.includes('json')) {
-    const peek = await request.clone().json().catch(() => null) as { kind?: unknown } | null;
-    if (peek?.kind !== undefined) {
-      if (peek.kind !== 'workspace') return errorResponse(`kind must be 'workspace'`, 400);
-      return mountWorkspace(ctx, instanceId, instance.sandbox);
-    }
-  }
-
   // The CONSUMER app (from the instance record, never the body) must hold
   // `apps.mount`: the route access manifest's `targetPermissions`, which the
   // middleware applies in every access mode (routeManifest.ts).
 
-  let body: { targetAppId?: string; mode?: string; data?: boolean };
-  try { body = await request.json(); }
+  let body: { targetAppId?: string; mode?: string; data?: boolean; kind?: string; n?: unknown; new?: unknown };
+  try { body = await request.clone().json(); }
   catch { return errorResponse('Body must be JSON', 400); }
+
+  if (body.kind === 'workspace') return mountWorkspace(ctx, instanceId, instance.sandbox);
+  if (body.kind === 'patches' || body.kind === 'work') {
+    const deps = liveAppSourceDeps((r) => authenticate(r), liveApprovalDeps(), liveOwnerActionDeps());
+    return mountAppVolume(request, instanceId, deps, { app: body.targetAppId, kind: body.kind, n: body.n, new: body.new });
+  }
+  if (body.kind !== undefined && body.kind !== 'source' && body.kind !== 'data') {
+    return errorResponse(`kind must be 'source', 'data', 'patches', 'work' or 'workspace'`, 400);
+  }
 
   const targetAppId = body.targetAppId;
   if (!targetAppId) return errorResponse('targetAppId is required', 400);
@@ -86,7 +93,7 @@ export const POST: APIRoute = async (ctx) => {
     const mount = await mgr.mounts.add(instanceId, {
       targetAppId,
       mode: body.mode === 'rw' ? 'rw' : 'ro',
-      data: body.data === true,
+      data: body.data === true || body.kind === 'data',
     });
     return jsonResponse({ ok: true, mount });
   } catch (err) {

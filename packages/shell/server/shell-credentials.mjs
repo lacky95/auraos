@@ -8,14 +8,19 @@
  *   - bearers starting `aura-sess1.`, or the retired `aura-admin1.` (D50: worthless, still never forwarded)
  *   - the internal service label
  *   - the gateway's signed identity claim, and the owner SSR claim (D45)
+ *   - the lifecycle token header: only the kernel's runner sends it, straight
+ *     to the app, so no caller can present one through the shell
+ *   - the host operator's one-time ticket (`X-Aura-Operator`, lib/access/identify.ts)
  *
  * App cookies and app-owned auth pass through byte for byte. Instance tokens
  * and API keys are still forwarded and only counted: Phase 3 decides them.
  */
-import { GATEWAY_IDENTITY_HEADER, OWNER_SSR_HEADER } from '@aura/core/host-rules';
+import { GATEWAY_IDENTITY_HEADER, LIFECYCLE_TOKEN_HEADER, OWNER_SSR_HEADER } from '@aura/core/host-rules';
 import { INTERNAL_SERVICE_HEADER, SESSION_COOKIES, countCredential } from './access-bridge.mjs';
 
-const SHELL_ONLY_HEADERS = new Set([INTERNAL_SERVICE_HEADER, GATEWAY_IDENTITY_HEADER, OWNER_SSR_HEADER]);
+/** lib/access/identify.ts OPERATOR_HEADER: the shell claims the ticket; an app never sees it. */
+const OPERATOR_HEADER = 'x-aura-operator';
+const SHELL_ONLY_HEADERS = new Set([INTERNAL_SERVICE_HEADER, GATEWAY_IDENTITY_HEADER, OWNER_SSR_HEADER, LIFECYCLE_TOKEN_HEADER, OPERATOR_HEADER]);
 const SHELL_BEARER = /(?:^|,)\s*Bearer\s+aura-(sess1|admin1)\./i;
 const INSTANCE_BEARER = /(?:^|,)\s*Bearer\s+aura1\./i;
 const API_KEY_BEARER = /(?:^|,)\s*Bearer\s+aura_k1_/i;

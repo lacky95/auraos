@@ -26,7 +26,7 @@ function access(opts: {
   const binding = 'binding' in opts ? opts.binding : 'life-2';
   const lives = opts.lives ?? { 'com.aura.terminal-2': 'life-2' };
   return createTerminalAccess({
-    scopeOf: async (appId: string) => scopes[appId],
+    systemCopy: async (appId: string) => scopes[appId] === 'system',
     authorize: async (appId: string, permission: string) => (grants[appId] ?? []).includes(permission),
     sessionGrant: async (appId: string, sessionId: string) => ((sessions[appId] ?? []).includes(sessionId)
       ? { ...(binding ? { binding } : {}) } : null),

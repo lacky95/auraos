@@ -2,6 +2,8 @@
 import ViewportSettingsDialog from './ViewportSettingsDialog.tsx';
 import AboutDialog from './AboutDialog.tsx';
 import { sharedKv } from '../../lib/sharedKv';
+import { readUserPrefValue } from '@aura/core';
+import { localOwnerId, requestUserId } from '../../lib/userContext';
 import Icon from '../ui/Icon.astro';
 
 // SSR-resolve clock format + locale from the OS KV so the first paint matches
@@ -18,7 +20,8 @@ let initialTimeZone: string = '';
   try {
     const [cf, lc, tz] = await Promise.all([
       kv.getValue<'12h' | '24h'>('os', 'clockFormat'),
-      kv.getValue<string>('os', 'locale'),
+      // The signed-in user's locale (D46), else the shared one from before the move.
+      requestUserId(Astro.request).then((u) => readUserPrefValue<string>(kv, u ?? localOwnerId(), 'locale')),
       kv.getValue<string>('os', 'timeZone'),
     ]);
     if (cf === '12h' || cf === '24h') initialClockFormat = cf;

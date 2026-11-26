@@ -35,5 +35,10 @@ export function liveRouteDeps(): ApprovalRouteDeps {
       return check.reason === 'rate-limited' ? 'rate-limited' : 'invalid';
     },
     rateKey: (ctx) => clientRateKey(ctx, process.env),
+    // D56: the secret typed into the dialog goes straight to the owner's vault.
+    storeCredential: async (userId, ask, value, record) => {
+      const { liveCredentialDeps, storeApprovedCredential } = await import('../credentials.ts');
+      await storeApprovedCredential(liveCredentialDeps(), userId, ask, value, record);
+    },
   };
 }

@@ -18,7 +18,7 @@
  * from their own UI to pop manually.
  */
 
-import { appHostRuntime, bodylessMutationHeaders, osBase } from './os-auth.js';
+import { appHostRuntime, bodylessMutationHeaders, osAuthHeaders, osBase } from './os-auth.js';
 import type { OsClient } from './OsClient.js';
 
 export interface NavigateOptions {
@@ -67,7 +67,7 @@ export class ActivityApi {
   async back(): Promise<void> {
     const id = this.getActivityId();
     if (!id) return;
-    await fetch(`${this.osApiBase()}/api/activities/${encodeURIComponent(id)}/back`, {
+    await this.send(id, '/back', {
       method: 'POST',
       headers: bodylessMutationHeaders(),
     }).catch(() => undefined);
@@ -82,7 +82,7 @@ export class ActivityApi {
   async backTo(index: number): Promise<void> {
     const id = this.getActivityId();
     if (!id) return;
-    await fetch(`${this.osApiBase()}/api/activities/${encodeURIComponent(id)}/back-to`, {
+    await this.send(id, '/back-to', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ index }),
@@ -100,7 +100,7 @@ export class ActivityApi {
   async setBreadcrumb(mode: 'os' | 'off'): Promise<void> {
     const id = this.getActivityId();
     if (!id) return;
-    await fetch(`${this.osApiBase()}/api/activities/${encodeURIComponent(id)}/breadcrumb`, {
+    await this.send(id, '/breadcrumb', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ mode }),
@@ -140,7 +140,7 @@ export class ActivityApi {
   async saveState(state: unknown, activityId?: string): Promise<boolean> {
     const id = activityId ?? this.getActivityId();
     if (!id) return false;
-    const res = await fetch(`${this.osApiBase()}/api/activities/${encodeURIComponent(id)}/state`, {
+    const res = await this.send(id, '/state', {
       method:  'PUT',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ state }),
@@ -152,7 +152,7 @@ export class ActivityApi {
   async savedState<T = unknown>(activityId?: string): Promise<T | null> {
     const id = activityId ?? this.getActivityId();
     if (!id) return null;
-    const res = await fetch(`${this.osApiBase()}/api/activities/${encodeURIComponent(id)}/state`).catch(() => null);
+    const res = await this.send(id, '/state').catch(() => null);
     if (!res?.ok) return null;
     const body = await res.json().catch(() => null) as { state?: T } | null;
     return body?.state ?? null;
@@ -163,7 +163,7 @@ export class ActivityApi {
   private async post(path: string, opts: NavigateOptions): Promise<boolean> {
     const id = this.getActivityId();
     if (!id) return false;
-    const res = await fetch(`${this.osApiBase()}/api/activities/${encodeURIComponent(id)}/navigate`, {
+    const res = await this.send(id, '/navigate', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ path, ...opts }),
@@ -171,7 +171,9 @@ export class ActivityApi {
     return !!res?.ok;
   }
 
-  private osApiBase(): string {
-    return osBase();
+  /** One activity call: the gateway in a page, OS_API_BASE plus the instance token on a server. */
+  private send(id: string, suffix: string, init: RequestInit = {}): Promise<Response> {
+    const url = `${osBase()}/api/activities/${encodeURIComponent(id)}${suffix}`;
+    return fetch(url, { ...init, headers: { ...(init.headers as Record<string, string> | undefined), ...osAuthHeaders(url) } });
   }
 }

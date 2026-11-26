@@ -45,6 +45,16 @@ async function ensureAppManager() {
     // skip this entirely. Idempotent.
     await bootstrapKv({ dataDir });
 
+    // D47: this Aura's permanent systemId and key pair, created on first
+    // boot. Never blocks boot: a broken system.json is reported and the
+    // identity stays absent until the operator fixes it.
+    try {
+      const { systemId } = core.ensureSystemIdentity(dataDir);
+      console.log(`[middleware] system identity ${systemId}`);
+    } catch (err) {
+      console.warn(`[middleware] system identity unavailable: ${(err as Error).message}`);
+    }
+
     // D50: the shared admin credential is retired. Its leftover sessions go;
     // admin.key stays on disk, unused, until a later release removes it.
     // Never blocks boot.
