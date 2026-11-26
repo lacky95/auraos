@@ -1,6 +1,7 @@
 ---
 import AuthLayout from '../layouts/AuthLayout.astro';
 import { authPageHeaders, loginReturnPath } from '../lib/authSurface.js';
+import LoginKeyboard from '../components/shell/keyboard/LoginKeyboard.astro';
 
 const gate = authPageHeaders();
 // The page the desktop sent the browser here from (desktopSignIn); only a path on this origin.
@@ -17,6 +18,7 @@ for (const [name, value] of Object.entries(gate.headers)) Astro.response.headers
     <p class="error" role="alert"></p>
   </form>
   <p class="alt"><a href="/setup">Forgot your password?</a></p>
+  <LoginKeyboard nonce={gate.nonce} />
   <script is:inline nonce={gate.nonce}>
     (() => {
       const form = document.getElementById('login');
