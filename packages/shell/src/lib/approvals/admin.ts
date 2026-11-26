@@ -81,6 +81,15 @@ export async function ownerAction(
   if (principal instanceof Response) return principal;
   if (principal.kind === 'operator') return { by: core.operatorAttribution(), detail: {} };
   if (principal.kind === 'anonymous') return json({ error: 'unauthenticated' }, 401);
+  // D85 A1: another Aura's principal manages nothing here, whatever its role.
+  if (core.isForeignPrincipal(principal as { systemId?: unknown })) return json({ error: 'foreign-system' }, 403);
+  // I.2 §3: a member is never the owner, and its escalation is refused, not routed to the
+  // owner's approval (approval routing per user is post-alpha, M1): its own login, and an
+  // app instance acting for it (e.g. the member's own System Terminal, C4).
+  if (principal.kind === 'user' && principal.role !== 'owner') return json({ error: 'owner-required' }, 403);
+  if (principal.kind === 'instance' && principal.userId !== undefined && principal.userId !== core.DEFAULT_OWNER_ID) {
+    return json({ error: 'owner-required' }, 403);
+  }
 
   if (principal.kind === 'user' && !principal.through && req.confirmed) {
     return json({ error: 'needs-confirmation', message: req.confirmed.where }, 403);

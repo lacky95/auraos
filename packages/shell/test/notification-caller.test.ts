@@ -30,7 +30,8 @@ const req = (headers: Record<string, string> = {}) => new Request('http://aura-s
 test('valid Bearer → verified instance caller (appId from the instance record)', async () => {
   const token = tokens.mint('com.example.notes-1').token;
   const c = await authenticate(req({ authorization: `Bearer ${token}`, 'x-aura-instance-id': 'com.other-1' }), deps);
-  assert.deepEqual(c, { kind: 'instance', appId: 'com.example.notes', instanceId: 'com.example.notes-1', verification: 'verified', systemId: SYS });
+  // D85 A9: the principal names this spawn (its lifetime); the rest is the instance.
+  assert.deepEqual(c, { kind: 'instance', appId: 'com.example.notes', instanceId: 'com.example.notes-1', verification: 'verified', systemId: SYS, lifetime: tokens.lifetimeId('com.example.notes-1') });
 });
 
 test('sidecar token keeps the sidecar name', async () => {

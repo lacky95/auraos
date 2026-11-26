@@ -279,7 +279,7 @@ function loginServices(state: { revoked?: boolean; disabled?: boolean } = {}) {
         ? { sessionId: 'f'.repeat(32), userId: 'default', method: 'password' as const, expiresAt: Date.now() + 60_000 }
         : null),
     },
-    users: { getOwner: async () => ({ ...OWNER, disabled: !!state.disabled }) },
+    users: { getUser: async (id: string) => (id === OWNER.id ? { ...OWNER, disabled: !!state.disabled } : null) },
   } as never;
 }
 
@@ -326,7 +326,7 @@ test('identity: a live login cookie or session bearer is the owner; expired or r
 test('identity: a verified App Host session is the owner acting through that app', async () => {
   const facts = {
     headers: { cookie: 'aura_app=sealed', authorization: 'Bearer app-own-token' }, method: 'GET', url: '/',
-    appHost: { appId: 'com.a.app', instanceId: 'com.a.app-1', userId: 'default', sid: 's'.repeat(32) },
+    appHost: { appId: 'com.a.app', instanceId: 'com.a.app-1', userId: 'default', sid: 's'.repeat(32), role: 'owner' },
   };
   const { bridge } = createObserver({ deps: deps(), report: new AccessReport({ redis: () => null }) });
   const v = await bridge.identify(facts);
@@ -337,6 +337,11 @@ test('identity: a verified App Host session is the owner acting through that app
     },
     via: 'app-host',
   });
+  // C2: the role is the one the live check read from the record; without one, a member (fail closed).
+  const { role: _role, ...noRole } = facts.appHost;
+  const roleOf = (v: Awaited<ReturnType<typeof bridge.identify>>) => (v?.principal as { role?: string } | undefined)?.role;
+  assert.equal(roleOf(await bridge.identify({ ...facts, appHost: noRole })), 'member');
+  assert.equal(roleOf(await bridge.identify({ ...facts, appHost: { ...noRole, role: 'admin' } })), 'member');
   // Anything else under that name is not a session the App Host verified.
   const forged = await bridge.identify({ ...facts, appHost: { appId: 'com.a.app', userId: 7 } });
   assert.notEqual(forged?.principal.kind, 'user');
@@ -348,7 +353,7 @@ test('identity: with Valkey down, keys and sessions are `unverified` and not loo
   const services = {
     apiKeys: { peek: async () => { calls += 1; return null; } },
     loginSessions: { verify: async () => { calls += 1; return null; } },
-    users: { getOwner: async () => { calls += 1; return null; } },
+    users: { getUser: async () => { calls += 1; return null; } },
   };
   for (const headers of [{ authorization: 'Bearer aura_k1_x' }, { authorization: 'Bearer aura-sess1.a.b' }] as Record<string, string>[]) {
     const seen = await identityOf(headers, deps({ services: () => services as never, redisReady: () => false }));

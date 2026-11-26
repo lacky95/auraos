@@ -109,7 +109,8 @@ export function ownerUiCovers(appId, path) {
 /**
  * D45, the one scope decision: the owner acts through this app on this path.
  * An allowlisted app, a path its entry covers, its active `system`
- * installation, and a live owner session. The gateway signs an owner claim
+ * installation, and a live session of the owner (the record's role, I.2: a
+ * member's session never acts as the owner). The gateway signs an owner claim
  * only when this holds, and the shell checks it again (identify.ts
  * `gatewayOwner`, used by the route manifest check and `authenticate()`).
  * Throws when the registry can't be read; callers fail closed.
@@ -117,7 +118,9 @@ export function ownerUiCovers(appId, path) {
 export async function ownerUiActs({ appId, installationId, sid, userId, path }, { registry, sessionLive }) {
   if (!ownerUiCovers(appId, path)) return false;
   if (!(await isOwnerUiInstallation(registry, { appId, installationId }))) return false;
-  return typeof sid === 'string' && !!sid && !!(await sessionLive(sid, userId));
+  if (typeof sid !== 'string' || !sid) return false;
+  const live = await sessionLive(sid, userId);
+  return !!live && live.role === 'owner';
 }
 
 export function gatewayKey() {

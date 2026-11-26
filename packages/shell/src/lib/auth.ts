@@ -7,7 +7,7 @@ import {
   bearerToken, resolvePrincipal, type CallerPrincipal, type CredentialRejection, type GatewayOwnerDeps, type PrincipalDeps,
   type ResolvedPrincipal,
 } from './access/identify.js';
-import { coreAuthServices, ownerSessionOf, sessionCookieToken } from './authSurface.js';
+import { coreAuthServices, userSessionOf, sessionCookieToken } from './authSurface.js';
 
 /**
  * Central request authentication for the shell API (identity only — what a
@@ -45,7 +45,7 @@ export interface AuthDeps {
   /** App Host services for the D45 owner check; loaded when absent. */
   ownerServices?: GatewayOwnerDeps['services'];
   apiKeys: { verify(key: string): Promise<{ id: string; name: string; scopes: string[] } | null> };
-  /** The owner's login sessions. Absent: a login cookie is not read, a login bearer is refused. */
+  /** The users' login sessions. Absent: a login cookie is not read, a login bearer is refused. */
   login?: PrincipalDeps['login'];
   /** The host operator's one-time tickets. Absent: an operator header is not verified. */
   operatorTickets?: PrincipalDeps['operatorTickets'];
@@ -55,10 +55,10 @@ export interface AuthDeps {
 const coreLogin: NonNullable<PrincipalDeps['login']> = {
   // Called, not referenced: authSurface imports this module, so its exports are not ready at load.
   cookieToken: (request) => sessionCookieToken(request),
-  ownerSession: async (token) => {
+  userSession: async (token) => {
     const svc = coreAuthServices();
-    const found = svc ? await ownerSessionOf(token, svc) : null;
-    return found ? { sessionId: found.session.sessionId, userId: found.user.id } : null;
+    const found = svc ? await userSessionOf(token, svc) : null;
+    return found ? { sessionId: found.session.sessionId, userId: found.user.id, role: found.user.role } : null;
   },
 };
 

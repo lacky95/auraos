@@ -71,7 +71,7 @@ const registry = {
     return installations[id] ?? null;
   },
 };
-const svc = { registry, sessionLive: async (sid: string) => liveSessions.has(sid) };
+const svc = { registry, sessionLive: async (sid: string) => (liveSessions.has(sid) ? ({ role: 'owner' as const }) : false as const) };
 const auth = createAppHostAuth({ secret: Buffer.alloc(32, 9) });
 const appsList = async () => [...new Set(Object.values(APPS).map(([appId]) => appId))].map((appId) => ({
   manifest: { id: appId, name: appId, componentType: 'activity', hosts: [] },

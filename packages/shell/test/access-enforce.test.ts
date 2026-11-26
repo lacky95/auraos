@@ -36,12 +36,12 @@ const operator: AccessPrincipal = { kind: 'operator', verification: 'verified' }
 const owner: AccessPrincipal = { kind: 'user', userId: 'default', role: 'owner', sessionId: 's', verification: 'verified' };
 const ownerThrough = (appId: string): AccessPrincipal => ({ ...owner, through: { appId, instanceId: `${appId}-1` } } as AccessPrincipal);
 
-const instances: Record<string, { appId: string; instanceId: string; sandbox?: string }> = {
+const instances: Record<string, { appId: string; instanceId: string; sandbox?: string; owner?: string }> = {
   'com.acme.notes-1': { appId: 'com.acme.notes', instanceId: 'com.acme.notes-1', sandbox: 'container' },
   'com.other.app-1': { appId: 'com.other.app', instanceId: 'com.other.app-1', sandbox: 'container' },
-  'com.aura.terminal-1': { appId: 'com.aura.terminal', instanceId: 'com.aura.terminal-1', sandbox: 'container' },
+  'com.aura.terminal-1': { appId: 'com.aura.terminal', instanceId: 'com.aura.terminal-1', sandbox: 'container', owner: 'default' },
   'com.aura.settings-1': { appId: 'com.aura.settings', instanceId: 'com.aura.settings-1', sandbox: 'container' },
-  'com.aura.aurashelld-1': { appId: 'com.aura.aurashelld', instanceId: 'com.aura.aurashelld-1', sandbox: 'container' },
+  'com.aura.aurashelld-1': { appId: 'com.aura.aurashelld', instanceId: 'com.aura.aurashelld-1', sandbox: 'container', owner: 'default' },
 };
 const scopes: Record<string, string> = {
   'com.acme.notes': 'user', 'com.other.app': 'user', 'com.aura.terminal': 'system', 'com.aura.settings': 'system',

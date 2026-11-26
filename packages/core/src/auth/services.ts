@@ -19,10 +19,11 @@ import { defaultIdentityKeyFile } from './identityKey.js';
 import { LoginSessionStore } from './LoginSessionStore.js';
 import { defaultSetupTicketDir, FileSetupTickets } from './setupTickets.js';
 import { ValkeyUserStore } from './ValkeyUserStore.js';
+import { LinuxIdentityStore, defaultHighWaterMarkFile } from '../identity/LinuxIdentityStore.js';
 import { SECURITY_AUDIT_ACTIONS, SecurityPolicyStore } from '../security/SecurityPolicyStore.js';
 
 /** Bump when the shape changes, so a singleton made by an older module copy is replaced. */
-export const AUTH_SERVICES_VERSION = 9;
+export const AUTH_SERVICES_VERSION = 10;
 
 export interface AuthServices {
   version: number;
@@ -32,8 +33,10 @@ export interface AuthServices {
   authorizer: Authorizer;
   /** Phase 5: lock state per shell client (tab). Not a credential. */
   clientSessions: ClientSessionStore;
-  /** The owner account. */
+  /** The user accounts: the owner and (5-main) members (I.2). */
   users: ValkeyUserStore;
+  /** The Linux identity registry (stream I, D70/D84): uid/gid per user and per installation. */
+  identity: LinuxIdentityStore;
   /** The one session store: the owner's password sessions. */
   loginSessions: LoginSessionStore;
   /** One-time setup, reset and operator codes. */
@@ -65,11 +68,13 @@ export function getAuthServices(): AuthServices {
     declared: (appId) => registry()?.getById(appId)?.permissions,
     appScope: (appId) => registry()?.getScopeId(appId),
   });
+  const identity = new LinuxIdentityStore({ redis, hwmFile: defaultHighWaterMarkFile() });
   const users = new ValkeyUserStore({
     identityKeyFile: defaultIdentityKeyFile(),
     redis,
+    identity,
     onTampered: () => {
-      console.warn('[auth] the owner record failed its integrity check');
+      console.warn('[auth] a user record failed its integrity check');
       void audit.record({ by: { kind: 'system' }, action: IDENTITY_AUDIT_ACTIONS.recordTampered, outcome: 'failed' }).catch(() => undefined);
     },
     onIdentityKeyError: (err) => {
@@ -84,19 +89,21 @@ export function getAuthServices(): AuthServices {
     },
     onOwnerRecovered: async (e) => {
       await audit.record({
-        by: operatorAttribution(), action: IDENTITY_AUDIT_ACTIONS.ownerRecovered, target: `user:${e.username}`,
+        by: operatorAttribution(), action: IDENTITY_AUDIT_ACTIONS.ownerRecovered, target: `user:${e.userId}`,
         outcome: e.sessionsRevoked === null ? 'failed' : 'ok',
-        detail: { recordTrusted: e.recordTrusted, usernameSource: e.usernameSource, sessionsRevoked: e.sessionsRevoked },
+        detail: { username: e.username, recordTrusted: e.recordTrusted, usernameSource: e.usernameSource, sessionsRevoked: e.sessionsRevoked },
       });
     },
   });
   // The CLI creates tickets without Valkey, so the shell audits them from their event files.
   const auditCreatedTickets = async () => {
     await setupTickets.drainCreatedEvents(async (e) => {
+      // By id (C6): the CLI names a reset's account by username, resolved here; the name stays in detail.
+      const userId = e.userId ?? (e.username ? await users.userIdOf(e.username).catch(() => null) : null);
       await audit.record({
         by: operatorAttribution(), action: IDENTITY_AUDIT_ACTIONS.ticketCreated,
-        ...(e.username ? { target: `user:${e.username}` } : {}),
-        detail: { purpose: e.purpose, createdAt: e.at },
+        ...(userId ? { target: `user:${userId}` } : {}),
+        detail: { purpose: e.purpose, createdAt: e.at, ...(e.username ? { username: e.username } : {}) },
       });
     });
   };
@@ -104,7 +111,7 @@ export function getAuthServices(): AuthServices {
   const svc: AuthServices = {
     version: AUTH_SERVICES_VERSION, grants, apiKeys: new ApiKeyStore(redis), audit, authorizer,
     clientSessions: new ClientSessionStore({ redis }),
-    users, loginSessions, setupTickets,
+    users, identity, loginSessions, setupTickets,
     approvals: new ValkeyApprovalStore({ redis }),
     securityPolicy: new SecurityPolicyStore({
       identityKeyFile: defaultIdentityKeyFile(),
@@ -117,6 +124,8 @@ export function getAuthServices(): AuthServices {
   };
   g[GLOBAL_KEY] = svc;
   void auditCreatedTickets().catch((err) => console.warn(`[auth] ticket audit failed: ${(err as Error).message}`));
+  // I.2 / stream I: v1 → v2 owner record, the username index, the accounts' Linux identities (once, idempotent).
+  void migrateIdentityRecords(svc);
   // Phase 6 rename: grants of notifications.desktopModal → notifications.systemModal (once, idempotent).
   void grants.migrateLegacy().then(async (moved) => {
     for (const m of moved) {
@@ -157,6 +166,32 @@ export async function retireSharedAdminCredential(
     console.log(`[auth] ${keyFile} is no longer used: the owner account and the host operator replace the shared admin credential (D50). It is left in place and removed in a later release.`);
   }
   return { sessionsRevoked, keyFileLeft };
+}
+
+/**
+ * I.2 and stream I boot step (5-pre2): re-seal the v1 owner record as v2,
+ * write the username index, and give every enabled account its Linux
+ * identity (the owner is 1000). Invisible to the owner: nothing reads the
+ * identities yet. Idempotent; never throws (a failure is logged and retried
+ * at the next boot).
+ */
+export async function migrateIdentityRecords(
+  svc: Pick<AuthServices, 'users' | 'identity' | 'audit'> = getAuthServices(),
+): Promise<void> {
+  try {
+    const m = await svc.users.migrateRecords();
+    if (m.resealed) {
+      console.log('[auth] the owner record is now v2 (I.2)');
+      await svc.audit.record({ by: { kind: 'system' }, action: 'auth.record-migrated', target: 'user:default', detail: { to: 2 } }).catch(() => undefined);
+    }
+    if (m.owner === 'untrusted') console.warn('[auth] the owner record failed its integrity check; left for `aura user reset-password`');
+    if (m.conflicts) console.warn(`[auth] ${m.conflicts} username index entr${m.conflicts === 1 ? 'y names' : 'ies name'} another account`);
+    for (const u of await svc.users.listUsers()) {
+      if (!u.disabled) await svc.identity.ensureUser(u.id);
+    }
+  } catch (err) {
+    console.warn(`[auth] identity record migration failed: ${(err as Error).message}`);
+  }
 }
 
 /** Tests / soft-restart. */

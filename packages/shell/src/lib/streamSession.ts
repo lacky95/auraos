@@ -29,7 +29,7 @@ export interface StreamSessionDeps {
 const liveDeps: StreamSessionDeps = {
   sessionLive: async (sid, userId) => {
     const svc = await loadAppHostServices();
-    return !!svc && await svc.sessionLive(sid, userId);
+    return !!svc && !!(await svc.sessionLive(sid, userId));
   },
 };
 

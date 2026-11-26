@@ -34,6 +34,8 @@ const TICKET_FILE_RE = /^[0-9a-f]{64}\.json$/;
 const PURPOSES: ReadonlySet<string> = new Set<SetupTicketPurpose>(['setup', 'reset', 'operator']);
 /** `approve:apr_…`, `nexus.install:<sha256>`: printable, no spaces. */
 const SUBJECT_RE = /^[A-Za-z0-9._:-]{1,200}$/;
+/** A local user id (the owner's `default`, or a generated `u…` id). */
+const USER_ID_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
 /**
  * The subject of an operator ticket that identifies one API request of the
@@ -48,6 +50,7 @@ export interface SetupTicketEvent {
   at: number;
   purpose: SetupTicketPurpose;
   username?: string;
+  userId?: string;
   subject?: string;
 }
 
@@ -81,10 +84,12 @@ function readTicket(file: string): SetupTicket | null {
     if (typeof t.sha256 !== 'string' || !SHA256_RE.test(t.sha256) || typeof t.expiresAt !== 'number') return null;
     if (typeof t.purpose !== 'string' || !PURPOSES.has(t.purpose)) return null;
     if (t.username !== undefined && typeof t.username !== 'string') return null;
+    if (t.userId !== undefined && (typeof t.userId !== 'string' || !USER_ID_RE.test(t.userId))) return null;
     if (t.subject !== undefined && (typeof t.subject !== 'string' || !SUBJECT_RE.test(t.subject))) return null;
     return {
       sha256: t.sha256, purpose: t.purpose, expiresAt: t.expiresAt,
       ...(t.username !== undefined ? { username: t.username } : {}),
+      ...(t.userId !== undefined ? { userId: t.userId } : {}),
       ...(t.subject !== undefined ? { subject: t.subject } : {}),
     };
   } catch {
@@ -99,12 +104,13 @@ function readTicket(file: string): SetupTicket | null {
  */
 export function createSetupTicket(
   dataDir: string,
-  input: { purpose: SetupTicketPurpose; username?: string; subject?: string },
+  input: { purpose: SetupTicketPurpose; username?: string; userId?: string; subject?: string },
   now: () => number = Date.now,
 ): { code: string; expiresAt: number } {
   if (!PURPOSES.has(input.purpose)) throw new Error('invalid ticket purpose');
   if ((input.purpose === 'operator') !== (input.subject !== undefined)) throw new Error('an operator ticket, and only one, names a subject');
   if (input.subject !== undefined && !SUBJECT_RE.test(input.subject)) throw new Error('invalid ticket subject');
+  if (input.userId !== undefined && (input.purpose !== 'reset' || !USER_ID_RE.test(input.userId))) throw new Error('only a reset ticket is bound to a user id');
   const dir = defaultSetupTicketDir(dataDir);
   mkdirSync(join(dir, 'events'), { recursive: true, mode: 0o700 });
 
@@ -120,9 +126,10 @@ export function createSetupTicket(
   const expiresAt = at + SETUP_TICKET_TTL_MS;
   const username = input.username !== undefined ? { username: input.username } : {};
   const subject = input.subject !== undefined ? { subject: input.subject } : {};
-  const ticket: SetupTicket = { sha256: hashCode(code), purpose: input.purpose, expiresAt, ...username, ...subject };
+  const userId = input.userId !== undefined ? { userId: input.userId } : {};
+  const ticket: SetupTicket = { sha256: hashCode(code), purpose: input.purpose, expiresAt, ...username, ...userId, ...subject };
   writePrivate(join(dir, `${ticket.sha256}.json`), ticket);
-  const event: SetupTicketEvent = { at, purpose: input.purpose, ...username, ...subject };
+  const event: SetupTicketEvent = { at, purpose: input.purpose, ...username, ...userId, ...subject };
   writePrivate(join(dir, 'events', `${at}-${randomBytes(4).toString('hex')}.json`), event);
   return { code: code.replace(/(.{5})(?=.)/g, '$1-'), expiresAt };
 }

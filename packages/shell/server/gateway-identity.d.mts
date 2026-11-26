@@ -27,7 +27,7 @@ export function ownerUiActs(
   ref: { appId: string; installationId: string; sid: string; userId: string; path: string },
   svc: {
     registry: InstallationReader | null | undefined;
-    sessionLive(sid: string, userId: string): Promise<boolean>;
+    sessionLive(sid: string, userId: string): Promise<false | { role: string }>;
   },
 ): Promise<boolean>;
 export function gatewayKey(): Buffer;

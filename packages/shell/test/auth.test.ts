@@ -30,7 +30,7 @@ const bearer = (t: string) => req({ authorization: `Bearer ${t}` });
 
 test('order: instance token → verified instance; API key → apiKey; a retired admin session → 401 (D50)', async () => {
   const inst = await authenticate(bearer(tokens.mint('com.example.notes-1').token), deps);
-  assert.deepEqual(inst, { kind: 'instance', appId: 'com.example.notes', instanceId: 'com.example.notes-1', verification: 'verified', systemId: SYS });
+  assert.deepEqual(inst, { kind: 'instance', appId: 'com.example.notes', instanceId: 'com.example.notes-1', verification: 'verified', systemId: SYS, lifetime: tokens.lifetimeId('com.example.notes-1') });
   const key = await authenticate(bearer(GOOD_KEY), deps);
   assert.deepEqual(key, { kind: 'apiKey', keyId: '0123456789abcdef', name: 'CI', scopes: ['system.notifications'], verification: 'verified' });
   const admin = await authenticate(bearer('aura-admin1.payload.sig'), deps);

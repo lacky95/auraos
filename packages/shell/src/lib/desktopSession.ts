@@ -37,6 +37,13 @@
  *     tab that the shell it talked to is gone and whether the restore of the
  *     new one is done, so it reloads onto the restored desktop exactly once.
  *
+ *   • Per user (C8, I.2): each user's snapshot and workspaces are their own
+ *     (`user/<id>/prefs`), holding only the instances that user owns (an
+ *     instance's server-side owner; one adopted without a label is the
+ *     owner's). The restore reopens every enabled user's desktop with that
+ *     user as the owner of what it starts. With only the owner, this is the
+ *     one desktop it always was.
+ *
  * Settings: `os/restoreSession` (false = off; default on). A planned restart
  * "without restoring activities" sets the one-shot `os/sessionRestoreSkip`.
  */
@@ -99,6 +106,8 @@ interface SessionGlobal {
   restored: boolean;
   bootId:   string;
   sweep:    MemberSweep | null;
+  /** Users this process wrote a snapshot for: their next one is written even when it is empty. */
+  users:    Set<string>;
 }
 interface MemberSweep {
   timer:     ReturnType<typeof setTimeout> | null;
@@ -109,8 +118,10 @@ interface MemberSweep {
 }
 const g = (): SessionGlobal => ((globalThis as { [G_KEY]?: SessionGlobal })[G_KEY] ??= {
   autosave: false, frozen: false, timer: null, writing: null, bound: false, restore: null,
-  restored: false, bootId: randomUUID(), sweep: null,
+  restored: false, bootId: randomUUID(), sweep: null, users: new Set(),
 });
+// A state made by an older module copy has no `users` yet.
+const writtenUsers = (): Set<string> => (g().users ??= new Set());
 // server.mjs reaches the signal shutdown through this (it loads the build, not this module).
 const SHUTDOWN_HOOK = Symbol.for('aura.shellShutdown');
 (globalThis as { [SHUTDOWN_HOOK]?: () => Promise<void> })[SHUTDOWN_HOOK] = () => shutdownForSignal();
@@ -123,17 +134,23 @@ async function withKv<T>(fn: (kv: ReturnType<typeof defaultKv>) => Promise<T>): 
 
 // ─── Snapshot ──────────────────────────────────────────────────────────────
 
-/** The current desktop, as it would be restored. */
-export async function buildSnapshot(reason: DesktopSnapshot['reason']): Promise<DesktopSnapshot> {
+/** The user an instance belongs to (C8): its server-side owner; one adopted without a label is the owner's. */
+export function instanceUser(inst: { owner?: string } | undefined): string {
+  return inst?.owner ?? localOwnerId();
+}
+
+/** One user's current desktop, as it would be restored: the instances that user owns. */
+export async function buildSnapshot(reason: DesktopSnapshot['reason'], userId: string = localOwnerId()): Promise<DesktopSnapshot> {
   const mgr = core.getAppManager();
   const members = new Set<string>();
   try {
-    const ws = await readWorkspaces();
+    const ws = await readWorkspaces(userId);
     if (ws?.workspaces) for (const m of allMembers(ws)) members.add(m);
   } catch { /* no workspaces: instance views unknown */ }
 
   const activities: SessionActivity[] = mgr.getAllActivities()
     .filter((a: AppActivity) => !mgr.getInstance(a.parentInstanceId)?.preview)
+    .filter((a: AppActivity) => instanceUser(mgr.getInstance(a.parentInstanceId) as { owner?: string } | undefined) === userId)
     .map((a: AppActivity) => ({
       activityId: a.activityId,
       parentInstanceId: a.parentInstanceId,
@@ -151,7 +168,27 @@ export async function buildSnapshot(reason: DesktopSnapshot['reason']): Promise<
     .sort((x, y) => x.createdAt.localeCompare(y.createdAt));
 
   const withWindows = new Set(activities.map((a) => a.parentInstanceId));
-  return { schema: 1, savedAt: new Date().toISOString(), reason, instances: sessionInstances(mgr, members, withWindows), activities };
+  return { schema: 1, savedAt: new Date().toISOString(), reason, instances: sessionInstances(mgr, members, withWindows, userId), activities };
+}
+
+/** Whose desktops to write: the owner, every user owning a running instance, and every user written before. */
+function snapshotUsers(mgr: Pick<Mgr, 'getAllInstances'>): string[] {
+  const users = new Set<string>([localOwnerId(), ...writtenUsers()]);
+  for (const inst of mgr.getAllInstances()) if (!inst.inPool) users.add(instanceUser(inst as { owner?: string }));
+  return [...users].sort();
+}
+
+/** Writes each user's snapshot; returns them merged (for the planned restart's count). */
+async function writeSnapshots(reason: DesktopSnapshot['reason']): Promise<DesktopSnapshot> {
+  const merged: DesktopSnapshot = { schema: 1, savedAt: new Date().toISOString(), reason, instances: [], activities: [] };
+  for (const userId of snapshotUsers(core.getAppManager())) {
+    const snap = await buildSnapshot(reason, userId);
+    await withKv((kv) => core.writeUserPref(kv, userId, SESSION_KEY, snap));
+    writtenUsers().add(userId);
+    merged.instances.push(...snap.instances);
+    merged.activities.push(...snap.activities);
+  }
+  return merged;
 }
 
 /** Instance states a PRoot respawn brings back: running ones, never one that had crashed or stopped (M5). */
@@ -159,12 +196,14 @@ const RESPAWN_STATES = new Set(['resumed', 'started', 'paused']);
 
 /** The instances a snapshot keeps: shown on a workspace, parent of a window, or a running PRoot one. */
 export function sessionInstances(
-  mgr: Pick<Mgr, 'getAllInstances' | 'getManifest'>, members: Set<string>, withWindows: Set<string>,
+  mgr: Pick<Mgr, 'getAllInstances' | 'getManifest'>, members: Set<string>, withWindows: Set<string>, userId?: string,
 ): SessionInstance[] {
   const instances: SessionInstance[] = [];
   for (const inst of mgr.getAllInstances()) {
     // A preview (Track P) is not restored after a restart: it is reaped.
     if (inst.inPool || inst.preview) continue;
+    // C8: one user's desktop holds only the instances that user owns.
+    if (userId !== undefined && instanceUser(inst as { owner?: string }) !== userId) continue;
     if (inst.state === 'destroyed' || inst.state === 'error') continue;
     const m = mgr.getManifest(inst.appId);
     if (!m || m.componentType === 'service') continue;
@@ -177,8 +216,7 @@ export function sessionInstances(
 }
 
 async function writeSnapshot(reason: DesktopSnapshot['reason']): Promise<void> {
-  const snap = await buildSnapshot(reason);
-  await withKv((kv) => core.writeUserPref(kv, localOwnerId(), SESSION_KEY, snap));
+  await writeSnapshots(reason);
 }
 
 function scheduleSave(): void {
@@ -224,9 +262,7 @@ export async function flushAndFreeze(reason: DesktopSnapshot['reason'] = 'planne
   st.frozen = true;
   if (st.timer) { clearTimeout(st.timer); st.timer = null; }
   if (st.writing) await st.writing.catch(() => undefined);
-  const snap = await buildSnapshot(reason);
-  await withKv((kv) => core.writeUserPref(kv, localOwnerId(), SESSION_KEY, snap));
-  return snap;
+  return writeSnapshots(reason);
 }
 
 const SIGNAL_GRACE_MS = 300;
@@ -298,10 +334,11 @@ async function doRestore(): Promise<RestoreReport> {
   const report: RestoreReport = { restored: 0, respawned: 0, failed: [], idMap: {}, pruned: 0 };
   const mgr = core.getAppManager();
 
-  const [enabled, skip, snap, restartDaemon] = await withKv(async (kv) => [
+  const users = await restoreUsers();
+  const [enabled, skip, snaps, restartDaemon] = await withKv(async (kv) => [
     await kv.getValue<boolean>('os', RESTORE_SETTING_KEY),
     await kv.getValue<boolean>('os', SKIP_KEY),
-    await core.readUserPrefValue<DesktopSnapshot>(kv, localOwnerId(), SESSION_KEY),
+    await Promise.all(users.map(async (userId) => ({ userId, snap: await core.readUserPrefValue<DesktopSnapshot>(kv, userId, SESSION_KEY) }))),
     await kv.getValue<boolean>('os', RESTART_DAEMON_KEY),
   ] as const);
   if (skip) await withKv((kv) => kv.del('os', SKIP_KEY));
@@ -309,13 +346,18 @@ async function doRestore(): Promise<RestoreReport> {
 
   if (enabled === false) report.skipped = 'disabled';
   else if (skip) report.skipped = 'one-shot';
-  else if (!snap || snap.schema !== 1) report.skipped = 'no-snapshot';
-  if (snap?.schema === 1) await reopenActivities(mgr, snap, report, !report.skipped);
+  else if (!snaps.some(({ snap }) => snap?.schema === 1)) report.skipped = 'no-snapshot';
+  // C8: each user's desktop, with that user as the owner of what it starts.
+  for (const { userId, snap } of snaps) {
+    if (snap?.schema === 1) await reopenActivities(mgr, snap, report, !report.skipped, userId);
+  }
 
   // Workspaces follow the activities: renamed ids, gone ones pruned — also when
   // nothing was restored (stale members from before the restart).
-  try { report.pruned = await remapWorkspaces(mgr, report.idMap); }
-  catch (err) { console.warn(`[desktop-session] workspace remap failed: ${(err as Error).message}`); }
+  for (const userId of users) {
+    try { report.pruned += await remapWorkspaces(mgr, report.idMap, userId); }
+    catch (err) { console.warn(`[desktop-session] workspace remap failed: ${(err as Error).message}`); }
+  }
 
   if (restartDaemon) await restartShellDaemon(mgr);
 
@@ -332,6 +374,16 @@ async function doRestore(): Promise<RestoreReport> {
 
 type Mgr = ReturnType<typeof core.getAppManager>;
 
+/** Whose desktops the restore brings back: every enabled account; the owner when the store can't say. */
+async function restoreUsers(): Promise<string[]> {
+  try {
+    const ids = (await core.getAuthServices().users.listUsers()).filter((u) => !u.disabled).map((u) => u.id);
+    return ids.length ? ids : [localOwnerId()];
+  } catch {
+    return [localOwnerId()];
+  }
+}
+
 function alive(mgr: Pick<Mgr, 'getInstance'>, instanceId: string, appId: string): boolean {
   const i = mgr.getInstance(instanceId);
   return !!i && i.appId === appId && !i.inPool && i.state !== 'destroyed' && i.state !== 'error';
@@ -343,8 +395,9 @@ function alive(mgr: Pick<Mgr, 'getInstance'>, instanceId: string, appId: string)
  */
 export async function reopenActivities(
   mgr: Pick<Mgr, 'getInstance' | 'getManifest' | 'isEnabled' | 'start' | 'openActivity'>,
-  snap: DesktopSnapshot, report: RestoreReport, windows = true,
+  snap: DesktopSnapshot, report: RestoreReport, windows = true, userId?: string,
 ): Promise<void> {
+  const as = userId ? { userId } : {};
   const instMap = new Map<string, string | Error>();
   const instanceFor = async (oldId: string, appId: string): Promise<string> => {
     const known = instMap.get(oldId);
@@ -357,7 +410,7 @@ export async function reopenActivities(
       } else {
         if (!mgr.getManifest(appId)) throw new Error('app is no longer installed');
         if (!mgr.isEnabled(appId)) throw new Error('app is disabled');
-        id = await mgr.start(appId);
+        id = await mgr.start(appId, as);
       }
       instMap.set(oldId, id);
       return id;
@@ -386,6 +439,7 @@ export async function reopenActivities(
       const sameInstance = inst === a.parentInstanceId;
       const stackParent = a.stackParentId ? report.idMap[a.stackParentId] : undefined;
       const opened = await mgr.openActivity(inst, undefined, {
+        ...as,
         ...(stackParent ? { stackParent } : {}),
         restore: {
           previousActivityId: a.activityId,
@@ -420,16 +474,16 @@ export async function reopenActivities(
   }
 }
 
-/** Rename restored ids in the workspaces; drop members that are not live. */
-async function remapWorkspaces(mgr: Mgr, idMap: Record<string, string>): Promise<number> {
-  const state = await readWorkspaces();
+/** Rename restored ids in one user's workspaces; drop members that are not live. */
+async function remapWorkspaces(mgr: Mgr, idMap: Record<string, string>, userId: string): Promise<number> {
+  const state = await readWorkspaces(userId);
   if (!state?.workspaces) return 0;
   const live = liveViewIds(mgr);
   const renamed = remapWorkspaceIds(state, idMap).state;
   const dead = allMembers(renamed).filter((m) => !live.has(m));
   const { state: next, changed } = remapWorkspaceIds(renamed, {}, dead);
   if (!changed && JSON.stringify(renamed) === JSON.stringify(state)) return 0;
-  await writeWorkspaces(next);
+  await writeWorkspaces(userId, next);
   return dead.length;
 }
 
@@ -445,15 +499,15 @@ function liveViewIds(mgr: Mgr): Set<string> {
   return live;
 }
 
-/** The owner's workspaces (D46): their own, else the shared ones from before the move. */
-function readWorkspaces(): Promise<RemapState | null> {
-  return withKv((kv) => core.readUserPrefValue<RemapState>(kv, localOwnerId(), 'workspaces'));
+/** One user's workspaces (D46, C8): their own, else the shared ones from before the move. */
+function readWorkspaces(userId: string): Promise<RemapState | null> {
+  return withKv((kv) => core.readUserPrefValue<RemapState>(kv, userId, 'workspaces'));
 }
 
-/** Store the owner's workspace document and tell the browsers (same events as a KV PUT). */
-async function writeWorkspaces(next: RemapState): Promise<void> {
-  const stored = await withKv((kv) => core.writeUserPref(kv, localOwnerId(), 'workspaces', next));
-  core.OsEventBus.emit('kv:changed', { namespace: 'os', key: 'workspaces', value: stored.value, userId: localOwnerId() });
+/** Store one user's workspace document and tell the browsers (same events as a KV PUT). */
+async function writeWorkspaces(userId: string, next: RemapState): Promise<void> {
+  const stored = await withKv((kv) => core.writeUserPref(kv, userId, 'workspaces', next));
+  core.OsEventBus.emit('kv:changed', { namespace: 'os', key: 'workspaces', value: stored.value, userId });
   core.OsEventBus.emit('workspaces:changed', {
     workspaces: next.workspaces.map((w) => ({
       id: String(w.id ?? ''),
@@ -518,27 +572,32 @@ async function runSweep(sweep: MemberSweep): Promise<void> {
   sweep.running = true;
   try {
     const mgr = core.getAppManager();
-    const state = await readWorkspaces();
-    if (!state?.workspaces) return;
-    const overdue = overdueDeadMembers(allMembers(state), liveViewIds(mgr), sweep.deadSince, Date.now(), DEAD_GRACE_MS);
-    // Dead but still in grace: look again right after it ends.
-    if (sweep.deadSince.size > overdue.length) scheduleSweep(sweep, DEAD_GRACE_MS + 1_000);
-    if (!overdue.length) return;
-    // Re-read: a browser may have written meanwhile. Only ids still dead go.
-    const current = await readWorkspaces();
-    if (!current?.workspaces) return;
-    const live = liveViewIds(mgr);
-    const gone = overdue.filter((id) => !live.has(id));
-    const { state: next, changed } = remapWorkspaceIds(current, {}, gone);
-    if (!changed) return;
-    await writeWorkspaces(next);
-    for (const id of gone) sweep.deadSince.delete(id);
-    console.log(`[desktop-session] pruned ${gone.length} stale workspace member(s): ${gone.join(', ')}`);
+    // C8: every user's workspaces (ids are unique across users, so one dead-since map serves all).
+    for (const userId of snapshotUsers(mgr)) await sweepUser(sweep, mgr, userId);
   } catch (err) {
     console.warn(`[desktop-session] member sweep failed: ${(err as Error).message}`);
   } finally {
     sweep.running = false;
   }
+}
+
+async function sweepUser(sweep: MemberSweep, mgr: Mgr, userId: string): Promise<void> {
+  const state = await readWorkspaces(userId);
+  if (!state?.workspaces) return;
+  const overdue = overdueDeadMembers(allMembers(state), liveViewIds(mgr), sweep.deadSince, Date.now(), DEAD_GRACE_MS);
+  // Dead but still in grace: look again right after it ends.
+  if (sweep.deadSince.size > overdue.length) scheduleSweep(sweep, DEAD_GRACE_MS + 1_000);
+  if (!overdue.length) return;
+  // Re-read: a browser may have written meanwhile. Only ids still dead go.
+  const current = await readWorkspaces(userId);
+  if (!current?.workspaces) return;
+  const live = liveViewIds(mgr);
+  const gone = overdue.filter((id) => !live.has(id));
+  const { state: next, changed } = remapWorkspaceIds(current, {}, gone);
+  if (!changed) return;
+  await writeWorkspaces(userId, next);
+  for (const id of gone) sweep.deadSince.delete(id);
+  console.log(`[desktop-session] pruned ${gone.length} stale workspace member(s): ${gone.join(', ')}`);
 }
 
 // A rebuilt module (prod shell-watch swaps builds in-process) takes the sweep

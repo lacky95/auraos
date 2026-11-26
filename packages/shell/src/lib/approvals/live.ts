@@ -12,10 +12,11 @@ import { edgeView } from '../../../server/host-policy.mjs';
 import { liveApprovalDeps } from './service.ts';
 import type { ApprovalRouteDeps, OwnerSession, RouteCtx } from './routes.ts';
 
+/** The session's own user (C3), and only when the record says owner: approvals stay the owner's (I.2 §3). */
 async function withUsername(s: { userId: string; sessionId: string } | null): Promise<OwnerSession | null> {
   if (!s) return null;
-  const owner = await coreAuthServices()?.users.getOwner();
-  return owner && !owner.disabled && owner.id === s.userId ? { ...s, username: owner.username } : null;
+  const owner = await coreAuthServices()?.users.getUser(s.userId);
+  return owner && !owner.disabled && owner.role === 'owner' && owner.id === s.userId ? { ...s, username: owner.username } : null;
 }
 
 export function liveRouteDeps(): ApprovalRouteDeps {

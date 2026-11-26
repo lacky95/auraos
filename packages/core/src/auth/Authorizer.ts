@@ -15,6 +15,14 @@
  *              grant to the key; nothing else
  *   anonymous  phase-1 compatibility: basic sending only (an unverified Simple
  *              notification); never privileged
+ *   user       a member's own app permissions only (I.2, C7): a `user` grant of
+ *              `app.use:<installationId>` / `app.jump:<installationId>`. An
+ *              instance acting for a user holds those of that user too. The
+ *              owner's authority is a route level (shell decide.ts), never a
+ *              permission here.
+ *   foreign    D85 A1: a principal whose `systemId` is set and is not this
+ *              system's is refused before any rule; its role is never read.
+ *              An absent `systemId` means local.
  *   `admin.*`  never a permission: the owner's management routes decide who
  *              may manage (shell `lib/approvals/admin.ts`, D50)
  *
@@ -33,7 +41,8 @@ function warnLegacy(appId: string, legacy: string, current: string): void {
   warnedLegacy.add(k);
   console.warn(`[auth] ${appId} requests the deprecated permission '${legacy}' — treated as '${current}'; rename it in app.manifest.json`);
 }
-import { GrantStore, NOTIFICATIONS_READ_PERMISSION, isPrivilegedPermission, canonicalPermission } from './GrantStore.js';
+import { GrantStore, NOTIFICATIONS_READ_PERMISSION, USER_APP_PERMISSION_RE, isPrivilegedPermission, canonicalPermission } from './GrantStore.js';
+import { localSystemId } from '../system/systemIdentity.js';
 import type { ReadGrant } from '../notifications/access.js';
 import {
   isSystemPrincipal, type DeclaredActor, type GrantSubject, type Principal,
@@ -53,6 +62,18 @@ export interface AuthorizerDeps {
   declared(appId: string): string[] | undefined;
   /** The install scope the app id currently resolves to (system|global|user). */
   appScope(appId: string): string | undefined;
+  /** This system's id (D47); default `localSystemId()`. Unreadable: every principal naming a system is refused. */
+  localSystemId?: () => string;
+}
+
+/**
+ * D85 A1: whether `principal` names another Aura. Checked before any role or
+ * grant rule; a principal without `systemId` is local (today's behaviour).
+ * When this system's own id can't be read, any named system counts as foreign.
+ */
+export function isForeignPrincipal(principal: { systemId?: unknown }, local: () => string = localSystemId): boolean {
+  if (principal.systemId === undefined) return false;
+  try { return principal.systemId !== local(); } catch { return true; }
 }
 
 const ENFORCED = new Set(ENFORCED_PERMISSIONS);
@@ -76,6 +97,9 @@ export class Authorizer {
   }
 
   async authorize(principal: Principal, action: string, _resource?: unknown): Promise<AuthzDecision> {
+    if (!isSystemPrincipal(principal) && isForeignPrincipal(principal as { systemId?: unknown }, this.deps.localSystemId)) {
+      return deny('foreign-system: a principal of another Aura has no authority here (D85)');
+    }
     const base = await this.base(principal, action);
     if (!base.allow) return base;
     const actor = (principal as { actor?: DeclaredActor }).actor;
@@ -118,8 +142,20 @@ export class Authorizer {
         return deny(`API key '${principal.name}' has no scope '${action}'`);
       }
 
+      case 'user': {
+        if (!USER_APP_PERMISSION_RE.test(action)) return deny(`'${action}' is not a user permission`);
+        if (await this.deps.grants.get({ kind: 'user', id: principal.userId }, action)) return allow(`granted to user ${principal.userId} by the owner`);
+        return deny(`user ${principal.userId} holds no '${action}' grant`);
+      }
+
       case 'instance': {
         const appId = principal.appId;
+        // An app permission of the user this instance acts for (C7): the user's grant, never the app's.
+        if (USER_APP_PERMISSION_RE.test(action)) {
+          if (!principal.userId) return deny(`'${action}' is a user's permission; this instance acts for no user`);
+          if (await this.deps.grants.get({ kind: 'user', id: principal.userId }, action)) return allow(`granted to user ${principal.userId} by the owner`);
+          return deny(`user ${principal.userId} holds no '${action}' grant`);
+        }
         const declared = this.deps.declared(appId);
         if (!declared) return deny(`unknown app ${appId}`);
         // Deprecated names in permissions[] still count (phase 6: desktopModal → systemModal).

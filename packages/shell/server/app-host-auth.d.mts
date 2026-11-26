@@ -7,11 +7,13 @@ export interface AppHostServices {
   registry: import('@aura/core').AppHostRegistry & {
     getInstallation(installationId: string): Promise<import('@aura/core').AppInstallation | null>;
   };
-  sessionLive(sid: string, userId: string): Promise<boolean>;
+  /** Live: the user's role from the record; not live: false. */
+  sessionLive(sid: string, userId: string): Promise<SessionLiveness>;
 }
+export type SessionLiveness = false | { role: import('@aura/core').UserRole };
 export function createSessionLive(deps: {
   sessions: { isLive(sessionId: string, userId: string): Promise<boolean> };
-  users: { getOwner(): Promise<{ id: string; disabled?: boolean } | null> };
+  users: { getUser(userId: string): Promise<{ id: string; role: import('@aura/core').UserRole; disabled?: boolean } | null> };
 }): AppHostServices['sessionLive'];
 export interface HandoffInput {
   aud: string; label: string; installationId: string; appId: string; slot: number;

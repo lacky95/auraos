@@ -16,6 +16,14 @@
  * scaffold or store install that SHADOWS the app from another scope under the
  * same id does not inherit the grant (it has to be granted again).
  *
+ * A `user` subject (I.2, D82) holds only the app permissions
+ * `app.use:<installationId>` (open and start the user's own instance) and
+ * `app.jump:<installationId>` (jump into it, H/J), OS-wide. The owner or the
+ * host operator grants them; nothing grants them implicitly.
+ *
+ * Subject, scope and installation ids never contain `@`: a qualified
+ * (`…@systemId`) subject is a federation change (D85 A3), not a value.
+ *
  * `grant:` is not a KvClient namespace, so `/api/kv` can't read or write it.
  * Every change emits `OsEventBus 'permissions:changed'` (content: subject,
  * permission, change — no secrets).
@@ -71,6 +79,15 @@ export const GRANTABLE_PERMISSIONS: readonly string[] = [...PRIVILEGED_PERMISSIO
 export const KV_OS_WRITE_PERMISSION_RE = /^system\.kv\.os\.[A-Za-z0-9_-]{1,128}\.write$/;
 
 /**
+ * A user's app permissions (I.2, C7): `app.use:<installationId>` and
+ * `app.jump:<installationId>`, granted to a `user` subject only. Same pattern
+ * as `credential.read:<NAME>`: one grant per installation.
+ */
+export const USER_APP_PERMISSION_RE = /^app\.(use|jump):[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+export const appUsePermission = (installationId: string): string => `app.use:${installationId}`;
+export const appJumpPermission = (installationId: string): string => `app.jump:${installationId}`;
+
+/**
  * Reading the raw value of a credential in a user's vault (D56): one grant
  * per app, credential and user (scope `{kind: 'user', id}`), given on the
  * owner's `fresh` approval and revocable. Never OS-wide. A handle alone
@@ -89,8 +106,10 @@ export function isPrivilegedPermission(p: string): boolean {
 const SUBJECT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
 /** A Terminal session id, `<instanceId>#<label>` (com.aura.terminal pty-server). */
 const TERMINAL_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}#[A-Za-z0-9._-]{1,64}$/;
-const SUBJECT_KINDS: readonly GrantSubjectKind[] = ['app', 'apiKey'];
+const SUBJECT_KINDS: readonly GrantSubjectKind[] = ['app', 'apiKey', 'user'];
 const USER_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+/** A local user id as a grant subject: the form `user:<id>` records hold (lowercase, C10). */
+const USER_SUBJECT_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
 /** Who grants: the owner, the host operator or AuraOS itself (D50). */
 export type GrantedBy = ChangeAttribution | { kind: 'system' };
@@ -146,6 +165,14 @@ export class GrantStore {
     permission = canonicalPermission(permission);
     if (!SUBJECT_KINDS.includes(subject.kind)) throw new GrantError(400, `subject kind must be one of ${SUBJECT_KINDS.join(', ')}`);
     if (typeof subject.id !== 'string' || !SUBJECT_ID.test(subject.id)) throw new GrantError(400, 'invalid subject id');
+    // I.2: a user holds its app permissions and nothing else; nobody else holds them.
+    const userApp = USER_APP_PERMISSION_RE.test(permission);
+    if (subject.kind === 'user' || userApp) {
+      if (subject.kind !== 'user' || !userApp || !USER_SUBJECT_ID.test(subject.id) || scope.kind !== 'os') {
+        throw new GrantError(400, 'app.use:<installationId> and app.jump:<installationId> are a user\'s, OS-wide, and a user holds nothing else');
+      }
+      return;
+    }
     if (!isPrivilegedPermission(permission)) {
       throw new GrantError(400, `'${permission}' cannot be granted here — grantable: ${GRANTABLE_PERMISSIONS.join(', ')}, system.kv.os.<topic>.write, credential.read:<NAME>`);
     }

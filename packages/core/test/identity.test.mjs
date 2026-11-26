@@ -352,7 +352,7 @@ test('recovery after a replaced identity.key re-seals from the ticket and revoke
   assert.equal(out.ok, true);
   assert.equal(out.recordTrusted, false);
   assert.ok(out.sessionsRevoked >= 1);
-  assert.deepEqual(recovered, [{ username: 'lukas', recordTrusted: false, usernameSource: 'ticket', sessionsRevoked: out.sessionsRevoked }]);
+  assert.deepEqual(recovered, [{ userId: 'default', username: 'lukas', recordTrusted: false, usernameSource: 'ticket', sessionsRevoked: out.sessionsRevoked }]);
   assert.equal((await store.getOwner()).username, 'lukas');
   assert.equal((await store.verifyPassword('lukas', NEW_PASSWORD, { rateLimitKey: 'k2' })).ok, true);
   assert.equal((await store.verifyPassword('lukas', PASSWORD, { rateLimitKey: 'k2' })).ok, false);
@@ -440,7 +440,8 @@ test('getAuthServices initializes with a malformed identity.key; recovery is aud
     const entries = await svc.audit.list(20);
     const entry = entries.find((e) => e.action === IDENTITY_AUDIT_ACTIONS.ownerRecovered);
     assert.equal(entry.actor, 'operator');
-    assert.equal(entry.target, 'user:lukas');
+    assert.equal(entry.target, 'user:default', 'by id (C6)');
+    assert.equal(entry.detail.username, 'lukas');
     assert.equal(entry.detail.recordTrusted, false);
     assert.equal(entry.detail.usernameSource, 'ticket');
     assert.equal(JSON.stringify(entries).includes(NEW_PASSWORD), false);
