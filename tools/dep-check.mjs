@@ -40,6 +40,7 @@ const RULES = {
   'server-webshell': 'The server layer of @aura/shell (API routes, middleware, server/, and the lib modules they reach) never imports Web Shell code (components, layouts, stores, desktop pages) or UI libraries.',
   'foundation-leaf': 'Foundation modules of @aura/core (sector map in packages/core/AGENTS.md) import no other sector at runtime, except the barrel (src/index.ts) and the composition root (src/system/bootstrap.ts).',
   'kernel-presentation': 'Kernel sectors never import presentation-contract modules (theme, layout, keymap) at runtime.',
+  'contract-leaf': 'Declared contract leaf files of @aura/core (the ARI contract, runtimes/ari.ts, types.ts and requirements.ts; the system app ids) import no other core module at runtime, so any module may depend on them without a cycle (D97, 5b).',
   'agent-agnostic': 'Agent-aware but agent-agnostic (owner, philosophy audit): no product-specific agent knowledge (claude, codex, anthropic, openai, .claude/.codex paths, CLAUDE_CONFIG_DIR, CODEX_HOME, config.toml) in the code of @aura/core src or the shell server infrastructure (src/lib, server/); it belongs in apps, adapters, the home seed, docs and tests. Comments and the AGENTS.md/CLAUDE.md file convention do not count.',
   'agents-docs': 'Every AGENTS.md has a sibling CLAUDE.md that is exactly `@AGENTS.md`; the chain of AGENTS.md files from the root to any directory stays under 28 KiB (Codex stops adding files at project_doc_max_bytes, 32 KiB by default); the sector map in packages/core/AGENTS.md names every core module exactly once.',
 };
@@ -372,6 +373,15 @@ if (existsSync(kernelDoc)) {
       if (KERNEL_SECTORS.has(sa) && sb === 'presentation-contracts' && !COMPOSITION_EXEMPT.has(e.from)) add('kernel-presentation', `${e.from} -> ${e.to}`, { from: e.from, line: e.line, detail: `${a} (${sa}) imports ${b}` });
     }
   }
+}
+
+// ── contract-leaf (D97 §4.2, 5b K): declared contract files stay leaves ───────
+// Type-only imports are free; a runtime import inside the same module is allowed.
+const CONTRACT_LEAVES = new Set(['core/src/runtimes/ari.ts', 'core/src/runtimes/types.ts', 'core/src/runtimes/requirements.ts', 'core/src/runtimes/workloadEnv.ts', 'core/src/system/systemApps.ts']);
+for (const e of coreRuntime) {
+  if (!CONTRACT_LEAVES.has(e.from)) continue;
+  const a = files.get(e.from).module, b = files.get(e.to).module;
+  if (a !== b) add('contract-leaf', `${e.from} -> ${e.to}`, { from: e.from, line: e.line, detail: `${e.from} is a contract leaf; it imports ${b} at runtime` });
 }
 
 // ── agent-agnostic (owner decision, philosophy audit 2026-11-26) ───────────────

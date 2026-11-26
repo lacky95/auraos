@@ -23,7 +23,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import type { RuntimeRegistry } from './registry.js';
-import { runtimeNeeds } from './registry.js';
+import { requirementsOf } from './requirements.js';
 import { RuntimeChangeError, type RuntimeChange, type RuntimeSettingsStore } from './settingsStore.js';
 import {
   missingCapabilities, type LegacyRuntime, type RuntimeMigrationPending, type RuntimeOverride, type RuntimeSettingsRecord,
@@ -156,7 +156,7 @@ export function decideMigration(
     const module = registry.get(runtime);
     if (!module) throw new RuntimeChangeError('unknown-runtime', `runtime ${runtime} is not installed`);
     if (!registry.isEnabled(runtime, cur)) throw new RuntimeChangeError('not-enabled', `runtime ${runtime} is disabled`);
-    const missing = missingCapabilities(registry.capabilitiesOf(runtime, cur), runtimeNeeds(app.manifest, app.sourceMode));
+    const missing = missingCapabilities(registry.capabilitiesOf(runtime, cur), requirementsOf(app.manifest, { sourceMode: app.sourceMode }).needs);
     if (missing.length) {
       throw new RuntimeChangeError('invalid-decision', `${app.appId} cannot run on ${runtime}: missing ${missing.join(', ')}`
         + (missing.includes('readOnlyBinds') ? ' (closed apps need enforced read-only binds, ARI-4)' : ''));

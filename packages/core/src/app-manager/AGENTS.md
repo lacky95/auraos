@@ -24,7 +24,7 @@ The sector rules are in `packages/core/AGENTS.md`. This module is the kernel's l
 - **Don't add a kind check** (`sandbox === 'container'` or `'proot'`) outside the runtime modules. Ask the runtime's capabilities instead (ARI, 5b G).
 - **Runners don't import `OsEventBus`.** They report exits through `onExit`; the kernel emits `app:*` (G1).
 - **Keep the `SandboxRunner` and ARI arguments plain data.** The spawn context carries no functions and no live objects.
-- **Collaborators are passed in.** Don't fetch them from `globalThis` or import a sibling module's `services.ts`. The `AppManager ↔ auth/services` cycle (G1) is removed in Phase 6 K.
+- **Collaborators are passed in.** Don't fetch them from `globalThis` or import a sibling module's `services.ts`. The auth services arrive as `opts.auth` from the composition point (5b K removed the `AppManager ↔ auth/services` cycle).
 - **Every spawn mints a workload token** (D89). A container without one is never adopted.
 
 ## State

@@ -20,6 +20,14 @@ export type IsolationLevel = 'none' | 'ptrace' | 'namespace' | 'vm' | 'remote';
  */
 export interface RuntimeCapabilities {
   isolation: IsolationLevel;
+  /**
+   * The network model (informational in 5b: no request needs it). `shell-netns`:
+   * the shell's own namespace (PRoot on the master); `bridge`: a sandbox on the
+   * shared Docker network; `remote`: a provider elsewhere (designed, ARI §4.1).
+   */
+  network: RuntimeNetwork;
+  /** Mounts the kernel-resolved App Home (`ResolvedHome`) at /home/aura (D65). */
+  appHome: boolean;
   /** D65/D67/D74: the Private Home bound only in a session's own mount namespace. */
   privateHomeSession: boolean;
   /** D74: opens an isolated session inside the running environment (never a separate container). */
@@ -28,8 +36,16 @@ export interface RuntimeCapabilities {
   identity: 'none' | 'emulated' | 'enforced';
   /** Read-only binds are enforced (a closed source needs it; ARI-4). */
   readOnlyBinds: boolean;
+  /**
+   * D85 A4: runs on this host and can bind host paths. The provider-local
+   * placement facts of a spawn (`appDir`, `instanceDataDir`, the tools dir,
+   * `ResolvedHome.hostPath`) reach only a runtime that declares it.
+   */
+  hostFilesystem: boolean;
   /** Cross-app mounts (MountManager). */
   mounts: boolean;
+  /** D80: writable cross-app mounts between different app uids through an idmapped bind (5b G probes it). */
+  idmappedMounts: boolean;
   /** `ports` with `into` (PortManager). */
   portExpose: boolean;
   /** Manifest `services[]` and the sidecar routes. */
@@ -37,9 +53,32 @@ export interface RuntimeCapabilities {
   warmPool: boolean;
   /** Instances outlive a shell restart and are re-adopted (D77). */
   survivesShellRestart: boolean;
+  /** Live resource usage per instance and sidecar (`usage`). */
+  usage: boolean;
+  /** Reserved: `false` everywhere until a runtime offers it. */
+  gpu: boolean;
 }
 
+export type RuntimeNetwork = 'shell-netns' | 'bridge' | 'remote';
+
 export type RuntimeCapability = keyof RuntimeCapabilities;
+
+/**
+ * Every capability, in display order: the one list the shell, the CLI and
+ * Settings use (no copies). The `Record` makes it exhaustive at compile time.
+ */
+const CAPABILITY_ORDER: Record<RuntimeCapability, number> = {
+  isolation: 0, network: 1, appHome: 2, privateHomeSession: 3, sessionExec: 4, identity: 5, readOnlyBinds: 6,
+  hostFilesystem: 7, mounts: 8, idmappedMounts: 9, portExpose: 10, sidecars: 11, warmPool: 12,
+  survivesShellRestart: 13, usage: 14, gpu: 15,
+};
+export const RUNTIME_CAPABILITY_KEYS: readonly RuntimeCapability[] = Object.freeze(
+  (Object.keys(CAPABILITY_ORDER) as RuntimeCapability[]).sort((a, b) => CAPABILITY_ORDER[a] - CAPABILITY_ORDER[b]),
+);
+/** The capabilities a request needs as `true` (everything but the levels and the informational `network`). */
+export const RUNTIME_BOOLEAN_CAPABILITIES: readonly RuntimeCapability[] = Object.freeze(
+  RUNTIME_CAPABILITY_KEYS.filter((k) => k !== 'isolation' && k !== 'identity' && k !== 'network'),
+);
 
 /** A runtime's settings object, validated against its schema by stream R. */
 export type RuntimeSettings = Record<string, unknown>;
@@ -56,12 +95,31 @@ export class RuntimeUnavailableError extends Error {
   }
 }
 
-/** ARI §2.2: a request needs a capability the runtime does not declare. Never downgraded. */
+/**
+ * ARI §2.2: a request needs a capability the runtime does not declare. Never
+ * downgraded and never auto-picked (Q17): `suggest` only names the enabled
+ * runtimes that could run it (D73), for the message and the owner's decision.
+ */
 export class RuntimeCapabilityError extends Error {
   override readonly name = 'RuntimeCapabilityError';
   readonly code = 'capability-missing' as const;
-  constructor(readonly runtime: string, readonly missing: RuntimeCapability[], message?: string) {
+  constructor(readonly runtime: string, readonly missing: RuntimeCapability[], message?: string, readonly suggest?: string[]) {
     super(message ?? `runtime ${runtime} cannot do this: missing ${missing.join(', ')}`);
+  }
+}
+
+/** The tail of a capability refusal: which enabled runtimes could run it, or that none can (D73). */
+export function suggestText(suggest: readonly string[]): string {
+  return suggest.length ? `; it could run on: ${suggest.join(', ')}` : '; no installed runtime can run it';
+}
+
+/** Why a runtime module is not registered (ARI §4.3): never loaded, so the Q17 error applies to its id. */
+export type RuntimeModuleRefusalCode = 'ari-unsupported' | 'invalid-runtime-id' | 'invalid-descriptor' | 'runtime-duplicate';
+
+export class RuntimeModuleError extends Error {
+  override readonly name = 'RuntimeModuleError';
+  constructor(readonly code: RuntimeModuleRefusalCode, readonly runtime: string, message: string) {
+    super(message);
   }
 }
 
@@ -75,7 +133,8 @@ export function missingCapabilities(caps: RuntimeCapabilities, needs: Partial<Ru
   const ISOLATION: IsolationLevel[] = ['none', 'ptrace', 'namespace', 'vm'];
   const missing: RuntimeCapability[] = [];
   for (const [key, want] of Object.entries(needs) as Array<[RuntimeCapability, unknown]>) {
-    if (want === undefined) continue;
+    // `network` is informational in 5b: nothing needs it, so nothing fails on it.
+    if (want === undefined || key === 'network') continue;
     const have = caps[key];
     if (key === 'identity') {
       if (IDENTITY.indexOf(have as typeof IDENTITY[number]) < IDENTITY.indexOf(want as typeof IDENTITY[number])) missing.push(key);
@@ -95,6 +154,29 @@ export function missingCapabilities(caps: RuntimeCapabilities, needs: Partial<Ru
 export function requireCapabilities(runtime: string, caps: RuntimeCapabilities, needs: Partial<RuntimeCapabilities>): void {
   const missing = missingCapabilities(caps, needs);
   if (missing.length) throw new RuntimeCapabilityError(runtime, missing);
+}
+
+/**
+ * Every refusal of the runtime layer, as data (D97: the ARI boundary carries
+ * records, and every refusal a `code`): what an API answers and an external
+ * provider would send. Null for anything that is not a runtime refusal.
+ */
+export interface RuntimeRefusal {
+  code: RuntimeUnavailableCode | 'capability-missing' | RuntimeResolutionCode | RuntimeModuleRefusalCode;
+  message: string;
+  runtime?: string;
+  appId?: string;
+  missing?: RuntimeCapability[];
+  suggest?: string[];
+}
+
+export function runtimeRefusal(err: unknown): RuntimeRefusal | null {
+  if (err instanceof RuntimeCapabilityError) {
+    return { code: err.code, message: err.message, runtime: err.runtime, missing: err.missing, ...(err.suggest ? { suggest: err.suggest } : {}) };
+  }
+  if (err instanceof RuntimeUnavailableError || err instanceof RuntimeModuleError) return { code: err.code, message: err.message, runtime: err.runtime };
+  if (err instanceof RuntimeResolutionError) return { code: err.code, message: err.message, appId: err.appId };
+  return null;
 }
 
 /** Where an installation's runtime came from (§11.2). */
@@ -148,6 +230,13 @@ export interface RuntimeSettingsRecord {
   pending?: Record<string, RuntimeMigrationPending>;
   /** Migrations recorded in this record: `d75` is when the legacy runtimes were recorded. */
   migrations?: { d75?: string };
+  /**
+   * ARI §4.3: the `settingsVersion` each runtime's stored settings were
+   * written at. Absent (a record from before 5b, or never written): 1. An
+   * older one is migrated by the module on read; one that fails leaves the
+   * runtime disabled with an error, never on guessed values.
+   */
+  settingsVersions?: Record<string, number>;
 }
 
 export type RuntimeResolutionCode = 'runtime-decision-needed' | 'runtime-unresolved';

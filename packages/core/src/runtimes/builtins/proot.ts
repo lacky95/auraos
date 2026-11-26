@@ -13,7 +13,7 @@
  */
 import type { SandboxRunner } from '../../app-manager/SandboxRunner.js';
 import { prootUnavailable } from '../../app-manager/ProotRunner.js';
-import type { RuntimeModule } from '../registry.js';
+import { runnerEndpoint, type RuntimeModule } from '../ari.js';
 import { RuntimeSettingsError } from '../settingsSchema.js';
 import type { RuntimeSettings } from '../types.js';
 
@@ -31,6 +31,8 @@ export function prootRuntime(runner: SandboxRunner, opts: ProotRuntimeOpts): Run
   return {
     descriptor: {
       id: 'proot',
+      version: '1.0.0',
+      ari: 1,
       title: 'PRoot',
       description: 'Lightweight ptrace sandbox. Fast cold start, weak isolation: read-only binds are not enforced, '
         + 'so closed apps cannot run on it (ARI-4); apps run under their own app identity only; no sidecars, '
@@ -48,13 +50,23 @@ export function prootRuntime(runner: SandboxRunner, opts: ProotRuntimeOpts): Run
           },
         },
       },
+      settingsVersion: 1,
     },
     runner,
     capabilities: (settings: RuntimeSettings) => runner.capabilities(settings),
-    unavailable: (settings: RuntimeSettings) => {
-      if (settings['placement'] === 'pool') return PROOT_POOL_UNAVAILABLE;
-      return prootUnavailable(env, opts.baseRootfs);
+    // Fails closed: the pool placement, the `proot-host` switch (D92) and the base rootfs.
+    health: (settings: RuntimeSettings) => {
+      const pool = settings['placement'] === 'pool';
+      const host = prootUnavailable(env, opts.baseRootfs);
+      const checks = [
+        { id: 'placement', ok: !pool, ...(pool ? { detail: PROOT_POOL_UNAVAILABLE } : {}) },
+        { id: 'proot-host', ok: host === null, ...(host ? { detail: host } : {}) },
+      ];
+      // One reason at a time, as before: the placement refusal wins over the host's.
+      if (pool) checks.pop();
+      return { status: checks.every((c) => c.ok) ? 'ok' : 'unavailable', checks };
     },
+    endpoint: (instanceId) => runnerEndpoint(runner, instanceId),
     checkSettings: (settings: RuntimeSettings) => {
       if (settings['placement'] === 'pool') throw new RuntimeSettingsError(PROOT_POOL_UNAVAILABLE);
     },
