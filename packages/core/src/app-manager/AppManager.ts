@@ -77,6 +77,7 @@ import { seedHomeAs } from './homeSeed.js';
 import { PREVIEW_IDLE_MS, previewTitle } from './preview.js';
 import { MOUNT_DIR_NAME } from './MountManager.js';
 import { ExecBridge } from './ExecBridge.js';
+import { RootGrants } from './rootTabs.js';
 import { DockerApi } from './DockerApi.js';
 
 const RECONCILE_INTERVAL_MS = 5_000;
@@ -132,6 +133,8 @@ export class AppManager {
   readonly osSidecars:  SidecarManager;
   /** Phase 5 stream X: jump, exec and logs through the shell (ExecBridge.ts). */
   readonly execBridge: ExecBridge;
+  /** Stream J.6: the single-use grants behind `aura root` tabs (rootTabs.ts). */
+  readonly rootGrants = new RootGrants();
   private dataDir: string;
   private toolchainDir: string;
   /** PRoot's `/`. Kept so the lib restore pass can re-stage into it. */
@@ -1884,6 +1887,21 @@ export class AppManager {
   private async userLinuxIdentity(userId: string): Promise<{ uid: number; gid: number } | null> {
     const r = await (await import('../auth/services.js')).getAuthServices().identity.getUser(userId);
     return r && r.state === 'active' ? { uid: r.uid, gid: r.gid } : null;
+  }
+
+  /** The open in-environment sessions (stream J; never persisted). */
+  openSessions(): ReturnType<ContainerRunner['openSessions']> {
+    return this.container.openSessions();
+  }
+
+  /** Ends the open root tabs of an instance (or every one): `aura root end`, Settings End. */
+  async endRootSessions(instanceId?: string): Promise<string[]> {
+    const ended: string[] = [];
+    for (const r of this.container.openSessions()) {
+      if (r.kind !== 'root' || (instanceId && r.instanceId !== instanceId)) continue;
+      if (await this.container.endSession(r.sessionId).catch(() => false)) ended.push(r.sessionId);
+    }
+    return ended;
   }
 
   /** D79/D82: a member's `app.jump:<installationId>` grant (the owner needs none). */

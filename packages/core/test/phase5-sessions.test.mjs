@@ -234,3 +234,23 @@ test('J.7: `*` and `#` never grant docker; the CLI spawns docker only for `jump 
   assert.match(hits[0], /^commands\/jump\.ts:/, 'only enterMasterContainer, which refuses without the socket');
   assert.ok(!readFileSync(join(cli, 'lib', 'exec-client.ts'), 'utf-8').includes('AURA_EXEC_VIA'));
 });
+
+// ─── J.6 root grants ──────────────────────────────────────────────────────
+
+test('J.6: a root grant is single use, bound to its user and instance, and expires', async () => {
+  const { RootGrants, isRootGrantToken } = await import('../dist/app-manager/rootTabs.js');
+  let now = 1_000;
+  const g = new RootGrants(() => now);
+  const a = g.issue('default', 'com.aura.terminal-1');
+  assert.ok(isRootGrantToken(a.grant));
+  assert.equal(g.consume(a.grant, 'u-bob', 'com.aura.terminal-1'), false, 'another user');
+  const b = g.issue('default', 'com.aura.terminal-1');
+  assert.equal(g.consume(b.grant, 'default', 'com.aura.terminal-2'), false, 'another instance');
+  const c = g.issue('default', 'com.aura.terminal-1');
+  assert.equal(g.consume(c.grant, 'default', 'com.aura.terminal-1'), true);
+  assert.equal(g.consume(c.grant, 'default', 'com.aura.terminal-1'), false, 'used once');
+  const d = g.issue('default', 'com.aura.terminal-1');
+  now += 2 * 60_000 + 1;
+  assert.equal(g.consume(d.grant, 'default', 'com.aura.terminal-1'), false, 'expired');
+  assert.equal(g.consume('short', 'default', 'com.aura.terminal-1'), false);
+});

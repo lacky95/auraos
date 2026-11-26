@@ -22,6 +22,8 @@ export interface SessionRequest {
   kind: 'jump' | 'exec';
   /** Absent: the shell's default (private for a user). Never with a sidecar. */
   home?: HomeMode;
+  /** A root tab (`aura root`): the single-use grant the approved request returned. */
+  root?: string;
   argv?: string[];
   tty: boolean;
   cwd?: string;
@@ -125,6 +127,7 @@ export function runSession(req: SessionRequest, io: SessionIo = process_): Promi
         ...(req.argv ? { argv: req.argv } : {}),
         ...(req.cwd ? { cwd: req.cwd } : {}),
         ...(req.home ? { home: req.home } : {}),
+        ...(req.root ? { root: req.root } : {}),
         ...(req.sidecar ? { sidecar: req.sidecar } : {}),
       });
     };

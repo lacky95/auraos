@@ -323,17 +323,14 @@ test('fails when a surface decision is missing', () => {
 
 // ── reserved Phase 5 rows (Stage 1) ─────────────────────────────────────────
 
-test('reserved Phase 5 routes are denied for every caller until implemented', () => {
+test('every reserved Phase 5 row has moved into routes; J\'s root tab is an owner action', () => {
   const reserved = ROUTE_ACCESS_MANIFEST.reserved ?? {};
-  // Streams R, X, I, A and H moved their rows into `routes` (runtimes, exec/logs, the identity reports,
-  // the privilege review, the home operations); J's stays reserved.
-  assert.ok(Object.keys(reserved).length >= 1, 'the Stage 1 rows exist');
-  for (const route of ['/api/admin/root']) {
-    assert.ok(route in reserved, route);
-    for (const method of Object.keys(reserved[route]!.methods ?? {}) as Array<keyof NonNullable<typeof reserved[string]['methods']>>) {
-      const r = effectiveRule(ROUTE_ACCESS_MANIFEST, { route, handlers: [method] }, method);
-      assert.deepEqual(r?.allow, [], `${method} ${route} is denied, not the admin group's owner rule`);
-    }
+  // Streams R, X, I, A, H and J moved their rows into `routes`.
+  assert.deepEqual(Object.keys(reserved), []);
+  for (const method of ['GET', 'POST', 'DELETE'] as const) {
+    const r = effectiveRule(ROUTE_ACCESS_MANIFEST, { route: '/api/admin/root', handlers: [method] }, method);
+    assert.deepEqual(r?.allow, ['own-instance', 'owner'], `${method} /api/admin/root`);
+    assert.equal(r?.systemApp, 'com.aura.terminal', 'only the System Terminal asks the owner');
   }
 });
 

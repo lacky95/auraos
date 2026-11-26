@@ -39,6 +39,7 @@ import type { AccessPrincipal } from '../auth/types.js';
 import { homeRequirements } from '../homes/HomeResolver.js';
 import { HomeDeniedError, type JumpHomeMode } from '../homes/types.js';
 import { RuntimeCapabilityError, missingCapabilities } from '../runtimes/types.js';
+import { isRootGrantToken } from './rootTabs.js';
 import type { AuditInput } from '../auth/AdminAudit.js';
 import { userAttribution } from '../auth/AdminAudit.js';
 import type { SidecarInfo } from '../types/instance.js';
@@ -119,6 +120,8 @@ export interface SessionOpen {
   env: Record<string, string>;
   /** Owner only (the route decides): a sidecar of the instance, as its image user. */
   sidecar?: string;
+  /** A root tab (J.6): the single-use grant `POST /api/admin/root` issued; the shell consumes it. */
+  root?: string;
 }
 
 export interface ExecSession {
@@ -222,6 +225,9 @@ export function parseSessionOpen(frame: unknown): SessionOpen {
   }
   if (f['sidecar'] !== undefined && (typeof f['sidecar'] !== 'string' || !/^[A-Za-z0-9_.-]{1,128}$/.test(f['sidecar']))) throw bad('bad sidecar name');
   if (f['sidecar'] !== undefined && f['home'] !== undefined) throw bad('a sidecar session has the image\'s own user and home');
+  if (f['root'] !== undefined && (!isRootGrantToken(f['root']) || f['sidecar'] !== undefined || (f['home'] !== undefined && f['home'] !== 'private'))) {
+    throw bad('root: a root grant, into the instance itself, with the Private Home');
+  }
   const env: Record<string, string> = {};
   const rawEnv = (f['env'] && typeof f['env'] === 'object' ? f['env'] : {}) as Record<string, unknown>;
   for (const key of SESSION_ENV) {
@@ -236,6 +242,7 @@ export function parseSessionOpen(frame: unknown): SessionOpen {
     ...(argv ? { argv } : {}),
     ...(typeof f['cwd'] === 'string' ? { cwd: f['cwd'] } : {}),
     ...(typeof f['sidecar'] === 'string' ? { sidecar: f['sidecar'] } : {}),
+    ...(typeof f['root'] === 'string' ? { root: f['root'] } : {}),
   };
 }
 
@@ -572,7 +579,7 @@ export function sessionCallerOf(principal: AccessPrincipal | null | undefined, l
  */
 export function execAudit(
   principal: AccessPrincipal | null | undefined,
-  action: 'session.opened' | 'session.closed' | 'instance.exec' | 'instance.logs',
+  action: 'session.opened' | 'session.closed' | 'instance.exec' | 'instance.logs' | 'root.granted' | 'root.ended',
   target: { appId?: string | undefined; instanceId: string },
   detail: Record<string, unknown> = {},
   outcome: AuditInput['outcome'] = 'ok',

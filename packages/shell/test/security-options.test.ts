@@ -142,7 +142,7 @@ test('registry: every option has a title, a description, a source and the fresh 
     if (o.type === 'enum') assert.ok(o.values?.includes(o.default as string), `${o.id}: default is a value`);
   }
   assert.equal(core.securityOption(core.FRESH_AUTH_REQUIRE_HTTPS)?.default, false, 'D63: off by default');
-  assert.deepEqual([...core.POLICY_OPTION_IDS], [core.FRESH_AUTH_REQUIRE_HTTPS]);
+  assert.deepEqual([...core.POLICY_OPTION_IDS], [core.FRESH_AUTH_REQUIRE_HTTPS, core.AURA_ROOT_OPTION], 'J.6: aura-root became a policy option');
   assert.equal(core.securityOption('access-profile')?.source, 'reserved');
   assert.equal(core.securityOption('password-policy')?.record, core.PASSWORD_POLICY_KEY);
 });
@@ -176,7 +176,8 @@ test('registry: env wins, then the policy record, then the default; sources say 
   assert.equal(option(list, 'lifecycle-strict').effectiveSource, 'default');
   assert.equal(option(list, 'password-policy').effectiveSource, 'record user:policy:password');
   assert.equal(option(list, 'access-profile').effectiveSource, 'reserved');
-  assert.deepEqual(list.filter((o) => o.writable).map((o) => o.id), ['fresh-auth-require-https']);
+  assert.deepEqual(list.filter((o) => o.writable).map((o) => o.id), ['fresh-auth-require-https', 'aura-root']);
+  assert.deepEqual([option(list, 'aura-root').value, option(list, 'aura-root').effectiveSource], ['enabled', 'default']);
   assert.equal(option(core.resolveSecurityOptions({}, {}), 'fresh-auth-require-https').value, false);
 });
 

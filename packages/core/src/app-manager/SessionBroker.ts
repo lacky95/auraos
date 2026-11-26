@@ -226,6 +226,15 @@ export class SessionBroker {
     await this.brokerCommand([helper, 'reap', ...[...this.open.values()].map((r) => String(r.launcherPid))]);
   }
 
+  /** Ends one open session (its launcher hangs it up). False when it is not open here. */
+  async end(sessionId: string): Promise<boolean> {
+    const r = this.open.get(sessionId);
+    if (!r || !this.ready) return false;
+    const helper = await this.ready;
+    await this.brokerCommand([helper, 'end', String(r.launcherPid)]);
+    return true;
+  }
+
   /** Opens one session in the target container. */
   async openSession(spec: SessionSpec, target: SessionTarget, onOutput: (channel: 1 | 2, data: Buffer) => void): Promise<ExecSession> {
     const helper = await this.ensure();

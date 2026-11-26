@@ -1611,9 +1611,14 @@ export class ContainerRunner implements SandboxRunner {
     return { engine: this.engineClient, broker: this.broker };
   }
 
-  /** The open in-environment sessions (diagnose). */
+  /** The open in-environment sessions (diagnose, root tabs). */
   openSessions(): ReturnType<SessionBroker['sessions']> {
     return this.broker?.sessions() ?? [];
+  }
+
+  /** Ends one open session (End of a root tab). */
+  endSession(sessionId: string): Promise<boolean> {
+    return this.broker?.end(sessionId) ?? Promise.resolve(false);
   }
 
   /**

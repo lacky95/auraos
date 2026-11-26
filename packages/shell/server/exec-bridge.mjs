@@ -7,7 +7,7 @@
  * Protocol:
  *   client → {op:'open', kind:'jump'|'exec', argv?, tty, cols, rows, cwd?,
  *             env:{TERM,COLORTERM,LANG,LC_ALL}, home?:'private'|'app'|'ephemeral',
- *             sidecar?}                                       first frame, text
+ *             sidecar?, root?:<grant>}                       first frame, text
  *   client → binary [0, …stdin bytes]
  *   client → {op:'resize', cols, rows} | {op:'signal', sig} | {op:'eof'}
  *   server → {op:'opened'} once the process runs (before it, a client may fall back)
@@ -27,6 +27,11 @@
  * is the owner's only. The user is the verified principal's, never a header.
  * Audit: `session.opened` / `session.closed` (user, instance, mode, home,
  * duration). A revoked sign-in ends the session (M4).
+ *
+ * A root tab (`aura root`, J.6): `root` carries the single-use grant the
+ * owner's approved `POST /api/admin/root` issued for this user and instance;
+ * it is consumed here (owner level only) before anything runs, and the
+ * session's end is audited `root.ended`.
  */
 import { WebSocketServer } from 'ws';
 import { followIdentity, reportSurface, requestIdentity, surfaceDecision } from './access-bridge.mjs';
@@ -48,6 +53,7 @@ export const liveExecDeps = {
   appOf: async (instanceId) => (await core()).getAppManager().getInstance(instanceId)?.appId ?? null,
   parseOpen: async (frame) => (await core()).parseSessionOpen(frame),
   callerOf: async (principal, level) => { const c = await core(); return c.sessionCallerOf(principal, level, c.DEFAULT_OWNER_ID); },
+  consumeRoot: async (grant, userId, instanceId) => (await core()).getAppManager().rootGrants.consume(grant, userId, instanceId),
   audit: async (principal, action, target, detail, outcome) => {
     const c = await core();
     await c.getAuthServices().audit.record(c.execAudit(principal, action, target, detail, outcome));
@@ -110,7 +116,7 @@ async function upgrade(req, socket, head, rawId, wss, deps) {
 function serve(ws, ctx, deps) {
   const target = { appId: ctx.appId, instanceId: ctx.instanceId };
   let session = null;
-  let opened = null;      // { at, kind, tty, home, sidecar }
+  let opened = null;      // { at, kind, tty, home, sidecar, root }
   let finished = false;
   const sendJson = (obj) => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj)); };
   const fail = (code, message, wsCode = 4000) => {
@@ -120,6 +126,7 @@ function serve(ws, ctx, deps) {
   const finish = (exitCode) => {
     if (finished || !opened) return;
     finished = true;
+    if (opened.root) void deps.audit(ctx.principal, 'root.ended', target, { durationMs: Date.now() - opened.at, exitCode }).catch(() => undefined);
     void deps.audit(ctx.principal, 'session.closed', target, {
       mode: opened.kind, tty: opened.tty, durationMs: Date.now() - opened.at, exitCode,
       ...(opened.home ? { home: opened.home } : {}),
@@ -169,10 +176,17 @@ function serve(ws, ctx, deps) {
     if (req.sidecar && !ctx.owner) return fail('forbidden', 'a sidecar session is the owner\'s only');
     if (ws.readyState !== ws.OPEN) return;
     const home = req.sidecar ? null : req.home ?? (ctx.level === 'self' ? 'app' : 'private');
-    const detail = { mode: req.kind, tty: req.tty, ...(home ? { home } : {}), ...(req.sidecar ? { sidecar: req.sidecar } : {}) };
+    const detail = { mode: req.kind, tty: req.tty, ...(home ? { home } : {}), ...(req.sidecar ? { sidecar: req.sidecar } : {}), ...(req.root ? { root: true } : {}) };
     try {
       const bridge = await deps.bridge();
       const caller = await deps.callerOf(ctx.principal, ctx.level);
+      if (req.root) {
+        // J.6: the owner's own grant for exactly this instance, used once.
+        if (!ctx.owner || !caller.user || !(await deps.consumeRoot(req.root, caller.user.userId, ctx.instanceId))) {
+          throw Object.assign(new Error('no valid root grant for this Terminal: run `aura root` again'), { code: 'forbidden' });
+        }
+        caller.root = true;
+      }
       session = await bridge.openSession(ctx.instanceId, req, (channel, chunk) => {
         if (ws.readyState === ws.OPEN) ws.send(Buffer.concat([Buffer.from([channel]), chunk]), { binary: true });
       }, caller);
@@ -180,7 +194,7 @@ function serve(ws, ctx, deps) {
       void deps.audit(ctx.principal, 'session.opened', target, { ...detail, error: err?.message }, 'failed').catch(() => undefined);
       return fail(err?.code ?? 'internal', err?.message ?? String(err));
     }
-    opened = { at: Date.now(), kind: req.kind, tty: req.tty, home, sidecar: req.sidecar };
+    opened = { at: Date.now(), kind: req.kind, tty: req.tty, home, sidecar: req.sidecar, root: !!req.root };
     void deps.audit(ctx.principal, 'session.opened', target, detail).catch(() => undefined);
     if (ws.readyState !== ws.OPEN) { session.close(); return; }
     sendJson({ op: 'opened' });
