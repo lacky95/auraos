@@ -1,4 +1,4 @@
-import { ExecBridgeError, getAppManager, type AccessPrincipal } from '@aura/core';
+import { getAppManager, type AccessPrincipal, type ExecBridgeError } from '@aura/core';
 import { errorResponse, jsonResponse } from './appResponse.js';
 import { isTrustedOwnerAgent } from './access/identify.ts';
 
@@ -100,6 +100,8 @@ export function execCaller(
 
 /** An ExecBridge failure as a response. */
 export function execError(err: unknown): Response {
-  if (err instanceof ExecBridgeError) return jsonResponse({ error: err.message, code: err.code }, err.status);
+  // By name, not instanceof: under `astro dev` core can load twice (SSR and Node's loader).
+  const e = err as Partial<ExecBridgeError> | null;
+  if (e?.name === 'ExecBridgeError' && typeof e.status === 'number') return jsonResponse({ error: e.message, code: e.code }, e.status);
   return errorResponse(err instanceof Error ? err.message : String(err), 500);
 }

@@ -49,7 +49,7 @@ async function rig(t: { after(fn: () => void): void }, who: { principal: Princip
           exited,
         };
       },
-    }),
+    }) as never,
     audit: async (_p: unknown, action: string, _t: unknown, detail: Record<string, unknown>, outcome?: string) => { audits.push({ action, detail, ...(outcome ? { outcome } : {}) }); },
     report: () => {},
     follow: () => () => {},
