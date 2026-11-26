@@ -196,3 +196,27 @@ test('execCaller (exec and logs routes): owner levels, the instance itself, neve
   assert.equal(level(locals({ kind: 'anonymous' }, 'none')), 401);
   assert.equal(level(undefined as unknown as App.Locals), 401);
 });
+
+test('socket.io leaves the bridge time to decide: an upgrade answered after 1.5 s still gets its answer', async () => {
+  const http = await import('node:http');
+  const net = await import('node:net');
+  const { Server } = await import('socket.io');
+  const { OS_EVENTS_UPGRADE } = await import('../server/attach.mjs');
+  const srv = http.createServer();
+  srv.on('upgrade', (req, socket) => {
+    if (!String(req.url).startsWith('/api/instances/')) return;
+    setTimeout(() => socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n'), 1500);
+  });
+  const io = new Server(srv, { path: '/os-events', transports: ['websocket'], serveClient: false, ...OS_EVENTS_UPGRADE });
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+  const port = (srv.address() as { port: number }).port;
+  try {
+    const first = await new Promise<string>((resolve) => {
+      const c = net.connect(port, '127.0.0.1', () => c.write('GET /api/instances/x-1/session HTTP/1.1\r\nHost: a\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n'));
+      let buf = '';
+      c.on('data', (d) => { buf += d; });
+      c.on('close', () => resolve(buf.split('\r\n')[0] || 'closed without an answer'));
+    });
+    assert.equal(first, 'HTTP/1.1 401 Unauthorized');
+  } finally { io.close(); srv.close(); }
+});

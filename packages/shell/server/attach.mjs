@@ -324,6 +324,16 @@ export function attachWsProxy(httpServer) {
  * resolves to the SAME emitter object the SSE endpoint subscribes to,
  * regardless of which module instance Vite hands us.
  */
+/**
+ * engine.io ends every upgrade it does not own after `destroyUpgradeTimeout`
+ * unless another listener has written to the socket by then. The shell's other
+ * upgrade listeners (the /api/proxy WS proxy, the exec bridge) decide
+ * asynchronously (identity, surface rule, instance lookup): with the 1 s
+ * default a slower decision found its socket already ended, and the caller got
+ * no answer at all. Unclaimed upgrades are still ended, later.
+ */
+export const OS_EVENTS_UPGRADE = { destroyUpgrade: true, destroyUpgradeTimeout: 30_000 };
+
 export async function attachSio(httpServer) {
   const { Server } = await import('socket.io');
   const core = await import('@aura/core');
@@ -361,6 +371,7 @@ export async function attachSio(httpServer) {
     path: '/os-events',
     transports: ['websocket'],
     serveClient: false,
+    ...OS_EVENTS_UPGRADE,
     // Dev-only: any origin is OK because the shell isn't internet-
     // reachable. Tighten when we ship a production build.
     cors: { origin: true, credentials: false },
