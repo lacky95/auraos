@@ -85,7 +85,7 @@ export interface ExecCaller {
 export function execCaller(
   locals: App.Locals | undefined,
   instanceId: string,
-  mgr: Pick<AppManager, 'isTrustedSystemCopy'>,
+  mgr: Pick<AppManager, 'isTrustedSystemCopy' | 'getInstance'>,
 ): ExecCaller | Response {
   const v = locals?.access;
   const p = v?.principal;

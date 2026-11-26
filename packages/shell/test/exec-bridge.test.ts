@@ -179,7 +179,11 @@ test('a client that goes away ends the session', async (t) => {
 });
 
 test('execCaller (exec and logs routes): owner levels, the instance itself, never its sidecar', () => {
-  const mgr = { isTrustedSystemCopy: (id: string) => id === 'com.aura.terminal' };
+  // D29 is owner-bound (stream I, C4): the Terminal instance must be the owner's.
+  const mgr = {
+    isTrustedSystemCopy: (id: string) => id === 'com.aura.terminal',
+    getInstance: (id: string) => (id === 'com.aura.terminal-1' ? { instanceId: id, appId: 'com.aura.terminal', owner: 'default' } : undefined),
+  };
   const locals = (principal: Principal, via = 'instance-token') => ({ access: { principal, via } }) as unknown as App.Locals;
   const level = (l: App.Locals) => { const c = execCaller(l, 'com.acme.notes-1', mgr as never); return c instanceof Response ? c.status : c.level; };
   assert.equal(level(locals(owner, 'login-session')), 'owner');

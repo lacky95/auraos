@@ -171,6 +171,8 @@ test('C8: a user\'s desktop snapshot holds only that user\'s instances, and the 
   const mgrView = {
     getAllInstances: () => list,
     getManifest: () => ({ activityMode: 'none' }),
+    // Stream R: containers survive a shell restart (no respawn).
+    runtimeCapabilitiesOf: () => ({ survivesShellRestart: true }),
   };
   const all = new Set(list.map((i) => i.instanceId));
   assert.deepEqual(sessionInstances(mgrView as never, all, new Set(), 'default').map((i) => i.instanceId), ['a-1', 'a-3'], 'unlabelled instances are the owner\'s');
