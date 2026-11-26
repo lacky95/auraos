@@ -6,6 +6,7 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { attachAppHosts, attachSio, attachWsProxy } from './server/attach.mjs';
+import { attachExecBridge } from './server/exec-bridge.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -27,6 +28,16 @@ function wsProxyPlugin() {
     name: 'aura-ws-proxy',
     configureServer(server) {
       if (server.httpServer) attachWsProxy(server.httpServer);
+    },
+  };
+}
+
+/** The exec bridge (server/exec-bridge.mjs): `aura exec`/`jump`/`logs` through the shell. The shell runs in dev on every install. */
+function execBridgePlugin() {
+  return {
+    name: 'aura-exec-bridge',
+    configureServer(server) {
+      if (server.httpServer) attachExecBridge(server.httpServer);
     },
   };
 }
@@ -124,6 +135,6 @@ export default defineConfig({
     },
     // tailwindcss() must come before wsProxyPlugin so its content-scanning
     // hooks run on every transformed module.
-    plugins: [tailwindcss(), appHostsPlugin(), wsProxyPlugin(), sioPlugin()],
+    plugins: [tailwindcss(), appHostsPlugin(), wsProxyPlugin(), execBridgePlugin(), sioPlugin()],
   },
 });
