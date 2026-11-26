@@ -1,6 +1,8 @@
 import type { APIRoute } from 'astro';
 import { readFileSync, readdirSync } from 'node:fs';
 import { getAppManager } from '@aura/core';
+import { auditOwner, ownerAction } from '../../../lib/approvals/admin.ts';
+import { reapOrphansRequest } from '../../../lib/approvals/maintenance.ts';
 
 interface AppProc { pid: number; appId: string; cmdline: string; }
 interface ReapReport {
@@ -30,8 +32,14 @@ function listAppProcesses(): AppProc[] {
   return out;
 }
 
-export const POST: APIRoute = async ({ url }) => {
-  const dryRun = url.searchParams.get('dryRun') === '1';
+/**
+ * POST /api/admin/reap-orphans[?dryRun=1]: the owner's (lib/approvals/maintenance.ts).
+ * A dry run is a read; the kill one click from the System Terminal.
+ */
+export const POST: APIRoute = async (ctx) => {
+  const dryRun = ctx.url.searchParams.get('dryRun') === '1';
+  const actor = await ownerAction(ctx, reapOrphansRequest(dryRun));
+  if (actor instanceof Response) return actor;
   const mgr = getAppManager();
   const tracked = mgr.getAllInstances();
 
@@ -92,6 +100,9 @@ export const POST: APIRoute = async ({ url }) => {
         inst.error = 'reaped by /api/admin/reap-orphans';
       }
     }
+    await auditOwner(actor, 'os.reap-orphans', {
+      outcome: report.errors.length ? 'failed' : 'ok', detail: { killed: report.killed.length, errors: report.errors.length },
+    });
   }
 
   return new Response(JSON.stringify(report, null, 2), {

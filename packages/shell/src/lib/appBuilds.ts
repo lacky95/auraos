@@ -6,10 +6,10 @@
  *
  * Builds run one at a time in throwaway containers (AppManager.buildApp).
  * Switching a running app to its new build means restarting it; windows come
- * back (restartWithActivities). Never restarted automatically:
- *   • at.oebb.opsconsole — it hosts agent sessions;
- *   • com.aura.terminal — live shell sessions (tmux) live in its containers;
- * both switch on their next start (new terminals, pool refills).
+ * back (restartWithActivities). Never restarted automatically: an app whose
+ * manifest declares `keepRunningOnBuild` (live sessions a restart would end,
+ * e.g. the System Terminal's tmux sessions); it switches on its next start
+ * (new terminals, pool refills).
  *
  * A Rebuild can change the SDK, so the pass first publishes it to the local
  * registry and refreshes the registry copies of installed apps; the build
@@ -21,7 +21,8 @@ import * as core from '@aura/core';
 import { restartWithActivities } from './appRestart.js';
 import { ensureSdkPublished } from './sdkBootstrap.js';
 
-export const KEEP_RUNNING = new Set(['at.oebb.opsconsole', 'com.aura.terminal']);
+/** The app's manifest asks to keep its running instances across a build (`keepRunningOnBuild`). */
+export const keepsRunning = (appId: string): boolean => core.getAppManager().getManifest(appId)?.keepRunningOnBuild === true;
 /** Left by os/boot.sh when a requested build (Update / Rebuild) ran this boot. */
 export const APP_BUILD_MARKER = '/data/aura/boot/apps-build-requested';
 
@@ -33,7 +34,7 @@ const isRunning = (appId: string) =>
 /** Move a running app onto what is now on disk, unless it must keep running. */
 async function switchRunning(appId: string): Promise<Pick<BuildResult, 'restarted' | 'restartNote'>> {
   if (!isRunning(appId)) return { restartNote: 'not running — starts from the build next time' };
-  if (KEEP_RUNNING.has(appId)) return { restartNote: 'kept running (live sessions) — switches on its next start' };
+  if (keepsRunning(appId)) return { restartNote: 'kept running (live sessions) — switches on its next start' };
   try { await restartWithActivities(appId); return { restarted: true }; }
   catch (err) { return { restartNote: `restart failed: ${(err as Error).message}` }; }
 }
@@ -63,15 +64,15 @@ export function appsNeedingBuild(): string[] {
 }
 
 /**
- * Refresh the registry @aura/* copies of enabled apps. A running KEEP_RUNNING
- * app is left alone: its live process still loads from that copy.
+ * Refresh the registry @aura/* copies of enabled apps. A running
+ * `keepRunningOnBuild` app is left alone: its live process still loads from that copy.
  * Returns the apps whose packages actually changed.
  */
 async function refreshAppSdks(): Promise<string[]> {
   const mgr = core.getAppManager();
   const changed: string[] = [];
   for (const m of mgr.getManifests()) {
-    if (!mgr.isEnabled(m.id) || (KEEP_RUNNING.has(m.id) && isRunning(m.id))) continue;
+    if (!mgr.isEnabled(m.id) || (m.keepRunningOnBuild && isRunning(m.id))) continue;
     const r = await mgr.refreshSdk(m.id);
     if (r.warning) console.warn(`[app-builds] ${m.id}: ${r.warning}`);
     if (r.changed) changed.push(m.id);

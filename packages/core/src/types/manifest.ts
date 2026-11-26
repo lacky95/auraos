@@ -527,6 +527,13 @@ export const AppManifestSchema = z.object({
    * Beispiel: Music Player im Hintergrund. Nutzer muss explizit APP CLOSE drücken um Backend zu beenden.
    */
   backgroundService: z.boolean().default(false),
+  /**
+   * The app hosts live sessions (shells, agent sessions) that a restart would
+   * end: a new build of it (`aura build app --restart`, the pass after an OS
+   * Update or Rebuild) does not restart its running instances. They switch to
+   * the build on their next start (shell lib/appBuilds.ts).
+   */
+  keepRunningOnBuild: z.boolean().default(false),
   viewConfig: z.object({
     defaultWidth: z.number().int().min(320).default(800),
     defaultHeight: z.number().int().min(240).default(600),

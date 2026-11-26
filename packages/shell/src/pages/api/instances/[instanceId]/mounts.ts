@@ -6,9 +6,7 @@ import { authenticate } from '../../../../lib/auth.ts';
 import { liveApprovalDeps } from '../../../../lib/approvals/service.ts';
 import { liveAppSourceDeps, mountAppVolume } from '../../../../lib/appSource.ts';
 import { isDeveloperMode } from '../../../../lib/systemMode.ts';
-
-/** The System Terminal: the only app the AuraOS checkout is ever mounted into (D60). */
-const SYSTEM_TERMINAL = 'com.aura.terminal';
+import { TERMINAL_APP_ID } from '../../../../../server/terminal-embed.mjs';
 
 /**
  * Cross-app mounts for one instance.
@@ -117,8 +115,8 @@ async function mountWorkspace(
   // Only the System Terminal instance itself, by its own token: not the
   // owner naming one, not a sidecar, not another Terminal instance, not a
   // copy of the Terminal installed in another scope.
-  if (caller.kind !== 'instance' || caller.appId !== SYSTEM_TERMINAL || caller.instanceId !== instanceId
-    || caller.sidecar || mgr.registry.getScopeId(SYSTEM_TERMINAL) !== 'system') {
+  if (caller.kind !== 'instance' || caller.appId !== TERMINAL_APP_ID || caller.instanceId !== instanceId
+    || caller.sidecar || mgr.registry.getScopeId(TERMINAL_APP_ID) !== 'system') {
     return errorResponse('the AuraOS checkout is mounted only into the System Terminal that asks for it: run aura mount workspace there', 403);
   }
   if (sandbox && sandbox !== 'container') {

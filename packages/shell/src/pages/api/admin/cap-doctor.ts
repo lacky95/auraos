@@ -8,6 +8,8 @@ import {
   toolchainMirrorBin, toolchainMirrorLib, toolchainLibFor,
   type LibDep, type Linkage,
 } from '@aura/core';
+import { auditOwner, ownerAction } from '../../../lib/approvals/admin.ts';
+import { capDoctorFixRequest } from '../../../lib/approvals/maintenance.ts';
 
 /**
  * `aura cap doctor` — does every installed capability actually RUN in the
@@ -216,10 +218,21 @@ export const GET: APIRoute = async ({ url }) => {
  * the store, so a repair is fast, offline, and safe to run on a whole toolchain.
  * When the origin paths are gone (a container recreate discarded the writable
  * layer), it falls back to restoring them from the volume-backed store.
+ *
+ * The owner's (lib/approvals/maintenance.ts): the owner in the desktop and the
+ * host operator act directly; `aura cap doctor --fix` in the System Terminal
+ * asks for one click. The read above stays direct.
  */
-export const POST: APIRoute = async ({ request }) => {
-  let body: { names?: string[]; refreshOnly?: boolean } = {};
-  try { body = await request.json() as typeof body; } catch { /* empty body is fine */ }
+export const POST: APIRoute = async (ctx) => {
+  let raw: unknown = {};
+  try { raw = await ctx.request.json(); } catch { /* empty body is fine */ }
+  const fix = capDoctorFixRequest(raw);
+  if ('invalid' in fix) {
+    return new Response(JSON.stringify({ ok: false, error: fix.invalid }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+  }
+  const actor = await ownerAction(ctx, fix.req);
+  if (actor instanceof Response) return actor;
+  const body = { names: fix.names, refreshOnly: fix.refreshOnly };
 
   const mgr = getAppManager();
   const dataDir   = mgr.getDataDir();
@@ -269,6 +282,7 @@ export const POST: APIRoute = async ({ request }) => {
   // mirror, so a refresh that runs first links yesterday's store.
   mgr.syncToolchainMirror();
   const refreshed = mgr.refreshWildcardApps();
+  await auditOwner(actor, 'cap.doctor-fix', { outcome: 'ok', detail: { repaired: repaired.map((r) => r.name), refreshed: refreshed.length } });
 
   return new Response(JSON.stringify({ ok: true, repaired, refreshed }), {
     status: 200, headers: { 'Content-Type': 'application/json' },

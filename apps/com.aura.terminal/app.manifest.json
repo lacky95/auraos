@@ -63,6 +63,7 @@
   ],
   "warmPool": 1,
   "backgroundService": true,
+  "keepRunningOnBuild": true,
   "sandbox": "container",
   "serve": "auto",
   "viewConfig": {
