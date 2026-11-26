@@ -4,6 +4,8 @@
 # container apps (this terminal). PRoot apps reach it at 127.0.0.1:3000.
 # Each call carries the caller's own instance token, read from the
 # environment (never written here: every app shares this home). D89 B5.
+# Generic form for any client: $OS_API_BASE + the Interface Registry url
+# (`aura get iface`), Authorization: Bearer $AURA_INSTANCE_TOKEN.
 
 [mcp_servers.aura-docs]
 url = "http://aura-shell:3000/api/proxy/com.aura.docs/mcp"

@@ -473,6 +473,40 @@ const hosts: ResourceDef<HostDto> = {
   ],
 };
 
+/** `GET /api/interfaces` items (core `InterfaceView`): the authoritative list of what apps provide. */
+interface InterfaceDto {
+  id: string; appId: string; name: string; kind: string; version?: string; address: string;
+  description?: string; status: string; url?: string;
+}
+
+/**
+ * The Interface Registry (D96: the one source of interface information).
+ * Generic access to any entry, whatever the client: `$OS_API_BASE` + `url`,
+ * with `Authorization: Bearer $AURA_INSTANCE_TOKEN` (the caller's session
+ * credential, never written into a file).
+ */
+const interfaces: ResourceDef<InterfaceDto> = {
+  name: 'interfaces',
+  aliases: ['interface', 'iface'],
+  description: 'Interface Registry: MCP servers, REST/HTTP and WebSocket endpoints apps provide (URL relative to $OS_API_BASE)',
+  verbs: ['get'],
+  scopes: ['app'],
+  nameOf: (i) => i.id,
+  list: async (ctx) => {
+    const q = new URLSearchParams({ consumers: '0', ...(ctx.app ? { appId: ctx.app } : {}) });
+    const res = await api.get<{ interfaces: InterfaceDto[] }>(`/api/interfaces?${q}`);
+    return res.interfaces ?? [];
+  },
+  columns: [
+    { header: 'ID', value: (i) => i.id },
+    { header: 'KIND', value: (i) => i.kind },
+    { header: 'STATUS', value: (i) => (i.status === 'live' ? color.green('live') : i.status === 'down' ? color.yellow('down') : color.dim(i.status)) },
+    { header: 'URL', value: (i) => i.url ?? color.dim('-') },
+    { header: 'VERSION', value: (i) => i.version ?? '-', wide: true },
+    { header: 'DESCRIPTION', value: (i) => i.description ?? '', wide: true },
+  ],
+};
+
 interface ScopeRow { id: string; appsDir: string; dataDir: string; immutable: boolean; appCount: number; gitRepo: string | null }
 
 const scopes: ResourceDef<ScopeRow> = {
@@ -573,7 +607,7 @@ const notifPerms: ResourceDef<NotifPermRow> = {
 
 /** Display order for help, api-resources and completion. */
 export const RESOURCES: ResourceDef[] = [
-  apps, instances, sidecars, activities, capabilities, services, mounts, ports, hosts, scopes, themes, permissions, notifPerms,
+  apps, instances, sidecars, activities, capabilities, services, mounts, ports, hosts, interfaces, scopes, themes, permissions, notifPerms,
 ];
 
 /** Look a resource up by any of its names (`inst`, `instance`, `instances`). */

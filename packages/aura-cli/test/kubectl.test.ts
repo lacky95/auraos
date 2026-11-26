@@ -27,6 +27,7 @@ test('every resource name and short name is unique and resolves to its resource'
   }
   assert.equal(findResource('inst')?.name, 'instances');
   assert.equal(findResource('sc')?.name, 'sidecars');
+  assert.equal(findResource('iface')?.name, 'interfaces', 'the Interface Registry (D96)');
   assert.equal(findResource('nope'), undefined);
 });
 
