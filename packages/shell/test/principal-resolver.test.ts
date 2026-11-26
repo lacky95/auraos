@@ -41,11 +41,11 @@ const SID = 'a'.repeat(32);
 let revoked = false;
 const login: NonNullable<PrincipalDeps['login']> = {
   cookieToken: sessionCookieToken,
-  ownerSession: async (t) => (t === LIVE && !revoked ? { sessionId: SID, userId: 'default' } : null),
+  userSession: async (t) => (t === LIVE && !revoked ? { sessionId: SID, userId: 'default', role: 'owner' as const } : null),
 };
 const ownerServices = (async () => ({
   registry: { getInstallation: async (id: string) => (id === 'inst-settings' ? { appId: 'com.aura.settings', scope: 'system', state: 'active' } : null) },
-  sessionLive: async (sid: string, userId: string) => sid === SID && userId === 'default' && !revoked,
+  sessionLive: async (sid: string, userId: string) => (sid === SID && userId === 'default' && !revoked ? ({ role: 'owner' as const }) : false as const),
 })) as unknown as GatewayOwnerDeps['services'];
 
 const deps: AuthDeps = {
@@ -84,7 +84,7 @@ test('an expired, revoked or forged login cookie → anonymous, never a 401', as
   assert.deepEqual(await authenticate(req({ cookie: `aura_session=${LIVE}` }), deps), { kind: 'anonymous', verification: 'unverified' });
   revoked = false;
   // A store that can't be read is not a request error for a cookie.
-  const down: AuthDeps = { ...deps, login: { cookieToken: sessionCookieToken, ownerSession: async () => { throw new Error('valkey down'); } } };
+  const down: AuthDeps = { ...deps, login: { cookieToken: sessionCookieToken, userSession: async () => { throw new Error('valkey down'); } } };
   assert.deepEqual(await authenticate(req({ cookie: `aura_session=${LIVE}` }), down), { kind: 'anonymous', verification: 'unverified' });
 });
 
@@ -104,15 +104,15 @@ test('an aura-sess1 bearer → the owner; invalid → 401', async () => {
 
 test('instance token → the instance acting for its `u` claim, else its owner', async () => {
   const owned = tokens.mint('com.acme.notes-1', undefined, 'default').token;
-  const instance = { kind: 'instance', appId: 'com.acme.notes', instanceId: 'com.acme.notes-1', verification: 'verified', systemId: SYS };
-  assert.deepEqual(await authenticate(req({ authorization: `Bearer ${owned}` }), deps), { ...instance, userId: 'default' });
+  const instance = () => ({ kind: 'instance', appId: 'com.acme.notes', instanceId: 'com.acme.notes-1', verification: 'verified', systemId: SYS, lifetime: tokens.lifetimeId('com.acme.notes-1') });
+  assert.deepEqual(await authenticate(req({ authorization: `Bearer ${owned}` }), deps), { ...instance(), userId: 'default' });
   const old = tokens.mint('com.acme.notes-1').token;  // minted before the claim: the server-side owner
-  assert.deepEqual(await authenticate(req({ authorization: `Bearer ${old}` }), deps), { ...instance, userId: 'default' });
+  assert.deepEqual(await authenticate(req({ authorization: `Bearer ${old}` }), deps), { ...instance(), userId: 'default' });
 });
 
 test('gateway claim → the instance, acting for the App Host session user only when the claim has one', async () => {
   const notes = (over: Partial<GatewayIdentityClaim>) => gateway('com.acme.notes', 'com.acme.notes-1', 'inst-notes', over);
-  const instance = { kind: 'instance', appId: 'com.acme.notes', instanceId: 'com.acme.notes-1', verification: 'verified', systemId: SYS };
+  const instance = { kind: 'instance', appId: 'com.acme.notes', instanceId: 'com.acme.notes-1', verification: 'verified', systemId: SYS, lifetime: tokens.lifetimeId('com.acme.notes-1') };
   assert.deepEqual(await authenticate(notes({ sid: SID }), deps), { ...instance, userId: 'default' });
   // The runtime script's claim names a scope user and no session: nobody.
   assert.deepEqual(await authenticate(notes({ userId: 'shared' }), deps), instance);
@@ -131,27 +131,32 @@ test('D45: the owner through system Settings → user through it', async () => {
 test('App Host cookie session (verified by app-hosts.mjs) → the owner acting through that app', async () => {
   const r = await resolvePrincipal(req({ authorization: 'Bearer the-apps-own-token' }), {
     mgr: mgr as never, apiKeys: null, login,
-  }, { appHost: { appId: 'com.acme.notes', instanceId: 'com.acme.notes-1', userId: 'default', sid: SID } });
+  }, { appHost: { appId: 'com.acme.notes', instanceId: 'com.acme.notes-1', userId: 'default', sid: SID, role: 'owner' } });
   assert.deepEqual(r, {
     principal: { ...USER, through: { appId: 'com.acme.notes', instanceId: 'com.acme.notes-1' } },
     via: 'app-host',
   });
+  // C2: a member's App Host session is a member acting through the app, never the owner.
+  const m = await resolvePrincipal(req({}), { mgr: mgr as never, apiKeys: null, login },
+    { appHost: { appId: 'com.acme.notes', userId: 'uaaaaaaaaaaaaaaa', sid: SID, role: 'member' } });
+  assert.equal((m.principal as { role?: string }).role, 'member');
 });
 
 test('sessionLive: revoked, expired, another user or a disabled owner is not live', async () => {
   const live = new Map([[SID, 'default']]);
-  let owner: { id: string; disabled?: boolean } | null = { id: 'default' };
+  let owner: { id: string; role: 'owner' | 'member'; disabled?: boolean } | null = { id: 'default', role: 'owner' };
   const check = createSessionLive({
     // LoginSessionStore.isLive: the nonce exists, is unexpired, and is this user's password session.
     sessions: { isLive: async (sid: string, userId: string) => live.get(sid) === userId },
-    users: { getOwner: async () => owner },
+    // C3: the session's own user, by id.
+    users: { getUser: async (id: string) => (owner && owner.id === id ? owner : null) },
   });
-  assert.equal(await check(SID, 'default'), true);
+  assert.deepEqual(await check(SID, 'default'), { role: 'owner' }, 'live, with the record\'s role');
   assert.equal(await check(SID, 'someone-else'), false, 'the user must match');
   assert.equal(await check(SID, ''), false);
-  owner = { id: 'default', disabled: true };
+  owner = { id: 'default', role: 'owner', disabled: true };
   assert.equal(await check(SID, 'default'), false, 'a disabled owner');
-  owner = { id: 'default' };
+  owner = { id: 'default', role: 'owner' };
   live.delete(SID);
   assert.equal(await check(SID, 'default'), false, 'revoked or expired');
 });

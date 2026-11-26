@@ -195,7 +195,7 @@ test('a failed revoke is reported, in the audit and to the caller', async () => 
   const failing = new core.ValkeyUserStore({
     identityKeyFile: core.defaultIdentityKeyFile(DATA_DIR),
     redis: () => defaultRedis(),
-    sessions: { revokeByMethod: async () => { throw new Error('valkey'); }, revokeByUser: async () => 0 },
+    sessions: { revokeByUser: async () => { throw new Error('valkey'); } },
     onOwnerRecovered: async (e) => {
       await core.getAuthServices().audit.record({
         by: core.operatorAttribution(), action: core.IDENTITY_AUDIT_ACTIONS.ownerRecovered,
@@ -289,7 +289,7 @@ test('fail-open: the real observer records an error instead of throwing on a bad
 test('a Valkey blip on a login session bearer is a service error, never a 401', async () => {
   const deps = {
     ...authDeps(),
-    login: { cookieToken: () => null, ownerSession: async () => { throw new Error('valkey down'); } },
+    login: { cookieToken: () => null, userSession: async () => { throw new Error('valkey down'); } },
   } as AuthDeps;
   const request = new Request('http://localhost/api/admin/x', { headers: { authorization: 'Bearer aura-sess1.a.b' } });
   await assert.rejects(authenticate(request, deps), /valkey down/);
@@ -308,7 +308,7 @@ test('fail-open: a Valkey failure in peek is counted and never reaches a respons
     internalSecret: () => null,
     services: () => ({
       loginSessions: { verify: async () => { throw new Error('valkey down'); } },
-      users: { getOwner: async () => { throw new Error('valkey down'); } },
+      users: { getUser: async () => { throw new Error('valkey down'); } },
       apiKeys: { peek: async () => { throw new Error('valkey down'); } },
     }),
   };

@@ -58,7 +58,16 @@ interface WithSystem { systemId?: string }
  * a verified source only: the instance token's `u` claim, the instance's
  * server-side owner, or the gateway claim of an App Host session.
  */
-export type InstancePrincipal = InstanceCaller & WithActor & WithSystem & { userId?: string };
+export type InstancePrincipal = InstanceCaller & WithActor & WithSystem & {
+  userId?: string;
+  /**
+   * D85 A9: which spawn of the instance this is (InstanceTokens `lifetimeId`,
+   * a hash of the per-spawn nonce), when the resolver could read it. Instance
+   * ids are reused, so a record that must not reach the next instance with
+   * the same id (an approval) binds this as well.
+   */
+  lifetime?: string;
+};
 export type ApiKeyPrincipal = ApiKeyCaller & WithActor & {
   /** The key's scopes (permission names), fixed by the owner at creation. */
   scopes: string[];
@@ -66,7 +75,12 @@ export type ApiKeyPrincipal = ApiKeyCaller & WithActor & {
 export type AnonymousPrincipal = AnonymousCaller & WithActor;
 export type SystemPrincipal = SystemCaller;
 
-export type UserRole = 'owner';
+/**
+ * From the verified user record (D82, I.2), never from the session or a
+ * claim: one `owner` (break-glass, D5/D16) and `member` accounts. A member
+ * holds no `owner` level and acts only through its own grants.
+ */
+export type UserRole = 'owner' | 'member';
 
 /** A logged-in human, verified from a live login session. */
 export type UserPrincipal = WithActor & WithSystem & {
@@ -91,7 +105,7 @@ export type Principal =
   | AnonymousPrincipal
   | SystemPrincipal;
 
-/** Kinds reserved for delegation. Not produced anywhere yet. */
+/** Kinds reserved for delegation and registered non-human principals (D84). Not produced anywhere yet. */
 export type ReservedPrincipalKind = 'agent';
 
 /** The host operator, from a one-time ticket for exactly one request (shell `identify.ts`). */
@@ -114,8 +128,13 @@ export function isSystemPrincipal(p: AccessPrincipal): p is SystemPrincipal {
   return p === SYSTEM_PRINCIPAL;
 }
 
-/** Subjects a grant can be given to. `user` / `agent` come with multi-user. */
-export type GrantSubjectKind = 'app' | 'apiKey';
+/**
+ * Subjects a grant can be given to. `user` is a local user id (D82, I.2), for
+ * the app permissions `app.use:<installationId>` and `app.jump:<installationId>`
+ * only. Ids never contain `@`: a qualified subject is a federation change
+ * (D85 A3), see `ReservedGrantSubject`.
+ */
+export type GrantSubjectKind = 'app' | 'apiKey' | 'user';
 export interface GrantSubject {
   kind: GrantSubjectKind;
   id: string;
@@ -128,7 +147,29 @@ export interface GrantSubject {
  */
 export type ReservedGrantSubject =
   | { kind: 'system'; systemId: string }
-  | { kind: 'user'; userId: string; systemId: string };
+  | { kind: 'user'; userId: string; systemId: string }
+  /** D84: an explicitly registered agent or service identity. Types only: no registration exists. */
+  | { kind: 'agent'; id: string }
+  | { kind: 'service'; id: string };
+
+/**
+ * Reserved (D83), types only in Phase 5: nothing stores or reads it. The
+ * future authoritative link from an external identity provider account to a
+ * local user. Key: `ident:ext:<sha256(issuer + "\0" + subject)>`. Never keyed
+ * by email or a display name; claims never choose `userId`, a uid or a home.
+ */
+export interface ExternalIdentityLink {
+  v: 1;
+  /** OIDC `iss`, exact string match. */
+  issuer: string;
+  /** OIDC `sub`: opaque and stable per provider. */
+  subject: string;
+  /** The internal Aura user; never derived from claims. */
+  userId: string;
+  linkedAt: number;
+  linkedBy: ChangeAttribution;
+  state: 'active' | 'suspended';
+}
 
 /**
  * Where a grant applies. Every grant today is OS-wide (one owner, no other

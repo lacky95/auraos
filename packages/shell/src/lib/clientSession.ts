@@ -36,8 +36,10 @@ export async function viewerFor(
   if (p.kind !== 'anonymous' && !(p.kind === 'user' && !p.through)) return viewer;
   const sid = clientSessionIdFrom(request, opts.url);
   if (!sid) return viewer;
-  const store = (core.getAuthServices() as { clientSessions?: { effectiveLock(sid: string): Promise<'locked' | 'unlocked'> } }).clientSessions;
-  const lock = store ? await store.effectiveLock(sid) : 'locked';
+  const store = (core.getAuthServices() as { clientSessions?: { effectiveLock(sid: string, opts?: { userId?: string }): Promise<'locked' | 'unlocked'> } }).clientSessions;
+  // D87 B1: a user's own login reads only its own screens; another user's sid is locked.
+  const userId = p.kind === 'user' ? (principal as { userId: string }).userId : undefined;
+  const lock = store ? await store.effectiveLock(sid, userId !== undefined ? { userId } : {}) : 'locked';
   viewer.screen = { sid, lock };
   return viewer;
 }

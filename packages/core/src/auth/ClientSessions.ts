@@ -21,6 +21,12 @@
  * request: a client-reported unlock is NOT an authentication boundary (the
  * lock screen has no PIN). An authenticated unlock (PIN, user login) plugs
  * in here later, without changing callers.
+ *
+ * D87 B1 (I.2): a session registered by a signed-in user records that
+ * `userId` and its `loginSessionId`. A sid that names a user counts only for
+ * that user (`effectiveLock(sid, { userId })` reads `locked` for anyone
+ * else), and `endBy` ends a user's screens when the account is disabled or
+ * its login sessions are revoked. There is no device concept.
  */
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { Redis } from '@aura/kv-store';
@@ -35,6 +41,10 @@ const SID_PATTERN = /^cs1\.([A-Za-z0-9_-]{22})\.([A-Za-z0-9_-]{22})$/;
 
 export interface ClientSessionRecord {
   clientId: string;
+  /** D87 B1: the signed-in user that registered this screen, if one did. */
+  userId?: string;
+  /** D87 B1: that user's login session; the screen ends with it. */
+  loginSessionId?: string;
   lock: LockState;
   createdAt: number;
   lastSeen: number;
@@ -160,7 +170,7 @@ export class ClientSessionStore {
   }
 
   /** A new session. `lock` is the client's current state; unlocked goes through the verifier. */
-  async register(opts: { lock?: LockState; proof?: unknown } = {}): Promise<ClientSessionState> {
+  async register(opts: { lock?: LockState; proof?: unknown; userId?: string; loginSessionId?: string } = {}): Promise<ClientSessionState> {
     const clientId = b64(randomBytes(16));
     const sid = `cs1.${clientId}.${await this.sign(clientId)}`;
     const now = this.now();
@@ -172,6 +182,8 @@ export class ClientSessionStore {
     }
     const rec: ClientSessionRecord = {
       clientId, lock, createdAt: now, lastSeen: now,
+      ...(opts.userId ? { userId: opts.userId } : {}),
+      ...(opts.userId && opts.loginSessionId ? { loginSessionId: opts.loginSessionId } : {}),
       ...(lock === 'locked' ? { lockAt: now } : { unlockAt: now }),
     };
     await this.save(rec);
@@ -240,10 +252,53 @@ export class ClientSessionStore {
     return rec;
   }
 
-  /** `'unlocked'` only for a live session that says so; everything else is `'locked'`. */
-  async effectiveLock(sid: string | null | undefined): Promise<LockState> {
+  /**
+   * D87 B1: end every screen of a user, or of one login session. How many.
+   * Called when an account is disabled and when login sessions are revoked.
+   */
+  async endBy(sel: { userId: string } | { loginSessionId: string }): Promise<number> {
+    return this.endWhere((rec) => ('userId' in sel ? rec.userId === sel.userId : rec.loginSessionId === sel.loginSessionId));
+  }
+
+  /** D87 B1: end the screens whose login session is no longer live (after a revoke). How many. */
+  async endRevoked(loginSessionLive: (loginSessionId: string) => Promise<boolean>): Promise<number> {
+    const dead = new Set<string>();
+    const ids = new Set<string>();
+    await this.eachRecord((rec) => { if (rec.loginSessionId) ids.add(rec.loginSessionId); });
+    for (const id of ids) if (!(await loginSessionLive(id))) dead.add(id);
+    return dead.size ? this.endWhere((rec) => !!rec.loginSessionId && dead.has(rec.loginSessionId)) : 0;
+  }
+
+  private async eachRecord(fn: (rec: ClientSessionRecord, key: string) => void): Promise<void> {
+    const r = this.redis();
+    let cursor = '0';
+    do {
+      const [next, keys] = await r.scan(cursor, 'MATCH', `${CLIENT_SESSION_PREFIX}*`, 'COUNT', 500);
+      cursor = next;
+      const recs = keys.filter((k) => k !== CLIENT_SESSION_SECRET_KEY);
+      if (!recs.length) continue;
+      const values = await r.mget(...recs);
+      recs.forEach((key, i) => {
+        try { const rec = JSON.parse(values[i] ?? 'null') as ClientSessionRecord | null; if (rec) fn(rec, key); } catch { /* skip */ }
+      });
+    } while (cursor !== '0');
+  }
+
+  private async endWhere(match: (rec: ClientSessionRecord) => boolean): Promise<number> {
+    const doomed: string[] = [];
+    await this.eachRecord((rec, key) => { if (match(rec)) doomed.push(key); });
+    return doomed.length ? this.redis().del(...doomed) : 0;
+  }
+
+  /**
+   * `'unlocked'` only for a live session that says so; everything else is
+   * `'locked'`. D87 B1: asked for a user (`userId`), a sid that another user
+   * registered reads `locked`: it is not this user's screen.
+   */
+  async effectiveLock(sid: string | null | undefined, opts: { userId?: string } = {}): Promise<LockState> {
     try {
       const rec = await this.get(sid);
+      if (rec?.userId && opts.userId !== undefined && rec.userId !== opts.userId) return 'locked';
       return rec?.lock === 'unlocked' ? 'unlocked' : 'locked';
     } catch {
       return 'locked';

@@ -65,3 +65,8 @@ export * from './security/SealedPolicyRecord.js';
 export * from './homes/types.js';
 export * from './homes/legacyResolver.js';
 export * from './identity/types.js';
+export * from './identity/LinuxIdentityStore.js';
+export * from './identity/passwd.js';
+export * from './identity/ownershipReport.js';
+export * from './homes/importReport.js';
+export * from './homes/plan.js';

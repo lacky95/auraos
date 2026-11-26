@@ -37,7 +37,7 @@ const installations: Record<string, { appId: string; scope: string; state: strin
 };
 const liveSessions = new Set(['s-live']);
 /** Mirrors app-host-auth.mjs `sessionLive`. */
-const sessionLive = async (sid: string) => liveSessions.has(sid);
+const sessionLive = async (sid: string) => (liveSessions.has(sid) ? ({ role: 'owner' as const }) : false as const);
 const services = {
   registry: {
     getInstallation: async (id: string) => installations[id] ?? null,

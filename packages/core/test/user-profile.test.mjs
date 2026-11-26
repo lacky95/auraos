@@ -74,7 +74,8 @@ function fakeRedis() {
 
 class Store extends ValkeyUserStore {
   constructor(redis, owner) { super({ identityKeyFile: '/nonexistent', redis: () => redis, now: () => 7 }); this.owner = owner; }
-  async getOwner() { return this.owner; }
+  // The account read (I.2: `user:<id>`, any role) is faked; the profile half is real.
+  async getUser(id) { return this.owner && this.owner.id === id ? this.owner : null; }
 }
 
 test('UserStore: getUser and getProfile, with locale backed by the user\'s preference', async () => {

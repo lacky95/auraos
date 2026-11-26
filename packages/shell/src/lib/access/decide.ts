@@ -17,6 +17,11 @@ import type {
  * trusted owner agent (D29): the System Terminal
  * or the owner's shell MCP by its own token, never on the owner's login
  * session or a shell screen.
+ *
+ * D85 A1: before any of that, a principal whose `systemId` is set and is not
+ * this system's is refused (`foreign-system`); its role is never read. A
+ * member (I.2) satisfies no `owner` level; on an `app-permission` rule it
+ * holds only its own `user` grants (core `Authorizer`).
  */
 
 export interface DecideDeps {
@@ -154,7 +159,8 @@ async function matchLevel(
 
   if (rule.allow.includes('app-permission')) {
     const permissions = rule.permissions ?? [];
-    const canHold = p.kind === 'instance' || p.kind === 'apiKey'
+    // A member holds its own `user` grants (I.2, C7); the owner matched above.
+    const canHold = p.kind === 'instance' || p.kind === 'apiKey' || (p.kind === 'user' && p.role !== 'owner' && permissions.length > 0)
       || (p.kind === 'anonymous' && permissions.length > 0);
     if (canHold) {
       const held = await checkPermissions(deps, p as Principal, permissions, input.strict);
@@ -174,6 +180,9 @@ async function evaluate(input: DecideInput, deps: DecideDeps): Promise<DecideRes
     return { outcome: 'needs-https', reason: 'https-required' };
   }
   if (rule.allow.includes('public')) return allow('public');
+
+  // D85 A1: a remote owner is never a local owner. Absent systemId means local.
+  if (core.isForeignPrincipal(principal as { systemId?: unknown })) return deny('foreign-system');
 
   const via = input.auth.via;
   const refusedAs: AccessReason = principal.kind === 'anonymous' ? 'unauthenticated' : 'wrong-principal';

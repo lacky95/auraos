@@ -5,7 +5,7 @@
  * desktop sends everyone to `/setup`, after that to `/login`.
  *
  * `whoami` reports the caller's principal (`authenticate()`, which reads the
- * login cookie through `sessionCookieToken` / `ownerSessionOf`) and labels
+ * login cookie through `sessionCookieToken` / `userSessionOf`) and labels
  * the login cookie. A login session opens the desktop and its App Hosts (the
  * handoff).
  *
@@ -61,7 +61,7 @@ export interface AuthAudit {
 
 export interface AuthSurfaceServices {
   users: UserStore
-    & Pick<ValkeyUserStore, 'recoverOwnerPassword' | 'credentialEpoch'
+    & Pick<ValkeyUserStore, 'setPasswordWithTicket' | 'credentialEpoch'
       | 'getPasswordPolicy' | 'checkNewPassword' | 'changeOwnerPassword' | 'setPasswordPolicy'>
     & Partial<Pick<ValkeyUserStore, 'identityKeyStatus'>>;
   loginSessions: LoginSessions;
@@ -90,7 +90,7 @@ export interface AuthContext {
 /** The one place that binds the surface to core. */
 export function coreAuthServices(): AuthSurfaceServices | null {
   const svc = core.getAuthServices?.() as unknown as Partial<AuthSurfaceServices> | undefined;
-  if (!svc?.users?.recoverOwnerPassword || !svc.users.credentialEpoch || !svc.loginSessions || !svc.setupTickets) return null;
+  if (!svc?.users?.setPasswordWithTicket || !svc.users.credentialEpoch || !svc.loginSessions || !svc.setupTickets) return null;
   return {
     users: svc.users, loginSessions: svc.loginSessions, setupTickets: svc.setupTickets, audit: svc.audit,
     notify: (notice) => core.getNotificationService().create(
@@ -328,32 +328,38 @@ function raiseNotice(svc: AuthSurfaceServices, notice: AuthNotice): void {
 const identityKeyUsable = (svc: AuthSurfaceServices) => svc.users.identityKeyStatus?.() !== 'malformed';
 
 /**
- * The live password session of the current, enabled owner that `token` names.
- * The one check behind the desktop's sign-in and the shell's principal
- * resolver (lib/access/identify.ts).
+ * The live password session `token` names, of the enabled user it belongs to
+ * (C3: the session's own user, read by id; any role). The role is the
+ * record's (C2): what that user may do is the access policy's question. The
+ * one check behind the desktop's sign-in and the shell's principal resolver
+ * (lib/access/identify.ts).
  */
-export async function ownerSessionOf(
+export async function userSessionOf(
   token: string,
-  svc: { loginSessions: Pick<LoginSessions, 'verify'>; users: Pick<UserStore, 'getOwner'> },
+  svc: { loginSessions: Pick<LoginSessions, 'verify'>; users: Pick<UserStore, 'getUser'> },
 ): Promise<{ session: LoginSession; user: UserAccount } | null> {
   const session = await svc.loginSessions.verify(token);
   if (!session || session.method !== 'password' || !session.userId) return null;
-  const user = await svc.users.getOwner();
+  const user = await svc.users.getUser(session.userId);
   if (!user || user.disabled || user.id !== session.userId) return null;
   return { session, user };
 }
 
-/** A live password session of the current, enabled owner. */
+/** A live password session of an enabled user (any role). */
 async function currentSession(
   ctx: AuthContext,
   svc: AuthSurfaceServices,
   scheme: Scheme,
 ): Promise<{ session: LoginSession; user: UserAccount } | null> {
   const token = readSessionCookie(ctx.request, scheme);
-  return token ? ownerSessionOf(token, svc) : null;
+  return token ? userSessionOf(token, svc) : null;
 }
 
-/** The verified owner session of this request, for the App Host handoff. */
+/**
+ * The verified OWNER session of this request (the record's role is `owner`),
+ * for the App Host handoff and the owner's approvals. A member's session is
+ * not one: approvals and the handoff stay the owner's in Phase 5 (I.2 §3).
+ */
 export async function currentOwnerSession(
   ctx: AuthContext,
   deps: AuthSurfaceDeps = defaultDeps(),
@@ -361,7 +367,8 @@ export async function currentOwnerSession(
   const svc = deps.services();
   if (!svc) return null;
   const current = await currentSession(ctx, svc, requestScheme(ctx, deps.env));
-  return current ? { sessionId: current.session.sessionId, userId: current.user.id, expiresAt: current.session.expiresAt } : null;
+  if (!current || current.user.role !== 'owner') return null;
+  return { sessionId: current.session.sessionId, userId: current.user.id, expiresAt: current.session.expiresAt };
 }
 
 /**
@@ -379,11 +386,11 @@ async function ownerCaller(
   if (ctx.request.headers.has(GATEWAY_IDENTITY_HEADER)) {
     const owner = await deps.gatewayOwner?.(ctx.request);
     if (!owner?.sessionId) return null;
-    const user = await svc.users.getOwner();
-    return user && !user.disabled && user.id === owner.userId ? { userId: user.id, sessionId: owner.sessionId } : null;
+    const user = await svc.users.getUser(owner.userId);
+    return user && !user.disabled && user.role === 'owner' ? { userId: user.id, sessionId: owner.sessionId } : null;
   }
   const current = await currentSession(ctx, svc, scheme);
-  return current ? { userId: current.user.id, sessionId: current.session.sessionId } : null;
+  return current?.user.role === 'owner' ? { userId: current.user.id, sessionId: current.session.sessionId } : null;
 }
 
 const loginRequired = () => json({ error: 'login-required' }, 401);
@@ -442,10 +449,10 @@ async function resetPassword(svc: AuthSurfaceServices, body: Body, scheme: Schem
   if (!identityKeyUsable(svc)) return unavailable();
   const ticket = await svc.setupTickets.claim(code, 'reset');
   if (!ticket) return setupRejected();
-  // The store moves the credential epoch, revokes sessions and writes the one
-  // audit event (`auth.owner-recovered`) with the final outcome.
-  let result: Awaited<ReturnType<AuthSurfaceServices['users']['recoverOwnerPassword']>>;
-  try { result = await svc.users.recoverOwnerPassword(ticket, password); }
+  // The store moves the credential epoch, revokes that user's sessions only
+  // (C5) and writes the one audit event with the final outcome.
+  let result: Awaited<ReturnType<AuthSurfaceServices['users']['setPasswordWithTicket']>>;
+  try { result = await svc.users.setPasswordWithTicket(ticket, password); }
   catch (err) { return policyError(err); }
   if (!result.ok) {
     return result.reason === 'identity-key-unavailable' || result.reason === 'conflict' ? unavailable() : setupRejected();
@@ -466,7 +473,8 @@ export function authLogin(ctx: AuthContext, deps: AuthSurfaceDeps = defaultDeps(
     const epoch = svc.users.credentialEpoch();
     const check = await svc.users.verifyPassword(username, password, { rateLimitKey: clientRateKey(ctx, deps.env) });
     if (!check.ok) return check.reason === 'rate-limited' ? json({ error: 'rate-limited' }, 429) : badCredentials();
-    if (check.user.disabled || check.user.role !== 'owner') return badCredentials();
+    // Any enabled account with a password (C3); what it may do is its role's (C2).
+    if (check.user.disabled) return badCredentials();
 
     const ttlMs = staySignedIn === true ? STAY_SIGNED_IN_TTL_MS : SESSION_TTL_MS;
     const { token, session } = await svc.loginSessions.issue({ method: 'password', userId: check.user.id, ttlMs });
@@ -574,7 +582,7 @@ export const ACCOUNT_SESSIONS_SHOWN = 20;
 export function authAccount(ctx: AuthContext, deps: AuthSurfaceDeps = defaultDeps()): Promise<Response> {
   return read(ctx, deps, async (svc, scheme) => {
     const caller = await ownerCaller(ctx, deps, svc, scheme);
-    const user = caller && await svc.users.getOwner();
+    const user = caller && await svc.users.getUser(caller.userId);
     if (!caller || !user) return loginRequired();
     const all = (await svc.loginSessions.listByUser(user.id))
       .map((s) => ({ id8: s.sessionId.slice(0, 8), method: s.method, createdAt: s.createdAt, current: s.sessionId === caller.sessionId }))

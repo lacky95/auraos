@@ -72,7 +72,8 @@ export interface ApprovalRouteDeps extends ApprovalServiceDeps {
   /** D63: the security option `fresh-auth-require-https` (access/decide.ts `freshAuthRequiresHttps`). */
   freshAuthRequiresHttps(): Promise<boolean>;
   /** A shell tab's lock state, from its client session id. */
-  lockOf(sid: string): Promise<'locked' | 'unlocked'>;
+  /** D87 B1: the screen's lock for `userId`; another user's screen reads locked. */
+  lockOf(sid: string, userId: string): Promise<'locked' | 'unlocked'>;
   /** The owner's password, through core's login rate limit. */
   verifyPassword(username: string, password: string, rateLimitKey: string | undefined): Promise<'ok' | 'invalid' | 'rate-limited'>;
   /** The login rate-limit key of this client (authSurface `clientRateKey`). */
@@ -218,7 +219,7 @@ export async function decideApproval(
   const shell = await deps.shellOwner(ctx);
   if ('error' in shell) return json({ error: shell.error }, shell.status);
   const sid = request.headers.get(CLIENT_SESSION_HEADER)?.trim();
-  if (!sid || (await deps.lockOf(sid)) !== 'unlocked') return json({ error: 'locked', message: 'Unlock this screen first.' }, 403);
+  if (!sid || (await deps.lockOf(sid, shell.owner.userId)) !== 'unlocked') return json({ error: 'locked', message: 'Unlock this screen first.' }, 403);
 
   const record = await deps.store.get(id);
   if (!record) return refusal('not-found');

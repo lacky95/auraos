@@ -8,6 +8,14 @@
  * detail names the requester), the host `operator`, `system` or `anonymous`.
  * Entries from before D50 may name `admin (shared credential)`.
  *
+ * Users are named by id, never by username (C6, D83): `user:<userId>` as
+ * actor or target, the username at most in `detail`. Build the actor with
+ * `actorOf` from an attribution; never parse `user:` back.
+ *
+ * D85 A3b: `actor` and `target` are local to the entry's `sys`. A foreign
+ * principal would be written qualified (`user:<id>@<systemId>`), never bare;
+ * no alpha path writes one.
+ *
  * Passwords, codes, tokens and hashes never go in here: `detail` fields with
  * such names are dropped on write, at any depth.
  */
@@ -32,6 +40,12 @@ export const IDENTITY_AUDIT_ACTIONS = {
   passwordPolicyChanged: 'auth.password-policy-changed',
   passwordPolicyTampered: 'auth.password-policy-tampered',
   sessionsRevoked: 'auth.sessions-revoked',
+  // I.2 (D82): member accounts. Created and disabled only by the host operator (5-main).
+  userCreated: 'auth.user-created',
+  userDisabled: 'auth.user-disabled',
+  userEnabled: 'auth.user-enabled',
+  /** A member's enrolment or reset with a one-time code (the owner's is `ownerRecovered`). */
+  passwordReset: 'auth.password-reset',
 } as const;
 
 export function userAttribution(p: Pick<UserPrincipal, 'userId'> & { sessionId?: string }): UserAttribution {

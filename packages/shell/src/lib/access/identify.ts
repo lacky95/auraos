@@ -1,6 +1,7 @@
 import type {
-  AccessPrincipal, AppInstance, AppManager, InstancePrincipal, OperatorPrincipal, Principal, UserPrincipal,
+  AccessPrincipal, AppInstance, AppManager, InstancePrincipal, OperatorPrincipal, Principal, UserPrincipal, UserRole,
 } from '@aura/core';
+import { DEFAULT_OWNER_ID } from '@aura/core';
 // The file-only entry, as the CLI uses it: one subject rule on both sides.
 import { operatorRequestSubject } from '@aura/core/setup-tickets';
 import { localSystemId } from '@aura/core/system-identity';
@@ -116,7 +117,11 @@ function ssrOwner(
   });
 }
 
-/** The owner through `inst`, if its `system` copy acts for that live owner session on this path (D45). */
+/**
+ * The owner through `inst`, if its `system` copy acts for that live owner
+ * session on this path (D45). `ownerUiActs` checks the session is live and
+ * its user's record has the `owner` role (I.2: never a member's).
+ */
 async function ownerThrough(
   request: Request, inst: Pick<AppInstance, 'appId' | 'instanceId'>,
   ref: { installationId: string; userId: string; sid: string }, deps: GatewayOwnerDeps,
@@ -127,10 +132,7 @@ async function ownerThrough(
   if (!svc) return null;
   const path = new URL(request.url).pathname;
   if (!(await ownerUiActs({ appId: inst.appId, path, ...ref }, svc))) return null;
-  return {
-    kind: 'user', userId: ref.userId, role: 'owner', sessionId: ref.sid,
-    verification: 'verified', ...systemOf(), through: { appId: inst.appId, instanceId: inst.instanceId },
-  };
+  return userPrincipal(ref.userId, ref.sid, 'owner', { appId: inst.appId, instanceId: inst.instanceId });
 }
 
 // ── the one principal resolver ──────────────────────────────────────────────
@@ -159,18 +161,19 @@ export interface ResolvedPrincipal extends VerifiedIdentity {
 /** The live objects the resolver reads. A missing one makes what needs it `unverified`. */
 export interface PrincipalDeps {
   mgr: (Pick<AppManager, 'getInstance' | 'getManifest' | 'isTrustedSystemCopy'> & {
-    tokens: Pick<AppManager['tokens'], 'verify'> & Partial<Pick<AppManager['tokens'], 'hasNonce'>>;
+    tokens: Pick<AppManager['tokens'], 'verify'> & Partial<Pick<AppManager['tokens'], 'hasNonce' | 'lifetimeId'>>;
   }) | null;
   apiKeys: { verify(key: string): Promise<{ id: string; name: string; scopes: string[] } | null> } | null;
   /**
    * The login token a request carries in its session cookie, and the live
-   * password session of the enabled owner it names (authSurface
-   * `sessionCookieToken` / `ownerSessionOf`, the checks the desktop's
-   * sign-in uses). Null: login is unavailable here.
+   * password session of the enabled user it names, with that user's role
+   * from the verified record (authSurface `sessionCookieToken` /
+   * `userSessionOf`, the checks the desktop's sign-in uses; C2, C3). Null:
+   * login is unavailable here.
    */
   login: {
     cookieToken(request: Request): string | null;
-    ownerSession(token: string): Promise<{ sessionId: string; userId: string } | null>;
+    userSession(token: string): Promise<{ sessionId: string; userId: string; role: UserRole } | null>;
   } | null;
   /** App Host services for the D45 owner check; loaded when absent. */
   ownerServices?: GatewayOwnerDeps['services'];
@@ -195,6 +198,8 @@ export interface AppHostSession {
   instanceId?: string;
   userId: string;
   sid: string;
+  /** The user's role, read from the record when the session was checked live; absent counts as `member`. */
+  role?: UserRole;
 }
 
 const API_KEY_PREFIX = 'aura_k1_';
@@ -224,8 +229,15 @@ export function systemOf(): { systemId?: string } {
   try { return { systemId: localSystemId() }; } catch { return {}; }
 }
 
-function userPrincipal(userId: string, sessionId: string, through?: UserPrincipal['through']): UserPrincipal {
-  return { kind: 'user', userId, role: 'owner', sessionId, verification: 'verified', ...systemOf(), ...(through ? { through } : {}) };
+/**
+ * A verified user. The role is the record's (C2), read by the same lookup
+ * that checked `disabled`; anything but `owner` is `member` (fail closed).
+ */
+function userPrincipal(userId: string, sessionId: string, role: UserRole | undefined, through?: UserPrincipal['through']): UserPrincipal {
+  return {
+    kind: 'user', userId, role: role === 'owner' ? 'owner' : 'member', sessionId, verification: 'verified',
+    ...systemOf(), ...(through ? { through } : {}),
+  };
 }
 
 /**
@@ -244,16 +256,22 @@ function instanceTokenClaims(token: string, tokens: NonNullable<PrincipalDeps['m
 
 function instancePrincipal(
   inst: Pick<AppInstance, 'appId' | 'instanceId'> & { owner?: string },
-  extra: { sidecar?: string; userId?: string },
+  extra: { sidecar?: string; userId?: string; lifetime?: string | null },
 ): InstancePrincipal {
   return {
     kind: 'instance', appId: inst.appId, instanceId: inst.instanceId,
     ...(extra.sidecar ? { sidecar: extra.sidecar } : {}),
     ...(extra.userId ? { userId: extra.userId } : {}),
+    // D85 A9: this spawn of the instance (a reused id is a new lifetime).
+    ...(extra.lifetime ? { lifetime: extra.lifetime } : {}),
     verification: 'verified',
     ...systemOf(),
   };
 }
+
+const lifetimeOf = (deps: PrincipalDeps, instanceId: string): string | null => {
+  try { return deps.mgr?.tokens.lifetimeId?.(instanceId) ?? null; } catch { return null; }
+};
 
 async function resolveGateway(request: Request, deps: PrincipalDeps): Promise<ResolvedPrincipal> {
   const mgr = deps.mgr;
@@ -266,7 +284,7 @@ async function resolveGateway(request: Request, deps: PrincipalDeps): Promise<Re
   // claim with `sid`); a claim without one (the runtime script) names nobody.
   const claim = gatewayClaimOf(request);
   const userId = claim && claim.sid && typeof claim.userId === 'string' ? claim.userId : undefined;
-  return seen(instancePrincipal(inst, userId ? { userId } : {}), 'gateway');
+  return seen(instancePrincipal(inst, { ...(userId ? { userId } : {}), lifetime: lifetimeOf(deps, inst.instanceId) }), 'gateway');
 }
 
 async function resolveBearer(token: string, deps: PrincipalDeps): Promise<ResolvedPrincipal> {
@@ -279,8 +297,8 @@ async function resolveBearer(token: string, deps: PrincipalDeps): Promise<Resolv
   }
   if (token.startsWith(LOGIN_SESSION_PREFIX)) {
     if (!deps.login) return unverified();
-    const s = await deps.login.ownerSession(token);
-    return s ? seen(userPrincipal(s.userId, s.sessionId), 'login-session') : rejected('credential-invalid');
+    const s = await deps.login.userSession(token);
+    return s ? seen(userPrincipal(s.userId, s.sessionId, s.role), 'login-session') : rejected('credential-invalid');
   }
   if (!token.startsWith(INSTANCE_TOKEN_PREFIX)) return rejected('credential-invalid');
   if (!deps.mgr) return unverified();
@@ -290,7 +308,7 @@ async function resolveBearer(token: string, deps: PrincipalDeps): Promise<Resolv
   if (!inst) return rejected('instance-not-running', claims.instanceId);
   // The `u` claim, else the instance's server-side owner (a token minted
   // before the claim, or when a pool member was claimed).
-  return seen(instancePrincipal(inst, { sidecar: claims.sidecar, userId: claims.userId ?? inst.owner }), 'instance-token');
+  return seen(instancePrincipal(inst, { sidecar: claims.sidecar, userId: claims.userId ?? inst.owner, lifetime: lifetimeOf(deps, inst.instanceId) }), 'instance-token');
 }
 
 /** The header the host CLI sends its one-time operator code in (aura-cli `resolveIdentity`). */
@@ -331,7 +349,7 @@ function resolveOperator(request: Request, code: string, deps: PrincipalDeps): P
  *   Bearer aura1.…           → instance, acting for its `u` claim or owner;
  *     + owner SSR claim        user through that trusted system UI (D45, `ssrOwner`)
  *   Bearer aura_k1_…         → apiKey
- *   Bearer aura-sess1.…      → user (a live password session of the enabled owner)
+ *   Bearer aura-sess1.…      → user (a live password session of an enabled user; role from the record)
  *   any other Authorization  → rejected
  *   X-Aura-Operator: <code>  → operator (the host CLI's one-time ticket for this request)
  *   login cookie             → user; expired, revoked or unreadable → anonymous
@@ -344,8 +362,8 @@ export async function resolvePrincipal(
   request: Request, deps: PrincipalDeps, opts: { appHost?: AppHostSession | null } = {},
 ): Promise<ResolvedPrincipal> {
   if (opts.appHost) {
-    const { appId, instanceId, userId, sid } = opts.appHost;
-    return seen(userPrincipal(userId, sid, { appId, ...(instanceId ? { instanceId } : {}) }), 'app-host');
+    const { appId, instanceId, userId, sid, role } = opts.appHost;
+    return seen(userPrincipal(userId, sid, role, { appId, ...(instanceId ? { instanceId } : {}) }), 'app-host');
   }
   const token = bearerToken(request);
   if (gatewayClaimOf(request) !== null) return resolveGateway(request, deps);
@@ -364,8 +382,8 @@ export async function resolvePrincipal(
   // A cookie is not a presented credential: an expired, revoked or
   // unreadable session is anonymous, never a 401 or an error.
   try {
-    const s = await deps.login!.ownerSession(cookie);
-    return s ? seen(userPrincipal(s.userId, s.sessionId), 'login-session') : seen(ANONYMOUS, 'foreign-or-invalid');
+    const s = await deps.login!.userSession(cookie);
+    return s ? seen(userPrincipal(s.userId, s.sessionId, s.role), 'login-session') : seen(ANONYMOUS, 'foreign-or-invalid');
   } catch {
     return unverified();
   }
@@ -411,12 +429,22 @@ export const OWNER_AGENT_APPS: ReadonlySet<string> = new Set(['com.aura.terminal
  * with its own instance token
  * (never one of its sidecars). A gateway call is judged as the app's page,
  * by its instance rules only (gatewayCaller.ts never asks this).
+ *
+ * C4 (I.2): and only the OWNER's instance. Its server-side `owner` (and the
+ * user it acts for, when the token names one) must be the owner account,
+ * which is always `default` (D47 rule 2), is created only by setup and can't
+ * be disabled (ValkeyUserStore `setDisabled`). An unclaimed pool member has
+ * no owner and is never trusted; a member's System Terminal is an ordinary
+ * instance acting for that member.
  */
 export function isTrustedOwnerAgent(
-  p: InstancePrincipal, mgr: Pick<AppManager, 'isTrustedSystemCopy'> | null,
+  p: InstancePrincipal, mgr: Pick<AppManager, 'isTrustedSystemCopy' | 'getInstance'> | null,
 ): boolean {
-  if (!OWNER_AGENT_APPS.has(p.appId) || p.sidecar) return false;
-  return mgr?.isTrustedSystemCopy(p.appId) === true;
+  if (!OWNER_AGENT_APPS.has(p.appId) || p.sidecar || !mgr) return false;
+  if (mgr.isTrustedSystemCopy(p.appId) !== true) return false;
+  const inst = mgr.getInstance(p.instanceId) as (AppInstance & { owner?: string; inPool?: boolean }) | undefined;
+  if (!inst || inst.appId !== p.appId || inst.inPool || inst.owner !== DEFAULT_OWNER_ID) return false;
+  return p.userId === undefined || p.userId === DEFAULT_OWNER_ID;
 }
 
 // ── D28: tokenless callers by their container network address ───────────────

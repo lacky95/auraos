@@ -98,7 +98,7 @@ test('M5: activities not restored (setting off, or a restart without restore): n
 
 test('M5: doRestore passes windows only when nothing skipped the restore', () => {
   const src = readFileSync(new URL('../src/lib/desktopSession.ts', import.meta.url), 'utf8');
-  assert.match(src, /await reopenActivities\(mgr, snap, report, !report\.skipped\)/);
+  assert.match(src, /await reopenActivities\(mgr, snap, report, !report\.skipped, userId\)/);
   assert.match(src, /for \(const si of windows \? snap\.instances\.filter\(\(i\) => i\.respawn\) : \[\]\)/);
 });
 

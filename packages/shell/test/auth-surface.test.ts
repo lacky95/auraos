@@ -52,6 +52,7 @@ function fakes() {
     users: {
       hasOwner: async () => owner !== null,
       getOwner: async () => publicUser(),
+      getUser: async (id) => (owner && owner.id === id ? publicUser() : null),
       createOwner: async ({ username, password }) => {
         calls.create++;
         assertNew(password, username);
@@ -66,7 +67,7 @@ function fakes() {
         return { ok: true, user: publicUser()! };
       },
       credentialEpoch: () => epoch,
-      recoverOwnerPassword: async (ticket, password) => {
+      setPasswordWithTicket: async (ticket, password) => {
         if (!ticket.username) return { ok: false, reason: 'invalid-ticket' };
         if (!owner) return { ok: false, reason: 'no-owner' };
         if (ticket.username !== owner.username) return { ok: false, reason: 'username-mismatch' };

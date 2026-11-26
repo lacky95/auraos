@@ -195,6 +195,8 @@ export const ACCESS_REASONS = [
   // refused
   'unclassified', 'unauthenticated', 'wrong-principal', 'wrong-target',
   'missing-permission', 'missing-target-permission', 'rule-denied', 'ambiguous-rule',
+  // D85 A1: a principal of another Aura, refused before any role or grant rule
+  'foreign-system',
   // a further step is needed
   'approval-required', 'fresh-auth-required', 'https-required', 'operator-required',
   'policy-error',

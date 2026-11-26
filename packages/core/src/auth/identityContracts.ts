@@ -33,6 +33,8 @@ export type PasswordCheck =
 
 export interface UserStore {
   hasOwner(): Promise<boolean>;
+  /** The account `userId` names (any role), or null for an unknown id or a record that fails its MAC. */
+  getUser(userId: string): Promise<UserAccount | null>;
   getOwner(): Promise<UserAccount | null>;
   /** Create-once and atomic: null when an owner already exists. */
   createOwner(input: { username: string; password: string }): Promise<UserAccount | null>;
@@ -62,7 +64,11 @@ export interface UserProfiles {
 
 export const LOGIN_SESSION_PREFIX = 'aura-sess1';
 
-/** The shared admin credential's `shared-key` method is retired (D50). */
+/**
+ * The shared admin credential's `shared-key` method is retired (D50).
+ * Reserved (D83 §4): `'oidc'`, for a future OIDC relying party that maps
+ * `iss`+`sub` to a local user and issues an ordinary session for it.
+ */
 export type LoginMethod = 'password';
 
 /** Signed token payload: `aura-sess1.<b64url payload>.<b64url MAC>`. */
@@ -121,8 +127,14 @@ export interface SetupTicket {
   sha256: string;
   purpose: SetupTicketPurpose;
   expiresAt: number;
-  /** The account a `reset` applies to. */
+  /** The account a `reset` applies to: the operator-facing handle. */
   username?: string;
+  /**
+   * The user a `reset` (or an enrolment) is bound to (I.2). Set when the shell
+   * creates the ticket; the host CLI has no Valkey and names the username
+   * only, which the shell resolves through the username index at claim.
+   */
+  userId?: string;
   /** What an `operator` ticket vouches for. */
   subject?: string;
 }

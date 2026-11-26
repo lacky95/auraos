@@ -87,7 +87,7 @@ export type ApprovalAction = (typeof APPROVAL_ACTIONS)[number];
  */
 export type ApprovalRequester =
   /** An app instance or sidecar, acting for `userId` when it has one (5.8). */
-  | { kind: 'instance'; appId: string; instanceId: string; sidecar?: string; userId?: string; systemId?: string }
+  | { kind: 'instance'; appId: string; instanceId: string; sidecar?: string; userId?: string; systemId?: string; lifetime?: string }
   /** A signed-in human, directly or through an app (D45, App Host cookie). */
   | { kind: 'user'; userId: string; systemId?: string; through?: { appId: string; instanceId?: string } }
   /** An external REST caller with an admin-issued key. */
@@ -217,6 +217,8 @@ export function approvalRequester(p: AccessPrincipal): ApprovalRequester | null 
         ...(p.sidecar ? { sidecar: p.sidecar } : {}),
         ...(p.userId ? { userId: p.userId } : {}),
         ...(p.systemId ? { systemId: p.systemId } : {}),
+        // D85 A9: an approval binds this spawn, so a reused instance id can't consume it.
+        ...(p.lifetime ? { lifetime: p.lifetime } : {}),
       };
     case 'user':
       return {

@@ -197,17 +197,19 @@ export function appHostAuth() {
 
 /**
  * Whether the login session a cookie or claim names is live for that user:
- * not revoked, not expired, a password session of `userId`, who is still the
- * enabled owner. The same conditions as the desktop's sign-in check
- * (authSurface `ownerSessionOf`), for holders of a session id instead of the
- * token. Rejects when the store can't be read, so callers fail closed.
+ * not revoked, not expired, a password session of `userId`, who is still an
+ * enabled account (C3: the session's own user, any role). The same
+ * conditions as the desktop's sign-in check (authSurface `userSessionOf`),
+ * for holders of a session id instead of the token. Live: `{ role }`, the
+ * record's role, so an owner-only check (D45 `ownerUiActs`) asks for it.
+ * Not live: false. Rejects when the store can't be read, so callers fail closed.
  */
 export function createSessionLive({ sessions, users }) {
   return async (sid, userId) => {
     if (typeof sid !== 'string' || !sid || typeof userId !== 'string' || !userId) return false;
     if (!(await sessions.isLive(sid, userId))) return false;
-    const owner = await users.getOwner();
-    return !!owner && !owner.disabled && owner.id === userId;
+    const user = await users.getUser(userId);
+    return !!user && !user.disabled && user.id === userId ? { role: user.role } : false;
   };
 }
 

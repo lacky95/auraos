@@ -4,7 +4,7 @@ import type { AccessPrincipal, AppManager, InstancePrincipal } from '@aura/core'
 import { GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
 import { defaultRedis } from '@aura/kv-store';
 import { accessMode, wouldEnforce } from '../../../server/access-mode.mjs';
-import { ownerSessionOf, sessionCookieToken } from '../authSurface.ts';
+import { userSessionOf, sessionCookieToken } from '../authSurface.ts';
 import { createDecide, freshAuthRequiresHttps, type DecideDeps } from './decide.ts';
 import {
   isTrustedOwnerAgent, liveNetworkIdentity, resolvePrincipal, type AppHostSession, type PrincipalDeps,
@@ -90,8 +90,8 @@ export interface ObserverManager {
 
 export interface ObserverServices {
   apiKeys?: { peek?(key: string): Promise<{ id: string; name: string; scopes: string[] } | null> };
-  loginSessions?: Parameters<typeof ownerSessionOf>[1]['loginSessions'];
-  users?: Parameters<typeof ownerSessionOf>[1]['users'];
+  loginSessions?: Parameters<typeof userSessionOf>[1]['loginSessions'];
+  users?: Parameters<typeof userSessionOf>[1]['users'];
   setupTickets?: { peek?(code: string, purpose: 'operator'): Promise<{ subject?: string } | null> };
 }
 
@@ -122,9 +122,9 @@ export function observerPrincipalDeps(deps: ObserverDeps): PrincipalDeps {
     apiKeys: peekKey && ready ? { verify: (key) => peekKey.call(svc!.apiKeys, key) } : null,
     login: loginSessions && users && ready ? {
       cookieToken: sessionCookieToken,
-      ownerSession: async (token) => {
-        const found = await ownerSessionOf(token, { loginSessions, users });
-        return found ? { sessionId: found.session.sessionId, userId: found.user.id } : null;
+      userSession: async (token) => {
+        const found = await userSessionOf(token, { loginSessions, users });
+        return found ? { sessionId: found.session.sessionId, userId: found.user.id, role: found.user.role } : null;
       },
     } : null,
     // Peek only: the gate or the route uses the ticket up (identify.ts `resolveOperator`).
@@ -176,7 +176,9 @@ function appHostOf(v: unknown): AppHostSession | null {
   if (!o || typeof o !== 'object') return null;
   const str = (x: unknown) => typeof x === 'string' && x.length > 0;
   if (!str(o.appId) || !str(o.userId) || !str(o.sid) || (o.instanceId !== undefined && !str(o.instanceId))) return null;
-  return { appId: o.appId!, userId: o.userId!, sid: o.sid!, ...(o.instanceId ? { instanceId: o.instanceId } : {}) };
+  // The record's role, as the live check read it (C2); anything else is no role, i.e. a member.
+  const role = o.role === 'owner' || o.role === 'member' ? { role: o.role } : {};
+  return { appId: o.appId!, userId: o.userId!, sid: o.sid!, ...(o.instanceId ? { instanceId: o.instanceId } : {}), ...role };
 }
 
 function isVerified(v: unknown): v is VerifiedIdentity {
@@ -606,7 +608,7 @@ export const liveDeps: ObserverDeps = {
     },
   },
   mgr: liveMgr,
-  ownerAgent: (p) => isTrustedOwnerAgent(p, liveMgr() as unknown as Pick<AppManager, 'isTrustedSystemCopy'> | null),
+  ownerAgent: (p) => isTrustedOwnerAgent(p, liveMgr() as unknown as Pick<AppManager, 'isTrustedSystemCopy' | 'getInstance'> | null),
   freshAuthRequiresHttps: () => freshAuthRequiresHttps(
     ((globalThis as Record<string, unknown>)[AUTH_SERVICES] as { securityPolicy?: core.SecurityPolicyStore } | undefined)?.securityPolicy ?? null),
   network: liveNetworkIdentity(() => liveMgr() as unknown as Pick<AppManager, 'getAllInstances'> | null),

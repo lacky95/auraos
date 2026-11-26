@@ -64,7 +64,7 @@ const registry = {
     return labels[label] ?? { status: 'unknown' };
   },
 };
-const svc = { registry, sessionLive: async (sid: string) => liveSessions.has(sid) };
+const svc = { registry, sessionLive: async (sid: string) => (liveSessions.has(sid) ? ({ role: 'owner' as const }) : false as const) };
 
 let nowMs = 1_000_000;
 const auth = createAppHostAuth({ secret: Buffer.alloc(32, 7), now: () => nowMs });
@@ -742,8 +742,9 @@ const AUTH_SERVICES = '__auraAuthServices';
 const fakeAuthServices = {
   version: Number.MAX_SAFE_INTEGER,
   users: {
-    recoverOwnerPassword: async () => ({ ok: false }), credentialEpoch: () => 0,
+    setPasswordWithTicket: async () => ({ ok: false }), credentialEpoch: () => 0,
     getOwner: async () => ({ id: 'default', username: 'owner', role: 'owner', disabled: false }),
+    getUser: async (id: string) => (id === 'default' ? { id: 'default', username: 'owner', role: 'owner', disabled: false } : null),
   },
   loginSessions: {
     verify: async (token: string) => (token === 'owner-token'

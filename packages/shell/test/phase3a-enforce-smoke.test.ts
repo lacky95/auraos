@@ -40,9 +40,10 @@ const SETTINGS = 'com.aura.settings';
 const COUNTER = 'com.example.counter';
 const TERMINALX = 'io.lakner.terminalx';
 
-const instances: Record<string, { appId: string; instanceId: string; sandbox: string; state: string }> = {};
+// Every instance is the owner's (its server-side `owner`), as on a one-user system.
+const instances: Record<string, { appId: string; instanceId: string; sandbox: string; state: string; owner: string }> = {};
 for (const appId of [TERMINAL, AURASHELLD, SETTINGS, COUNTER, TERMINALX]) {
-  instances[`${appId}-1`] = { appId, instanceId: `${appId}-1`, sandbox: 'container', state: 'resumed' };
+  instances[`${appId}-1`] = { appId, instanceId: `${appId}-1`, sandbox: 'container', state: 'resumed', owner: 'default' };
 }
 const scopes: Record<string, string> = { [TERMINAL]: 'system', [AURASHELLD]: 'system', [SETTINGS]: 'system', [COUNTER]: 'user', [TERMINALX]: 'user' };
 const declared: Record<string, string[]> = {
@@ -79,13 +80,13 @@ const authorizer = new Authorizer({
 const OWNER_SID = 's-live';
 const login: NonNullable<AuthDeps['login']> = {
   cookieToken: (request) => /(?:^|;\s*)sess=([^;]+)/.exec(request.headers.get('cookie') ?? '')?.[1] ?? null,
-  ownerSession: async (token) => (token === 'ok' ? { sessionId: OWNER_SID, userId: 'default' } : null),
+  userSession: async (token) => (token === 'ok' ? { sessionId: OWNER_SID, userId: 'default', role: 'owner' as const } : null),
 };
 
 // D45: the App Host services behind a trusted UI's owner claim.
 const ownerServices = (async () => ({
   registry: { getInstallation: async (id: string) => (id === 'inst-settings' ? { appId: SETTINGS, scope: 'system', state: 'active' } : null) },
-  sessionLive: async (sid: string) => sid === OWNER_SID,
+  sessionLive: async (sid: string) => (sid === OWNER_SID ? ({ role: 'owner' as const }) : false as const),
 })) as unknown as GatewayOwnerDeps['services'];
 
 // D28: the Terminal container's address on the app network.

@@ -10,5 +10,5 @@ export * from './setupTickets.js';
 export * from './AdminAudit.js';
 export * from './Authorizer.js';
 export * from './ClientSessions.js';
-export { getAuthServices, resetAuthServices, retireSharedAdminCredential, AUTH_SERVICES_VERSION } from './services.js';
+export { getAuthServices, resetAuthServices, retireSharedAdminCredential, migrateIdentityRecords, AUTH_SERVICES_VERSION } from './services.js';
 export type { AuthServices } from './services.js';

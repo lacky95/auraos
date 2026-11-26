@@ -12,10 +12,11 @@ import { edgeView } from '../../../server/host-policy.mjs';
 import { liveApprovalDeps } from './service.ts';
 import type { ApprovalRouteDeps, OwnerSession, RouteCtx } from './routes.ts';
 
+/** The session's own user (C3), and only when the record says owner: approvals stay the owner's (I.2 §3). */
 async function withUsername(s: { userId: string; sessionId: string } | null): Promise<OwnerSession | null> {
   if (!s) return null;
-  const owner = await coreAuthServices()?.users.getOwner();
-  return owner && !owner.disabled && owner.id === s.userId ? { ...s, username: owner.username } : null;
+  const owner = await coreAuthServices()?.users.getUser(s.userId);
+  return owner && !owner.disabled && owner.role === 'owner' && owner.id === s.userId ? { ...s, username: owner.username } : null;
 }
 
 export function liveRouteDeps(): ApprovalRouteDeps {
@@ -36,7 +37,7 @@ export function liveRouteDeps(): ApprovalRouteDeps {
       return edgeView({ peer, header: (name: string) => ctx.request.headers.get(name) }).scheme;
     },
     freshAuthRequiresHttps: () => freshAuthRequiresHttps(svc.securityPolicy),
-    lockOf: (sid) => svc.clientSessions.effectiveLock(sid),
+    lockOf: (sid, userId) => svc.clientSessions.effectiveLock(sid, { userId }),
     verifyPassword: async (username, password, rateLimitKey) => {
       const check = await svc.users.verifyPassword(username, password, { rateLimitKey });
       if (check.ok) return check.user.role === 'owner' && !check.user.disabled ? 'ok' : 'invalid';

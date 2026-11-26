@@ -325,14 +325,24 @@ test('fails when a surface decision is missing', () => {
 
 test('reserved Phase 5 routes are denied for every caller until implemented', () => {
   const reserved = ROUTE_ACCESS_MANIFEST.reserved ?? {};
-  // Streams R and X moved their rows into `routes` (test/runtimes.test.ts, exec/logs); the other streams' stay reserved.
-  assert.ok(Object.keys(reserved).length >= 7, 'the Stage 1 rows exist');
-  for (const route of ['/api/admin/homes/plan', '/api/admin/identity/ownership-report', '/api/admin/root']) {
+  // Streams R, X and I moved their rows into `routes` (runtimes, exec/logs, the read-only identity reports); H's and J's stay reserved.
+  assert.ok(Object.keys(reserved).length >= 5, 'the Stage 1 rows exist');
+  for (const route of ['/api/admin/identity/ownership-apply', '/api/admin/homes/import', '/api/admin/root']) {
     assert.ok(route in reserved, route);
     for (const method of Object.keys(reserved[route]!.methods ?? {}) as Array<keyof NonNullable<typeof reserved[string]['methods']>>) {
       const r = effectiveRule(ROUTE_ACCESS_MANIFEST, { route, handlers: [method] }, method);
       assert.deepEqual(r?.allow, [], `${method} ${route} is denied, not the admin group's owner rule`);
     }
+  }
+});
+
+test('stream I moved its read-only report rows into routes: owner views, never public, no longer reserved', () => {
+  const reserved = ROUTE_ACCESS_MANIFEST.reserved ?? {};
+  for (const route of ['/api/admin/identity/ownership-report', '/api/admin/identity/check', '/api/admin/homes/plan', '/api/admin/homes/import-report']) {
+    assert.ok(!(route in reserved), `${route} is not reserved any more`);
+    const r = effectiveRule(ROUTE_ACCESS_MANIFEST, { route, handlers: ['GET'] }, 'GET');
+    assert.deepEqual(r?.allow, ['own-instance', 'owner'], route);
+    assert.equal(r?.systemApp, 'com.aura.terminal', `${route}: only the System Terminal asks the owner`);
   }
 });
 

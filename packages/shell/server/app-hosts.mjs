@@ -342,8 +342,10 @@ export function createAppHostRouter({
     const payload = hostAuth().readCookie(req.headers.cookie, appHostCookieName(secure), expected)
       ?? hostAuth().readCookie(req.headers.cookie, appHostEmbedCookieName(secure), { ...expected, embed: true });
     if (!payload) return null;
-    if (!(await route.svc.sessionLive(payload.sid, payload.userId))) return null;
-    verifiedSessions.set(req, payload);
+    const live = await route.svc.sessionLive(payload.sid, payload.userId);
+    if (!live) return null;
+    // The role the record has now (C2), for the principal; never a cookie field.
+    verifiedSessions.set(req, { ...payload, role: live.role });
     return payload;
   }
 
@@ -354,7 +356,7 @@ export function createAppHostRouter({
   function hostIdentity(route, req) {
     const session = verifiedSessions.get(req);
     const appHost = session ? {
-      appId: route.record.appId, userId: session.userId, sid: session.sid,
+      appId: route.record.appId, userId: session.userId, sid: session.sid, role: session.role,
       ...(route.slot?.instanceId ? { instanceId: route.slot.instanceId } : {}),
     } : null;
     // Once per request: the gate, the report and the SSE mux share it.

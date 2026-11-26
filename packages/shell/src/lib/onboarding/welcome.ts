@@ -126,7 +126,9 @@ export class Welcome {
       try {
         const kv = defaultKv();
         let theme: unknown = null;
-        // The owner's own theme (D46): the welcome tour is the owner's.
+        // The owner's own theme (D46): the welcome tour is the owner's first-run setup,
+        // tracked in one OS-wide onboarding record, so it stays the owner's (C8; a
+        // member gets no welcome tour in Phase 5).
         try { theme = await core.readUserPrefValue(kv, localOwnerId(), 'theme'); } finally { await kv.close().catch(() => undefined); }
         const found = detectDone(this.opts, theme);
         const known = this.state?.welcome.done ?? {};

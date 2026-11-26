@@ -91,7 +91,9 @@ async function doRestart(appId: string, only?: string[]): Promise<RestartResult>
     : [];
 
   const viewIds = withActivities ? snapshot.map((a) => a.activityId) : oldInstanceIds;
-  const before = placementsOf(await readWorkspaces().catch(() => null), viewIds);
+  // C8: the restarted windows are their owner's, on that user's workspaces (the first instance's owner).
+  const userId = (instances[0] as { owner?: string } | undefined)?.owner ?? localOwnerId();
+  const before = placementsOf(await readWorkspaces(userId).catch(() => null), viewIds);
 
   OsEventBus.emit('app:restarting', {
     appId,
@@ -104,7 +106,7 @@ async function doRestart(appId: string, only?: string[]): Promise<RestartResult>
     // and the new instance adopts them (core sidecarParking.ts).
     if (only) await Promise.all(oldInstanceIds.map((id) => mgr.stop(id, { reason: 'restart' })));
     else await mgr.stopAll(appId, { reason: 'restart' });
-    const instanceId = await mgr.start(appId);
+    const instanceId = await mgr.start(appId, { userId });
 
     const restored: RestoredActivity[] = [];
     const failed: RestartResult['failed'] = [];
@@ -146,11 +148,11 @@ async function doRestart(appId: string, only?: string[]): Promise<RestartResult>
     }
 
     const dropped = failed.map((f) => f.from);
-    const workspacesUpdated = await placeWindows(restored, dropped, before);
+    const workspacesUpdated = await placeWindows(userId, restored, dropped, before);
     // An older desktop tab's writes for this restart can still be in flight
     // (it claims each new window for its active workspace) — place once more
     // after they have landed. Later moves are the user's and stay.
-    setTimeout(() => { placeWindows(restored, dropped, before).catch(() => undefined); }, 3_000);
+    setTimeout(() => { placeWindows(userId, restored, dropped, before).catch(() => undefined); }, 3_000);
 
     const result: RestartResult = { appId, oldInstanceIds, instanceId, restored, failed, workspacesUpdated };
     OsEventBus.emit('app:restarted', result);
@@ -163,9 +165,9 @@ async function doRestart(appId: string, only?: string[]): Promise<RestartResult>
 
 type Placement = { wsId: string; index: number; rect?: unknown; focused: boolean };
 
-async function readWorkspaces(): Promise<WsShape | null> {
-  // The owner's desktop (D46): their own workspaces, else the shared ones from before the move.
-  const entry = await readUserPref(defaultKv(), localOwnerId(), 'workspaces');
+async function readWorkspaces(userId: string): Promise<WsShape | null> {
+  // The user's desktop (D46, C8): their own workspaces, else the shared ones from before the move.
+  const entry = await readUserPref(defaultKv(), userId, 'workspaces');
   const state = entry?.value as WsShape | undefined;
   return state && Array.isArray(state.workspaces) ? state : null;
 }
@@ -199,11 +201,12 @@ function placementsOf(state: WsShape | null, viewIds: string[]): Map<string, Pla
  * Returns true when it wrote.
  */
 async function placeWindows(
+  userId: string,
   restored: RestoredActivity[],
   dropped: string[],
   before: Map<string, Placement>,
 ): Promise<boolean> {
-  const state = await readWorkspaces();
+  const state = await readWorkspaces(userId);
   if (!state) return false;
   const ours = new Set([...dropped, ...restored.flatMap((r) => [r.from, r.to])]);
   const next: WsShape = structuredClone(state);
@@ -244,9 +247,9 @@ async function placeWindows(
   }
   if (JSON.stringify(next) === JSON.stringify(state)) return false;
 
-  const stored = await writeUserPref(defaultKv(), localOwnerId(), 'workspaces', next);
+  const stored = await writeUserPref(defaultKv(), userId, 'workspaces', next);
   // Same events the KV route emits for a browser-side PUT.
-  OsEventBus.emit('kv:changed', { namespace: 'os', key: 'workspaces', value: stored.value, userId: localOwnerId() });
+  OsEventBus.emit('kv:changed', { namespace: 'os', key: 'workspaces', value: stored.value, userId });
   OsEventBus.emit('workspaces:changed', {
     workspaces: next.workspaces.map((w) => ({
       id: String(w.id ?? ''),
