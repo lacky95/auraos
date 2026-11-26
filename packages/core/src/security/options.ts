@@ -105,6 +105,17 @@ export const SECURITY_OPTIONS: readonly SecurityOption[] = Object.freeze([
     restartRequired: true, change: 'fresh', since: '2026-11-26', phase: '5-pre2 (D89 B4), strict by default in 5-main',
   },
   {
+    id: 'terminal-root-transition',
+    title: 'Terminal root transition (5-main deploy only)',
+    description: 'The one migration exception of stream T. deploy: while the 5-main deploy migrates the owner\'s Private '
+      + 'Home to uid 1000, the owner\'s System Terminal may still start as root if that home is still root\'s. Honoured '
+      + 'only for a root-owned switch file written less than 6 hours ago, and never for a member. off (default, and once '
+      + 'the window has passed): a Terminal whose user\'s home is not theirs yet does not start (no root fallback); '
+      + 'run `aura admin homes ownership --dry-run`, then `--apply <digest>` (from the host if need be).',
+    type: 'enum', values: ['off', 'deploy'], default: 'off', source: 'file', file: 'aura/terminal-root-transition',
+    restartRequired: false, change: 'fresh', since: '2026-11-26', phase: '5-main (stream T)',
+  },
+  {
     id: 'host-policy',
     title: 'Host check',
     description: 'Which addresses the shell answers on (DNS rebinding protection). enforce (default): a malformed address, '

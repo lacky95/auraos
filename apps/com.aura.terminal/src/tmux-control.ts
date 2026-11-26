@@ -62,7 +62,7 @@ export const TMUX_SOCKET_ARGS: readonly string[] = tmuxSocketArgs();
  * tokens), plus the server's own listen and build settings.
  */
 const SERVER_ONLY_ENV = new Set([
-  'AURA_LIFECYCLE_TOKEN', 'AURA_RELAY_STRICT', 'AURA_LISTEN_SUBNET', 'AURA_SHELL_PEERS', 'AURA_SERVE',
+  'AURA_LIFECYCLE_TOKEN', 'AURA_LIFECYCLE_TOKEN_FILE', 'AURA_SERVER_SEALED', 'AURA_RELAY_STRICT', 'AURA_LISTEN_SUBNET', 'AURA_SHELL_PEERS', 'AURA_SERVE',
   'PORT', 'APP_PORT', 'HOST', 'NODE_ENV', 'ASTRO_NODE_AUTOSTART',
 ]);
 const SERVER_ONLY_PREFIXES = ['npm_', 'ASTRO_', 'VITE_', 'PNPM_'];

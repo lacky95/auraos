@@ -120,6 +120,21 @@ export function applyOwnershipRows(rows: readonly ApplyRow[], journal: string): 
  * first. Symlinks are never followed (`lchown`); an entry that is gone or no
  * longer the same kind is reported, not recreated.
  */
+/**
+ * The journal file an operator names for a revert (stream T's deploy recovery):
+ * a bare journal name of this data dir's journal directory, never a path.
+ * Null for anything else.
+ */
+export function ownershipJournalPath(dataDir: string, name: string): string | null {
+  const base = String(name ?? '').split('/').pop() ?? '';
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(base) || base.includes('..')) return null;
+  const p = join(ownershipJournalDir(dataDir), base);
+  try {
+    const st = lstatSync(p);
+    return st.isFile() && !st.isSymbolicLink() ? p : null;
+  } catch { return null; }
+}
+
 export function revertOwnershipJournal(journal: string): { restored: number; skipped: string[] } {
   const lines = readFileSync(journal, 'utf-8').split('\n').filter(Boolean);
   const out = { restored: 0, skipped: [] as string[] };

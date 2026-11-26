@@ -15,7 +15,10 @@
 // Stream T (owner-approved D89 B4 strict, D69): every container start carries
 // its relay mode (`AURA_RELAY_STRICT=strict` by default); a System Terminal
 // carries its session user and the tmux socket tmpfs, and with a session
-// identity runs as that user's uid.
+// identity runs as that user's uid. Owner decision (2026-11-26): a session host
+// gets AURA_SERVER_SEALED (production build only, execute-only node) and its
+// lifecycle token as a one-time file, never `-e AURA_LIFECYCLE_TOKEN`; the
+// synthesised start script (every fixture's digest) carries the sealed branch.
 //
 // Run via: node tools/run-tests.mjs --only=core
 

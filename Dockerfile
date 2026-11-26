@@ -40,6 +40,12 @@ RUN ARCH=$(dpkg --print-architecture) \
  && chmod +x /usr/local/bin/zot \
  && zot --version
 
+# Stream T (D69): the System Terminal's server runs from an execute-only copy of node. A process started from a
+# binary its user can't read is made non-dumpable by the kernel, so the user's own session processes (same uid)
+# can't read its /proc/<pid>/{environ,mem,fd,maps} or ptrace it (the lifecycle token stays in the server).
+# Children it starts (tmux, the sessions) exec readable binaries and are ordinary again.
+RUN install -m 0111 -o root -g root /usr/local/bin/node /usr/local/bin/node-sealed
+
 # ─── Stage: base-rootfs ───────────────────────────────────────────────────────
 # Debian-slim filesystem with the tools an app sandbox needs, exported as a
 # raw rootfs that PRoot can pivot into. Using debian-slim (not Alpine) keeps

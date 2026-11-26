@@ -41,6 +41,7 @@ import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import { RELAY_CLAIM_HEADER, relayKey, verifyRelayClaim, type RelayClaim } from './relayClaim.js';
+import { lifecycleSecret } from './lifecycle-secret.js';
 
 export { RELAY_CLAIM_HEADER, type RelayClaim };
 
@@ -127,7 +128,7 @@ export interface ShellRelayResult {
 
 export interface ShellRelayDeps {
   peerKind(peer: string | null | undefined): Promise<PeerKind | null>;
-  /** This start's lifecycle token (AURA_LIFECYCLE_TOKEN); the claim key derives from it. */
+  /** This start's lifecycle token (lifecycle-secret.ts: its env, or a session host's one-time file); the claim key derives from it. */
   lifecycleToken(): string | undefined;
   /** This instance's id (APP_INSTANCE_ID). */
   instanceId(): string | undefined;
@@ -205,7 +206,7 @@ function reportRelay(verdict: 'missing' | 'invalid', call: { method: string; pat
 /** The live relay check: the live address check, this start's lifecycle token and AURA_RELAY_STRICT. */
 export const checkShellRelay = createShellRelay({
   peerKind: (peer) => fromShell.peerKind(peer),
-  lifecycleToken: () => process.env['AURA_LIFECYCLE_TOKEN'] || undefined,
+  lifecycleToken: () => lifecycleSecret(),
   instanceId: () => process.env['APP_INSTANCE_ID'] || process.env['AURA_INSTANCE_ID'] || undefined,
   mode: () => process.env['AURA_RELAY_STRICT'],
   report: reportRelay,

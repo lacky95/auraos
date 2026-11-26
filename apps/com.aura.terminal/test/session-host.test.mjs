@@ -71,3 +71,17 @@ test('a real session: its own hook token and id in its env, never the lifecycle 
   assert.match(global, /^HOME=\/home\/aura$/m);
   tc.tmuxKill(id);
 });
+
+test('hook token: keyed from the token the server took from its one-time file (no lifecycle token in its env)', () => {
+  const saved = process.env.AURA_LIFECYCLE_TOKEN;
+  const KEY = Symbol.for('aura.lifecycle.secret');
+  try {
+    delete process.env.AURA_LIFECYCLE_TOKEN;
+    globalThis[KEY] = 'lt-from-file';
+    assert.equal(hookToken('com.aura.terminal-2#a1'), hookToken('com.aura.terminal-2#a1', 'lt-from-file'));
+    assert.equal(tc.sessionEnv({ AURA_LIFECYCLE_TOKEN_FILE: '/run/aura-secret/lifecycle-token', AURA_SERVER_SEALED: '1' }).AURA_LIFECYCLE_TOKEN_FILE, undefined);
+  } finally {
+    delete globalThis[KEY];
+    process.env.AURA_LIFECYCLE_TOKEN = saved;
+  }
+});

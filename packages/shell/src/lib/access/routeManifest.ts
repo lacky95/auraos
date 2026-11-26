@@ -408,6 +408,9 @@ const routes: RouteAccessManifest['routes'] = {
   '/api/admin/identity/ownership-apply': {
     methods: { POST: ownerManages('Applies the reviewed dry-run ownership report (P5-2, D70) for its digest, journaled: the owner decides with the password (fresh).') },
   },
+  '/api/admin/identity/ownership-revert': {
+    methods: { POST: ownerManages('Stream T, the 5-main deploy\'s recovery: restores one ownership-apply journal exactly (previous owner and mode); the owner decides with the password (fresh).') },
+  },
   '/api/admin/homes/import': {
     methods: { POST: ownerManages('Copies named paths from the owner\'s Private Home into an App Home (Q15): a dry run is an owner view, the copy the owner\'s decision (fresh).') },
   },

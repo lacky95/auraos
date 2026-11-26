@@ -260,4 +260,6 @@ export const HOME_AUDIT_ACTIONS = {
   reset: 'homes.reset',
   deleted: 'homes.deleted',
   ownershipApplied: 'homes.ownership-applied',
+  /** Stream T: the deploy's recovery: one journal of an apply restored exactly. */
+  ownershipReverted: 'homes.ownership-reverted',
 } as const;

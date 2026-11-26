@@ -28,7 +28,7 @@ import { PortAllocator } from './PortAllocator.js';
 import { LifecycleStateMachine } from './LifecycleStateMachine.js';
 import { ProotRunner, killProcessGroup } from './ProotRunner.js';
 import { ContainerRunner } from './ContainerRunner.js';
-import { appFingerprint, discardBuildStaging, installBuild, prepareBuildStaging, prodCapability, sdkFingerprint, serveState, writeBuildStamp, type ServeState } from './appBuild.js';
+import { appFingerprint, buildFailureReason, discardBuildStaging, installBuild, prepareBuildStaging, prodCapability, sdkFingerprint, serveState, writeBuildStamp, type ServeState } from './appBuild.js';
 import { needsProvisioning, refreshAuraPackages } from './provisioning.js';
 import { MountManager } from './MountManager.js';
 import { PortManager, type ExposeSpec } from './PortManager.js';
@@ -113,6 +113,30 @@ export function retireForeignSessionData(dir: string, uid: number, now = Date.no
   mkdirSync(dir, { recursive: true });
   console.log(`[AppManager] ${basename(dir)}: its data was another user's (uid ${st.uid}); moved aside, starting empty`);
   return aside;
+}
+
+/** The switch file of the 5-main deploy's migration window (security option `terminal-root-transition`). */
+export const TERMINAL_ROOT_TRANSITION_FILE = 'aura/terminal-root-transition';
+/** How long a written switch file opens the window. */
+export const TERMINAL_ROOT_TRANSITION_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * Stream T: whether the 5-main deploy's migration window is open: the switch
+ * file says `deploy`, is a regular root-owned file (not a link), and was
+ * written less than TERMINAL_ROOT_TRANSITION_MS ago. Anything else: closed.
+ */
+export function terminalRootTransitionOpen(
+  dataDir: string, now = Date.now(),
+  io: { lstat(p: string): { isFile(): boolean; isSymbolicLink(): boolean; uid: number; mtimeMs: number } | null; read(p: string): string | null } = {
+    lstat: (p) => { try { return lstatSync(p); } catch { return null; } },
+    read: (p) => { try { return readFileSync(p, 'utf-8'); } catch { return null; } },
+  },
+): boolean {
+  const file = join(dataDir, TERMINAL_ROOT_TRANSITION_FILE);
+  const st = io.lstat(file);
+  if (!st || st.isSymbolicLink() || !st.isFile() || st.uid !== 0) return false;
+  if (st.mtimeMs > now + 60_000 || now - st.mtimeMs > TERMINAL_ROOT_TRANSITION_MS) return false;
+  return (io.read(file) ?? '').trim() === 'deploy';
 }
 
 export function adoptedIdentity(user: string | undefined): Pick<AppInstance, 'runAs' | 'uid' | 'gid'> {
@@ -1073,6 +1097,23 @@ export class AppManager {
     return next;
   }
 
+  /**
+   * Stream T: an app that may only run from its production build (a user's
+   * session host): build it now when its build is missing or stale
+   * (`buildApp`, staged and merged, so running instances keep their files),
+   * and fail visibly when it still isn't current. The serve decision never
+   * reads the system mode: Developer Mode does not make an app a dev server.
+   */
+  private async ensureProductionBuild(appId: string, manifest: AppManifest & { appDir: string }): Promise<void> {
+    if (serveState(manifest.appDir, manifest).mode === 'prod') return;
+    const r = await this.buildApp(appId);
+    const after = serveState(manifest.appDir, manifest);
+    if (after.mode !== 'prod') {
+      throw new Error(`${appId} runs only from its current production build, and it has none (${after.reason}`
+        + `${r.ok ? '' : `; the build failed: ${buildFailureReason(r)}`}): not started (never as a dev server)`);
+    }
+  }
+
   /** One provisioning per app dir at a time; a second caller waits for the first. */
   private readonly provisioning = new Map<string, Promise<{ ok: boolean; ran: boolean; output: string }>>();
 
@@ -1783,12 +1824,18 @@ export class AppManager {
     if (TERMINAL_SESSION_APPS.has(appId) && isNonRootIdentity(identity)
       && ownerHomeAwaitsOwnership(home, identity.userId)) {
       // The owner's Private Home is still root's (D70: only the owner-approved
-      // ownership apply hands it to uid 1000): as uid 1000 the owner's own
-      // Terminal could read none of it (0600 logins), so until the apply it
-      // runs as before. Never for a member (their home is created theirs), and
-      // reported (diagnose/terminal-sessions, `aura get inst`: runAs root).
-      console.warn(`[AppManager] ${instanceId}: the owner's Private Home is still root-owned (ownership apply pending): `
-        + 'this Terminal runs as root until `aura admin homes ownership --apply` (stream T)');
+      // ownership apply hands it to uid 1000). As uid 1000 the Terminal could
+      // read none of it (0600 logins). Not a mode: the start fails visibly,
+      // except inside the 5-main deploy's migration window (the
+      // `terminal-root-transition` switch file, root-owned, < 6 h old), where
+      // the owner's Terminal still starts as root. Never a member's.
+      if (!terminalRootTransitionOpen(this.dataDir)) {
+        throw new HomeDeniedError('ownership-pending', `${appId}: the owner's Private Home still belongs to root, so the owner's `
+          + 'Terminal (uid 1000) can\'t start: run `aura admin homes ownership --dry-run`, then `--apply <digest>` '
+          + '(from the host: docker exec -it aura-shell aura admin homes ownership …). No root fallback (stream T).');
+      }
+      console.warn(`[AppManager] ${instanceId}: deploy migration window: the owner's Private Home is still root's, `
+        + 'so this Terminal starts as root until the ownership apply (terminal-root-transition, stream T)');
       identity = { ...ROOT_SPAWN_IDENTITY, userId: identity.userId! };
     }
     return { home, identity };
@@ -1984,6 +2031,10 @@ export class AppManager {
         nonRoot = spawnCtx.identity;
         await this.prepareNonRootStart(appId, manifest, appDir, instanceDataDir, nonRoot, installation?.installationId ?? null, spawnCtx.home);
       }
+      // A user's session host runs from its current production build only (owner, 2026-11-26): built
+      // here when it is not, through the one build path; never a dev server, Developer Mode or not.
+      // The owner's explicit dev run of the Terminal is a Preview (its own workspace, its own caches).
+      if (TERMINAL_SESSION_APPS.has(appId) && !opts.preview) await this.ensureProductionBuild(appId, manifest);
       const ident = spawnCtx.identity ?? { uid: 0, gid: 0 };
       this.upsertInstance(instanceId, appId, { runAs: isSessionIdentity(nonRoot) ? 'user' : nonRoot ? 'app' : 'root', uid: ident.uid, gid: ident.gid });
       const pid = await runner.spawn(instanceId, appId, port, manifest, {

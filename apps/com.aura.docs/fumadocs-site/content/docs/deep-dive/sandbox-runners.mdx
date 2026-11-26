@@ -224,9 +224,23 @@ user's session host:
   a member's is created when they open one, and a pool member is never handed
   to another user. A reused instance id never inherits another user's
   scrollback or saved state (it is moved aside, root-only).
+- **It runs its production build, always** (also in Developer Mode, which
+  never makes an app a dev server): a missing or stale build is built first
+  through the one build path; a build that can't be made current means no
+  start. The build output stays root's and read-only for the session users.
+  The owner develops the Terminal in a Preview (its own instance, workspace
+  and caches), which never touches other users' sessions.
+- **Its server is sealed from its own sessions:** it runs from an
+  execute-only `node-sealed` (aura-base), so the kernel makes it non-dumpable
+  and the sessions (same uid) can't read its `/proc/<pid>` (environ, memory,
+  descriptors) or ptrace it. Its lifecycle token is never in its environment:
+  the runtime hands it over as a one-time file that the server reads and
+  removes at start.
 - **Before the ownership apply** (`aura admin homes ownership --apply`), the
-  owner's Private Home is still root's; until then the owner's Terminal runs as
-  root as before (shown as `runAs root` in `aura get inst`), never a member's.
+  owner's Private Home is still root's and the owner's Terminal does not start
+  (no root fallback). Only inside the 5-main deploy's migration window (the
+  `terminal-root-transition` switch file, root-owned, under 6 hours old) does
+  it start as root; a member's never.
 
 ### Orphan adoption at shell boot
 
