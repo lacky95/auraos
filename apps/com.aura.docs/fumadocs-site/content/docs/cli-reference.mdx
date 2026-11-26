@@ -80,6 +80,7 @@ aura jump -m                                  # the aura-shell master container
 | `aura get mounts [name]` | Cross-app mounts (INSTANCE, TARGET, KIND, MODE, PATH, ORIGIN). | `-a`, `-i <instance>` |
 | `aura get ports [name]` | Port exposes, app-to-app or host (OWNER, ID, KIND, SOURCE, LISTEN, STICKY). | `-a`, `-i` |
 | `aura get hosts [name]` | Manifest `hosts[]` entries (NAME, APP, TARGET, STATUS, URL). These names are not served; windows run on registry-assigned [App Hosts](/docs/app-hosts). The CLI reaches the shell by container name, so URL shows `{name}--<desktop host>`. | `-a` |
+| `aura get iface [app/name]` | The [Interface Registry](/docs/interfaces): what apps provide (MCP, REST/HTTP, WS …), with ID, KIND, STATUS and URL. Any client reaches an entry at `$OS_API_BASE` + URL with `Authorization: Bearer $AURA_INSTANCE_TOKEN` ([Connect from an agent or tool](/docs/interfaces#connect-from-an-agent-or-tool)). | `-a`, `-o wide` (+ VERSION, DESCRIPTION), `-o json` |
 | `aura get scopes [name]` | Install scopes (system / global / user). | `-o` |
 | `aura get themes [name]` | Theme presets; ACTIVE marks the dark/light slot in use. | `-o` |
 | `aura get perms [app]` | Declared manifest permissions per app. | `-o` |
@@ -224,26 +225,6 @@ aura port expose at.oebb.opsconsole:5173 --host --sticky
 | `aura data query <authority>/<path>` | GET from a provider; print the JSON response. | — |
 | `aura data write <authority>/<path> [body]` | Write to a provider; body `-` reads stdin. | `-m, --method PUT\|POST\|PATCH\|DELETE` (default PUT) |
 | `aura data watch <authority>/<path>` | Follow an SSE-capable provider endpoint (adds `?watch=1` if missing). | — |
-
-### MCP servers — `aura mcp …`
-
-Aura MCP servers (URLs through `$OS_API_BASE/api/proxy/…`) in Claude Code's
-`~/.claude.json` and Codex's `~/.codex/config.toml`, with the caller's
-instance token **by reference** (`${AURA_INSTANCE_TOKEN}` in Claude Code,
-`bearer_token_env_var = "AURA_INSTANCE_TOKEN"` in Codex), never by value: the
-home is shared by every app, and the reference gives each app its own
-identity (D89 B5). No command prints or writes a token value.
-
-| Command | What it does | Key flags |
-|---|---|---|
-| `aura mcp ls` | Every Aura MCP entry and how it authenticates: token by reference, `headersHelper`, no token, or a literal AuraOS token (fix it). | `-o json` |
-| `aura mcp add <name> <app>[/<interface>]` | Look the app's MCP interface up in the Interface Registry and add it to both clients, token by reference. | `--client claude\|codex`, `-n, --dry-run` |
-| `aura mcp fix` | Rewrite tokenless and literal-token entries to the reference. The old file is kept as `<file>.bak-aura-mcp`, with any AuraOS credential removed. | `-n, --dry-run` |
-
-`add` and `fix` write only after the owner confirms at an interactive
-terminal; without one (an agent's command), they show the plan and write
-nothing. Running Claude Code or Codex sessions pick the change up after a
-restart.
 
 ## Access
 

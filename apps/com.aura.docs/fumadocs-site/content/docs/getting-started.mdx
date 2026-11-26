@@ -71,14 +71,14 @@ Open **Aura Docs** — this site. For agents, the docs also have an MCP
 server:
 
 ```sh
-aura mcp add aura-docs com.aura.docs
+aura get iface com.aura.docs/mcp     # its URL, relative to $OS_API_BASE
 ```
 
-New installs have it preconfigured. `aura mcp add` writes it for Claude Code
-and Codex with your instance token **by reference**
-(`Authorization: Bearer ${AURA_INSTANCE_TOKEN}`), never the token itself:
-every app shares the home the configs live in. See
-[`aura mcp`](/docs/cli-reference#mcp-servers--aura-mcp-).
+New installs have it preconfigured for Claude Code and Codex. Any MCP
+client connects the same way: `$OS_API_BASE` + that URL, with
+`Authorization: Bearer $AURA_INSTANCE_TOKEN` written into its config **by
+reference**, never the token itself (every app shares the home the configs
+live in). See [Connect from an agent or tool](/docs/interfaces#connect-from-an-agent-or-tool).
 
 ## Start over
 
