@@ -76,7 +76,8 @@ test('runner capabilities declare today honestly', () => {
   // capabilities() reads no instance state: call it without constructing (no docker).
   const container = ContainerRunner.prototype.capabilities.call({});
   assert.deepEqual(container, {
-    isolation: 'namespace', privateHomeSession: false, sessionExec: false, identity: 'none', readOnlyBinds: true,
+    // Stream A (P5-3): --user, cap-drop ALL, no-new-privileges for runAs: app.
+    isolation: 'namespace', privateHomeSession: false, sessionExec: false, identity: 'enforced', readOnlyBinds: true,
     mounts: true, portExpose: true, sidecars: true, warmPool: true, survivesShellRestart: true,
   });
 });
@@ -127,7 +128,8 @@ test('AppManager spawn seam: homes and identities are asked, with the runner cap
   assert.equal(ctx.home.kind, 'app-user');
   assert.equal(ctx.identity.uid, 200001);
   assert.deepEqual(asked.home, { installationId: null, environmentScope: 'user', executionContext: 'application', userId: 'u1', runtime: caps });
-  assert.deepEqual(asked.identity, { appId: 'org.p5.app', installationId: null, userId: 'u1' });
+  // Stream A: the installation's runAs (no record: root, as before).
+  assert.deepEqual(asked.identity, { appId: 'org.p5.app', installationId: null, runAs: 'root', userId: 'u1' });
   // A pool member (no owner) asks for no user.
   await AppManager.prototype.spawnContext.call(fake, 'org.p5.app', 'org.p5.app-2', { manifest, runtime: { capabilities: caps } });
   assert.equal('userId' in asked.home, false);

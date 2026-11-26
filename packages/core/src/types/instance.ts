@@ -58,6 +58,15 @@ export interface AppInstance {
    * interfaces, never restored after a restart, and reaped when idle.
    */
   preview?: { workspace: string; startedAt: string };
+  /**
+   * How this instance's app process runs (P5-3), latched at spawn from its
+   * installation's `runAs`, or read from the container on adoption (D77: a
+   * re-adopted instance keeps it, and nothing is re-chowned). `uid`/`gid`
+   * are the process identity (0 for root).
+   */
+  runAs?: 'root' | 'app';
+  uid?: number;
+  gid?: number;
 }
 
 export type SidecarState = 'running' | 'starting' | 'stopped' | 'error' | 'unknown';

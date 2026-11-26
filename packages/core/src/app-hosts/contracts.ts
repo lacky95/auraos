@@ -28,6 +28,11 @@ export interface AppInstallation {
   userId: string;
   source: AppSourceFingerprint;
   state: AppInstallationState;
+  /**
+   * How its app processes run (P5-3): absent on records from before 5-apps,
+   * which run as `root`. Changed only by the owner (`aura admin apps run-as`).
+   */
+  runAs?: 'root' | 'app';
   createdAt: number;
   updatedAt: number;
 }

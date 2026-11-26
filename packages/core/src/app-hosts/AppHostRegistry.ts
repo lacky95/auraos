@@ -117,6 +117,8 @@ export interface NewInstallationInput {
   source: AppSourceFingerprint;
   /** The installation this one takes the app's binding from. */
   replaces?: string;
+  /** How its app processes run (P5-3); see `newInstallationRunAs`. Absent: not recorded (`root`). */
+  runAs?: 'root' | 'app';
 }
 
 /** The contract plus the installation records the app lifecycle needs. */
@@ -127,6 +129,12 @@ export interface AppHostStore extends AppHostRegistry {
   /** Creates the app's installation, or returns the one already bound. */
   createInstallation(input: NewInstallationInput): Promise<AppInstallation>;
   updateInstallation(installationId: string, patch: { originId?: string | null; source?: AppSourceFingerprint }): Promise<AppInstallation>;
+  /**
+   * The owner's runAs flip of one installation (P5-3), compare-and-set.
+   * `expect` is the runAs the caller decided on (absent counts as `root`):
+   * a changed record is refused (`{ ok: false }`), never overwritten.
+   */
+  setRunAs(installationId: string, runAs: 'root' | 'app', expect?: 'root' | 'app'): Promise<{ ok: boolean; installation: AppInstallation | null }>;
   /** `null` until the first boot migration recorded them. */
   getKnownManifestHosts(): Promise<Set<string> | null>;
   addKnownManifestHosts(claims: readonly string[]): Promise<void>;
@@ -222,7 +230,9 @@ export function createAppHostRegistry(kv: Redis | (() => Redis), opts: AppHostRe
         const at = now();
         const installation: AppInstallation = {
           installationId: randomUUID(), appId: input.appId, originId: input.originId,
-          scope: input.scope, userId, source: input.source, state: 'active', createdAt: at, updatedAt: at,
+          scope: input.scope, userId, source: input.source, state: 'active',
+          ...(input.runAs ? { runAs: input.runAs } : {}),
+          createdAt: at, updatedAt: at,
         };
         const ok = await commit(
           [{ key: bind, expect: bound }],
@@ -252,6 +262,20 @@ export function createAppHostRegistry(kv: Redis | (() => Redis), opts: AppHostRe
         );
         return ok ? next : undefined;
       });
+    },
+
+    async setRunAs(id, runAs, expect) {
+      if (runAs !== 'root' && runAs !== 'app') throw new Error(`invalid runAs '${String(runAs)}'`);
+      const cur = await readInstallation(id);
+      if (!cur) return { ok: false, installation: null };
+      if (expect !== undefined && (cur.value.runAs ?? 'root') !== expect) return { ok: false, installation: cur.value };
+      if ((cur.value.runAs ?? 'root') === runAs && cur.value.runAs !== undefined) return { ok: true, installation: cur.value };
+      const next: AppInstallation = { ...cur.value, runAs, updatedAt: now() };
+      const ok = await commit(
+        [{ key: installKey(id), expect: cur.raw }],
+        [{ op: 'set', key: installKey(id), value: JSON.stringify(next) }],
+      );
+      return ok ? { ok: true, installation: next } : { ok: false, installation: (await readInstallation(id))?.value ?? null };
     },
 
     async allocate({ installation, instanceScope, isSystemApp }) {

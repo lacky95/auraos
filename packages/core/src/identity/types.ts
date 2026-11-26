@@ -138,6 +138,8 @@ export const ROOT_SPAWN_IDENTITY: Readonly<SpawnIdentity> = Object.freeze({ uid:
 /** What the spawn seam asks the identity provider (stream I/A implement it). */
 export interface SpawnIdentityRequest {
   appId: string;
+  /** The installation's recorded runAs (absent: `root`, a record from before 5-apps). */
+  runAs?: AppRunAs;
   /** Null until the spawn seam resolves installations (stream H/A). */
   installationId: string | null;
   userId?: string;
@@ -145,6 +147,26 @@ export interface SpawnIdentityRequest {
 
 export interface SpawnIdentityProvider {
   identityFor(req: SpawnIdentityRequest): Promise<SpawnIdentity>;
+}
+
+/**
+ * How an installation's app processes run (P5-3, stream A): `app` under the
+ * installation's own app identity (non-root, no capabilities), `root` as
+ * before. Recorded per installation (`AppInstallation.runAs`); a record
+ * without it predates 5-apps and runs as `root`. Never a fallback: a failed
+ * `app` start fails, it is never retried as `root`.
+ */
+export type AppRunAs = 'root' | 'app';
+export const APP_RUN_AS_VALUES: readonly AppRunAs[] = ['root', 'app'];
+
+/**
+ * The runAs of a NEW installation (5-apps): every installed app starts as
+ * `app`; the built-in apps a fresh system records at first boot start as
+ * `root` and are flipped by the owner per wave, until 5-main makes `app` the
+ * default for all.
+ */
+export function newInstallationRunAs(scope: string): AppRunAs {
+  return scope === 'system' ? 'root' : 'app';
 }
 
 /** Today's behaviour: every app process is root. */

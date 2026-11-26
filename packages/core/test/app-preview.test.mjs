@@ -63,6 +63,8 @@ function fakeManager() {
     getActivitiesByInstance: (id) => [...fake.activities.values()].filter((a) => a.parentInstanceId === id),
     async stop(id) { fake.stops.push(id); fake.instances.delete(id); slots.delete(id); },
     forceKill(id) { fake.instances.delete(id); },
+    // Stream A: no installation record here, so the instances run as root (as before).
+    async installationRunAs() { return null; },
   };
   for (const name of ['spawnInstance', 'spawnContext', 'allocateInstanceId', 'transition', 'upsertInstance', 'defaultInstance',
     'startPreview', 'previewsOf', 'stopPreview', 'reapIdlePreviews', 'previewDataSource']) {

@@ -29,7 +29,7 @@ import { LifecycleStateMachine } from './LifecycleStateMachine.js';
 import { ProotRunner, killProcessGroup } from './ProotRunner.js';
 import { ContainerRunner } from './ContainerRunner.js';
 import { appFingerprint, discardBuildStaging, installBuild, prepareBuildStaging, prodCapability, sdkFingerprint, serveState, writeBuildStamp, type ServeState } from './appBuild.js';
-import { refreshAuraPackages } from './provisioning.js';
+import { needsProvisioning, refreshAuraPackages } from './provisioning.js';
 import { MountManager } from './MountManager.js';
 import { PortManager, type ExposeSpec } from './PortManager.js';
 import { InstanceTokens } from './InstanceTokens.js';
@@ -47,7 +47,11 @@ import { AdminAudit } from '../auth/AdminAudit.js';
 import { defaultIdentityKeyFile } from '../auth/identityKey.js';
 import type { HomeResolver } from '../homes/types.js';
 import { legacyHomeResolver } from '../homes/legacyResolver.js';
-import { ROOT_IDENTITY_PROVIDER, type SpawnIdentityProvider } from '../identity/types.js';
+import type { AppRunAs, SpawnIdentity, SpawnIdentityProvider } from '../identity/types.js';
+import { appIdentityProvider } from '../identity/appIdentityProvider.js';
+import { appOwnershipSpecs, applyAppOwnership } from '../identity/appOwnership.js';
+import { RuntimeCapabilityError } from '../runtimes/types.js';
+import { isNonRootIdentity } from './spawn/identityArgs.js';
 import { selectOrphanSidecars } from './sidecars.js';
 import { SidecarParking, keepServicesOf } from './sidecarParking.js';
 import {
@@ -71,6 +75,15 @@ import { DockerApi } from './DockerApi.js';
 
 const RECONCILE_INTERVAL_MS = 5_000;
 const ERROR_GRACE_MS        = 30_000;
+
+/** The latched identity of an adopted container from its `Config.User` (P5-3). */
+export function adoptedIdentity(user: string | undefined): Pick<AppInstance, 'runAs' | 'uid' | 'gid'> {
+  const m = /^(\d+)(?::(\d+))?$/.exec(user ?? '');
+  if (!m) return { runAs: 'root', uid: 0, gid: 0 };
+  const uid = Number(m[1]);
+  const gid = m[2] !== undefined ? Number(m[2]) : uid;
+  return uid === 0 ? { runAs: 'root', uid: 0, gid } : { runAs: 'app', uid, gid };
+}
 
 export class AppManager {
   // Public so the manifest-edit endpoint can call reloadFromDisk(appId)
@@ -205,7 +218,8 @@ export class AppManager {
       },
     });
     this.homes      = opts.homes ?? legacyHomeResolver(opts.dataDir);
-    this.identities = opts.identities ?? ROOT_IDENTITY_PROVIDER;
+    // The installation's runAs decides (P5-3): root as today, or its app identity from the one registry.
+    this.identities = opts.identities ?? appIdentityProvider(async () => (await import('../auth/services.js')).getAuthServices().identity);
     this.permissions = new PermissionManager(this.registry);
     this.tokens      = new InstanceTokens(join(opts.dataDir, 'aura', 'secrets', 'instance-token.key'));
     this.providers   = new ContentProviderRegistry();
@@ -267,6 +281,8 @@ export class AppManager {
         return {
           appId: inst.appId, instanceDataDir: join(scope.dataDir, 'apps', inst.appId, instanceId),
           ...(inst.owner ? { owner: inst.owner } : {}),
+          // P5-3: its latched identity, for the aura-base inheritHome sidecar policy.
+          ...(inst.runAs === 'app' && inst.uid && inst.gid ? { identity: { uid: inst.uid, gid: inst.gid, range: 'app' as const } } : {}),
         };
       },
       changed: () => { void this.syncSidecars(2).catch(() => undefined); },
@@ -975,7 +991,9 @@ export class AppManager {
     if (!cap.capable) return done({ ok: true, built: false, skipped: `${cap.reason}${cap.detail ? `: ${cap.detail}` : ''}` });
     if (!opts.force && serveState(manifest.appDir, manifest).mode === 'prod') return done({ ok: true, built: false, skipped: 'build is current' });
     if (!existsSync(join(manifest.appDir, 'node_modules'))) {
-      return done({ ok: false, built: false, skipped: 'dependencies not installed yet — start the app once' });
+      // The throwaway builder installs them (P5-3): never the app, never at its start.
+      const p = await this.provisionApp(appId);
+      if (!p.ok) return done({ ok: false, built: false, skipped: 'dependencies could not be installed', output: p.output });
     }
     const run = async () => {
       const fingerprint = appFingerprint(manifest.appDir, manifest.build?.ignore ?? []);
@@ -1002,6 +1020,36 @@ export class AppManager {
     const next = this.buildChain.then(run, run);
     this.buildChain = next.catch(() => undefined);
     return next;
+  }
+
+  /** One provisioning per app dir at a time; a second caller waits for the first. */
+  private readonly provisioning = new Map<string, Promise<{ ok: boolean; ran: boolean; output: string }>>();
+
+  /**
+   * Install an app's dependencies (npm/pnpm tree, `@aura/*` packages) in the
+   * throwaway builder container (P5-3): as root inside that container, with
+   * no app runtime, no socket, no home and no token, caches in
+   * `/data/aura/cache/builder`. Never in the shell, never in the app.
+   * `ok` means the app no longer needs provisioning. Before the first start
+   * of a non-root app, after an install, and before a build.
+   */
+  async provisionApp(appId: string, opts: { appDir?: string; onLine?: (line: string) => void } = {}): Promise<{ ok: boolean; ran: boolean; output: string }> {
+    const manifest = this.registry.getById(appId);
+    if (!manifest) throw new Error(`App not found: ${appId}`);
+    const appDir = opts.appDir ?? manifest.appDir;
+    const runtime = manifest.runtime === 'raw' ? 'raw' : 'astro';
+    if (!needsProvisioning(appDir, runtime)) return { ok: true, ran: false, output: '' };
+    const running = this.provisioning.get(appDir);
+    if (running) return running;
+    const run = (async () => {
+      console.log(`[AppManager] provision: ${appId} in the builder …`);
+      const res = await this.container.provisionApp(appId, appDir, runtime, { ...(opts.onLine ? { onLine: opts.onLine } : {}) });
+      const ok = res.ok && !needsProvisioning(appDir, runtime);
+      console.log(`[AppManager] provision: ${appId} ${ok ? 'ok' : 'FAILED'}`);
+      return { ok, ran: true, output: res.output };
+    })();
+    this.provisioning.set(appDir, run);
+    try { return await run; } finally { this.provisioning.delete(appDir); }
   }
 
   /**
@@ -1195,6 +1243,8 @@ export class AppManager {
           inPool:            pooled.has(o.instanceId),
           sandbox:           'container',
           owner:             adoptedInstanceOwner(o.ownerLabel, pooled.has(o.instanceId)),
+          // D77: the identity it was started with, as the container says (never re-chowned).
+          ...adoptedIdentity(o.user),
           // A preview survives as one: never a provider or interface, reaped when idle.
           ...(o.preview ? { preview: { workspace: o.preview, startedAt: new Date().toISOString() } } : {}),
         };
@@ -1652,20 +1702,73 @@ export class AppManager {
    * own until the kernel builds it (ARI dup #2).
    */
   private async spawnContext(
-    appId: string, instanceId: string, opts: { manifest: AppManifest; runtime: ResolvedRuntime; owner?: string },
+    appId: string, instanceId: string,
+    opts: { manifest: AppManifest; runtime: ResolvedRuntime; owner?: string; installation: { installationId: string; runAs?: AppRunAs } | null },
   ): Promise<Pick<InstanceSpawnContext, 'home' | 'identity'>> {
     void instanceId; // a runtime handle only: never a durable reference (D85 A7)
     // Not resolved yet: stream H resolves it here and fails closed without it.
-    const installationId = null;
     const home = await this.homes.resolve({
-      installationId,
+      installationId: null,
       environmentScope: opts.manifest.environmentScope,
       executionContext: 'application',
       ...(opts.owner ? { userId: opts.owner } : {}),
       runtime: opts.runtime.capabilities,
     });
-    const identity = await this.identities.identityFor({ appId, installationId, ...(opts.owner ? { userId: opts.owner } : {}) });
+    // Stream A (P5-3): the installation's runAs. Never a root fallback.
+    const identity = await this.identities.identityFor({
+      appId, installationId: opts.installation?.installationId ?? null, runAs: opts.installation?.runAs ?? 'root',
+      ...(opts.owner ? { userId: opts.owner } : {}),
+    });
+    if (isNonRootIdentity(identity) && opts.runtime.capabilities.identity === 'none') {
+      throw new RuntimeCapabilityError(opts.runtime.runtime, ['identity'],
+        `${appId} runs as its app identity, and runtime ${opts.runtime.runtime} can't enforce one: not started (no root fallback)`);
+    }
     return { home, identity };
+  }
+
+  /**
+   * The installation record a start reads its runAs from (P5-3). Null when
+   * the app has none yet (a record from before 5-apps, or not migrated): it
+   * runs as root, as before. A record that can't be READ fails the start: an
+   * `app` installation must never start as root because Valkey hiccuped.
+   */
+  async installationRunAs(appId: string): Promise<{ installationId: string; runAs?: AppRunAs } | null> {
+    const scope = this.registry.getScopeId(appId);
+    if (!scope) return null;
+    let inst;
+    try { inst = await getAppHostServices().registry.findInstallation(appId, scope); }
+    catch (err) {
+      throw new Error(`${appId}: its installation record can't be read (${(err as Error).message}); not started, since how it runs is unknown`);
+    }
+    return inst ? { installationId: inst.installationId, ...(inst.runAs ? { runAs: inst.runAs } : {}) } : null;
+  }
+
+  /** The last start of each app under `runAs: app` (the privilege review), since this shell started. */
+  private readonly appStarts = new Map<string, { at: string; ok: boolean; error?: string }>();
+  lastAppStart(appId: string): { at: string; ok: boolean; error?: string } | undefined { return this.appStarts.get(appId); }
+
+  /**
+   * Before a non-root start (P5-3): the dependencies are installed by the
+   * throwaway builder (never by the app, never as the app), then the
+   * installation's ownership rows (`appOwnershipSpecs`, the same rows the
+   * dry-run report lists) are applied for the instance. Throws: a start that
+   * can't be prepared fails visibly.
+   */
+  private async prepareNonRootStart(
+    appId: string, manifest: AppManifest, appDir: string, instanceDataDir: string, identity: SpawnIdentity, installationId: string | null,
+  ): Promise<void> {
+    if (needsProvisioning(appDir, manifest.runtime === 'raw' ? 'raw' : 'astro')) {
+      const r = await this.provisionApp(appId, { appDir });
+      if (!r.ok) throw new Error(`${appId}: its dependencies could not be installed by the builder: ${r.output.trim().split('\n').slice(-5).join(' | ')}`);
+    }
+    const rows = appOwnershipSpecs({
+      appId, installationId, appDataRoot: dirname(instanceDataDir), instanceDirs: [basename(instanceDataDir)], appDir,
+      devServed: manifest.runtime !== 'raw' && serveState(appDir, manifest).mode !== 'prod',
+      identity: { uid: identity.uid, gid: identity.gid },
+    });
+    const r = applyAppOwnership(rows, identity);
+    if (r.changed || r.created.length) console.log(`[AppManager] ${appId}: ownership for uid ${identity.uid}: ${r.changed} changed, ${r.created.length} created`);
+    for (const x of r.skipped) console.warn(`[AppManager] ${appId}: ownership: ${x}`);
   }
 
   private async spawnInstance(
@@ -1703,11 +1806,22 @@ export class AppManager {
     // A pool member belongs to nobody until it is claimed.
     const owner = opts.inPool ? undefined : opts.preview?.owner ?? opts.userId ?? this.instances.get(instanceId)?.owner ?? DEFAULT_OWNER_ID;
 
+    let nonRoot: SpawnIdentity | null = null;
     try {
       const runner = runtime.module.runner;
+      const installation = await this.installationRunAs(appId);
+      const spawnCtx = await this.spawnContext(appId, instanceId, { manifest, runtime, owner, installation });
+      const appDir = opts.preview?.appDir ?? manifest.appDir;
+      if (isNonRootIdentity(spawnCtx.identity)) {
+        nonRoot = spawnCtx.identity;
+        await this.prepareNonRootStart(appId, manifest, appDir, instanceDataDir, nonRoot, installation?.installationId ?? null);
+      }
+      const ident = spawnCtx.identity ?? { uid: 0, gid: 0 };
+      this.upsertInstance(instanceId, appId, { runAs: nonRoot ? 'app' : 'root', uid: ident.uid, gid: ident.gid });
       const pid = await runner.spawn(instanceId, appId, port, manifest, {
-        ...await this.spawnContext(appId, instanceId, { manifest, runtime, owner }),
-        appDir:          opts.preview?.appDir ?? manifest.appDir,
+        ...spawnCtx,
+        ...(installation ? { installationId: installation.installationId } : {}),
+        appDir,
         instanceDataDir,
         // Fresh nonce per spawn: tokens of a previous life of a recycled
         // instance id stop verifying the moment this one is minted. An owned
@@ -1776,8 +1890,11 @@ export class AppManager {
       }
 
       this.runnerOf(instanceId).onExit(instanceId, (code) => this.handleUnexpectedExit(instanceId, appId, code));
+      if (nonRoot) this.appStarts.set(appId, { at: new Date().toISOString(), ok: true });
       return instanceId;
     } catch (err) {
+      // P5-3: a failed non-root start is reported, never retried as root.
+      if (nonRoot) this.appStarts.set(appId, { at: new Date().toISOString(), ok: false, error: String(err).slice(0, 500) });
       this.releasePort(port, instanceId);
       this.transition(instanceId, appId, 'error', null, String(err));
       throw err;

@@ -148,6 +148,17 @@ export const SECURITY_OPTIONS: readonly SecurityOption[] = Object.freeze([
     since: '2026-11-26', phase: '5 (ARI, Q1)',
   },
   {
+    id: 'app-run-as',
+    title: 'App identity (runAs, per installation)',
+    description: 'How an installed app\'s processes run. app: as the installation\'s own app identity (uid 200000+), with no '
+      + 'capabilities and no-new-privileges; its data is owned by that identity and its source stays root-owned. root: as before. '
+      + 'Installations recorded before 5-apps run as root; new installations start as app (built-in apps stay root until the owner '
+      + 'flips them). A failed app start is never retried as root. Changed per app with `aura admin apps run-as <app> app|root`; '
+      + '`aura admin apps privileges` is the review (Phase 5, P5-3).',
+    type: 'record', default: null, source: 'record', record: 'apphost:install:<installationId> runAs', restartRequired: false, change: 'fresh',
+    since: '2026-11-26', phase: '5 (P5-3)',
+  },
+  {
     id: 'aura-root',
     title: 'Root tab (`aura root`)',
     description: 'enabled (default): the owner can open a dedicated root tab with the Docker socket in that tab only, after '

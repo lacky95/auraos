@@ -47,4 +47,6 @@ export interface SpawnContext {
   home?: ResolvedHome;
   identity?: SpawnIdentity;
   env?: Record<string, string>;
+  /** The app's installation (names its account in the generated passwd, stream A). */
+  installationId?: string;
 }

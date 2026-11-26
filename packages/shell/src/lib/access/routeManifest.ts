@@ -394,6 +394,11 @@ const routes: RouteAccessManifest['routes'] = {
   // Phase 5 stream I: the read-only identity and home reports (moved from `reserved`).
   '/api/admin/identity/ownership-report': { methods: { GET: ownerManages('The dry-run ownership report (P5-2, D70): paths, owners and counts; read-only, an owner view.') } },
   '/api/admin/identity/check': { methods: { GET: ownerManages('The identity registry and account invariants (D70, D83), by id only: an owner view.') } },
+  // Phase 5 stream A (P5-3): the privilege review and the per-installation runAs flip.
+  '/api/admin/identity/privilege-review': { methods: { GET: ownerManages('The app privilege review (P5-3): runAs, app identities and elevated needs; read-only, an owner view.') } },
+  '/api/admin/apps/run-as': {
+    methods: { POST: ownerManages('Flips how an installation\'s processes run (app identity or root): the owner decides with the password (fresh).') },
+  },
   '/api/admin/homes/plan': { methods: { GET: ownerManages('The Home Resolver in report mode: each instance\'s home today against the Phase 5 target; an owner view.') } },
   '/api/admin/homes/import-report': { methods: { GET: ownerManages('The home import report (Q15): which dot-dirs each app may want; paths and sizes only, an owner view.') } },
   '/api/admin/credentials': { methods: { GET: ownerManages('The owner\'s personal vault (D56): names, consumers, last use; never a value.') } },
@@ -704,7 +709,6 @@ const notYet = (stream: string, target: AccessTarget, methods: readonly RouteMet
 /** Stage 1 (phase5-plan.md §4 item 5): each stream adds its file and moves its row into `routes`. */
 const reserved: RouteAccessManifest['reserved'] = {
   // I: identities and the read-only reports; H applies them.
-  '/api/admin/identity/privilege-review': notYet('I/A', 'system', ['GET']),
   '/api/admin/identity/ownership-apply': notYet('H', 'system', ['POST']),
   '/api/admin/homes/import': notYet('H', 'system', ['POST']),
   '/api/admin/homes/reset': notYet('H', 'system', ['POST']),

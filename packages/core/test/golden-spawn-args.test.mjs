@@ -92,6 +92,17 @@ const FIXTURES = [
     term: { name: 'aura-term-default', subnet: '172.30.0.0/16' },
   },
   {
+    // Stream A (P5-3): an installation with runAs: app. --user, cap-drop ALL,
+    // no-new-privileges and the generated passwd/group (container); PRoot
+    // ignores the identity (AppManager refuses an app identity there).
+    name: 'app-identity',
+    manifest: { id: 'org.golden.appid', sandbox: 'container' },
+    appDir: () => userApp('org.golden.appid'),
+    ctx: { owner: 'default', identity: { uid: 200001, gid: 200001, range: 'app' }, installationId: '3f1c2e7a-0000-4000-8000-000000000001' },
+    contextEnv: {},
+    volumes: [],
+  },
+  {
     name: 'docker-tool',
     manifest: { id: 'org.golden.docker', tools: ['docker'] },
     appDir: () => userApp('org.golden.docker'),

@@ -66,6 +66,8 @@ export function getNexusManager(): NexusManager {
     // the fs-watch on scope dirs is unreliable (see AppManager.reloadScopedApp).
     onAppChanged:  (id) => { try { getAppManager().reloadScopedApp(id); } catch { /* pre-init */ } },
     hostLifecycle: getAppHostServices().lifecycle,
+    // Dependencies install in the throwaway builder, never in the shell (P5-3).
+    provision:     (id, onLine) => getAppManager().provisionApp(id, { onLine }),
   });
   g[GLOBAL_KEY] = instance;
   g[CODE_KEY] = CODE;

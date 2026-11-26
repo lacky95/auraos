@@ -13,6 +13,9 @@ import type { PermissionManager } from '../permissions/PermissionManager.js';
 import type { AppManifest } from '../types/manifest.js';
 import { toolsGrant } from './tool-allowlist.js';
 import { rawSocketArgs } from './spawn/networkArgs.js';
+import { sidecarIdentityArgs } from './spawn/identityArgs.js';
+import { BASE_IMAGE } from './BaseImage.js';
+import type { SpawnIdentity } from '../identity/types.js';
 import {
   MY_TOOLS_PATH, SHARED_HOME_PATH, listToolchainBinaries, provisionAllowlist, readSidecarMap, toolchainMirrorBin,
 } from './tool-provision.js';
@@ -135,7 +138,7 @@ interface SidecarManagerOpts {
   tokens: InstanceTokens;
   mounts: MountManager;
   /** Live instance → app + its shell-side data dir. */
-  instance(instanceId: string): { appId: string; instanceDataDir: string; owner?: string } | null;
+  instance(instanceId: string): { appId: string; instanceDataDir: string; owner?: string; identity?: SpawnIdentity } | null;
   /**
    * A sidecar was created or removed — lets AppManager refresh its sidecar
    * cache now instead of at the next reconciler tick (else `GET sidecars`
@@ -625,6 +628,8 @@ export class SidecarManager {
       ...(spec.limits?.memory ? ['--memory', spec.limits.memory] : []),
       ...(spec.limits?.cpus ? ['--cpus', String(spec.limits.cpus)] : []),
       ...(spec.user ? ['--user', spec.user] : []),
+      // P5-3: an aura-base sidecar that inherits the app's home is the app's own code: the app's identity.
+      ...sidecarIdentityArgs(spec, this.opts.instance(instanceId)?.identity, { appDataVolume: rt.appDataVolume, instanceId, baseImage: BASE_IMAGE }),
       ...(spec.workdir ? ['--workdir', spec.workdir] : []),
       ...(spec.inheritPermissions && manifest?.permissions?.length ? ['-e', `AURA_PERMISSIONS=${manifest.permissions.join(',')}`] : []),
     ];

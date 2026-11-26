@@ -38,7 +38,7 @@ import { orasHostFromUrl, resolveByName, urlForHost } from './RegistryConfig.js'
 import type { OciSource, SourcesConfig } from './SourcesConfig.js';
 import { DEFAULT_APP_REPO_PREFIX, DEFAULT_SOURCES_CONFIG, loadSourcesConfig, ociRegistryView } from './SourcesConfig.js';
 import { loadRegistryCredentials } from './RegistryAuth.js';
-import { needsProvisioning, provisionApp } from '../app-manager/provisioning.js';
+import { needsProvisioning } from '../app-manager/provisioning.js';
 import {
   APP_ID_PATTERN, classifyIdentity, rewriteAppIdentity, scanInstalledIdentities, suggestFreeAppId, tracksSource,
   type InstalledIdentity,
@@ -94,6 +94,12 @@ export interface NexusManagerOpts {
    *  unreliable. Injected by the singleton (which owns the AppManager ref) to
    *  avoid a NexusManager→AppManager import cycle. */
   onAppChanged?: (appId: string) => void;
+  /**
+   * Installs an app's dependencies in the throwaway builder (P5-3,
+   * `AppManager.provisionApp`). Injected by the singleton; without it the
+   * install leaves provisioning to the first start.
+   */
+  provision?: (appId: string, onLine: (line: string) => void) => Promise<{ ok: boolean; ran: boolean; output: string }>;
   /** App Host records follow the install lifecycle. Injected by the singleton. */
   hostLifecycle?: AppHostLifecycle;
 }
@@ -113,6 +119,7 @@ export class NexusManager {
   private sourcesLoaded = false;
   /** Deterministic AppRegistry (re)registration hook. */
   private readonly onAppChanged?: (appId: string) => void;
+  private readonly provision?: NexusManagerOpts['provision'];
   private readonly hostLifecycle?: AppHostLifecycle;
   /** App ids (and raw refs) currently mid-install. Exposed so the store UI can
    *  render/persist an "installing…" state that survives a page reload. */
@@ -130,6 +137,7 @@ export class NexusManager {
     this.scopeDefs     = opts.scopes;
     this.bus           = opts.bus;
     this.onAppChanged  = opts.onAppChanged;
+    this.provision     = opts.provision;
     this.hostLifecycle = opts.hostLifecycle;
     this.sourcesConfig = opts.sourcesConfig ?? cloneDefaultSources();
     this.catalog       = new CatalogAggregator({
@@ -651,16 +659,15 @@ export class NexusManager {
       // hangs up mid-install — costs a slow first launch, not a broken app.
       // The entrypoint still provisions as a fallback and the runners wait.
       const appDir = join(installer.appsDir, manifest.id);
-      if (needsProvisioning(appDir, manifest.runtime)) {
-        yield { type: 'install.provision', message: 'installing dependencies…' };
+      if (this.provision && needsProvisioning(appDir, manifest.runtime)) {
+        yield { type: 'install.provision', message: 'installing dependencies (in the builder)…' };
         try {
-          const prov = await provisionApp(appDir, (line) => {
+          const prov = await this.provision(manifest.id, (line) => {
             this.bus?.emit('nexus:install.progress', { id: manifest.id, line });
-          }, manifest.runtime);
-          for (const w of prov.warnings) yield { type: 'install.provision', message: w };
-          if (prov.ran.length) {
-            yield { type: 'install.provision', message: `dependencies ready (${prov.ran.join(', ')})` };
-          }
+          });
+          yield { type: 'install.provision', message: prov.ok
+            ? 'dependencies ready'
+            : `dependency install failed — will retry at first launch: ${prov.output.trim().split('\n').slice(-3).join(' | ')}` };
         } catch (err) {
           yield { type: 'install.provision',
                   message: `dependency install failed (${(err as Error).message}) — will retry at first launch` };

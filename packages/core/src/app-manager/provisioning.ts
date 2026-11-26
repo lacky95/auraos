@@ -14,17 +14,21 @@
  * on the retry that found a warm node_modules. Installed-but-unlaunchable is
  * the worst possible resting state for a store.
  *
- * Two changes share this module:
+ * Three rules share this module:
  *
- *  1. `provisionApp()` runs the same steps at INSTALL time, where taking two
- *     minutes is expected and can be reported. After it, first launch is a
- *     boot like any other.
+ *  1. The same steps run at INSTALL time, where taking two minutes is
+ *     expected and can be reported, in the throwaway builder container
+ *     (`builderProvisionShell`, `ContainerRunner.provisionApp`; P5-3): as root
+ *     inside that container only, never in the shell and never in the app.
  *
- *  2. The entrypoint still provisions as a fallback — an app can be
- *     sideloaded, scaffolded by `aura dev new`, or gain a dependency after
- *     install — but now brackets that work in markers. A runner watching the
- *     log knows the app is being prepared rather than failing to start, and
- *     holds the boot budget open instead of killing it.
+ *  2. The entrypoint of a ROOT app still provisions as a fallback — an app
+ *     can be sideloaded, scaffolded by `aura dev new`, or gain a dependency
+ *     after install — bracketed in markers, so a runner watching the log
+ *     knows the app is being prepared and holds the boot budget open.
+ *
+ *  3. A NON-ROOT app (`runAs: app`) never installs: its start shell only
+ *     reports "not provisioned" and exits non-zero (fail closed, visible).
+ *     The kernel provisions it in the builder before its start.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
@@ -94,6 +98,11 @@ if ${npmMissing}; then
 fi
 if [ ! -d node_modules/@aura ] && grep -qE '"(aura)?[dD]ependencies"|"@aura/' package.json 2>/dev/null; then
   PROVISION=1
+fi
+if [ "$PROVISION" = 1 ] && [ "$(id -u)" != 0 ]; then
+  # A non-root app never installs (P5-3): the OS builder does, before its start.
+  echo "[\${APP_ID:-app}] not provisioned: its dependencies are installed by the OS builder, never by the app (run: aura build app \${APP_ID:-<app>})" >&2
+  exit 1
 fi
 if [ "$PROVISION" = 1 ]; then
   # Bracket the slow part so the runner can tell "being prepared" from
@@ -220,13 +229,6 @@ export function nextHealthDeadline(opts: {
   return Math.max(deadline, Math.min(now + bootBudgetMs, hardDeadline));
 }
 
-export interface ProvisionResult {
-  /** Steps actually run, in order. Empty when the app was already ready. */
-  ran:      string[];
-  /** Non-fatal problems worth surfacing; provisioning still succeeded. */
-  warnings: string[];
-}
-
 /** Does this app still need dependencies installed? */
 export function needsProvisioning(appDir: string, runtime: AppRuntime = 'astro'): boolean {
   if (!existsSync(join(appDir, 'package.json'))) return false;
@@ -236,7 +238,7 @@ export function needsProvisioning(appDir: string, runtime: AppRuntime = 'astro')
 
 type AppRuntime = keyof typeof NPM_MISSING_SHELL;
 
-/** NPM_MISSING_SHELL in TypeScript, for the install-time path. */
+/** NPM_MISSING_SHELL in TypeScript, for the kernel's checks. */
 function npmMissing(appDir: string, runtime: AppRuntime): boolean {
   if (runtime === 'astro') return !existsSync(join(appDir, 'node_modules', '.bin', 'astro'));
   if (existsSync(join(appDir, 'node_modules'))) return false;
@@ -256,50 +258,38 @@ function referencesAuraPackages(appDir: string): boolean {
   } catch { return false; }
 }
 
+/** Where the builder keeps package caches: never a home (P5-3). */
+export const BUILDER_CACHE_SUBPATH = 'aura/cache/builder';
+export const BUILDER_CACHE_PATH = '/aura-cache';
+
+/** The builder's env: caches in the builder cache dir; no token, no context, no home. */
+export function builderProvisionEnv(appId: string): string[] {
+  return [
+    '-e', `APP_ID=${appId}`,
+    '-e', `HOME=${BUILDER_CACHE_PATH}/home`,
+    '-e', `npm_config_cache=${BUILDER_CACHE_PATH}/npm`,
+    '-e', `npm_config_store_dir=${BUILDER_CACHE_PATH}/pnpm-store`,
+    '-e', `XDG_CACHE_HOME=${BUILDER_CACHE_PATH}/xdg`,
+    '-e', 'npm_config_update_notifier=false',
+    '-e', 'ASTRO_TELEMETRY_DISABLED=1',
+  ];
+}
+
 /**
- * Install an app's dependencies in place.
- *
- * Runs in the OS container against the app's directory on the shared data
- * volume — the same directory the app container later bind-mounts, so the
- * work is visible to it. `onLine` receives command output for progress.
- *
- * Never throws for a failed `aura sdk install`: an app that declares no
- * `@aura/*` package, or a registry that is briefly down, must not turn a
- * working install into a failed one. A failed `npm install` DOES throw —
- * without it there is no app.
+ * The provisioning of the throwaway builder (P5-3): the start shell's own
+ * block, so the two can never drift, as root in the builder container. The
+ * `aura` CLI comes from the read-only packages mount. Fails when the app
+ * still needs provisioning afterwards.
  */
-export async function provisionApp(
-  appDir:   string,
-  onLine?:  (line: string) => void,
-  runtime:  AppRuntime = 'astro',
-): Promise<ProvisionResult> {
-  const result: ProvisionResult = { ran: [], warnings: [] };
-  if (!existsSync(join(appDir, 'package.json'))) return result;
-
-  if (npmMissing(appDir, runtime)) {
-    result.ran.push('npm install');
-    const code = await run('npm', ['install', '--prefer-offline'], appDir, onLine);
-    if (code !== 0) {
-      // --prefer-offline can fail on a stale/partial cache; the retry is the
-      // same fallback the entrypoint has always had.
-      onLine?.('npm install --prefer-offline failed, retrying online…');
-      const retry = await run('npm', ['install'], appDir, onLine);
-      if (retry !== 0) throw new Error(`npm install failed in ${appDir} (exit ${retry})`);
-    }
-  }
-
-  if (referencesAuraPackages(appDir) && !existsSync(join(appDir, 'node_modules', '@aura'))) {
-    result.ran.push('aura sdk install');
-    const code = await run('aura', ['sdk', 'install', '--quiet'], appDir, onLine);
-    if (code !== 0) {
-      // Left to the entrypoint to retry at launch, which is why that fallback
-      // stays. Surfaced rather than swallowed so a broken registry is visible.
-      result.warnings.push(
-        `aura sdk install failed (exit ${code}) — @aura/* packages will be pulled at first launch instead`,
-      );
-    }
-  }
-  return result;
+export function builderProvisionShell(runtime: AppRuntime): string {
+  return `set -e
+mkdir -p "$HOME"
+aura() { node /workspace/packages/aura-cli/dist/aura.cjs "$@"; }
+${provisionShell(runtime)}
+if ${NPM_MISSING_SHELL[runtime]}; then
+  echo "[\${APP_ID:-app}] provisioning did not install the dependencies" >&2
+  exit 1
+fi`;
 }
 
 /** Does this app hold a registry copy of @aura/* (not workspace links) to keep current? */

@@ -1,6 +1,6 @@
 import { spawn, spawnSync, execSync, execFile, execFileSync, type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
@@ -11,7 +11,7 @@ import { containerContextEnv, containerContextMounts } from './spawn/contextArgs
 import { containerSocketArgs } from './spawn/socketArgs.js';
 import { containerNetworkArgs, containerNetworkEnv, containerShellBase, rawSocketArgs, terminalNetworkUser } from './spawn/networkArgs.js';
 import { TERM_NETWORK_CONTAINER_LABEL, TermNetworks, type TermNetwork } from './TermNetworks.js';
-import { containerIdentityArgs } from './spawn/identityArgs.js';
+import { containerIdentityArgs, isNonRootIdentity, writeIdentityFiles } from './spawn/identityArgs.js';
 import type { RuntimeCapabilities } from '../runtimes/types.js';
 // Value import, but MountManager imports ContainerRunner type-only, so there
 // is no runtime cycle.
@@ -27,6 +27,7 @@ import { ContextStore } from '../context/ContextStore.js';
 import { VolumeStore, type VolumeEntry } from '../context/VolumeStore.js';
 import {
   ASTRO_START_SHELL, RAW_START_SHELL, PROVISION_TIMEOUT_MS, ProvisionWatch, nextHealthDeadline,
+  BUILDER_CACHE_PATH, BUILDER_CACHE_SUBPATH, builderProvisionEnv, builderProvisionShell,
 } from './provisioning.js';
 import { BUILD_STAGING_DIR, serveState } from './appBuild.js';
 import { BASE_IMAGE, whenBaseImageReady } from './BaseImage.js';
@@ -341,17 +342,17 @@ export class ContainerRunner implements SandboxRunner {
 
   /**
    * Today's container runtime (ARI §2.3): namespaces, enforced read-only
-   * binds, mounts, port expose, sidecars, re-adoption. Every process runs as
-   * root (identity `none`) and jump is a `docker exec`, not an isolated
-   * session: streams A and J flip `identity`, `sessionExec` and
-   * `privateHomeSession` when they land.
+   * binds, mounts, port expose, sidecars, re-adoption. It enforces an app
+   * identity (`--user`, no capabilities, no-new-privileges: stream A,
+   * `identity: enforced`); jump is a `docker exec`, not an isolated session
+   * yet: stream J flips `sessionExec` and `privateHomeSession`.
    */
   public capabilities(): RuntimeCapabilities {
     return {
       isolation: 'namespace',
       privateHomeSession: false,
       sessionExec: false,
-      identity: 'none',
+      identity: 'enforced',
       readOnlyBinds: true,
       mounts: true,
       portExpose: true,
@@ -466,6 +467,8 @@ export class ContainerRunner implements SandboxRunner {
     const termUser = terminalNetworkUser(appId, ctx);
     const term = termUser ? this.termNetworks.ensure(termUser) : null;
 
+    // A non-root app (stream A): its passwd and group, mounted read-only.
+    if (isNonRootIdentity(ctx.identity)) writeIdentityFiles(this.dataDir, instanceId, ctx.identity, ctx.installationId ?? null);
     const args = this.buildDockerArgs(instanceId, appId, port, manifest, hostname, ctx, contextEnv, contextVolumes, term);
     console.log(`[ContainerRunner] Spawning ${hostname} (app=${appId}) on port ${port}`);
 
@@ -867,8 +870,8 @@ export class ContainerRunner implements SandboxRunner {
       '-e', 'AURA_LIFECYCLE_TOKEN',
       // A Terminal's private listen subnet and shell peer (spawn/networkArgs.ts, D58).
       ...containerNetworkEnv({ term, shellHostname: this.shellHostname }),
-      // The process identity (spawn/identityArgs.ts): root today, until stream A.
-      ...containerIdentityArgs(ctx.identity),
+      // The process identity (spawn/identityArgs.ts): root, or the installation's app uid (P5-3).
+      ...containerIdentityArgs(ctx.identity, { appDataVolume, instanceId }),
       BASE_IMAGE,
     );
     a.push(...entrypoint);
@@ -1094,9 +1097,11 @@ export class ContainerRunner implements SandboxRunner {
     dialByAddress?: boolean;
     lifecycleToken?: string;
     preview?: string;
+    /** `Config.User` (P5-3): `<uid>:<gid>` of a non-root app; empty for root. */
+    user?: string;
   }> | null> {
     type DockerInspect = {
-      Config: { Env: string[]; Labels?: Record<string, string> }; State: { Pid: number };
+      Config: { Env: string[]; Labels?: Record<string, string>; User?: string }; State: { Pid: number };
       NetworkSettings?: { Networks?: DockerNetworks };
     };
     let psOut: string;
@@ -1113,7 +1118,7 @@ export class ContainerRunner implements SandboxRunner {
       return null;
     }
     const names = psOut.split('\n').map((l) => l.trim()).filter(Boolean);
-    const out: Array<{ instanceId: string; appId: string; port: number; hostname: string; pid: number; tokenNonce?: string; ownerLabel?: string; address?: string; addresses?: string[]; dialByAddress?: boolean; lifecycleToken?: string; preview?: string }> = [];
+    const out: Array<{ instanceId: string; appId: string; port: number; hostname: string; pid: number; tokenNonce?: string; ownerLabel?: string; address?: string; addresses?: string[]; dialByAddress?: boolean; lifecycleToken?: string; preview?: string; user?: string }> = [];
     for (const name of names) {
       if (!name.startsWith('aura-')) continue;
       // Skip aura-shell itself — it's not an app instance, just the
@@ -1163,6 +1168,7 @@ export class ContainerRunner implements SandboxRunner {
         ...(termNet ? { dialByAddress: true } : {}),
         lifecycleToken: env['AURA_LIFECYCLE_TOKEN'] || undefined,
         ...(inspect.Config?.Labels?.[PREVIEW_LABEL] ? { preview: inspect.Config.Labels[PREVIEW_LABEL] } : {}),
+        ...(inspect.Config?.User ? { user: inspect.Config.User } : {}),
       });
     }
     return out;
@@ -1493,6 +1499,58 @@ export class ContainerRunner implements SandboxRunner {
       child.stderr?.on('data', keep);
       const timer = setTimeout(() => {
         keep(Buffer.from(`\n[build] timed out after ${Math.round(timeoutMs / 1000)} s\n`));
+        try { spawnSync('docker', ['rm', '-f', name], { stdio: 'ignore', timeout: 20_000 }); } catch { /* gone */ }
+      }, timeoutMs);
+      child.on('error', (err) => { clearTimeout(timer); untrack(); resolve({ ok: false, output: `${output}\n${err.message}` }); });
+      child.on('close', (code) => { clearTimeout(timer); untrack(); resolve({ ok: code === 0, output }); });
+    });
+  }
+
+  /**
+   * Install an app's dependencies in a throwaway builder container (P5-3):
+   * the start shell's own provisioning block (`provisionShell`), run as root
+   * inside that container only, on the shared network (the local registry
+   * serves `@aura/*`), with no socket, no home, no context, no token and no
+   * raw sockets. Package caches live in the builder cache dir
+   * (`/data/aura/cache/builder`, root, 0700), never in a home. The app never
+   * runs here. Capped like a build.
+   */
+  async provisionApp(
+    appId: string, appDir: string, runtime: 'astro' | 'raw', opts: { timeoutMs?: number; onLine?: (line: string) => void } = {},
+  ): Promise<{ ok: boolean; output: string }> {
+    await whenBaseImageReady();
+    const cacheDir = join(this.dataDir, BUILDER_CACHE_SUBPATH);
+    mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
+    chmodSync(cacheDir, 0o700);
+    const name = `aura-provision-${appId.replace(/[^a-zA-Z0-9_.-]/g, '_')}`;
+    const args = [
+      'run', '--rm', '--name', name,
+      '--network', SHARED_NETWORK, ...rawSocketArgs(),
+      '--pids-limit', '512', '--memory', '3g', '--cpus', '2',
+      '--workdir', `/workspace/apps/${appId}`,
+      ...this.buildAppDirMount(appDir, appId, this.appDataVolume),
+      ...this.workspaceMounts(),
+      '--mount', `type=volume,source=${this.nodeModulesVolume},target=/workspace/node_modules,readonly`,
+      '--mount', `type=volume,source=${this.appDataVolume},target=${BUILDER_CACHE_PATH},volume-subpath=${BUILDER_CACHE_SUBPATH}`,
+      ...builderProvisionEnv(appId),
+      BASE_IMAGE,
+      'bash', '-c', builderProvisionShell(runtime),
+    ];
+    const timeoutMs = opts.timeoutMs ?? PROVISION_TIMEOUT_MS;
+    return await new Promise((resolve) => {
+      let output = '';
+      const keep = (d: Buffer) => {
+        output = (output + d.toString()).slice(-16_000);
+        if (opts.onLine) for (const l of d.toString().split('\n')) if (l.trim()) opts.onLine(l.trim());
+      };
+      const child = spawn('docker', args, { stdio: ['ignore', 'pipe', 'pipe'], env: WATCHER_ENV });
+      const pid = child.pid;
+      if (pid) this.buildPids.add(pid);
+      const untrack = () => { if (pid) this.buildPids.delete(pid); };
+      child.stdout?.on('data', keep);
+      child.stderr?.on('data', keep);
+      const timer = setTimeout(() => {
+        keep(Buffer.from(`\n[provision] timed out after ${Math.round(timeoutMs / 1000)} s\n`));
         try { spawnSync('docker', ['rm', '-f', name], { stdio: 'ignore', timeout: 20_000 }); } catch { /* gone */ }
       }, timeoutMs);
       child.on('error', (err) => { clearTimeout(timer); untrack(); resolve({ ok: false, output: `${output}\n${err.message}` }); });

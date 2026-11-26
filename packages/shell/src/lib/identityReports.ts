@@ -12,6 +12,8 @@
  *                      from today's shared home
  *   identityCheck()    the registry and account invariants, for
  *                      `diagnose/identity-registry` and `diagnose/identity-accounts`
+ *   privilegeReview()  per installation: runAs, app identity, last app start
+ *                      and every "needs elevated privileges" reason (P5-3, A)
  */
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -71,18 +73,14 @@ export async function liveOwnershipSpecs(): Promise<OwnershipRowSpec[]> {
     const installationId = await installationOf(m.id, m.scopeId);
     const app = installationId ? await svc.identity.getApp(installationId) : null;
     if (scopeDir) {
-      // Instance data is `<scope>/apps/<appId>/<appId>[-N]` (AppManager). For global and user
-      // scopes `<scope>/apps/<appId>` is also the app's source tree, so the rows name the
-      // instance directories, never the whole tree.
-      const appData = join(scopeDir, 'apps', m.id);
-      const instanceDir = new RegExp(`^${m.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(-\\d+)?$`);
-      for (const dir of subdirs(appData).filter((d) => instanceDir.test(d))) {
-        specs.push({
-          section: 'plannedAppPaths', path: join(appData, dir), kind: 'app-data', owner: installationId ?? m.id,
-          to: app ? { uid: app.uid, gid: app.gid } : null, recursive: true,
-          note: app ? 'applied with this installation\'s runAs flip (P5-3)' : 'app identity not allocated yet (stream A allocates it at the runAs flip)',
-        });
-      }
+      // Stream A's rows (core appOwnershipSpecs), the same ones a `runAs: app` start applies:
+      // the instance directories `<scope>/apps/<appId>/<appId>[-N]` (never the whole tree, which
+      // is the source for global and user scopes) and, for an app served by astro dev, its caches.
+      specs.push(...core.appOwnershipSpecs({
+        appId: m.id, installationId, appDataRoot: join(scopeDir, 'apps', m.id), appDir: m.appDir,
+        devServed: m.runtime !== 'raw' && core.serveState(m.appDir, m).mode !== 'prod',
+        identity: app ? { uid: app.uid, gid: app.gid } : null,
+      }));
     }
     let mode: 'open' | 'closed' = 'closed';
     try {
@@ -165,4 +163,34 @@ export async function identityCheck(): Promise<IdentityCheck> {
     return who !== undefined && !ids.has(who);
   }).length;
   return { registry: await svc.identity.check(), accounts: await svc.users.checkAccounts(), enabledWithoutIdentity, auditUsernameTargets };
+}
+
+/** The privilege review (P5-3, stream A): per installed app, how it runs and what it would need. */
+export async function privilegeReview(): Promise<core.PrivilegeReview> {
+  const svc = core.getAuthServices();
+  const mgr = core.getAppManager();
+  const hosts = core.getAppHostServices().registry;
+  const inputs: core.PrivilegeReviewInput[] = [];
+  const instances = mgr.getAllInstances();
+  for (const m of mgr.registry.getAll()) {
+    let inst: core.AppInstallation | null = null;
+    try { inst = await hosts.findInstallation(m.id, m.scopeId); } catch { inst = null; }
+    const app = inst ? await svc.identity.getApp(inst.installationId) : null;
+    let runtime: { id: string | null; identity: 'none' | 'emulated' | 'enforced' | null } = { id: null, identity: null };
+    try {
+      const r = await mgr.resolveRuntime(m.id, m, { sourceMode: mgr.sourceModeOf(m.id)?.mode ?? 'closed' });
+      runtime = { id: r.runtime, identity: r.capabilities.identity };
+    } catch { /* an unresolvable runtime is the runtimes report's finding */ }
+    const last = mgr.lastAppStart(m.id);
+    inputs.push({
+      appId: m.id, scope: m.scopeId, installationId: inst?.installationId ?? null,
+      runAs: inst ? inst.runAs ?? 'root' : null,
+      identity: app ? { uid: app.uid, gid: app.gid } : null,
+      needs: core.manifestPrivilegeNeeds(m, runtime, core.BASE_IMAGE),
+      instances: instances.filter((i) => i.appId === m.id && !i.inPool)
+        .map((i) => ({ instanceId: i.instanceId, uid: typeof i.uid === 'number' ? i.uid : null })),
+      ...(last ? { lastAppStart: last } : {}),
+    });
+  }
+  return core.buildPrivilegeReview(inputs);
 }

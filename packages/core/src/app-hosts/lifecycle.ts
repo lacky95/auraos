@@ -17,6 +17,7 @@ import type { AppHostRecord, AppInstallation, AppInstanceScope, AppSourceFingerp
 import { APP_HOST_DEFAULT_USER, sameAppSource, type AppHostStore } from './AppHostRegistry.js';
 import { manifestHostClaim, type ManifestHostGuard } from './manifestHostGuard.js';
 import { isProtectedHostName } from './hostRules.js';
+import { newInstallationRunAs } from '../identity/types.js';
 
 export interface AppIdentityFacts {
   appId: string;
@@ -104,16 +105,16 @@ export class AppHostLifecycle {
     if (!bound) {
       const reserved = await this.matchingReserved(app);
       if (reserved && sameAppSource(reserved.source, app.source)) return this.reactivated(reserved, app);
-      return this.registry.createInstallation({ ...app, userId: APP_HOST_DEFAULT_USER });
+      return this.registry.createInstallation({ ...app, userId: APP_HOST_DEFAULT_USER, runAs: newInstallationRunAs(app.scope) });
     }
     if (bound.state === 'reserved') {
       if (bound.originId === app.originId && sameAppSource(bound.source, app.source)) return this.reactivated(bound, app);
-      return this.registry.createInstallation({ ...app, userId: bound.userId, replaces: bound.installationId });
+      return this.registry.createInstallation({ ...app, userId: bound.userId, replaces: bound.installationId, runAs: newInstallationRunAs(app.scope) });
     }
     // Active. Two different known origins are two different apps.
     if (bound.originId && app.originId && bound.originId !== app.originId) {
       await this.registry.reserve(bound.installationId);
-      return this.registry.createInstallation({ ...app, userId: bound.userId, replaces: bound.installationId });
+      return this.registry.createInstallation({ ...app, userId: bound.userId, replaces: bound.installationId, runAs: newInstallationRunAs(app.scope) });
     }
     const originId = app.originId ?? bound.originId;
     const sourceChanged = bound.source.kind !== app.source.kind || bound.source.ref !== app.source.ref
