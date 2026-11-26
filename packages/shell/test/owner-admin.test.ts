@@ -202,3 +202,22 @@ test('Settings has no admin token path left: no unlock message, no bearer, no se
     assert.doesNotMatch(readFileSync(new URL(copy, import.meta.url), 'utf8'), /aura\.admin\.unlock/, copy);
   }
 });
+
+test('D60: turning Developer Mode on is confirmed in the dialog: the desktop session alone is refused, the operator acts, Settings and the Terminal ask with the password', async () => {
+  const ON: AdminRequest = {
+    action: 'admin.change', level: 'fresh', payload: { op: 'system-mode', mode: 'developer' },
+    title: 'Turn on Developer Mode', confirmed: { where: 'Settings → System, or aura mode developer on the host' },
+  };
+  caller = OWNER;
+  const desk = await asked(await ownerAction(ctx({ authorization: 'Bearer aura-sess1.x' }), ON, deps()));
+  assert.deepEqual(desk, { status: 403, body: { error: 'needs-confirmation', message: 'Settings → System, or aura mode developer on the host' } });
+  caller = OPERATOR;
+  assert.deepEqual(await ownerAction(ctx(), ON, deps()), { by: { kind: 'operator' }, detail: {} });
+  for (const who of [SETTINGS, TERMINAL]) {
+    caller = who;
+    const r = await asked(await ownerAction(ctx(), ON, deps()));
+    assert.equal(r.status, 202);
+    assert.equal(r.body.level, 'fresh');
+    store = new MemoryStore();
+  }
+});

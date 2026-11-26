@@ -26,6 +26,7 @@ import { registerSdk } from './commands/sdk.js';
 import { registerVerbs, setProgramFactory } from './commands/verbs.js';
 import { registerAdmin, registerApiKey } from './commands/admin.js';
 import { registerShellMode } from './commands/shellMode.js';
+import { registerSystemMode } from './commands/systemMode.js';
 import { registerIdentity } from './commands/identity.js';
 import { registerApprove } from './commands/approve.js';
 import { registerSecret } from './commands/secret.js';
@@ -130,7 +131,8 @@ export const HELP_SECTIONS: Array<{ title: string; lines: Array<[string, string]
     + 'they run directly. There is no admin login.' },
   { title: 'Ecosystem & dev', lines: [
     ['aura nexus ...', 'Find, install, update, publish apps'],
-    ['aura dev ...', 'Scaffold, validate, run apps standalone'],
+    ['aura dev ...', 'Scaffold, validate, run apps standalone; rebuild/restart AuraOS'],
+    ['aura mode ...', 'Developer Mode: show it, switch it (on asks for your password)'],
   ] },
   { title: 'Settings', lines: [
     ['aura set theme <name>', 'Switch the active theme'],
@@ -276,6 +278,7 @@ export function buildProgram(): Command {
   registerData(program);
   registerAdmin(program);
   registerShellMode(program);
+  registerSystemMode(program);
   registerIdentity(program);
   registerApprove(program);
   registerSecret(program);

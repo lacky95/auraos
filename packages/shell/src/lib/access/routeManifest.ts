@@ -210,13 +210,34 @@ const routes: RouteAccessManifest['routes'] = {
       rule: ownerManages('Overwriting an app replaces the code under its id: the owner decides. Decided on `force: true` alone, as clone-app.'),
     }],
   },
-  // M2: restarting or updating the OS, in every mode (the routes check no caller themselves):
-  // the owner, the operator, and `aura` in the trusted Terminal (D29).
+  // M2, D60: restarting, updating and switching how the OS runs, in every mode. The owner and the
+  // operator act directly; Settings and `aura` in the System Terminal ask the owner (ownerAction).
   '/api/admin/self-update': {
-    methods: { GET: rule(OWNER, 'system'), POST: rule(OWNER, 'system', { guard: 'rule' }) },
+    methods: {
+      GET: rule(OWNER, 'system'),
+      POST: ownerManages('Updates, rebuilds or restarts the OS: the owner decides (a dry run changes nothing).'),
+    },
   },
-  '/api/admin/restart': { methods: { POST: rule(OWNER, 'system', { guard: 'rule' }) } },
-  '/api/admin/soft-restart': { methods: { POST: rule(OWNER, 'system', { guard: 'rule' }) } },
+  '/api/admin/restart': { methods: { POST: ownerManages('Restarts the OS: the owner decides.') } },
+  '/api/admin/soft-restart': { methods: { POST: ownerManages('Stops every app and the app manager: the owner decides.') } },
+  '/api/admin/shell-mode': {
+    methods: {
+      GET: rule(OWNER, 'system', { guard: 'rule' }),
+      PUT: ownerManages('How the shell runs (dev or prod) from the next boot: the owner decides.'),
+    },
+  },
+  // D60: the system mode. Turning Developer Mode on needs the password (or the host operator);
+  // reading it is the owner's, the System Terminal included (D29).
+  '/api/admin/system-mode': {
+    methods: {
+      GET: rule(OWNER, 'system', { guard: 'rule' }),
+      PUT: ownerManages('Developer Mode on needs the owner\'s password; off runs the clean-tree flow.'),
+      POST: ownerManages('Saves the Developer Mode changes as patch files: the owner decides.'),
+    },
+  },
+  '/api/admin/dev/restart': {
+    methods: { POST: ownerManages('`aura dev rebuild|restart`, Developer Mode only: the owner decides.') },
+  },
   // D29: the owner's trusted terminal acts for the owner, so `aura enable|disable app` works from it.
   '/api/admin/apps/enabled': {
     methods: on(['GET', 'POST'], rule(OWNER, 'system', why('The owner: the desktop, Settings (D45) and `aura enable|disable app` from the trusted Terminal (D29).'))),
@@ -386,6 +407,14 @@ const routes: RouteAccessManifest['routes'] = {
         targetPermissions: ['apps.mount'],
         guard: 'target-permissions',
         ...why('Q30: write access to another app\'s files is the owner\'s call (`aura mount add --wr` from the trusted Terminal); an app asking for it gets an approval once stream B\'s flow covers mounts.'),
+      }),
+    }, {
+      id: 'workspace',
+      methods: ['POST'],
+      match: { on: 'body', field: 'kind', equals: 'workspace', read: true },
+      rule: rule(INSTANCE, 'app', {
+        systemApp: 'com.aura.terminal', guard: 'rule',
+        ...why('D60 `aura mount workspace`: the System Terminal mounts the AuraOS checkout into itself, in Developer Mode only, with the owner\'s click. The route refuses every other caller and target.'),
       }),
     }],
   },

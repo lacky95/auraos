@@ -1,5 +1,6 @@
 import type { APIRoute } from 'astro';
 import { getAppManager } from '@aura/core';
+import { auditOwner, ownerAction } from '../../../lib/approvals/admin.ts';
 
 /**
  * Soft-restart the AppManager singleton without bouncing the container.
@@ -20,8 +21,17 @@ import { getAppManager } from '@aura/core';
  *
  * Caveat: any in-flight HTTP requests proxying to a tracked instance will
  * see the upstream disappear mid-flight and the client will reconnect.
+ *
+ * The owner's (lib/approvals/admin.ts): it force-kills every app. The CLI in
+ * the System Terminal asks for one click.
  */
-export const POST: APIRoute = async () => {
+export const POST: APIRoute = async (ctx) => {
+  const actor = await ownerAction(ctx, {
+    action: 'admin.change', level: 'session', payload: { op: 'os.soft-restart' },
+    title: 'Restart the app manager', details: ['Every running app is stopped; apps start again when they are next used.'],
+  });
+  if (actor instanceof Response) return actor;
+  await auditOwner(actor, 'os.soft-restart');
   let mgr;
   try { mgr = getAppManager(); }
   catch { return json({ ok: true, note: 'no AppManager singleton to restart' }, 200); }

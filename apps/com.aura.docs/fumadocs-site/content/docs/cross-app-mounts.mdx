@@ -47,6 +47,7 @@ A mode change is detach + re-add — POSTing over a live mount returns
 | `aura rm mount <id>… [-i <instance>]` | Detach. `<id>` is `<appId>` (source and data mounts) or `<appId>:data` (just the data one). Without `-i` it finds the one instance that has it and asks first (`-y` skips the question); pass `-i` when several have it. |
 | `aura mount ls` | The same list for one instance (default: the one you are in), plus a *sidecar mounts* section and the OS context volumes. |
 | `aura mount rm <appId>… [--all]` | Detach from one instance (default: the one you are in); `--all` empties it. |
+| `aura mount workspace` | [Developer Mode](/docs/developer-mode) only: the AuraOS source `/workspace`, read-write at `/mnt/aura/workspace` of the System Terminal you run it in — never another app. Detach with `aura mount rm workspace`. |
 
 | Flag | Applies to | Meaning |
 |---|---|---|

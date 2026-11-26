@@ -43,6 +43,12 @@ export interface AdminRequest {
   /** For the dialog, from the validated request: "Grant io.lakner.terminalx terminal.screen.read". */
   title: string;
   details?: readonly string[];
+  /**
+   * The owner's desktop session alone is not enough: the change is confirmed
+   * in the shell's approval dialog (Settings) or by the host operator.
+   * Turning Developer Mode on (D1, D60); its level is `fresh`.
+   */
+  confirmed?: { where: string };
 }
 
 /** Who acted, for the record and the audit trail. */
@@ -76,6 +82,9 @@ export async function ownerAction(
   if (principal.kind === 'operator') return { by: core.operatorAttribution(), detail: {} };
   if (principal.kind === 'anonymous') return json({ error: 'unauthenticated' }, 401);
 
+  if (principal.kind === 'user' && !principal.through && req.confirmed) {
+    return json({ error: 'needs-confirmation', message: req.confirmed.where }, 403);
+  }
   if (principal.kind === 'user' && !principal.through) {
     // A login cookie rides on a sibling App Host's request too (same site): a
     // change by cookie needs the desktop's own Origin. A bearer is no cookie.

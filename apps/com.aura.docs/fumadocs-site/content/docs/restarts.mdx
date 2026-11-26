@@ -53,7 +53,10 @@ aura restart os --no-restore    # restart into an empty desktop
 - **Settings → About** → **Restart** (also **Update** and **Rebuild**)
 
 Untick *bring my work back* for a clean start. The route behind them is
-`POST /api/admin/restart { restore }` (admin).
+`POST /api/admin/restart { restore }`, the owner's: the desktop and the host
+act directly, Settings and the System Terminal ask for one click. A plain
+restart builds nothing; in [Developer Mode](/docs/developer-mode) `aura dev
+rebuild` builds what changed and restarts.
 
 Open browser tabs show *AuraOS is restarting* and reload by themselves once the
 shell is back.

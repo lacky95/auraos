@@ -12,7 +12,8 @@
  * the shell's dialog, coming from Settings or the System Terminal; the host
  * operator acts directly. So with `fresh-auth-require-https` on, turning it
  * off over HTTP needs HTTPS or the host (D63). An `env` option answers 409:
- * it is set on the host.
+ * it is set on the host; a `record` or `file` option too: it is changed where
+ * it always was.
  */
 import * as core from '@aura/core';
 import { auditOwner, ownerAction, type OwnerActor } from './approvals/admin.ts';
@@ -58,6 +59,9 @@ export async function putSecurityOption(ctx: Ctx, deps: SecurityOptionsDeps = li
   }
   if (option.source === 'record') {
     return json({ error: 'own-setting', message: `${option.title} keeps its own record (${option.record}) and is changed where it always was.` }, 409);
+  }
+  if (option.source === 'file') {
+    return json({ error: 'own-setting', message: `${option.title} keeps its own switch (/data/${option.file}) and is changed where it always was.` }, 409);
   }
   if (option.source === 'reserved') return json({ error: 'not-yet-available' }, 409);
   if (option.env && (deps.env[option.env] ?? '').trim() !== '') {

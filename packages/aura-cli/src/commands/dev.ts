@@ -16,6 +16,7 @@ import {
 import { registerDevClone } from './dev-clone.js';
 import { apiOrBody, registerDevSource } from './dev-source.js';
 import { registerDevPatch } from './dev-patch.js';
+import { registerDevRestart } from './systemMode.js';
 
 const TEMPLATE_DIR = (() => {
   if (process.env['AURA_TEMPLATE_DIR']) return process.env['AURA_TEMPLATE_DIR'];
@@ -906,6 +907,7 @@ Skips node_modules, dist, .astro and .next. ${DOCS_HINT}; ${CONTRACT_DOCS_HINT}.
   registerDevCheckout(dev);
   registerDevSource(dev);
   registerDevPatch(dev);
+  registerDevRestart(dev);
 
   dev
     .command('standalone <appId>')

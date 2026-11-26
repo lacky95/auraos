@@ -4,6 +4,7 @@ import { accessMode } from '../../../server/access-mode.mjs';
 import { gatewayClaimOf } from '../../../server/gateway-identity.mjs';
 import { afterResponse } from '../afterResponse.ts';
 import { presentsApproval } from '../approvals/service.ts';
+import { systemMode } from '../systemMode.ts';
 import { decide as liveDecide } from './decide.ts';
 import { readJsonBody, refused, TOO_LARGE } from './enforce.ts';
 import { OWNER_UI_EXCLUDED_TARGETS, gatewayInstance, gatewayOwner, type GatewayOwnerDeps } from './identify.ts';
@@ -111,7 +112,7 @@ export async function enforceGateway(
       auth: { fresh: presentsApproval(ctx.request), via: 'gateway' },
       strict,
       accessProfile: 'open',
-      systemMode: 'normal',
+      systemMode: systemMode(),
       deployment: 'private',
     });
     return { variant, result };

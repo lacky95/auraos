@@ -1,0 +1,137 @@
+---
+title: Developer Mode
+description: What Developer Mode is, how to switch it, rebuilding and restarting AuraOS from its source, mounting the source into the System Terminal, and what happens when you switch it off.
+---
+
+AuraOS has two **system modes**:
+
+- **Developer Mode**: AuraOS runs from its source checkout, `/workspace`, and
+  you develop AuraOS itself. The desktop shows a **Developer mode** badge at the
+  top edge for as long as it is on.
+- **Normal mode**: AuraOS runs the locked release.
+
+<Callout type="warn">
+**Normal mode is not enforced yet.** Until Phase 6 ships the release build,
+AuraOS always runs from `/workspace`. Switching Developer Mode off records the
+mode, hides the badge, detaches the writable source mount and runs the
+clean-tree check below — but the source stays where it is and the shell keeps
+running from it. Every installation runs Developer Mode by default until then.
+</Callout>
+
+The system mode is separate from the [shell runtime mode](/docs/deep-dive/shell-runtime-modes)
+(`aura shell mode dev|prod`, how the shell is served) and from the access
+profile. Developer Mode does not widen what apps can do: user data, app homes
+and secrets stay isolated, and installed apps keep the permissions they had.
+
+## See the mode
+
+```bash
+aura mode       # the mode, what differs in /workspace, writable source mounts
+aura status     # one line: System mode
+```
+
+Settings → **System** shows the same.
+
+## Switch it on
+
+Only you, the owner, can turn Developer Mode on, and your password confirms it:
+
+- **Settings → System → Turn on…** opens AuraOS's own approval dialog, which
+  asks for your password.
+- **`aura mode developer`** in the System Terminal asks the same dialog; the
+  CLI waits for your answer.
+- **On the host** (also over plain HTTP, where the dialog can't take a
+  password): `docker exec -it aura-shell aura mode developer`, or approve a
+  pending request with `aura approve <id>`.
+
+An agent in the Terminal can ask for it, but it can't approve it.
+
+`AURA_SYSTEM_MODE=developer|normal` on the container overrides the switch
+(the file `/data/aura/system-mode`), like `AURA_SHELL_MODE` does for the shell.
+
+## Rebuild and restart
+
+In Developer Mode:
+
+```bash
+aura dev rebuild               # build the packages whose sources changed, then restart
+aura dev restart               # restart without building
+aura dev rebuild --no-restore  # come back with an empty desktop
+```
+
+Both save your desktop and bring it back (see [Restarts](/docs/restarts)).
+From the System Terminal the desktop asks you for one click; on the host they
+run directly. Outside Developer Mode they are refused. To rebuild the AuraOS
+**image** (for example after changing the Dockerfile), use Settings → About →
+Rebuild or `aura restart os --rebuild`.
+
+A plain `aura restart os` builds nothing: the boot only builds what a rebuild
+asked for, or a package with no build output yet.
+
+## Edit the source from the System Terminal
+
+```bash
+aura mount workspace      # /workspace, read-write, at /mnt/aura/workspace
+aura mount ls             # shows it (KIND workspace, MODE rw)
+aura mount rm workspace   # detach it
+```
+
+- It works **only in Developer Mode** and **only into the System Terminal that
+  asks** — never into another app, another Terminal instance or a sidecar.
+- You approve it with one click in the desktop. Every session and agent in
+  that Terminal can then change the running AuraOS source.
+- It is live, without a restart, and lasts until you detach it, the Terminal
+  instance stops, or Developer Mode is switched off.
+
+For anything beyond the source (Docker, the master container) use the host
+shell, `docker exec -it aura-shell bash`.
+
+## Switch it off
+
+Normal mode starts from the exact release commit, so switching off first
+checks `/workspace` against the release — until Phase 6, the remote's `main`
+as last fetched. When it differs (uncommitted changes, untracked files, or
+local commits the release doesn't have), Developer Mode **stays on** and you
+get the list and three recommendations, in this order:
+
+1. **Make the tree clean**: commit and push your work, or discard it. Then
+   switch off again.
+2. **Save the changes as patch files**: `aura mode export-patches` (or
+   Settings → System → Save as patch files) writes them to
+   `/data/aura/dev-patches/<date>/` — `commits/` from `git format-patch`,
+   `uncommitted.diff`, `untracked.diff` and a README with how to apply them.
+   `/workspace` is not changed; clean up afterwards.
+3. **Automatic clean-up**, only if you choose it:
+   `aura mode normal --move-to-branch` (or Settings → System → Move to a branch
+   and turn off). Everything that differs is committed to a new
+   `dev/<date>` branch, a backup (patch files and a git bundle) is kept in
+   `/data/aura/dev-backups/<date>/` for 30 days, and `/workspace` is reset to
+   the release on `main`. Ignored files such as `node_modules` and build output
+   stay. It asks for your password.
+
+Nothing is ever cleaned up silently. With a clean tree, switching off needs
+one click. Every writable source mount is detached.
+
+```bash
+aura mode normal                  # refused while /workspace differs, with the list
+aura mode export-patches          # (b)
+aura mode normal --move-to-branch # (c)
+```
+
+After the automatic clean-up the running shell still has the old code loaded:
+run `aura dev rebuild` before switching off, or `aura restart os --rebuild`
+afterwards.
+
+## Routes
+
+| Route | What |
+|---|---|
+| `GET /api/admin/system-mode[?tree=1]` | The mode, the writable source mounts, and with `tree=1` what differs |
+| `PUT /api/admin/system-mode { mode, cleanup? }` | Switch (on: password; off: the clean-tree flow, `cleanup: 'branch'` for the automatic clean-up) |
+| `POST /api/admin/system-mode { action: 'export-patches' }` | Save the patch files |
+| `POST /api/admin/dev/restart { build?, restore? }` | `aura dev rebuild` / `restart` |
+| `POST /api/instances/<id>/mounts { kind: 'workspace' }` | `aura mount workspace` |
+
+Restarting, updating and the shell mode (`/api/admin/restart`,
+`soft-restart`, `self-update`, `shell-mode`) are the owner's too: the desktop
+and the host act directly, Settings and the System Terminal ask for one click.

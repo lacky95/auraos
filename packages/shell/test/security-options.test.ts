@@ -134,9 +134,11 @@ test('registry: every option has a title, a description, a source and the fresh 
     assert.ok(!ids.has(o.id), `unique id ${o.id}`);
     ids.add(o.id);
     assert.ok(o.title.length > 3 && o.description.length > 20, `${o.id} explains itself`);
-    assert.ok(['policy', 'env', 'record', 'reserved'].includes(o.source), o.id);
-    assert.equal(o.change, 'fresh', `${o.id}: every security option needs the password`);
-    if (o.source === 'env') assert.match(o.env ?? '', /^AURA_[A-Z_]+$/);
+    assert.ok(['policy', 'env', 'record', 'file', 'reserved'].includes(o.source), o.id);
+    // Every security option needs the password; the shell mode's switch is one click (D57).
+    assert.equal(o.change, o.id === 'shell-mode' ? 'session' : 'fresh', `${o.id}: the change level`);
+    if (o.source === 'env' || o.source === 'file') assert.match(o.env ?? '', /^AURA_[A-Z_]+$/);
+    if (o.source === 'file') assert.match(o.file ?? '', /^aura\/[a-z-]+$/);
     if (o.type === 'enum') assert.ok(o.values?.includes(o.default as string), `${o.id}: default is a value`);
   }
   assert.equal(core.securityOption(core.FRESH_AUTH_REQUIRE_HTTPS)?.default, false, 'D63: off by default');
@@ -176,6 +178,19 @@ test('registry: env wins, then the policy record, then the default; sources say 
   assert.equal(option(list, 'access-profile').effectiveSource, 'reserved');
   assert.deepEqual(list.filter((o) => o.writable).map((o) => o.id), ['fresh-auth-require-https']);
   assert.equal(option(core.resolveSecurityOptions({}, {}), 'fresh-auth-require-https').value, false);
+});
+
+test('registry: a file option reads its switch file; the host variable wins; garbage is the default', () => {
+  const files: Record<string, string> = { 'aura/system-mode': 'normal\n', 'aura/shell-mode': 'bogus' };
+  const read = (f: string) => files[f] ?? null;
+  const list = core.resolveSecurityOptions({}, {}, read);
+  assert.deepEqual([option(list, 'system-mode').value, option(list, 'system-mode').effectiveSource], ['normal', 'file /data/aura/system-mode']);
+  assert.deepEqual([option(list, 'shell-mode').value, option(list, 'shell-mode').effectiveSource], ['dev', 'default']);
+  const env = core.resolveSecurityOptions({}, { AURA_SYSTEM_MODE: 'developer', AURA_SHELL_MODE: 'prod' }, read);
+  assert.deepEqual([option(env, 'system-mode').value, option(env, 'system-mode').effectiveSource], ['developer', 'env AURA_SYSTEM_MODE']);
+  assert.deepEqual([option(env, 'shell-mode').value, option(env, 'shell-mode').effectiveSource], ['prod', 'env AURA_SHELL_MODE']);
+  assert.deepEqual([option(core.resolveSecurityOptions({}, {}, () => null), 'system-mode').value], ['developer']);
+  assert.equal(option(list, 'system-mode').writable, false);
 });
 
 // ── the sealed store ────────────────────────────────────────────────────────

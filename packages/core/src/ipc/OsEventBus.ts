@@ -138,6 +138,11 @@ export interface OsEvents {
     restore: boolean;
     graceMs: number;
   };
+  /** The system mode changed (shell lib/systemMode.ts, D60): the desktop
+   *  shows or hides its Developer mode indicator. */
+  'os:systemModeChanged': {
+    mode: 'normal' | 'developer';
+  };
   /** The desktop session was restored after boot. `idMap` maps activity ids
    *  from before the restart to the ones they have now (equal when kept). */
   'session:restored': {

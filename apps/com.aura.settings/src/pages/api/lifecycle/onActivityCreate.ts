@@ -18,6 +18,7 @@ export const POST = createActivityCreateHandler(({ data }) => {
     case 'apps':       return { path: '/apps',       title: 'Settings · Apps' };
     case 'access':     return { path: '/access',     title: 'Settings · Notifications & access' };
     case 'users':      return { path: '/users',      title: 'Settings · Users & Identities' };
+    case 'system':     return { path: '/system',     title: 'Settings · System' };
     case 'about':      return { path: '/about',      title: 'Settings · About' };
     default:           return { path: '/',           title: 'Settings' };
   }

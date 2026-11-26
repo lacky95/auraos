@@ -381,6 +381,8 @@ export async function attachSio(httpServer) {
     // OS restarts: a planned restart is starting (tabs flush + show it) /
     // the desktop session was restored after boot (lib/desktopSession.ts).
     'os:shuttingDown', 'session:restored',
+    // The system mode changed: the desktop's Developer mode indicator (lib/systemMode.ts).
+    'os:systemModeChanged',
     // Production shell: a watched rebuild was swapped in (server/watchRebuild.mjs).
     'shell:rebuilt',
     // Notification store lifecycle — content-free {eventId,id,state}.

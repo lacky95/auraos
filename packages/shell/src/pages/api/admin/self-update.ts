@@ -1,5 +1,6 @@
 import type { APIRoute } from 'astro';
 import { SelfUpdater, UPDATE_BRANCH_RE, UPDATE_JOB_ID_RE } from '@aura/core';
+import { auditOwner, ownerAction } from '../../../lib/approvals/admin.ts';
 import { plannedRestart } from '../../../lib/plannedRestart.js';
 
 /**
@@ -18,6 +19,10 @@ import { plannedRestart } from '../../../lib/plannedRestart.js';
  *         (bounce the master container). 202, because the
  *         work outlives this request AND this whole process — the updater
  *         recreates the container serving it.
+ *
+ * A real POST is the owner's (lib/approvals/admin.ts): the owner in the
+ * desktop and the host operator act directly; Settings → About and the CLI in
+ * the System Terminal ask for one click. A dry run changes nothing.
  *
  * GET only reads: it never writes a job file (an abandoned run is shown
  * closed, and written so by the next POST). Job ids and branch names are
@@ -68,7 +73,8 @@ export const GET: APIRoute = ({ url }) => {
   return json(body);
 };
 
-export const POST: APIRoute = async ({ request }) => {
+export const POST: APIRoute = async (ctx) => {
+  const { request } = ctx;
   let body: { mode?: 'update' | 'rebuild' | 'restart'; branch?: string; dryRun?: boolean; restore?: boolean } = {};
   try { body = await request.json() as typeof body; } catch { /* empty body is fine */ }
   if (!body || typeof body !== 'object') body = {};
@@ -81,9 +87,19 @@ export const POST: APIRoute = async ({ request }) => {
     if (!res.ok) return json({ ok: false, error: res.reason }, 409);
     return json({ ok: true, job: res.job }, 202);
   }
+  const mode = body.mode ?? 'update';
+  const restore = body.restore !== false;
+  const branch = body.branch?.trim();
+  const actor = await ownerAction(ctx, {
+    action: 'admin.change', level: 'session', payload: { op: 'os.self-update', mode, branch: branch ?? null, restore },
+    title: mode === 'update' ? `Update AuraOS${branch ? ` from ${branch}` : ''}` : mode === 'rebuild' ? 'Rebuild the AuraOS image and restart' : 'Restart AuraOS',
+    details: [restore ? 'Your desktop is saved and comes back after the restart.' : 'AuraOS comes back with an empty desktop.'],
+  });
+  if (actor instanceof Response) return actor;
   // Every real run takes the container down: save the desktop first and bring
   // it back after (lib/plannedRestart.ts).
-  const res = await plannedRestart({ mode: body.mode ?? 'update', branch: body.branch, restore: body.restore !== false });
+  const res = await plannedRestart({ mode, branch, restore });
+  await auditOwner(actor, 'os.self-update', { outcome: res.ok ? 'ok' : 'failed', detail: { mode, branch: branch ?? null, restore } });
   if (!res.ok) return json({ ok: false, error: res.error }, 409);
   return json({ ok: true, job: res.job, activities: res.activities }, 202);
 };

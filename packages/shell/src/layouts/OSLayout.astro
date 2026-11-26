@@ -15,6 +15,7 @@ import LockScreenNotifications from '../components/shell/notifications/LockScree
 import KeyboardOverlay from '../components/shell/keyboard/KeyboardOverlay.astro';
 import FlightLayer from '../components/shell/flight/FlightLayer.astro';
 import ClientSession from '../components/shell/ClientSession.astro';
+import DeveloperModeBadge from '../components/shell/DeveloperModeBadge.astro';
 import { ThemeManager, readUserPrefValue } from '@aura/core';
 import { localOwnerId, requestUserId } from '../lib/userContext';
 import type { AppManifest, ColorMode } from '@aura/core';
@@ -558,6 +559,9 @@ const activeThemeId   = activeTheme.id;
   <FlightLayer />
   <!-- Virtual keyboard: one shell-owned keyboard for every activity (z 1065). -->
   <KeyboardOverlay />
+  <!-- D3, D60: the permanent Developer mode indicator (z 1870, no pointer events; below the
+       system modals and the lock screen, and the trusted dialogs are in the top layer). -->
+  <DeveloperModeBadge />
   <OwnerPasswordDialog />
   <TerminalShareDialog />
   <!--
