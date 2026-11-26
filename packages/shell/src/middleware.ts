@@ -13,6 +13,10 @@ import { captureAccess, createAccessReporter } from './lib/access/guard.ts';
 import { GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
 import { shellFramePolicy } from './lib/desktop/shellFramePolicy.ts';
 import { runAfterResponse } from './lib/afterResponse.ts';
+import { installRelaySigner, type RelaySigner } from './lib/access/relay.ts';
+
+// D89 B4: the relay claim signer for the WS proxy and App Hosts (server/access-bridge.mjs `relayClaimOf`).
+installRelaySigner(() => { try { return getAppManager() as unknown as RelaySigner; } catch { return null; } });
 
 // Source of truth is the singleton on globalThis — NOT a module-scoped flag.
 // The soft-restart endpoint deletes that singleton; if we tracked init state

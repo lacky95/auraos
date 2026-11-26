@@ -23,11 +23,22 @@
  * are. This check stays as the second layer (another Terminal is no shell).
  * On that network the shell connects from its address there, which its plain
  * name need not resolve to when the container is on two networks: the runtime
- * names it in `AURA_SHELL_PEERS` (comma-separated host names), resolved too.
+ * names it in `AURA_SHELL_PEERS` (comma-separated host names), resolved too. *
+ * D89 B4: the address is not proof (D28). The shell signs each call it relays
+ * to such an app with a relay claim (`x-aura-relay`, ./relayClaim.ts), keyed
+ * from this start's lifecycle token. `checkShellRelay` verifies it on a call
+ * from the shell's address: in `warn` (the default) a missing or invalid
+ * claim is reported in the app's log and the call is still served; in
+ * `strict` (`AURA_RELAY_STRICT=strict`, the `relay-strict` security option)
+ * it is refused. Loopback and the container's own addresses are the app
+ * itself and need no claim. `fromShell` stays the address-only check.
  */
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { networkInterfaces } from 'node:os';
+import { RELAY_CLAIM_HEADER, relayKey, verifyRelayClaim, type RelayClaim } from './relayClaim.js';
+
+export { RELAY_CLAIM_HEADER, type RelayClaim };
 
 export interface ShellPeerDeps {
   /** The shell's base URL (OS_API_BASE). */
@@ -69,16 +80,24 @@ export function createShellPeer(deps: ShellPeerDeps) {
     addresses = new Set((await Promise.all(hosts.map(addressesOf))).flat());
   }
 
-  return async function fromShell(peer: string | null | undefined): Promise<boolean> {
+  /** `self`: this container (loopback, its own addresses); `shell`: the shell's address; null: anyone else. */
+  async function peerKind(peer: string | null | undefined): Promise<PeerKind | null> {
     const a = normalize(peer);
-    if (!a) return false;
-    if (a.startsWith('127.') || a === '::1') return true;
-    if (deps.own?.().some((o) => normalize(o) === a)) return true;
-    if (addresses.has(a)) return true;
+    if (!a) return null;
+    if (a.startsWith('127.') || a === '::1') return 'self';
+    if (deps.own?.().some((o) => normalize(o) === a)) return 'self';
+    if (addresses.has(a)) return 'shell';
     if (now() - resolvedAt > RETRY_MS) await refresh();
-    return addresses.has(a);
-  };
+    return addresses.has(a) ? 'shell' : null;
+  }
+
+  async function fromShell(peer: string | null | undefined): Promise<boolean> {
+    return (await peerKind(peer)) !== null;
+  }
+  return Object.assign(fromShell, { peerKind });
 }
+
+export type PeerKind = 'self' | 'shell';
 
 /** The live check, over OS_API_BASE and the container's DNS. */
 export const fromShell = createShellPeer({
@@ -86,6 +105,93 @@ export const fromShell = createShellPeer({
   peers: () => (process.env['AURA_SHELL_PEERS'] ?? '').split(','),
   resolve: async (host) => (await lookup(host, { all: true })).map((r) => r.address),
   own: () => Object.values(networkInterfaces()).flat().map((i) => i?.address ?? ''),
+});
+
+// ── D89 B4: the relay claim ────────────────────────────────────────────────
+
+export type RelayVerdict = 'valid' | 'missing' | 'invalid' | 'self';
+
+export interface ShellRelayResult {
+  /** Serve the call. */
+  ok: boolean;
+  /** `self`: this container's own call, no claim needed. Only for a peer that is self or the shell. */
+  verdict: RelayVerdict | null;
+  /** The verified claim: the instance, call and the user the shell authorized. */
+  claim: RelayClaim | null;
+}
+
+export interface ShellRelayDeps {
+  peerKind(peer: string | null | undefined): Promise<PeerKind | null>;
+  /** This start's lifecycle token (AURA_LIFECYCLE_TOKEN); the claim key derives from it. */
+  lifecycleToken(): string | undefined;
+  /** This instance's id (APP_INSTANCE_ID). */
+  instanceId(): string | undefined;
+  /** `AURA_RELAY_STRICT`: `strict` refuses; anything else is `warn`. */
+  mode(): string | undefined;
+  /** A missing or invalid claim on a call from the shell's address (never the claim's value). */
+  report?(verdict: 'missing' | 'invalid', call: { method: string; path: string; mode: 'warn' | 'strict' }): void;
+  now?(): number;
+}
+
+export function createShellRelay(deps: ShellRelayDeps) {
+  let cachedToken: string | undefined;
+  let cachedKey: Buffer | null = null;
+  const key = (): Buffer | null => {
+    const token = deps.lifecycleToken();
+    if (!token) return null;
+    if (token !== cachedToken) { cachedToken = token; cachedKey = relayKey(token); }
+    return cachedKey;
+  };
+
+  /**
+   * The verdict on one call: `peer` its socket address, `header` the
+   * `x-aura-relay` value, `method` and `path` (with query) as this server got them.
+   */
+  return async function checkShellRelay(call: {
+    peer: string | null | undefined; header: string | string[] | null | undefined; method: string; path: string;
+  }): Promise<ShellRelayResult> {
+    const kind = await deps.peerKind(call.peer);
+    if (kind === null) return { ok: false, verdict: null, claim: null };
+    if (kind === 'self') return { ok: true, verdict: 'self', claim: null };
+    const mode = (deps.mode() ?? '').trim().toLowerCase() === 'strict' ? 'strict' : 'warn';
+    const header = Array.isArray(call.header) ? call.header[0] : call.header;
+    const k = key();
+    const instanceId = deps.instanceId();
+    const claim = header && k && instanceId
+      ? verifyRelayClaim(header, { key: k, instanceId, method: call.method, path: call.path, ...(deps.now ? { now: deps.now() } : {}) })
+      : null;
+    if (claim) return { ok: true, verdict: 'valid', claim };
+    const verdict = header ? 'invalid' : 'missing';
+    try { deps.report?.(verdict, { method: call.method, path: call.path, mode }); } catch { /* report-only */ }
+    return { ok: mode === 'warn', verdict, claim: null };
+  };
+}
+
+const REPORT_EVERY_MS = 60_000;
+const reported = new Map<string, number>();
+/** Counts since start, by verdict (`missing`, `invalid`): what warn mode let through. */
+export const relayCounts: Record<'missing' | 'invalid', number> = { missing: 0, invalid: 0 };
+
+/** One log line per verdict and path a minute; the counts keep every call. */
+function reportRelay(verdict: 'missing' | 'invalid', call: { method: string; path: string; mode: 'warn' | 'strict' }): void {
+  relayCounts[verdict] += 1;
+  const path = call.path.split('?', 1)[0] ?? '';
+  const k = `${verdict} ${call.method} ${path}`;
+  const t = Date.now();
+  if (t - (reported.get(k) ?? 0) < REPORT_EVERY_MS) return;
+  if (reported.size > 500) reported.clear();
+  reported.set(k, t);
+  console.warn(`[shell-peer] relay-claim ${verdict} (${call.mode === 'strict' ? 'refused' : 'warn, served'}): ${call.method} ${path} `
+    + `(${relayCounts[verdict]} ${verdict} since start)`);
+}
+
+/** The live relay check: the live address check, this start's lifecycle token and AURA_RELAY_STRICT. */
+export const checkShellRelay = createShellRelay({
+  peerKind: (peer) => fromShell.peerKind(peer),
+  lifecycleToken: () => process.env['AURA_LIFECYCLE_TOKEN'] || undefined,
+  instanceId: () => process.env['APP_INSTANCE_ID'] || process.env['AURA_INSTANCE_ID'] || undefined,
+  mode: () => process.env['AURA_RELAY_STRICT'],
+  report: reportRelay,
 });
 
 /** The refusal an HTTP route answers to a caller that is not the shell. */

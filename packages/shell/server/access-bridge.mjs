@@ -189,3 +189,23 @@ export function internalServiceHeaders(url) {
     return {};
   }
 }
+
+// ── the relay claim (D89 B4) ────────────────────────────────────────────────
+
+const RELAY_SIGNER = Symbol.for('aura.relay.sign');
+
+/**
+ * The shell's relay claim (`x-aura-relay`) for a call one of these servers
+ * forwards to an owner-agent app (lib/access/relay.ts, registered by the
+ * middleware): `{ appId, instanceId, method, path, principal? | session? | system? }`.
+ * Null for any other app, before the middleware loaded, or on any error: the
+ * receiver then reports the claim missing (warn) or refuses (strict).
+ */
+export function relayClaimOf(call) {
+  try {
+    const sign = globalThis[RELAY_SIGNER];
+    return typeof sign === 'function' ? sign(call) ?? null : null;
+  } catch {
+    return null;
+  }
+}

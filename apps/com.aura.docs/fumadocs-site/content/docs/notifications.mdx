@@ -613,7 +613,7 @@ daemon. Window `blocking` is always downgraded (agents have no window); a
 system modal needs `systemModal` for the daemon and shows "Requested by
 Aura Shell Daemon".
 
-Connect it: `claude mcp add --scope user --transport http aura-shell "$OS_API_BASE/api/proxy/com.aura.aurashelld/api/mcp/shell"`.
+Connect it: `aura mcp add aura-shell com.aura.aurashelld` (or by hand: `claude mcp add --scope user --transport http aura-shell '${OS_API_BASE}/api/proxy/com.aura.aurashelld/api/mcp/shell' -H 'Authorization: Bearer ${AURA_INSTANCE_TOKEN}'`). The daemon's MCP is an owner agent's: it answers only the System Terminal's token (D89), so the token header is required, by reference, never pasted.
 
 ---
 

@@ -71,3 +71,74 @@ test('the shell on a private Terminal network (D58): its AURA_SHELL_PEERS name c
   const none = createShellPeer({ base: () => undefined, peers: () => ['aura-shell.aura-term-default'], resolve: async () => ['172.30.0.2'] });
   assert.equal(await none('172.30.0.2'), false);
 });
+
+// D89 B4: the relay claim on a call from the shell's address.
+import { createShellRelay } from '../dist/shell-peer.js';
+import { relayKey, signRelayClaim } from '../dist/relayClaim.js';
+
+test('relay: self needs no claim, another container never passes, the shell is checked', async () => {
+  const peer = createShellPeer({ base: () => 'http://aura-shell:3000', resolve: async () => ['172.20.0.2'], own: () => ['172.20.0.7'] });
+  assert.equal(await peer.peerKind('127.0.0.1'), 'self');
+  assert.equal(await peer.peerKind('172.20.0.7'), 'self');
+  assert.equal(await peer.peerKind('172.20.0.2'), 'shell');
+  assert.equal(await peer.peerKind('172.20.0.9'), null);
+  let mode = 'warn';
+  const reports = [];
+  const check = createShellRelay({
+    peerKind: peer.peerKind, lifecycleToken: () => 'lt-1', instanceId: () => 'com.aura.terminal-2', mode: () => mode,
+    report: (v, call) => reports.push([v, call.method, call.path, call.mode]),
+  });
+  const good = signRelayClaim(relayKey('lt-1'), { i: 'com.aura.terminal-2', m: 'GET', p: '/ws?session=a', u: 'owner-1', c: 'user' });
+  const call = (p, header, path = '/ws?session=a') => check({ peer: p, header, method: 'GET', path });
+
+  assert.deepEqual(await call('127.0.0.1', undefined), { ok: true, verdict: 'self', claim: null });
+  assert.deepEqual(await call('172.20.0.9', good), { ok: false, verdict: null, claim: null }, 'a claim never makes another address the shell');
+  const valid = await call('172.20.0.2', good);
+  assert.equal(valid.ok, true);
+  assert.equal(valid.verdict, 'valid');
+  assert.equal(valid.claim.u, 'owner-1', 'the user the shell authorized');
+  assert.deepEqual(await call('172.20.0.2', [good]), valid, 'Node may hand an array');
+
+  // warn: served, reported
+  assert.equal((await call('172.20.0.2', undefined)).ok, true);
+  assert.equal((await call('172.20.0.2', 'agr1.bad.mac')).verdict, 'invalid');
+  assert.equal((await call('172.20.0.2', good, '/api/sessions')).verdict, 'invalid', 'bound to its path');
+  assert.deepEqual(reports, [['missing', 'GET', '/ws?session=a', 'warn'], ['invalid', 'GET', '/ws?session=a', 'warn'], ['invalid', 'GET', '/api/sessions', 'warn']]);
+
+  // strict: refused
+  mode = 'strict';
+  assert.equal((await call('172.20.0.2', undefined)).ok, false);
+  assert.equal((await call('172.20.0.2', 'agr1.bad.mac')).ok, false);
+  assert.equal((await call('172.20.0.2', good)).ok, true);
+  assert.equal((await call('127.0.0.1', undefined)).ok, true, 'self still needs none');
+});
+
+test('relay: without a lifecycle token (an app started by hand) nothing verifies; warn still serves', async () => {
+  const check = createShellRelay({
+    peerKind: async () => 'shell', lifecycleToken: () => undefined, instanceId: () => 'x-1', mode: () => undefined,
+  });
+  const r = await check({ peer: '172.20.0.2', header: 'agr1.a.b', method: 'GET', path: '/' });
+  assert.deepEqual(r, { ok: true, verdict: 'invalid', claim: null });
+});
+
+test('relay: the live check reads AURA_RELAY_STRICT and the start\'s token at call time', async () => {
+  const { checkShellRelay, relayCounts } = await import('../dist/shell-peer.js');
+  const prev = { ...process.env };
+  try {
+    process.env.OS_API_BASE = 'http://10.77.0.2:3000';
+    process.env.AURA_LIFECYCLE_TOKEN = 'lt-live';
+    process.env.APP_INSTANCE_ID = 'com.aura.aurashelld-1';
+    delete process.env.AURA_RELAY_STRICT;
+    const before = relayCounts.missing;
+    assert.equal((await checkShellRelay({ peer: '10.77.0.2', header: null, method: 'POST', path: '/api/mcp/shell' })).ok, true);
+    assert.equal(relayCounts.missing, before + 1);
+    process.env.AURA_RELAY_STRICT = 'strict';
+    assert.equal((await checkShellRelay({ peer: '10.77.0.2', header: null, method: 'POST', path: '/api/mcp/shell' })).ok, false);
+    const good = signRelayClaim(relayKey('lt-live'), { i: 'com.aura.aurashelld-1', m: 'POST', p: '/api/mcp/shell' });
+    assert.equal((await checkShellRelay({ peer: '10.77.0.2', header: good, method: 'POST', path: '/api/mcp/shell' })).verdict, 'valid');
+  } finally {
+    for (const k of ['OS_API_BASE', 'AURA_LIFECYCLE_TOKEN', 'APP_INSTANCE_ID', 'AURA_RELAY_STRICT']) {
+      if (prev[k] === undefined) delete process.env[k]; else process.env[k] = prev[k];
+    }
+  }
+});

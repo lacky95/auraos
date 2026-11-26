@@ -61,6 +61,7 @@ import {
 import { PermissionManager } from '../permissions/PermissionManager.js';
 import { ContentProviderRegistry } from '../content/ContentProviderRegistry.js';
 import { InterfaceRegistry } from '../interfaces/InterfaceRegistry.js';
+import { signRelayClaim } from '../app-hosts/relayClaim.js';
 import type { InterfaceView } from '../interfaces/InterfaceRegistry.js';
 import { keymapRegistry } from '../keymap/KeymapRegistry.js';
 import { ScopeRegistry } from '../scopes/ScopeRegistry.js';
@@ -2219,6 +2220,24 @@ export class AppManager {
    */
   getInstanceAddresses(instanceId: string): string[] {
     return this.runnerOf(instanceId).addresses?.(instanceId) ?? [];
+  }
+
+  /**
+   * D89 B4: the shell's relay claim for one call it forwards to this
+   * instance's server (`x-aura-relay`, app-hosts/relayClaim.ts), signed with
+   * the key of the instance's current start. Null when the instance is not
+   * running or its start has no lifecycle token (the receiver then reports
+   * the claim missing).
+   */
+  relayClaim(instanceId: string, call: { method: string; path: string; userId?: string; sid?: string; caller?: string }): string | null {
+    if (!this.instances.get(instanceId)?.sandbox) return null;
+    let key: Buffer | null = null;
+    try { key = this.runnerOf(instanceId).relayKey?.(instanceId) ?? null; } catch { key = null; }
+    if (!key) return null;
+    return signRelayClaim(key, {
+      i: instanceId, m: call.method, p: call.path,
+      ...(call.userId ? { u: call.userId } : {}), ...(call.sid ? { sid: call.sid } : {}), ...(call.caller ? { c: call.caller } : {}),
+    });
   }
 
   /**

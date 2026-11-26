@@ -2,11 +2,13 @@
   "mcpServers": {
     "aura-docs": {
       "type": "http",
-      "url": "${OS_API_BASE:-http://aura-shell:3000}/api/proxy/com.aura.docs/mcp"
+      "url": "${OS_API_BASE:-http://aura-shell:3000}/api/proxy/com.aura.docs/mcp",
+      "headers": { "Authorization": "Bearer ${AURA_INSTANCE_TOKEN}" }
     },
     "aura-interfaces": {
       "type": "http",
-      "url": "${OS_API_BASE:-http://aura-shell:3000}/api/proxy/com.aura.settings/mcp/interfaces"
+      "url": "${OS_API_BASE:-http://aura-shell:3000}/api/proxy/com.aura.settings/mcp/interfaces",
+      "headers": { "Authorization": "Bearer ${AURA_INSTANCE_TOKEN}" }
     }
   }
 }
