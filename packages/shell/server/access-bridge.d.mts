@@ -1,4 +1,6 @@
 export const INTERNAL_SERVICE_HEADER: string;
+/** The relay signer's one globalThis key (D89 B4). */
+export const RELAY_SIGNER_KEY: symbol;
 export const SESSION_COOKIES: ReadonlySet<string>;
 export function reportSurface(observation: unknown): void;
 export function countSurfaceEvent(subject: string): void;

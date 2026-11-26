@@ -13,8 +13,7 @@ Higher levels state principles; lower levels the specifics. Don't repeat a rule 
 
 **How agents find these files** (verified 2026-11-26):
 - **Start your session at the worktree root.**
-- **Claude Code** loads the root file at start, and loads each nested `CLAUDE.md` (with its `@AGENTS.md`) when it reads a file in that directory.
-  - Started in a subdirectory, it loads every ancestor `CLAUDE.md`, but resolves the ancestors' `@AGENTS.md` only after a one-time approval of external imports. In `claude -p`, that approval is never given.
+- **Claude Code** loads the root file at start and each nested `CLAUDE.md` (with its `@AGENTS.md`) when it reads a file there. Started in a subdirectory, it resolves the ancestors' `@AGENTS.md` only after a one-time approval of external imports (never given in `claude -p`).
 - **Codex** joins `AGENTS.md` from the git root down to the working directory and stops at 32 KiB. `pnpm arch` keeps every chain under 28 KiB.
 
 ## What AuraOS is (architecture in one screen)
@@ -49,7 +48,7 @@ Simple by default. Modular by design. Replaceable by contract. Language-independ
 6. **Encapsulation:** no reaching into another module's internals or private state.
 7. **Controlled cross-sector dependencies:** follow the direction rules in `packages/core/AGENTS.md`.
 8. **No unintended cycles:** between files, or between modules through real import chains.
-9. **No uncontrolled global singletons:** no new `globalThis` pin. The existing ones are listed in `packages/core/AGENTS.md` and are created by the composition root.
+9. **No uncontrolled global singletons:** no new `globalThis` pin. The existing ones are listed in `packages/core/AGENTS.md` and `packages/shell/AGENTS.md`; each module creates its own until Phase 6 K moves them into the composition root.
 10. **No presentation in the kernel:** no Web Shell, UI, Astro or React import, and no window or animation concepts in kernel sectors.
 11. **Explicit composition:** wiring happens in one composition root (`bootSystem()`, Phase 6), not inside domain modules.
 12. **Security, authorization and lifecycle invariants are preserved** by every change; a refactor never weakens one.
@@ -122,17 +121,11 @@ make ps          # running aura-* containers
 The shell serves `http://localhost:3000`. Each app is its own Astro dev server
 on a port in 4001–4999, reached through `/api/proxy/<appId>/<path>`.
 
-The compose project name defaults to the checkout's folder name, and the
-volumes are named after it (`<project>_aura-app-data`), so they differ between
-checkouts. Prefer `docker restart aura-shell` /
-`docker exec aura-shell …` over `docker compose …` when acting on the shell
-container specifically.
+Volumes are named after the compose project (the checkout's folder name). Act on the shell with
+`docker restart|exec aura-shell`, not `docker compose`.
 
-**You may be running inside `aura-shell` yourself.** Check `hostname` before
-restarting it: restarting the container kills the agent session, and killing
-the `astro dev` process does too (it's the entrypoint's foreground command, so
-the container exits and `restart: unless-stopped` brings it back). Ask before
-doing either.
+**You may be running inside `aura-shell` yourself** (`hostname`): restarting it, or killing its
+`astro dev` (the entrypoint's foreground process), ends your session. Ask before doing either.
 
 ## The build model — read this before debugging "my change did nothing"
 
@@ -147,36 +140,16 @@ So a source edit under `packages/` is invisible to the running OS until:
 docker exec aura-shell pnpm --filter @aura/<pkg> build   # then restart the shell
 ```
 
-Skipping this fails in ways that don't look like staleness:
-
-- a shell route importing a new export → **500 on that route only**, because
-  the module fails to import;
-- a changed constant or regex → silently keeps the old value (e.g. adding a KV
-  namespace to `KV_CONTEXT_NAMESPACE_PATTERN` has no effect, so writes to the
-  new namespace are rejected as invalid);
-- a runner change (`ContainerRunner`, `ProotRunner`) → applies only to apps
-  spawned *after* the restart.
-
-What does **not** need a rebuild: `packages/shell`'s own pages, API routes and
-middleware (it runs under `astro dev`), and everything in `apps/*` — those are
-bind-mounted and re-read on iframe reload. Their imports of `@aura/core` still
-come from `dist`.
+Skipping it doesn't look like staleness: a route importing a new export is a **500 on that route
+only**; a changed constant or regex silently keeps its old value; a runner change applies only to
+apps spawned after the restart. No rebuild for the shell's own pages, routes and middleware
+(`astro dev`) or `apps/*` (re-read on reload); their `@aura/core` imports still come from `dist`.
 
 ## Verifying changes
 
-There is no browser automation in this repo — UI changes are verified at the
-desktop by hand. Where a check can be made without a browser, prefer it:
-fetching a page through the proxy (`http://localhost:3000/api/proxy/<appId>/<page>`)
-and asserting on the HTML catches most of it, and cross-checking every
-`var(--aura-color-*)` name against `/api/os/theme.css` catches invented tokens
-and leftover hardcoded colours.
-
-Type checks and unit tests:
-
-```sh
-pnpm typecheck                        # recursive
-pnpm --filter @aura/core test         # + @aura/kv-store test
-```
+UI is verified at the desktop by hand (no browser automation here; VM tests live in `auraos-e2e`).
+Without a browser: fetch a page through `/api/proxy/<appId>/<page>` and assert on the HTML; check every
+`var(--aura-color-*)` against `/api/os/theme.css`. Tests and types: see Validation above.
 
 ## Styling
 
@@ -213,21 +186,7 @@ The styling rules (classes vs `data-*`, `is:global` for injected rows, Tailwind 
 
 ## Where things live
 
-```
-packages/core         AppManager, ProotRunner, ContainerRunner, OsEventBus,
-                      PermissionManager, ThemeManager, ContextStore/VolumeStore,
-                      manifest schema
-packages/shell        Astro SSR shell — /api/proxy, /api/os/*, /api/apps,
-                      /api/data, middleware (OS bootstrap), layout + launcher
-packages/app-sdk      OsClient, lifecycle factories, auraAppIntegration
-packages/kv-store     Valkey-backed KV + namespace validation
-packages/aura-cli     the `aura` CLI, and the app template it scaffolds from
-packages/ui           shared UI primitives (React/scificn) + theme bridge
-apps/<id>             apps shipped with the OS
-os/                   entrypoint shims, bashrc, publish scripts
-```
-
-Start points when stuck: `packages/shell/src/middleware.ts` (what boots on
-first request), `packages/core/src/app-manager/` (how apps are spawned),
-`packages/shell/src/pages/api/proxy/[id]/[...path].ts` (how app HTML/JS is
-rewritten for the iframe).
+The layers are in "What AuraOS is" above; also `packages/kv-store` (Valkey KV, namespace validation),
+`packages/ui` (shared UI primitives, theme bridge), `apps/<id>` (apps shipped with the OS), `os/` (entrypoint
+shims, bashrc, the home seed). Start points: `packages/shell/src/middleware.ts` (kernel init until Phase 6),
+`packages/core/src/app-manager/` (spawning), `packages/shell/src/pages/api/proxy/[id]/[...path].ts` (the app proxy).

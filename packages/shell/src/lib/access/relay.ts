@@ -1,6 +1,7 @@
 import type { AccessPrincipal } from '@aura/core';
 import { DEFAULT_OWNER_ID } from '@aura/core';
 import { OWNER_AGENT_APPS } from './identify.ts';
+import { RELAY_SIGNER_KEY } from '../../../server/access-bridge.mjs';
 
 /**
  * D89 B4: the shell's relay claim on a call it forwards to an owner-agent
@@ -62,8 +63,8 @@ export function relayClaimFor(
   }
 }
 
-/** How the shell's plain `.mjs` servers (WS proxy, App Hosts, terminal-embed) reach `relayClaimFor` (server/access-bridge.mjs `relayClaimOf`). */
-export const RELAY_SIGNER_KEY = Symbol.for('aura.relay.sign');
+/** How the shell's plain `.mjs` servers (WS proxy, App Hosts, terminal-embed) reach `relayClaimFor`: the one key, owned by server/access-bridge.mjs (`relayClaimOf`). */
+export { RELAY_SIGNER_KEY };
 
 export interface RelayRequest {
   appId: string | null | undefined;

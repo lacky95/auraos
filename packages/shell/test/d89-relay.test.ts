@@ -161,3 +161,10 @@ test('B7: the observer counts it per app, and the decision is unchanged', async 
     report.stop();
   }
 });
+
+test('5-main (repeat audit N3): the relay signer has one key, owned by the access bridge', () => {
+  const read = (f: string) => fs.readFileSync(new URL(`../${f}`, import.meta.url), 'utf8');
+  const all = ['server/access-bridge.mjs', 'src/lib/access/relay.ts'].map(read).join('\n');
+  assert.equal(all.match(/Symbol\.for\('aura\.relay\.sign'\)/g)?.length, 1, 'defined once');
+  assert.equal(RELAY_SIGNER_KEY, Symbol.for('aura.relay.sign'));
+});

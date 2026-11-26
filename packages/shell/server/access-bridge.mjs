@@ -192,7 +192,14 @@ export function internalServiceHeaders(url) {
 
 // ── the relay claim (D89 B4) ────────────────────────────────────────────────
 
-const RELAY_SIGNER = Symbol.for('aura.relay.sign');
+/**
+ * The one key of the relay signer (lib/access/relay.ts installs it, the
+ * middleware at module load). Baselined globalThis pin (shell AGENTS.md):
+ * it must exist from module load and in every access mode, which the
+ * `aura.access` bridge does not; Phase 5b folds both into one bridge set up
+ * at the composition point.
+ */
+export const RELAY_SIGNER_KEY = Symbol.for('aura.relay.sign');
 
 /**
  * The shell's relay claim (`x-aura-relay`) for a call one of these servers
@@ -203,7 +210,7 @@ const RELAY_SIGNER = Symbol.for('aura.relay.sign');
  */
 export function relayClaimOf(call) {
   try {
-    const sign = globalThis[RELAY_SIGNER];
+    const sign = globalThis[RELAY_SIGNER_KEY];
     return typeof sign === 'function' ? sign(call) ?? null : null;
   } catch {
     return null;

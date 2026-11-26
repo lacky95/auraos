@@ -4,7 +4,7 @@ The sector rules are in `packages/core/AGENTS.md`. This module is the kernel's l
 
 ## What lives here
 
-- **`AppManager.ts`** (about 3,100 lines on `main`, about 70 public methods): it is the kernel API the shell calls (`getAppManager()`, 93 shell files). It handles:
+- **`AppManager.ts`** (about 4,000 lines at 5-main, about 85 public methods): it is the kernel API the shell calls (`getAppManager()`, 105 shell files). It handles:
   - lifecycle (`init`, adoption, reconciler, start, stop, kill, pause, resume, `stopAll`);
   - services, warm pools, previews and intents;
   - enable state;
@@ -13,7 +13,7 @@ The sector rules are in `packages/core/AGENTS.md`. This module is the kernel's l
   - manifests, interfaces, sidecars and usage.
 - **Runners:** `ContainerRunner.ts` and `ProotRunner.ts` implement `SandboxRunner.ts`. From 5b CR/PR they sit behind ARI modules in `core/src/runtimes/<id>/`.
 - **Resource managers:** `SidecarManager`, `MountManager`, `PortManager`. From 5b G they are typed to runtime backends.
-- **System Management parts that still live here:** `AppRegistry`, `appBuild`, `BaseImage`, `tool-*`, `provisioning`. They move out in the Phase 8 decomposition.
+- **System Management parts that still live here:** `AppRegistry`, `appBuild`, `BaseImage`, `tool-provision`, `provisioning`. They move out in the Phase 8 decomposition.
 
 ## Rules
 
@@ -24,7 +24,7 @@ The sector rules are in `packages/core/AGENTS.md`. This module is the kernel's l
 - **Don't add a kind check** (`sandbox === 'container'` or `'proot'`) outside the runtime modules. Ask the runtime's capabilities instead (ARI, 5b G).
 - **Runners don't import `OsEventBus`.** They report exits through `onExit`; the kernel emits `app:*` (G1).
 - **Keep the `SandboxRunner` and ARI arguments plain data.** The spawn context carries no functions and no live objects.
-- **Collaborators are passed in.** Don't fetch them from `globalThis` or import a sibling module's `services.ts`. The `AppManager ↔ auth/services` cycle from 5-main is removed in 5b K.
+- **Collaborators are passed in.** Don't fetch them from `globalThis` or import a sibling module's `services.ts`. The `AppManager ↔ auth/services` cycle (G1) is removed in Phase 6 K.
 - **Every spawn mints a workload token** (D89). A container without one is never adopted.
 
 ## State

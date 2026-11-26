@@ -55,7 +55,7 @@ presentation-contracts: theme layout keymap
 
 ## Public contract
 
-- **Today:** other packages import the root `@aura/core` (`src/index.ts`, 55 `export *`) or the declared leaf subpaths in `package.json` `exports`: `theme`, `keymap`, `setup-tickets`, `system-identity`, `logger`, `host-rules`, `aura-channel`.
+- **Today:** other packages import the root `@aura/core` (`src/index.ts`, 78 `export *` lines) or the declared leaf subpaths in `package.json` `exports`: `theme`, `keymap`, `setup-tickets`, `system-identity`, `logger`, `host-rules`, `aura-channel`.
 - **Don't widen the barrel with implementation classes.** Phase 8 narrows it.
 - **Inside core**, cross-module imports go straight to implementation files today (131 imports, none through an `index.ts`). New code imports another module's leaf contract file or its `index.ts`. Phase 7 adds the `core-deep-import` rule with a baseline.
 
@@ -63,7 +63,7 @@ presentation-contracts: theme layout keymap
 
 | State | Owner | Notes |
 |---|---|---|
-| `user:<id>:…`, `usersess:`, `grant:`, `audit:admin` | `auth` | `security` (`user:…:policy`) and `capabilities` (`user:…:capabilities`) own their sub-keys |
+| `user:<id>:…`, `user:policy:password`, `usersess:`, `grant:`, `audit:admin` | `auth` | the `user:` prefix has four owners: also `security` (`user:policy:security`), `runtimes` (`user:policy:runtimes`), `capabilities` (`user:capabilities:registry`) |
 | `approval:` | `approvals` | Lua compare-and-set; single use |
 | `context:*` | `context` | never readable through `/api/kv` |
 | `apphost:*`, `hosts:` | `app-hosts` | |
@@ -77,7 +77,7 @@ presentation-contracts: theme layout keymap
 - `LayoutStrategyRegistry`, `KeymapRegistry`, registry logins, the system identity cache;
 - `NotificationService` (plus its hooks and cache).
 
-Add no new one. From Phase 6, `bootSystem()` creates them in one place.
+Each module creates its own lazily today. Add no new one; Phase 6 K moves their creation into `bootSystem()`.
 
 ## Kernel-wide invariants
 
@@ -92,16 +92,16 @@ Add no new one. From Phase 6, `bootSystem()` creates them in one place.
 
 | Violation | Owner |
 |---|---|
-| `auth/services.ts` composes AppManager, capabilities and security (`auth → app-manager, capabilities, security`) | Phase 6 K: composition moves into `bootSystem()` |
+| G1: `auth/services.ts` composes AppManager, capabilities, security and the identity store (`auth → app-manager, capabilities, security, identity`); AppManager reaches it back by dynamic imports (file cycle `AppManager ↔ auth/services`, `app-manager → auth`) | Phase 6 K: `bootSystem()` composes and hands the services in |
 | `AppManager → app-hosts/services` (fetches the singleton itself) | Phase 6 K |
 | `NotificationService → auth/services`, plus a hidden `globalThis` read of AppManager (`NotificationService.ts:1729`) | Phase 6 K: inject the lookups |
 | `app-hosts/lifecycle.ts → app-manager/AppIdentity` | Phase 7 (contract leaf) |
 | `nexus/removeApp.ts → AppManager` | Phase 7 (removal contract) |
 | `types/manifest.ts → app-hosts/appHosts` (Foundation not a leaf) | Phase 7 (host-name rules into Foundation) |
 | `AppManager → keymap/KeymapRegistry` (kernel uses presentation) | Phase 8 (AppManager decomposition) |
-| Arriving with 5-main: `AppManager ↔ auth/services` (stream A's dynamic import) | 5b K |
-| Arriving with 5-main: `runtimes/builtins → app-manager/ProotRunner` (R2) | 5b CR, PR |
-| `agent-agnostic` hits: home seeder, home import markers, privilege notes (audit #2, #10/#11); the `claude-code` alias (#5) | 5b; Phase 6 |
+| `app-manager ↔ runtimes` (`runtimes/builtins/proot.ts → ProotRunner`, R2) | Phase 5b CR + PR |
+| `agent-agnostic`: home seeder, import markers, privilege table (audit #2, #10/#11, N1); approval text (#1) | Phase 5b |
+| `agent-agnostic`: the `claude-code` alias, onboarding probes, screen scraping (#4–#6) | Phase 6 |
 
 **Phase 8 (committed):** AppManager is decomposed behind a compatibility facade into real modules. Each gets its own responsibility, state, contract and tests: activities and navigation, the service supervisor, previews, build and tools.
 
