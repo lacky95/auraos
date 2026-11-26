@@ -209,3 +209,17 @@ export function relayClaimOf(call) {
     return null;
   }
 }
+
+/**
+ * I.2 (D82): the user an instance belongs to, from the kernel through the
+ * bridge (a member reaches only its own); null for an unknown instance, an
+ * unclaimed pool member, or before the middleware loaded. Never throws.
+ */
+export function instanceOwnerOf(instanceId) {
+  try {
+    const owner = globalThis[BRIDGE]?.instanceOwner;
+    return typeof owner === 'function' ? owner(instanceId) ?? null : null;
+  } catch {
+    return null;
+  }
+}

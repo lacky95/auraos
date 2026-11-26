@@ -113,6 +113,27 @@ export interface LoginSessions {
   revokeByMethod(method: LoginMethod): Promise<number>;
 }
 
+/**
+ * D82 disable (I.2), the part outside the login store: what a disabled user
+ * still runs as an interactive session ends. Implemented by the kernel
+ * (`AppManager.endUserSessions`): stream T's System Terminal instances of the
+ * user (and pool members warmed for them), stream J's jump sessions of the
+ * user through the session broker. Never stops an instance shared with
+ * others, never deletes anything (D83 §4).
+ */
+export interface UserSessionsEnded {
+  /** Terminal instances of the user that were stopped. */
+  terminals: number;
+  /** Terminal instances of the user that could not be stopped (the disable is reported failed). */
+  terminalsFailed: number;
+  /** Jump sessions ended; null when this kernel has no session broker (nothing of the user's can be open). */
+  jumpSessions: number | null;
+}
+
+export interface UserSessionEnders {
+  endUserSessions(userId: string): Promise<UserSessionsEnded>;
+}
+
 // ── setup tickets ───────────────────────────────────────────────────────────
 
 /**

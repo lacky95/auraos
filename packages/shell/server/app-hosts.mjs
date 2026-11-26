@@ -352,6 +352,22 @@ export function createAppHostRouter({
   }
 
   /**
+   * The surface gate of an App Host request or upgrade. I.2 (D82): a member's
+   * session is decided on the instance its slot holds now, so it reaches only
+   * its own (a slot reassigned to another user's instance refuses it); a
+   * member's slot without an instance is refused (the member starts its own
+   * from the desktop, `/api/apps/<id>/start`).
+   */
+  async function hostGate(route, req, subject, method) {
+    const role = verifiedSessions.get(req)?.role;
+    const instanceId = route.slot?.instanceId;
+    if (role !== 'owner' && !instanceId) return false;
+    return surfaceGate({
+      subject, method, appId: route.record.appId, ...(role !== 'owner' ? { instanceId } : {}), identity: hostIdentity(route, req),
+    });
+  }
+
+  /**
    * The report's identity for a request on an App Host: the session
    * appSession() verified, as the owner acting through this app. Never the cookie.
    */
@@ -516,7 +532,7 @@ export function createAppHostRouter({
 
     const session = await appSession(route, req, edge);
     if (!session) return page(401, 'Open this app from AuraOS', 'This address needs a sign-in from the AuraOS desktop.');
-    if (!(await surfaceGate({ subject: 'app-hosts', method: req.method, appId: route.record.appId, identity: hostIdentity(route, req) }))) {
+    if (!(await hostGate(route, req, 'app-hosts', req.method))) {
       return page(403, 'Request refused', 'This sign-in may not open this app.');
     }
     const policy = OWN_ORIGIN_ONLY_APPS.has(route.record.appId) ? 'own-origin' : 'app';
@@ -576,8 +592,7 @@ export function createAppHostRouter({
       session = await appSession(route, req, edge);
       if (!session) return fail(401, 'Unauthorized');
       if (mux && session.embed) return fail(403, 'Forbidden');
-      const identity = hostIdentity(route, req);
-      if (!(await surfaceGate({ subject: mux ? 'sse-mux' : 'app-hosts', method: 'UPGRADE', appId: route.record.appId, identity }))) {
+      if (!(await hostGate(route, req, mux ? 'sse-mux' : 'app-hosts', 'UPGRADE'))) {
         return fail(403, 'Forbidden');
       }
       if (mux) {

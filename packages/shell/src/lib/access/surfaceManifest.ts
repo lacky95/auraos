@@ -12,6 +12,13 @@ import type { AccessSurface } from './types.ts';
 
 const decide = (phase: number, note: string) => ({ ambiguous: true, decision: { phase, note } }) as const;
 
+/**
+ * I.2 (D82): a member's own instance of an app it holds `app.use` for
+ * (decide.ts `memberPermissions`). The surface names the instance once it is
+ * known, so a member never reaches another user's.
+ */
+const MEMBER_USES_APP = ['app.use:<installationId>'] as const;
+
 export const SURFACE_MANIFEST: readonly AccessSurface[] = [
   {
     id: 'shell-listener',
@@ -33,7 +40,8 @@ export const SURFACE_MANIFEST: readonly AccessSurface[] = [
     rule: {
       allow: ['owner'],
       target: 'proxy-upstream',
-      ...decide(2, 'Claims the request before Astro and streams it to the app with no check. Needs the login handoff, then per-host enforcement.'),
+      memberPermissions: MEMBER_USES_APP,
+      ...decide(2, 'Claims the request before Astro and streams it to the app with no check. Needs the login handoff, then per-host enforcement. I.2: a member\'s session only to its own instance, decided again on the slot\'s instance.'),
     },
   },
   {
@@ -46,7 +54,8 @@ export const SURFACE_MANIFEST: readonly AccessSurface[] = [
       allow: ['owner', 'app-permission'],
       target: 'proxy-upstream',
       credentials: ['login-session', 'operator-ticket', 'instance-token'],
-      note: 'As /api/proxy (D89 B6): the owner, and an app instance by its own token; never an address. An owner agent\'s upstream takes the owner only, a Terminal instance only its own user (D69). Upgrades skip the middleware, so surfaceGate checks them (with the chosen instance); the target lookup carries the internal label.',
+      memberPermissions: MEMBER_USES_APP,
+      note: 'As /api/proxy (D89 B6): the owner, a member to its own instance with app.use (I.2), and an app instance by its own token; never an address. An owner agent\'s upstream takes the owner only, a Terminal instance only its own user (D69). Upgrades skip the middleware, so surfaceGate checks them (with the chosen instance); the target lookup carries the internal label.',
     },
   },
   {
@@ -71,6 +80,7 @@ export const SURFACE_MANIFEST: readonly AccessSurface[] = [
     rule: {
       allow: ['owner'],
       target: 'proxy-upstream',
+      memberPermissions: MEMBER_USES_APP,
       note: 'The owner, through the app whose App Host session the router verified (surfaceGate at the upgrade). Each stream is then a gateway call checked on its own, and the event streams end when the sign-in is revoked (lib/streamSession.ts).',
     },
   },
@@ -106,7 +116,8 @@ export const SURFACE_MANIFEST: readonly AccessSurface[] = [
     rule: {
       allow: ['owner'],
       target: 'proxy-upstream',
-      note: 'D69 (stream T): a shell in one user\'s session host: the owner level (the owner, the owner\'s System Terminal), and only for a Terminal instance of the user the caller acts for (decide.ts `sessionHostReachable`; the instance checks the relay claim\'s user again). TerminalX reaches a granted session through its App Host embed (D25).',
+      memberPermissions: MEMBER_USES_APP,
+      note: 'D69 (stream T): a shell in one user\'s session host: the owner level (the owner, the owner\'s System Terminal), or a member with app.use to its own Terminal instance (I.2), and only for a Terminal instance of the user the caller acts for (decide.ts `sessionHostReachable`; the instance checks the relay claim\'s user again). TerminalX reaches a granted session through its App Host embed (D25).',
     },
   },
   {
@@ -118,7 +129,8 @@ export const SURFACE_MANIFEST: readonly AccessSurface[] = [
       allow: ['owner', 'app-permission'],
       target: 'proxy-upstream',
       credentials: ['login-session', 'operator-ticket', 'instance-token'],
-      note: 'The /api/proxy route rule decides (C6: the same rule): the owner, and an app instance by its own token (D89 B5/B6: MCP entries send it by reference), except to an owner agent\'s MCP (the Terminal, aurashelld), which only the owner and the owner\'s System Terminal reach (H2), and a Terminal instance only its own user (D69).',
+      memberPermissions: MEMBER_USES_APP,
+      note: 'The /api/proxy route rule decides (C6: the same rule): the owner, a member to its own instance with app.use (I.2), and an app instance by its own token (D89 B5/B6: MCP entries send it by reference), except to an owner agent\'s MCP (the Terminal, aurashelld), which only the owner and the owner\'s System Terminal reach (H2), and a Terminal instance only its own user (D69).',
     },
   },
   {

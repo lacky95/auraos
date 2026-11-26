@@ -14,6 +14,7 @@ import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { closeSync, mkdirSync, openSync, readFileSync, writeSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { appHostCookieName, isAuraReservedPath } from '@aura/core/host-rules';
+import { membersAllowed } from './access-mode.mjs';
 
 export const HANDOFF_TTL_MS = 60_000;
 export const APP_COOKIE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -203,13 +204,15 @@ export function appHostAuth() {
  * for holders of a session id instead of the token. Live: `{ role }`, the
  * record's role, so an owner-only check (D45 `ownerUiActs`) asks for it.
  * Not live: false. Rejects when the store can't be read, so callers fail closed.
+ * A member's session is live only while members are allowed (`enforce`, I.2).
  */
-export function createSessionLive({ sessions, users }) {
+export function createSessionLive({ sessions, users, members = membersAllowed }) {
   return async (sid, userId) => {
     if (typeof sid !== 'string' || !sid || typeof userId !== 'string' || !userId) return false;
     if (!(await sessions.isLive(sid, userId))) return false;
     const user = await users.getUser(userId);
-    return !!user && !user.disabled && user.id === userId ? { role: user.role } : false;
+    if (!user || user.disabled || user.id !== userId) return false;
+    return user.role === 'owner' || members() ? { role: user.role } : false;
   };
 }
 

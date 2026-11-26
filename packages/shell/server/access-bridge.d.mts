@@ -41,3 +41,5 @@ export function relayClaimOf(call: {
   session?: { userId?: string; sid?: string } | null;
   system?: boolean;
 }): string | null;
+/** I.2 (D82): the user an instance belongs to; null for an unknown one or an unclaimed pool member. */
+export function instanceOwnerOf(instanceId: string): string | null;

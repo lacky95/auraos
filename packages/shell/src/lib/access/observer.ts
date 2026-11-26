@@ -5,7 +5,7 @@ import { GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
 import { defaultRedis } from '@aura/kv-store';
 import { accessMode, wouldEnforce } from '../../../server/access-mode.mjs';
 import { userSessionOf, sessionCookieToken } from '../authSurface.ts';
-import { createDecide, freshAuthRequiresHttps, type DecideDeps } from './decide.ts';
+import { createDecide, freshAuthRequiresHttps, liveInstallationOf, liveInstanceOwner, type DecideDeps } from './decide.ts';
 import {
   isTrustedOwnerAgent, normalizePeer, resolvePrincipal, type AppHostSession, type PrincipalDeps,
 } from './identify.ts';
@@ -582,6 +582,9 @@ export function createObserver({ deps, report, manifest = ROUTE_ACCESS_MANIFEST,
         .then((event) => (event ? { outcome: event.decision, reason: event.reason } : DENIED))
         .catch(() => DENIED);
     },
+    instanceOwner(instanceId) {
+      try { return deps.instanceOwner?.(instanceId) ?? null; } catch { return null; }
+    },
     followSession(principal, end) {
       try { return followSocket(principal, end); } catch { return null; }
     },
@@ -635,10 +638,9 @@ export const liveDeps: ObserverDeps = {
   ownerAgent: (p) => isTrustedOwnerAgent(p, liveMgr() as unknown as Pick<AppManager, 'isTrustedSystemCopy' | 'getInstance'> | null),
   freshAuthRequiresHttps: () => freshAuthRequiresHttps(
     ((globalThis as Record<string, unknown>)[AUTH_SERVICES] as { securityPolicy?: core.SecurityPolicyStore } | undefined)?.securityPolicy ?? null),
-  instanceOwner: (id) => {
-    const inst = liveMgr()?.getInstance(id) as { owner?: string; inPool?: boolean } | undefined;
-    return inst && !inst.inPool && typeof inst.owner === 'string' ? inst.owner : null;
-  },
+  // D69 and I.2: a session host is its user's, and a member reaches only its own instances.
+  instanceOwner: (id) => (liveMgr() ? liveInstanceOwner(id) : null),
+  installationOf: (appId) => (liveMgr() ? liveInstallationOf(appId) : Promise.resolve(null)),
   // Read, never created: creating them has side effects of its own.
   services: () => ((globalThis as Record<string, unknown>)[AUTH_SERVICES] as ObserverServices | undefined) ?? null,
   redisReady: () => liveRedis() !== null,

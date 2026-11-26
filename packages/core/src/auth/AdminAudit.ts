@@ -44,6 +44,10 @@ export const IDENTITY_AUDIT_ACTIONS = {
   userCreated: 'auth.user-created',
   userDisabled: 'auth.user-disabled',
   userEnabled: 'auth.user-enabled',
+  /** D82 disable: the user's Terminal instances and jump sessions ended (kernel `endUserSessions`). */
+  userSessionsEnded: 'auth.user-sessions-ended',
+  /** A member's `app.use` / `app.jump` grant given or revoked by the host operator. */
+  userGrant: 'auth.user-grant',
   /** A member's enrolment or reset with a one-time code (the owner's is `ownerRecovered`). */
   passwordReset: 'auth.password-reset',
 } as const;

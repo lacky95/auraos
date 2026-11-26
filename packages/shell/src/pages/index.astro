@@ -107,6 +107,9 @@ for (const inst of mgr.getAllInstances()) {
   // iframes on page load (otherwise the user sees N pool terminals appear
   // before they've clicked anything).
   if (inst.inPool) continue;
+  // I.2 (C8, D82): only this user's windows. Another user's instances are theirs,
+  // and their titles and ids are not shown on this desktop.
+  if (((inst as { owner?: string }).owner ?? localOwnerId()) !== userId) continue;
   // Skip instances of apps the user has explicitly disabled. AppManager
   // already stops them on disable, but this guards against the brief
   // window between the chokidar `add` event and the next SSR pass.

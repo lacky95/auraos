@@ -136,15 +136,18 @@ test('C3: a session is its own user\'s, with the record\'s role; disabled or ano
     loginSessions: { verify: async (t: string | null | undefined) => sessions[t ?? ''] ?? null },
     users: { getUser: async (id: string) => accounts[id] ?? null },
   };
-  assert.equal((await userSessionOf('tOwner', svc))?.user.role, 'owner');
-  assert.equal((await userSessionOf('tBob', svc))?.user.role, 'member');
-  assert.equal(await userSessionOf('tGhost', svc), null);
+  // Members act only under `enforce` (I.2 part 2, phase5-members.test.ts); here they may.
+  const enforced = () => true;
+  assert.equal((await userSessionOf('tOwner', svc, enforced))?.user.role, 'owner');
+  assert.equal((await userSessionOf('tBob', svc, enforced))?.user.role, 'member');
+  assert.equal(await userSessionOf('tGhost', svc, enforced), null);
   accounts[MEMBER_ID]!.disabled = true;
-  assert.equal(await userSessionOf('tBob', svc), null, 'disabled: dead on the next request');
+  assert.equal(await userSessionOf('tBob', svc, enforced), null, 'disabled: dead on the next request');
 
   const live = createSessionLive({
     sessions: { isLive: async (sid: string, userId: string) => Object.values(sessions).some((s) => s.sessionId === sid && s.userId === userId) },
     users: { getUser: async (id: string) => accounts[id] ?? null },
+    members: enforced,
   });
   accounts[MEMBER_ID]!.disabled = false;
   assert.deepEqual(await live('b'.repeat(32), MEMBER_ID), { role: 'member' });

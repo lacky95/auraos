@@ -20,7 +20,7 @@
 import * as core from '@aura/core';
 import type { AppManifest, ContextStore } from '@aura/core';
 import type { CallerPrincipal, ResolvedPrincipal } from './access/identify.ts';
-import { actingInstance } from './access/identify.ts';
+import { actingInstance, isOwnerPrincipal } from './access/identify.ts';
 import type { ContractSignal } from './access/types.ts';
 
 const reply = (body: unknown, status = 200): Response => new Response(JSON.stringify(body), {
@@ -101,12 +101,17 @@ export interface PermissionCheckDeps {
   held(principal: core.Principal, permission: string): Promise<boolean>;
 }
 
-/** The principal a permission is asked for: the app behind the call. Null: the owner (holds every permission). */
+/**
+ * The principal a permission is asked for: the app behind the call. `owner`:
+ * the owner (holds every permission). A member is asked as itself: it holds
+ * only its own `user` grants (I.2 audit).
+ */
 function permissionSubject(p: CallerPrincipal): core.Principal | 'owner' | null {
   const inst = actingInstance(p);
   if (inst) return inst;
   if (p.kind === 'apiKey') return p;
-  if (p.kind === 'user' || p.kind === 'operator') return 'owner';
+  if (isOwnerPrincipal(p)) return 'owner';
+  if (p.kind === 'user') return p;
   return null;
 }
 

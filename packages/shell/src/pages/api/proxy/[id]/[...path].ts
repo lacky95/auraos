@@ -131,15 +131,20 @@ const forward = async ({ params, request, locals }: APIContext): Promise<Respons
   //     caller's own instance only, started for the caller when it has none.
   //     An exact instance id was checked against the caller by the access
   //     rule (decide.ts `sessionHostReachable`).
+  //   - I.2 (D82): a member reaches only its own instances of any app (the
+  //     gate checked a named one; a bare appId picks, or cold-starts, the
+  //     member's own).
+  const principal = locals?.access?.principal;
+  const memberId = principal?.kind === 'user' && principal.role !== 'owner' ? principal.userId : null;
   const sessionUser = SESSION_HOST_APPS.has(id)
-    ? (locals?.access?.principal ? actingUser(locals.access.principal) : await requestUserId(request))
-    : null;
+    ? (principal ? actingUser(principal) : await requestUserId(request))
+    : memberId;
   if (SESSION_HOST_APPS.has(id) && !sessionUser) {
     return jsonError(403, { error: 'not-session-owner', message: `${id} instances are user sessions: call as the user whose session it is` });
   }
   const mine = (i: { owner?: string }) => sessionUser === null || i.owner === sessionUser;
   const exact = mgr.getInstance(id);
-  let instance = exact && isLive(exact.state)
+  let instance = exact && isLive(exact.state) && mine(exact)
     ? exact
     : mgr.getInstancesByApp(id).find((i) => !i.inPool && !i.preview && isLive(i.state) && i.port != null && mine(i));
 

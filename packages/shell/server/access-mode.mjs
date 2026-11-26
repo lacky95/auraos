@@ -46,6 +46,17 @@ export function accessMode() {
 }
 
 /**
+ * I.2 (D82): whether member accounts may sign in and act. Only in `enforce`:
+ * in `report` and `off` the manifest refuses nothing, and routes that trust
+ * any verified user as the owner's desktop would treat a member as the owner.
+ * So a member's login, session and App Host sign-in count only here, and
+ * `aura admin user add` refuses elsewhere. The owner is never affected.
+ */
+export function membersAllowed() {
+  return accessMode() === 'enforce';
+}
+
+/**
  * Whether a report row marks a decision `enforce` would act on: in `report`,
  * any outcome but `allow`, unless the request was already refused by an
  * enforcement that runs in every mode (an App Host gateway call).
