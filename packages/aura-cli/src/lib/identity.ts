@@ -180,15 +180,26 @@ function operatorIdentity(target: string, method: string): ResolvedIdentity | nu
   }
 }
 
+/**
+ * The identity a request to `path` on the shell carries: this process's own
+ * token if it may go there, else (on the host) a one-time operator ticket.
+ * shellFetch and the exec bridge's WebSocket (lib/exec-client.ts) use it.
+ */
+export function shellIdentity(path: string, method = 'GET', intent: IdentityIntent = 'self', instanceId?: string): ResolvedIdentity {
+  const url = shellUrl();
+  const identity = resolveIdentity({ url, path, intent, ...(instanceId !== undefined ? { instanceId } : {}) });
+  // Nothing else to send, and a call that may carry an identity: the host operator, if this is the host.
+  if (identity.kind === 'none' && !identity.credentialed && intent !== 'anonymous' && !isProxyPath(`${url}${path}`)) {
+    return operatorIdentity(`${url}${path}`, method) ?? identity;
+  }
+  return identity;
+}
+
 /** The CLI's only route to the shell API. It carries this process's identity unless told otherwise. */
 export function shellFetch(path: string, init: ShellFetchInit = {}): Promise<Response> {
   const { intent = 'self', instanceId, headers, ...rest } = init;
   const url = shellUrl();
-  let identity = resolveIdentity({ url, path, intent, ...(instanceId !== undefined ? { instanceId } : {}) });
-  // Nothing else to send, and a call that may carry an identity: the host operator, if this is the host.
-  if (identity.kind === 'none' && !identity.credentialed && intent !== 'anonymous' && !isProxyPath(`${url}${path}`)) {
-    identity = operatorIdentity(`${url}${path}`, rest.method ?? 'GET') ?? identity;
-  }
+  const identity = shellIdentity(path, rest.method ?? 'GET', intent, instanceId);
   return fetch(`${url}${path}`, {
     ...rest,
     headers: { ...(headers as Record<string, string> | undefined), ...identity.headers },

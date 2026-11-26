@@ -4,6 +4,8 @@ import type { SpawnContext } from '../scopes/types.js';
 import type { ResourceUsage, SidecarInfo } from '../types/instance.js';
 import type { LifecycleStatus } from './lifecycleGate.js';
 import type { RuntimeCapabilities, RuntimeSettings } from '../runtimes/types.js';
+import type { EngineContainer } from './ExecBridge.js';
+import type { OutputLog } from './outputLog.js';
 
 /**
  * Shared abstraction for "spawn an isolated bash process that runs an app".
@@ -89,6 +91,15 @@ export interface SandboxRunner {
    * instance this runner is not running. No shell: `argv` is exec'd as given.
    */
   exec?(instanceId: string, argv: string[], opts?: SandboxExecOpts): Promise<{ stdout: string; stderr: string }>;
+
+  /**
+   * Phase 5 stream X: the Engine container behind a running instance, which
+   * the exec bridge enters and reads logs from (ExecBridge.ts). Only runtimes
+   * that have one implement it; the container name stays the runtime's (D85 A7).
+   */
+  engineContainer?(instanceId: string): EngineContainer | null;
+  /** Phase 5 stream X: the instance's own output, for runtimes without an engine log. */
+  outputLog?(instanceId: string): OutputLog | null;
 
   /**
    * Optional — runners whose sandboxes outlive the shell process (currently

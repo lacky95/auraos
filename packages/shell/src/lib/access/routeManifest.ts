@@ -462,6 +462,17 @@ const routes: RouteAccessManifest['routes'] = {
   '/api/instances/[instanceId]/mounts/[mountId]': {
     methods: { DELETE: rule(INSTANCE, 'instance', { targetPermissions: ['apps.mount'], guard: 'target-permissions' }) },
   },
+  // Phase 5 stream X: `aura exec` and `aura logs` through the shell (the WS
+  // session is the `exec-bridge` surface). `guard: 'rule'`: refused in every
+  // mode, since exec runs as root in the app container.
+  '/api/instances/[instanceId]/exec': {
+    methods: { POST: rule(INSTANCE, 'instance', { guard: 'rule', ...why(
+      'The owner (the CLI through the trusted Terminal, D29, or the host operator) or the instance itself by its own token. Runs argv in the app\'s container as root (5-pre2, X); `sidecar` in the body is the owner\'s only (the handler). Audited as instance.exec.') }) },
+  },
+  '/api/instances/[instanceId]/logs': {
+    methods: { GET: rule(INSTANCE, 'instance', { guard: 'rule', ...why(
+      'The owner or the instance itself: the app\'s own output (engine log, or the PRoot ring). `sidecar` is the owner\'s only (the handler). Audited as instance.logs.') }) },
+  },
   '/api/instances/[instanceId]/sidecars': {
     methods: {
       GET: rule(INSTANCE, 'instance', SIDECAR_READ),
@@ -694,9 +705,6 @@ const reserved: RouteAccessManifest['reserved'] = {
   '/api/admin/homes/plan': notYet('I', 'system', ['GET']),
   '/api/admin/homes/import': notYet('H', 'system', ['POST']),
   '/api/admin/homes/reset': notYet('H', 'system', ['POST']),
-  // X: instance logs and exec through the shell (the WS session is the `exec-bridge` surface).
-  '/api/instances/[instanceId]/logs': notYet('X', 'instance', ['GET']),
-  '/api/instances/[instanceId]/exec': notYet('X', 'instance', ['POST']),
   // J: the root tab (`aura root`, P5-4).
   '/api/admin/root': notYet('J', 'system', ['GET', 'POST']),
 };

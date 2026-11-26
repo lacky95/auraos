@@ -437,6 +437,39 @@ test('decide: an auto-granted permission counts outside enforce only (strict)', 
 
 // ── surfaces ────────────────────────────────────────────────────────────────
 
+test('Phase 5 X: exec and logs → the owner, the System Terminal and the instance itself, in every mode', async () => {
+  const call = (route: 'exec' | 'logs', id: string) => ({
+    method: route === 'exec' ? 'POST' : 'GET', path: `/api/instances/${id}/${route}`, route: `/api/instances/[instanceId]/${route}`,
+    params: { instanceId: id }, ...(route === 'exec' ? { body: { cmd: ['id'] } } : {}),
+  });
+  for (const mode of MODES) {
+    for (const route of ['exec', 'logs'] as const) {
+      assert.equal(await gate(mode, owner, call(route, 'com.acme.notes-1')), 'pass', `${mode} ${route} owner`);
+      assert.equal(await gate(mode, operator, call(route, 'com.acme.notes-1')), 'pass', `${mode} ${route} operator`);
+      assert.equal(await gate(mode, inst('com.aura.terminal'), call(route, 'com.acme.notes-1')), 'pass', `${mode} ${route} System Terminal (D29)`);
+      assert.equal(await gate(mode, inst('com.acme.notes'), call(route, 'com.acme.notes-1')), 'pass', `${mode} ${route} itself`);
+      assert.equal(await gate(mode, inst('com.other.app'), call(route, 'com.acme.notes-1')), '403 access-denied', `${mode} ${route} another app`);
+      assert.equal(await gate(mode, anon, call(route, 'com.acme.notes-1')), '401 unauthenticated', `${mode} ${route} anonymous`);
+    }
+  }
+});
+
+test('Phase 5 X: the exec-bridge surface decides on the target instance', async () => {
+  const d = deps('report', { principal: anon, via: 'none' });
+  const { bridge } = createObserver({ deps: d, report: new AccessReport({ redis: () => null }) });
+  const as = (principal: AccessPrincipal, via: AccessVia) => ({ verified: { principal, via }, referer: null, instanceId: null, peer: '172.20.0.8' });
+  const decide = async (principal: AccessPrincipal, via: AccessVia, instanceId: string | null) =>
+    bridge.decideSurface({ subject: 'exec-bridge', method: 'UPGRADE', status: 0, instanceId, identity: as(principal, via) });
+  assert.deepEqual(await decide(owner, 'login-session', 'com.acme.notes-1'), { outcome: 'allow', reason: 'owner' });
+  assert.deepEqual(await decide(inst('com.aura.terminal'), 'instance-token', 'com.acme.notes-1'), { outcome: 'allow', reason: 'owner' });
+  assert.deepEqual(await decide(inst('com.acme.notes'), 'instance-token', 'com.acme.notes-1'), { outcome: 'allow', reason: 'own-instance' });
+  assert.equal((await decide(inst('com.other.app'), 'instance-token', 'com.acme.notes-1')).outcome, 'deny', 'another instance');
+  assert.equal((await decide(anon, 'none', 'com.acme.notes-1')).outcome, 'deny', 'anonymous, even from an app container address');
+  assert.equal((await decide(owner, 'login-session', 'no-such-1')).outcome, 'deny', 'an unknown instance');
+  assert.equal((await decide(inst('com.acme.notes'), 'instance-token', null)).outcome, 'deny', 'no target: not its own');
+  bridge.dispose();
+});
+
 test('surfaceGate: yes outside enforce; in enforce the observer decides, and no observer is a no', async () => {
   const prev = process.env['AURA_ACCESS_ENFORCE'];
   const prevBridge = g[BRIDGE];
@@ -489,6 +522,7 @@ test('every .mjs surface asks the one surface gate', () => {
   assert.match(hosts, /surfaceGate\(\{ subject: 'app-hosts'/);
   assert.match(hosts, /surfaceGate\(\{ subject: mux \? 'sse-mux' : 'app-hosts'/);
   assert.match(hosts, /surfaceGate\(\{ subject: 'vite-dev-server'/);
+  assert.match(src('exec-bridge.mjs'), /deps\.decide\(\{ subject: SUBJECT, method: 'UPGRADE', instanceId, identity \}\)/, 'the exec bridge decides in every mode');
 });
 
 test('no route keeps its own guard (D36)', () => {

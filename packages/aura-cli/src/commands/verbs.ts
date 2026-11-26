@@ -15,6 +15,7 @@ import { spawn } from 'node:child_process';
 import { api, shellUrl, subscribeEvents } from '../lib/client.js';
 import { color, fail, table } from '../lib/format.js';
 import { enterSidecar } from '../lib/enter-sandbox.js';
+import { execVia, printLogs } from '../lib/exec-client.js';
 import { BACK, PromptCancelled, promptConfirm, promptMultiSelect } from '../lib/prompts.js';
 import { parseOutput, renderDocument, renderObjects, type OutputFormat } from '../lib/output.js';
 import { ownersOf, resolveInstance, resolveSidecar } from '../lib/resolve.js';
@@ -283,7 +284,7 @@ async function execCmd(resource: string, name: string, cmd: string[], opts: { co
   const inst = await resolveInstance(name);
   if (opts.container) {
     const sc = await resolveSidecar(inst.instanceId, opts.container);
-    enterSidecar(sc.id, `${inst.instanceId}/${sidecarId(sc)}`, cmd);
+    enterSidecar(sc.id, `${inst.instanceId}/${sidecarId(sc)}`, cmd, { instanceId: inst.instanceId, service: sc.service || sc.id });
     return;
   }
   await dispatch(['inst', 'shell', inst.instanceId, ...(cmd.length ? ['-c', shQuote(cmd)] : [])]);
@@ -296,6 +297,18 @@ async function logsCmd(resource: string, name: string, opts: { container?: strin
   }
   if (def.name === 'sidecars') fail('use: aura logs inst <instanceId> -c <sidecar>');
   const inst = await resolveInstance(name);
+  // Phase 5 X: the shell's logs route first (no docker socket needed); the
+  // paths below stay as the fallback until 5-main (AURA_EXEC_VIA, lib/exec-client.ts).
+  const via = execVia();
+  if (via !== 'docker') {
+    const sc = opts.container ? await resolveSidecar(inst.instanceId, opts.container) : null;
+    const printed = await printLogs({
+      instanceId: inst.instanceId, ...(opts.tail ? { tail: opts.tail } : {}), ...(opts.follow ? { follow: true } : {}),
+      ...(sc ? { sidecar: sc.service || sc.id } : {}),
+    });
+    if (printed) return;
+    if (via === 'api') fail(`the shell's logs route refused or is missing for ${inst.instanceId}`);
+  }
   if (!opts.container) {
     // The app's own output. A container instance's stdout/stderr are what
     // `docker logs` holds; a PRoot instance has no container — its output

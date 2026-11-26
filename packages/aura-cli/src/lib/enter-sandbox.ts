@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { stdout, env as procEnv } from 'node:process';
 import { color, fail, info, ok } from './format.js';
+import { execVia, runSession, type SessionRequest } from './exec-client.js';
 
 /**
  * Tell the AuraOS Terminal which sandbox the live shell is now in.
@@ -119,8 +120,46 @@ export function enterSandbox(
   return enterProot(instanceId, appId, port, tools, cmd, launch);
 }
 
-/** Joins the sibling container's namespace via docker exec. */
+/** The positional-argument jump into `startDir`, with today's fallback message. */
+function startDirArgv(startDir: string): string[] {
+  return ['bash', '-c', 'cd -- "$1" 2>/dev/null || printf "Workspace unavailable; using %s\\n" "$PWD"; exec bash -i', 'aura-jump', startDir];
+}
+
+/**
+ * Phase 5 stream X: run the session through the shell's exec bridge when it
+ * is available (lib/exec-client.ts). Calls `fallback` when the bridge could
+ * not open it (nothing ran), unless AURA_EXEC_VIA=api; AURA_EXEC_VIA=docker
+ * goes straight to the fallback. Exits the process with the session's code.
+ */
+function viaBridge(req: SessionRequest, label: string | null, fallback: () => void): void {
+  const via = execVia();
+  if (via === 'docker') return fallback();
+  const restoreHost = label ? callerHostLabel() : null;
+  if (label) setTerminalHost(label);
+  void runSession(req).then((r) => {
+    if (r.opened) {
+      if (restoreHost) setTerminalHost(restoreHost);
+      if (label) ok(`shell exited (code ${r.code ?? 1})`);
+      process.exit(r.code ?? 1);
+    }
+    if (restoreHost) setTerminalHost(restoreHost);
+    if (via === 'api') fail(`exec bridge: ${r.reason}`);
+    if (process.env['AURA_LOG']) info(`exec bridge unavailable (${r.reason}); using docker`);
+    fallback();
+  });
+}
+
+/** Enters the app's container: the exec bridge first, `docker exec` as the fallback. */
 function enterContainer(instanceId: string, appId: string, cmd?: string, startDir?: string): void {
+  const tty = !cmd || (process.stdin.isTTY && stdout.isTTY);
+  const argv = cmd ? ['bash', '-lc', cmd] : startDir ? startDirArgv(startDir) : undefined;
+  if (!cmd) info(`entering container of ${color.bold(instanceId)} (sandbox=container, via the shell)`);
+  viaBridge({ instanceId, kind: cmd ? 'exec' : 'jump', tty, ...(argv ? { argv } : {}) }, cmd ? null : appId,
+    () => dockerExecContainer(instanceId, appId, cmd, startDir));
+}
+
+/** Joins the sibling container's namespace via docker exec (the fallback until 5-main). */
+function dockerExecContainer(instanceId: string, appId: string, cmd?: string, startDir?: string): void {
   // Mirrors ContainerRunner.containerName() — same sanitisation rule.
   const containerName = 'aura-' + instanceId.replace(/[^a-zA-Z0-9_.-]/g, '_');
   const appDir = `/workspace/apps/${appId}`;
@@ -157,9 +196,7 @@ function enterContainer(instanceId: string, appId: string, cmd?: string, startDi
     containerName,
   ];
   // Positional arguments avoid shell interpolation; absent data falls back to source.
-  const shellArgs = cmd ? ['bash', '-lc', cmd] : startDir
-    ? ['bash', '-c', 'cd -- "$1" 2>/dev/null || printf "Workspace unavailable; using %s\\n" "$PWD"; exec bash -i', 'aura-jump', startDir]
-    : ['bash', '-i'];
+  const shellArgs = cmd ? ['bash', '-lc', cmd] : startDir ? startDirArgv(startDir) : ['bash', '-i'];
   const args = [...execArgs, ...shellArgs];
   // One-off `cmd` runs print only the command's own output, like docker exec.
   if (!cmd) info(`entering container ${color.bold(containerName)} (sandbox=container, cwd=${startDir ?? appDir})`);
@@ -191,7 +228,18 @@ function enterContainer(instanceId: string, appId: string, cmd?: string, startDi
  * way `docker exec` does. Same caller prerequisite as every container jump:
  * the docker CLI plus a bound socket.
  */
-export function enterSidecar(container: string, label: string, cmd?: string[]): void {
+export function enterSidecar(container: string, label: string, cmd?: string[], via?: { instanceId: string; service: string }): void {
+  const interactive = !cmd || cmd.length === 0;
+  if (!via) return dockerExecSidecar(container, label, cmd);
+  if (interactive) info(`entering sidecar ${color.bold(label)} (via the shell)`);
+  viaBridge({
+    instanceId: via.instanceId, sidecar: via.service, kind: interactive ? 'jump' : 'exec',
+    tty: interactive || (process.stdin.isTTY && stdout.isTTY), ...(interactive ? {} : { argv: cmd! }),
+  }, interactive ? label : null, () => dockerExecSidecar(container, label, cmd));
+}
+
+/** `docker exec` into a sidecar (the fallback until 5-main). */
+function dockerExecSidecar(container: string, label: string, cmd?: string[]): void {
   const termEnv: string[] = [];
   const passthrough: Record<string, string> = {
     TERM:      process.env['TERM']      ?? 'xterm-256color',

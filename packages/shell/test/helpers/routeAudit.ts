@@ -24,11 +24,12 @@ export const POLICY: AuditPolicy = {
   publicCandidates: new Set(candidateKeys),
   publicSurfaces: new Set(['shell-static-assets', 'page-setup', 'page-login']),
 };
-// Classified in SURFACE_MANIFEST as shell-listener, ws-proxy and sse-mux.
+// Classified in SURFACE_MANIFEST as shell-listener, ws-proxy, exec-bridge and sse-mux.
 export const KNOWN_LISTENERS = [
   'server.mjs createServer',
   'server/attach.mjs WebSocketServer',
   'server/attach.mjs upgrade',
+  'server/exec-bridge.mjs WebSocketServer',
   'server/exec-bridge.mjs upgrade',
   'server/sse-mux.mjs WebSocketServer',
 ];

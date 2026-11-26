@@ -66,6 +66,8 @@ import { appSourceFingerprint } from '../app-hosts/lifecycle.js';
 import { seedHome } from './homeSeed.js';
 import { PREVIEW_IDLE_MS, previewTitle } from './preview.js';
 import { MOUNT_DIR_NAME } from './MountManager.js';
+import { ExecBridge } from './ExecBridge.js';
+import { DockerApi } from './DockerApi.js';
 
 const RECONCILE_INTERVAL_MS = 5_000;
 const ERROR_GRACE_MS        = 30_000;
@@ -109,6 +111,8 @@ export class AppManager {
   readonly tokens:      InstanceTokens;
   /** Sidecars the OS starts on an app's request (the official sidecar path). */
   readonly osSidecars:  SidecarManager;
+  /** Phase 5 stream X: jump, exec and logs through the shell (ExecBridge.ts). */
+  readonly execBridge: ExecBridge;
   private dataDir: string;
   private toolchainDir: string;
   /** PRoot's `/`. Kept so the lib restore pass can re-stage into it. */
@@ -242,6 +246,12 @@ export class AppManager {
         );
         return inst ? { instanceId: inst.instanceId } : null;
       },
+    });
+    this.execBridge  = new ExecBridge({
+      engine:   new DockerApi(),
+      instance: (id) => this.instances.get(id),
+      runner:   (id) => this.runnerOf(id),
+      sidecars: (id) => this.getSidecars(id),
     });
     this.osSidecars  = new SidecarManager({
       runner:      this.container,

@@ -119,7 +119,7 @@ async function jumpDirect(target: string | undefined, sidecar: string | undefine
   const inst = await resolveInstance(token);
   if (sidecar) {
     const sc = await resolveSidecar(inst.instanceId, sidecar);
-    enterSidecar(sc.id, `${inst.instanceId}/${sidecarId(sc)}`);
+    enterSidecar(sc.id, `${inst.instanceId}/${sidecarId(sc)}`, undefined, { instanceId: inst.instanceId, service: sc.service || sc.id });
     return;
   }
   const dto = await api.get<{

@@ -325,9 +325,9 @@ test('fails when a surface decision is missing', () => {
 
 test('reserved Phase 5 routes are denied for every caller until implemented', () => {
   const reserved = ROUTE_ACCESS_MANIFEST.reserved ?? {};
-  // Stream R moved its rows into `routes` (test/runtimes.test.ts); the other streams' stay reserved.
-  assert.ok(Object.keys(reserved).length >= 9, 'the Stage 1 rows exist');
-  for (const route of ['/api/admin/homes/plan', '/api/admin/identity/ownership-report', '/api/instances/[instanceId]/logs', '/api/admin/root']) {
+  // Streams R and X moved their rows into `routes` (test/runtimes.test.ts, exec/logs); the other streams' stay reserved.
+  assert.ok(Object.keys(reserved).length >= 7, 'the Stage 1 rows exist');
+  for (const route of ['/api/admin/homes/plan', '/api/admin/identity/ownership-report', '/api/admin/root']) {
     assert.ok(route in reserved, route);
     for (const method of Object.keys(reserved[route]!.methods ?? {}) as Array<keyof NonNullable<typeof reserved[string]['methods']>>) {
       const r = effectiveRule(ROUTE_ACCESS_MANIFEST, { route, handlers: [method] }, method);
