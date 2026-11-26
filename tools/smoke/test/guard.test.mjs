@@ -41,6 +41,10 @@ const admittedGuard = () => {
 const FORBIDDEN_PATHS = [
   '/api/admin/self-update',
   '/api/admin/cap-doctor',
+  '/api/admin/system-mode?tree=1',   // only the plain mode read is allowlisted
+  '/api/admin/system-mode/x',
+  '/api/admin/system-modes',
+  '/api/admin',
   '/api/nexus',
   '/api/nexus?refresh=1',
   '/api/nexus/status',

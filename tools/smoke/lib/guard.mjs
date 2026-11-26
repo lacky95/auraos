@@ -32,6 +32,8 @@ export const ALLOWED_LIVE_REQUESTS = Object.freeze([
   { method: 'GET', path: '/api/nexus/installed' },
   { method: 'GET', path: '/api/notifications' },
   { method: 'GET', path: '/api/hosts' },
+  // `aura status` prints the system mode (D60). Exact path: `?tree=1` (the git walk) stays refused.
+  { method: 'GET', path: '/api/admin/system-mode' },
   { method: 'GET', template: '/api/proxy/{runningTerminal}/api/sessions' },
   { method: 'GET', template: '/api/instances/{runningInstance}/sidecars?usage=0' },
   { method: 'GET', template: '/api/instances/{runningInstance}/mounts' },
@@ -43,7 +45,7 @@ export const ALLOWED_LIVE_REQUESTS = Object.freeze([
  * that a future allowlist edit cannot let one through, and for clear refusals.
  */
 export const DENIED_LIVE_PATHS = Object.freeze([
-  /^\/api\/admin(\/|$)/,                // self-update, cap-doctor, management
+  /^\/api\/admin(\/(?!system-mode$)|$)/,  // self-update, cap-doctor, management (the mode read is allowlisted)
   /^\/api\/nexus(\/(?!installed$)|$)/,  // catalog routes can load sources or write cache
   /\/ws(\/|$)/,                         // a Terminal WebSocket creates a session
   /\/api\/sessions\/./,                 // screen, input, open, launch, events
