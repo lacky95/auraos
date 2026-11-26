@@ -80,10 +80,10 @@ test('AppManager records the adopted instance\'s status', async () => {
   const inst = { instanceId: ID, appId: APP };
   const fake = {
     instances: new Map([[ID, inst]]),
-    runners: { container: { measureAdopted: async () => ({ identity: 'match', guard: '401' }) } },
+    container: { measureAdopted: async () => ({ identity: 'match', guard: '401' }) },
   };
   await AppManager.prototype.measureAdopted.call(fake, ID);
   assert.deepEqual(inst.lifecycle, { identity: 'match', guard: '401' });
-  fake.runners.container.measureAdopted = async () => { throw new Error('boom'); };
+  fake.container.measureAdopted = async () => { throw new Error('boom'); };
   await AppManager.prototype.measureAdopted.call(fake, ID); // never throws
 });

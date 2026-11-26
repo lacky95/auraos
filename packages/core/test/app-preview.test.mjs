@@ -48,7 +48,11 @@ function fakeManager() {
     savePoolIds() {},
     interfaces: { registerInstance: (i) => registered.interfaces.push(i.instanceId) },
     providers: { registerInstance: (i) => registered.providers.push(i.instanceId) },
-    runners: { container: { spawn: async (id, appId, port, m, ctx) => { spawned.push({ id, ctx }); return 1000 + spawned.length; }, lifecycleStatus: () => null, capabilities: () => ({}) } },
+    // Stream R: the resolved runtime (registry.ts); the preview path does not choose it.
+    resolveRuntime: async () => ({
+      runtime: 'container', source: 'manifest', installationId: null, capabilities: {}, settings: {},
+      module: { runner: { spawn: async (id, appId, port, m, ctx) => { spawned.push({ id, ctx }); return 1000 + spawned.length; }, lifecycleStatus: () => null } },
+    }),
     // The Phase 5 spawn seams, with today's defaults.
     homes: legacyHomeResolver('/data'),
     identities: ROOT_IDENTITY_PROVIDER,
@@ -60,7 +64,7 @@ function fakeManager() {
     async stop(id) { fake.stops.push(id); fake.instances.delete(id); slots.delete(id); },
     forceKill(id) { fake.instances.delete(id); },
   };
-  for (const name of ['spawnInstance', 'spawnContext', 'runnerById', 'allocateInstanceId', 'transition', 'upsertInstance', 'defaultInstance',
+  for (const name of ['spawnInstance', 'spawnContext', 'allocateInstanceId', 'transition', 'upsertInstance', 'defaultInstance',
     'startPreview', 'previewsOf', 'stopPreview', 'reapIdlePreviews', 'previewDataSource']) {
     fake[name] = AppManager.prototype[name].bind(fake);
   }

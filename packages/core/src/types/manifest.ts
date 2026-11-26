@@ -481,42 +481,29 @@ export const AppManifestSchema = z.object({
    */
   critical: z.boolean().default(false),
   /**
-   * Sandbox this app inside PRoot. Default true. Set false ONLY for apps
-   * that use native modules whose syscalls PRoot's ptrace-based emulation
-   * can't translate — Tailwind 4 (Oxide), node-pty in some configurations,
-   * etc. — where the app errors out with EFAULT on file opens.
-   *
-   * Cost of opting out: app sees the container's full filesystem (no
-   * `--bind` jail), and the AURA_LAYER_TAG prompt drops to `[ctnr]`.
-   * Process-group kill, port allocation, identity verification all still
-   * work — they're independent of the sandbox.
-   *
-   * Deprecated (Q17): stays parseable, and stream R stops reading it — an app
-   * picks its runtime with `sandbox` only. Until then ProotRunner still
-   * honours it.
+   * Ignored (Q17). It used to opt an app out of the PRoot wrapping, which ran
+   * it unwrapped in the AuraOS container. It stays parseable so old manifests
+   * load, and nothing reads it: an app picks its runtime with `sandbox` only.
+   * An installation that relied on it before the runtime release is reported
+   * by the D75 migration as `master-direct` and waits for the owner's
+   * decision (runtimes/migrateLegacy.ts).
    */
   useProot: z.boolean().default(true),
   /**
-   * Which sandbox backend hosts this app's instances:
-   *   'proot'     → ptrace sandbox inside the AuraOS container (default).
-   *                 Cheap to spawn but weak isolation; useProot still gates
-   *                 whether the PRoot wrapping is applied.
-   *   'container' → real kernel-namespace container (rootless docker)
-   *                 spawned as a sibling of the AuraOS container, sharing
-   *                 the host filesystem via SLICED bind mounts (only the
-   *                 app's own apps/<id> + workspace shared dirs are visible).
-   *                 Real PID/net/mount namespaces — `cd /workspace/apps`
-   *                 inside the sandbox shows ONLY the app's own folder.
+   * The runtime that hosts this app's instances (ARI §9.2): a runtime id, not
+   * a closed pair. Built in:
+   *   'container' → each instance in its own Docker container (the default,
+   *                 Q18): real PID/net/mount namespaces, enforced read-only
+   *                 binds, sidecars, cross-app mounts.
+   *   'proot'     → a ptrace sandbox in the AuraOS container: cheap, weak
+   *                 isolation, no enforced read-only binds (closed apps
+   *                 cannot run on it, ARI-4).
    *
-   * The two backends share the same manifest semantics (tools[], lifecycle,
-   * activities, content providers, two-dir cap allowlist) — only the spawn
-   * primitive differs. Apps migrate between them with no source change.
-   *
-   * A runtime id (ARI §9.2), not a closed pair: no schema default, so an
-   * omitted value stays visible after parsing (§11.2). An unknown id is
-   * refused when the app starts, not when it parses (Q17). Until stream R
-   * resolves the default from Runtime Settings, an omitted value means
-   * `LEGACY_DEFAULT_SANDBOX` (see `manifestSandbox`).
+   * Omitted: the Runtime Settings default (Settings → Runtimes, `aura
+   * runtime default`); no schema default, so the omission stays visible
+   * after parsing (§11.2). An unknown or disabled id is refused when the
+   * app starts, not when it parses, and never replaced by another runtime
+   * (Q17). The owner can override it per installation (Runtime Settings).
    */
   sandbox: z.string().regex(/^[a-z][a-z0-9-]{1,31}$/, {
     message: 'sandbox must be a runtime id (lowercase letters, digits and dashes)',
@@ -899,18 +886,6 @@ export const AppManifestSchema = z.object({
 );
 
 export type AppManifest = z.infer<typeof AppManifestSchema>;
-
-/**
- * The runtime an omitted `sandbox` meant before Phase 5 (the old schema
- * default). Stream R replaces it with the Runtime Settings default
- * (`container`, Q18) plus the D75 migration overrides.
- */
-export const LEGACY_DEFAULT_SANDBOX = 'proot';
-
-/** The runtime id a manifest asks for, with today's meaning of an omitted value. */
-export function manifestSandbox(manifest: Pick<AppManifest, 'sandbox'>): string {
-  return manifest.sandbox ?? LEGACY_DEFAULT_SANDBOX;
-}
 
 /** An app's `proxy` settings with every default filled in (`resolveProxyConfig`). */
 export interface ProxyConfig {

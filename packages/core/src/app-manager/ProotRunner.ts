@@ -58,6 +58,101 @@ interface SpawnedApp {
   lifecycle?: LifecycleStatus;
 }
 
+/** What `prootBinds` lays out: everything resolved by the runner (or, later, the pool). */
+export interface ProotBindSpec {
+  rootfs: string;
+  /** Bound at /data. */
+  instanceDataDir: string;
+  /** The app's source, bound at its own path and the cwd. */
+  appDir: string;
+  /** The `/home/aura` bind (spawn/homeArgs.ts). */
+  homeBind: string;
+  /** /run/context and the Context Volumes (spawn/contextArgs.ts). */
+  contextBinds: string[];
+  /** The allowlist dir, and the store too in legacy symlink mode; null without a toolchain. */
+  tools: { myTools: string; allTools: string | null } | null;
+  /** The Docker socket when granted (spawn/socketArgs.ts). */
+  socketBinds: string[];
+}
+
+/**
+ * The PRoot bind topology of one instance, in one place (ARI §9.3): the
+ * master placement uses it today, the pool placement (R2) reuses it rather
+ * than a second copy. Returns the sandbox arguments before the entrypoint.
+ */
+export function prootBinds(spec: ProotBindSpec): string[] {
+  // pnpm workspace creates node_modules as a forest of relative symlinks
+  // (e.g. `node_modules/astro → ../../node_modules/.pnpm/astro@.../astro`).
+  // Those resolve correctly ONLY if the app dir keeps its `/workspace/apps/<id>`
+  // absolute path inside the PRoot. We therefore drop the `/app` alias and
+  // use the workspace path as cwd; `APP_ID`/`APP_INSTANCE_ID` env vars give
+  // the app its identity instead.
+  const args = [
+    `--rootfs=${spec.rootfs}`,
+    '--bind=/workspace:/workspace',
+    `--bind=${spec.instanceDataDir}:/data`,
+    '--bind=/proc',
+    '--bind=/dev',
+    '--bind=/tmp',
+    '--bind=/etc/resolv.conf:/etc/resolv.conf',
+    // Bring the master container's Node 22 into the sandbox — Debian-bookworm
+    // ships Node 18 in its package archive, which is too old for our apps.
+    '--bind=/usr/local/bin/node:/usr/local/bin/node',
+    // The user's HOME — the SAME `aura/home/<userId>` dir ContainerRunner
+    // mounts at /home/aura in every app container (spawn/homeArgs.ts). (The
+    // master container's own home is deliberately elsewhere — see
+    // scopes/home.ts.) Without this bind a PRoot's HOME resolves inside the
+    // base-rootfs (/os/base-rootfs/root), which is an IMAGE LAYER: every
+    // `claude` login, `gh auth`, ssh key and tool dotfile written there is
+    // destroyed by the next `compose up --build` or container recreate.
+    spec.homeBind,
+    // OS Context: /run/context and the shared Context Volumes (spawn/contextArgs.ts).
+    ...spec.contextBinds,
+    // Expose the app's own source dir at its real absolute path. Required for
+    // user/global-scope apps, whose appDir lives UNDER /data (e.g.
+    // /data/scopes/users/<u>/apps/<id>): the `${dataDir}:/data` bind above
+    // remaps /data to the per-instance data dir, which would otherwise shadow
+    // the app source — `chdir(appDir)` then fails and proot falls back to `/`,
+    // so `astro dev` never finds package.json/node_modules. Binding appDir
+    // onto itself overlays that subtree back. For system-scope apps (appDir
+    // under /workspace) this is a no-op — the path already maps to the same
+    // host dir via the /workspace bind.
+    `--bind=${spec.appDir}:${spec.appDir}`,
+    `--cwd=${spec.appDir}`,
+  ];
+
+  // Toolchain tools override the base-rootfs versions if a matching binary
+  // is present (e.g. host's `claude` cli). Tools the manifest doesn't declare
+  // stay invisible inside the sandbox.
+  //
+  // Resolve symlinks before constructing the bind argument: PRoot's bind
+  // mishandles a source path that is itself a symlink — `lstat` inside the
+  // sandbox sees it as a symlink but `readlink` returns EINVAL, which makes
+  // Node's `realpathSync` throw on entry-point resolution. Binding the
+  // resolved target (a regular file) sidesteps that entirely. Capabilities
+  // installed by `aura cap install` use symlinks, so this fix matters for
+  // every dynamically added tool, not just `aura` itself.
+  // Toolchain view. /aura/my-tools is the per-instance allowlist dir,
+  // mutated from OUTSIDE the proot at cap-grant / cap-install time — the
+  // bind is at the directory level, so live instances see new tools without
+  // a respawn. bashrc + spawn env prepend it to PATH.
+  //
+  // /aura/all-tools (the whole toolchain store) is bound ONLY in legacy
+  // symlink mode, where the allowlist entries are symlinks that need that
+  // path to resolve against. In hardlink mode the allowlist entries ARE the
+  // binaries, so binding the store would just hand every app every tool by
+  // absolute path and defeat the grant. See tool-provision.ts.
+  if (spec.tools) {
+    if (spec.tools.allTools) args.push(`--bind=${spec.tools.allTools}:${ALL_TOOLS_PATH}`);
+    args.push(`--bind=${spec.tools.myTools}:${MY_TOOLS_PATH}`);
+  }
+
+  // The Docker socket when `tools[]` grants `docker` (spawn/socketArgs.ts).
+  args.push(...spec.socketBinds);
+
+  return args;
+}
+
 const execFileAsync = promisify(execFile);
 
 export class ProotRunner implements SandboxRunner {
@@ -146,12 +241,10 @@ export class ProotRunner implements SandboxRunner {
     const appDir = ctx.appDir;
     const dataDir = ctx.instanceDataDir;
 
-    const useProotEnv = process.env['AURA_USE_PROOT'];
-    // Two-level opt-out: the OS-wide env var, then the per-app manifest flag.
-    // useProot defaults to true; an app sets `"useProot": false` when its
-    // native deps (Tailwind 4 Oxide, etc.) hit PRoot's ptrace EFAULT bug.
-    const prooted = useProotEnv === 'true'
-                 && manifest.useProot !== false
+    // The OS-wide switch and the rootfs. The manifest's `useProot` is not
+    // read (Q17), and the `proot` runtime refuses a start when this is false
+    // (runtimes/builtins/proot.ts, D75): R2 removes the unwrapped path.
+    const prooted = process.env['AURA_USE_PROOT'] === 'true'
                  && existsSync(this.baseRootfs);
     // Resolve once — used by the proot-args builder AND (when not prooted) as
     // the direct spawn argv.
@@ -205,8 +298,8 @@ export class ProotRunner implements SandboxRunner {
       // to detect layers — saves ~100–300 ms off every interactive terminal
       // launch (which is dominated by bash startup work, not by anything we
       // can fix in pty-server or astro).
-      // Drop the "proot" half of the layer tag when the app opted out of
-      // PRoot (the prompt should reflect the actual sandbox state, not the
+      // Drop the "proot" half of the layer tag when the spawn is not wrapped
+      // (the prompt should reflect the actual sandbox state, not the
       // OS-wide intent). Bash startup .bashrc reads $AURA_LAYER_TAG verbatim.
       AURA_LAYER_TAG: prooted ? '[proot+ctnr]' : '[ctnr]',
       // Same bearer ContainerRunner injects. The token-gated sidecar routes
@@ -336,80 +429,20 @@ export class ProotRunner implements SandboxRunner {
   ): string[] {
     if (!useProot) return entrypointArgv;
 
-    // pnpm workspace creates node_modules as a forest of relative symlinks
-    // (e.g. `node_modules/astro → ../../node_modules/.pnpm/astro@.../astro`).
-    // Those resolve correctly ONLY if the app dir keeps its `/workspace/apps/<id>`
-    // absolute path inside the PRoot. We therefore drop the `/app` alias and
-    // use the workspace path as cwd; `APP_ID`/`APP_INSTANCE_ID` env vars give
-    // the app its identity instead.
-    const args = [
-      `--rootfs=${this.baseRootfs}`,
-      '--bind=/workspace:/workspace',
-      `--bind=${dataDir}:/data`,
-      '--bind=/proc',
-      '--bind=/dev',
-      '--bind=/tmp',
-      '--bind=/etc/resolv.conf:/etc/resolv.conf',
-      // Bring the master container's Node 22 into the sandbox — Debian-bookworm
-      // ships Node 18 in its package archive, which is too old for our apps.
-      '--bind=/usr/local/bin/node:/usr/local/bin/node',
-      // The user's HOME — the SAME `aura/home/<userId>` dir ContainerRunner
-      // mounts at /home/aura in every app container (spawn/homeArgs.ts). (The
-      // master container's own home is deliberately elsewhere — see
-      // scopes/home.ts.) Without this bind a PRoot's HOME resolves inside the
-      // base-rootfs (/os/base-rootfs/root), which is an IMAGE LAYER: every
-      // `claude` login, `gh auth`, ssh key and tool dotfile written there is
-      // destroyed by the next `compose up --build` or container recreate.
-      prootHomeBind({ dataDir: this.dataDir }),
-      // OS Context: /run/context and the shared Context Volumes (spawn/contextArgs.ts).
-      ...prootContextBinds({ systemDir: this.contextStore.systemDir, volumesDir: this.volumeStore.volumesDir, volumes: contextVolumes }),
-      // Expose the app's own source dir at its real absolute path. Required for
-      // user/global-scope apps, whose appDir lives UNDER /data (e.g.
-      // /data/scopes/users/<u>/apps/<id>): the `${dataDir}:/data` bind above
-      // remaps /data to the per-instance data dir, which would otherwise shadow
-      // the app source — `chdir(appDir)` then fails and proot falls back to `/`,
-      // so `astro dev` never finds package.json/node_modules. Binding appDir
-      // onto itself overlays that subtree back. For system-scope apps (appDir
-      // under /workspace) this is a no-op — the path already maps to the same
-      // host dir via the /workspace bind.
-      `--bind=${appDir}:${appDir}`,
-      `--cwd=${appDir}`,
-    ];
-
-    // Toolchain tools override the base-rootfs versions if a matching binary
-    // is present (e.g. host's `claude` cli). Tools the manifest doesn't declare
-    // stay invisible inside the sandbox.
-    //
-    // Resolve symlinks before constructing the bind argument: PRoot's bind
-    // mishandles a source path that is itself a symlink — `lstat` inside the
-    // sandbox sees it as a symlink but `readlink` returns EINVAL, which makes
-    // Node's `realpathSync` throw on entry-point resolution. Binding the
-    // resolved target (a regular file) sidesteps that entirely. Capabilities
-    // installed by `aura cap install` use symlinks, so this fix matters for
-    // every dynamically added tool, not just `aura` itself.
-    // Toolchain view. /aura/my-tools is the per-instance allowlist dir,
-    // mutated from OUTSIDE the proot at cap-grant / cap-install time — the
-    // bind is at the directory level, so live instances see new tools without
-    // a respawn. bashrc + spawn env prepend it to PATH.
-    //
-    // /aura/all-tools (the whole toolchain store) is bound ONLY in legacy
-    // symlink mode, where the allowlist entries are symlinks that need that
-    // path to resolve against. In hardlink mode the allowlist entries ARE the
-    // binaries, so binding the store would just hand every app every tool by
-    // absolute path and defeat the grant. See tool-provision.ts.
+    // Toolchain view: see prootBinds. The allowlist dir exists before the bind.
     const toolBinDir = join(this.toolchainDir, 'bin');
-    if (existsSync(toolBinDir)) {
-      const myTools = this.toolsDir(instanceId);
-      mkdirSync(myTools, { recursive: true });
-      if (currentToolsMode(this.dataDir) === 'symlink') {
-        args.push(`--bind=${toolBinDir}:${ALL_TOOLS_PATH}`);
-      }
-      args.push(`--bind=${myTools}:${MY_TOOLS_PATH}`);
-    }
-
-    // The Docker socket when `tools[]` grants `docker` (spawn/socketArgs.ts).
-    args.push(...prootSocketBinds(manifest.tools));
-
+    const hasTools = existsSync(toolBinDir);
+    const myTools = this.toolsDir(instanceId);
+    if (hasTools) mkdirSync(myTools, { recursive: true });
+    const args = prootBinds({
+      rootfs: this.baseRootfs,
+      instanceDataDir: dataDir,
+      appDir,
+      homeBind: prootHomeBind({ dataDir: this.dataDir }),
+      contextBinds: prootContextBinds({ systemDir: this.contextStore.systemDir, volumesDir: this.volumeStore.volumesDir, volumes: contextVolumes }),
+      tools: hasTools ? { myTools, allTools: currentToolsMode(this.dataDir) === 'symlink' ? toolBinDir : null } : null,
+      socketBinds: prootSocketBinds(manifest.tools),
+    });
     args.push(...entrypointArgv);
     return args;
   }

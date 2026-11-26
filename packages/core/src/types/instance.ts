@@ -1,3 +1,4 @@
+import type { RuntimeSource } from '../runtimes/types.js';
 import type { AppLifecycleState } from './lifecycle.js';
 import type { LifecycleStatus } from '../app-manager/lifecycleGate.js';
 
@@ -25,14 +26,19 @@ export interface AppInstance {
    */
   inPool?: boolean;
   /**
-   * Which sandbox runner owns this instance. Latched at spawn time from the
-   * manifest's `sandbox` field; needed at call sites (kill, lifecycle hooks)
-   * because the manifest may change between spawn and teardown and we need
-   * to dispatch to the runner that ACTUALLY launched the process. A runtime
-   * id (ARI §9.1), always the resolved one, never omitted for a spawned
-   * instance.
+   * The runtime that runs this instance (ARI §9.1): latched at spawn from
+   * the resolution (an override, the manifest's `sandbox` or the default);
+   * needed at call sites (kill, lifecycle hooks) because the manifest or the
+   * Runtime Settings may change between spawn and teardown. Never omitted for
+   * a spawned instance.
    */
   sandbox?: string;
+  /**
+   * Where `sandbox` came from (§11.2): `override` / `migration` (Runtime
+   * Settings, per installation), `manifest` or `default`. Absent for an
+   * instance adopted after a shell restart.
+   */
+  runtimeSource?: RuntimeSource;
   /**
    * The user this instance runs for. Set on spawn and on warm-pool claim;
    * undefined only while the instance is an unclaimed pool member.

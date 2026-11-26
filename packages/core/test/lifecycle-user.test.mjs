@@ -34,12 +34,14 @@ function fake(manifests, instances = []) {
     getInstancesByApp: (appId) => [...f.instances.values()].filter((i) => i.appId === appId),
     getActivitiesByInstance: () => [],
     async start(appId, opts) { f.starts.push([appId, opts]); return f.getInstancesByApp(appId)[0].instanceId; },
+    // Stream R: liveness through the runtime's capability (PRoot: the shell's own pid).
+    runtimeCapabilitiesOf: () => ({ survivesShellRestart: false }),
     runnerOf: () => ({
       isRunning: () => true,
       async callOptionalLifecycle(instanceId, hook, body) { calls.push({ instanceId, hook, body }); return { ok: true }; },
     }),
   };
-  for (const name of ['startIntent', 'pickIntentInstance', 'openActivity', 'openActivityAndReport', 'claimFromPool', 'notifyAssigned', 'launch']) {
+  for (const name of ['startIntent', 'pickIntentInstance', 'openActivity', 'openActivityAndReport', 'claimFromPool', 'notifyAssigned', 'launch', 'instanceAlive']) {
     f[name] = AppManager.prototype[name].bind(f);
   }
   return f;

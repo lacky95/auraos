@@ -4,8 +4,8 @@
  * A runtime is a string id (the manifest's `sandbox`), not a closed pair.
  * The kernel compares what a request needs with what the runtime declares
  * and fails closed on a miss: it never downgrades a request and never falls
- * back to another runtime (Q17). Stream R builds the registry, the settings
- * store and the resolver on these types.
+ * back to another runtime (Q17). The registry, the settings store and the
+ * resolver (stream R) are built on these types: registry.ts, settingsStore.ts.
  */
 
 /** A runtime id, and so a manifest `sandbox` value (ARI §2.1). */
@@ -100,6 +100,13 @@ export function requireCapabilities(runtime: string, caps: RuntimeCapabilities, 
 /** Where an installation's runtime came from (§11.2). */
 export type RuntimeSource = 'manifest' | 'default' | 'override' | 'migration';
 
+/**
+ * D75: how an installation ran before the runtime release. `proot-master`:
+ * wrapped in PRoot on the master; `master-direct`: unwrapped in the kernel's
+ * own container (no `AURA_USE_PROOT`, `useProot: false` or no rootfs).
+ */
+export type LegacyRuntime = 'container' | 'proot-master' | 'master-direct';
+
 /** ARI-3: one installation's runtime override, in `RuntimeSettingsRecord.overrides`. */
 export interface RuntimeOverride {
   runtime: string;
@@ -107,7 +114,23 @@ export interface RuntimeOverride {
   source: 'migration' | 'override';
   recordedAt: string;
   /** D75: the legacy effective runtime a migration override keeps. */
-  legacy?: 'container' | 'proot-master' | 'master-direct';
+  legacy?: LegacyRuntime;
+  /** For display: the app the installation is of (the key stays the installation). */
+  appId?: string;
+}
+
+/**
+ * D75: an installation whose legacy runtime does not meet the mandatory
+ * requirements. It does not start until the owner decides (`aura runtime
+ * migrate`, Settings → Runtimes): no fallback, no silent switch.
+ */
+export interface RuntimeMigrationPending {
+  appId: string;
+  legacy: LegacyRuntime;
+  /** Did the manifest name its runtime? */
+  sandbox: 'explicit' | 'omitted';
+  reason: 'master-direct' | 'closed-on-proot';
+  recordedAt: string;
 }
 
 /**
@@ -121,4 +144,21 @@ export interface RuntimeSettingsRecord {
   enabled: string[];
   settings: Record<string, RuntimeSettings>;
   overrides: Record<string, RuntimeOverride>;
+  /** D75: installations waiting for the owner's decision, by installation. */
+  pending?: Record<string, RuntimeMigrationPending>;
+  /** Migrations recorded in this record: `d75` is when the legacy runtimes were recorded. */
+  migrations?: { d75?: string };
+}
+
+export type RuntimeResolutionCode = 'runtime-decision-needed' | 'runtime-unresolved';
+
+/**
+ * The runtime of a start cannot be decided: a D75 decision is open, or the
+ * Runtime Settings or the installation cannot be read. Fails closed.
+ */
+export class RuntimeResolutionError extends Error {
+  override readonly name = 'RuntimeResolutionError';
+  constructor(readonly code: RuntimeResolutionCode, readonly appId: string, message: string) {
+    super(message);
+  }
 }

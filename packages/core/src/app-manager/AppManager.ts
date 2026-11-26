@@ -12,7 +12,7 @@ function hookUser(instances: ReadonlyMap<string, { owner?: string }>, instanceId
 import { mkdirSync, readdirSync, readFileSync, lstatSync, writeFileSync, chmodSync, copyFileSync, cpSync, renameSync, rmSync, unlinkSync, existsSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
-import { lifecyclePath, manifestSandbox } from '../types/manifest.js';
+import { lifecyclePath } from '../types/manifest.js';
 import type { AppLifecycleState } from '../types/lifecycle.js';
 import type { AppInstance, ResourceUsage, SidecarInfo } from '../types/instance.js';
 import type { AppActivity, ActivityRestoreSeed, FlightPatch, FlightNotice, FlightState, FlightRect, FlightBadge, FlightAction, FlightEdge, FlightEdgeSize, FlightMode } from '../types/activity.js';
@@ -36,7 +36,15 @@ import { InstanceTokens } from './InstanceTokens.js';
 import { SidecarManager } from './SidecarManager.js';
 import { parentOfConsumer } from './MountManager.js';
 import type { InstanceSpawnContext, SandboxExecOpts, SandboxRunner } from './SandboxRunner.js';
-import { RuntimeUnavailableError } from '../runtimes/types.js';
+import type { RuntimeCapabilities } from '../runtimes/types.js';
+import { RuntimeRegistry, type ResolvedRuntime, type RuntimeModule } from '../runtimes/registry.js';
+import { containerRuntime } from '../runtimes/builtins/container.js';
+import { prootRuntime } from '../runtimes/builtins/proot.js';
+import { RUNTIME_AUDIT_ACTIONS, RuntimeSettingsStore } from '../runtimes/settingsStore.js';
+import { migrateLegacyRuntimes, processLegacyEnv, type MigrationApp } from '../runtimes/migrateLegacy.js';
+import { defaultRedis } from '@aura/kv-store';
+import { AdminAudit } from '../auth/AdminAudit.js';
+import { defaultIdentityKeyFile } from '../auth/identityKey.js';
 import type { HomeResolver } from '../homes/types.js';
 import { legacyHomeResolver } from '../homes/legacyResolver.js';
 import { ROOT_IDENTITY_PROVIDER, type SpawnIdentityProvider } from '../identity/types.js';
@@ -70,15 +78,16 @@ export class AppManager {
   private ports: PortAllocator;
   private fsm: LifecycleStateMachine;
   /**
-   * Default runner — used by the existing `this.runner` call-sites. We keep
-   * the field so the rest of AppManager doesn't have to know about the two
-   * backends. The `pickRunner(manifest)` method routes through `runners`
-   * for code paths that need per-app selection (spawn/health/exit, lifecycle
-   * dispatch). For utility calls without a manifest in scope (forceKill,
-   * port lookup, getActivePids) we union across runners.
+   * The runtimes by id (ARI §9.1, stream R). A spawn resolves its runtime
+   * once (`resolveRuntime`: override, manifest, default; Q17 errors, no
+   * fallback) and latches it on the instance as `sandbox`; every later call
+   * reaches the runner through that id (`runnerOf`).
    */
-  private runner: SandboxRunner;
-  private runners: Record<'proot' | 'container', SandboxRunner>;
+  readonly runtimes: RuntimeRegistry;
+  /** The Runtime Settings record (`user:policy:runtimes`, ARI §9.7). */
+  readonly runtimeSettings: RuntimeSettingsStore;
+  /** The container runtime's runner: what only it backs (adoption, builds, mounts, ports, sidecars). */
+  private readonly container: ContainerRunner;
   /** Phase 5 spawn seams, used only by `spawnContext`. */
   private readonly homes: HomeResolver;
   private readonly identities: SpawnIdentityProvider;
@@ -148,6 +157,10 @@ export class AppManager {
     /** Spawn seams (Phase 5): see `spawnContext`. Defaults reproduce today. */
     homes?: HomeResolver;
     identities?: SpawnIdentityProvider;
+    /** More runtimes next to the built-in ones (ARI; tests register a fake one). */
+    runtimes?: RuntimeModule[];
+    /** The Runtime Settings store; default: the sealed record in Valkey. */
+    runtimeSettings?: RuntimeSettingsStore;
   }) {
     this.dataDir = opts.dataDir;
     this.toolchainDir = opts.toolchainDir;
@@ -170,14 +183,23 @@ export class AppManager {
       // entirely and works in BOTH prooted and non-prooted spawns.
       osApiBase: `http://127.0.0.1:${opts.shellPort ?? 3000}`,
     };
-    this.runners = {
-      proot:     new ProotRunner(runnerOpts),
-      container: new ContainerRunner(runnerOpts),
-    };
+    this.container = new ContainerRunner(runnerOpts);
     // M6: while adoption is pending a spawn never removes a running survivor by name.
-    (this.runners.container as ContainerRunner).survivorsUnknown = () => this.adoptionPending;
-    // Default runner for utility calls; per-app spawn routes via runnerOf().
-    this.runner = this.runners['proot'];
+    this.container.survivorsUnknown = () => this.adoptionPending;
+    this.runtimes = new RuntimeRegistry();
+    this.runtimes.register(containerRuntime(this.container));
+    this.runtimes.register(prootRuntime(new ProotRunner(runnerOpts), { baseRootfs: opts.baseRootfs }));
+    for (const m of opts.runtimes ?? []) this.runtimes.register(m);
+    this.runtimeSettings = opts.runtimeSettings ?? new RuntimeSettingsStore({
+      identityKeyFile: defaultIdentityKeyFile(opts.dataDir),
+      redis: () => defaultRedis(),
+      registry: this.runtimes,
+      onTampered: () => {
+        console.warn('[AppManager] the Runtime Settings failed their integrity check; the built-in defaults apply');
+        void new AdminAudit(() => defaultRedis()).record({ by: { kind: 'system' }, action: RUNTIME_AUDIT_ACTIONS.policyTampered, outcome: 'failed' })
+          .catch(() => undefined);
+      },
+    });
     this.homes      = opts.homes ?? legacyHomeResolver(opts.dataDir);
     this.identities = opts.identities ?? ROOT_IDENTITY_PROVIDER;
     this.permissions = new PermissionManager(this.registry);
@@ -192,7 +214,7 @@ export class AppManager {
       dataDir:       opts.dataDir,
       registry:      this.registry,
       scopeRegistry: this.scopeRegistry,
-      runner:        this.runners['container'] as ContainerRunner,
+      runner:        this.container,
       sourceMode:    (appId) => this.sourceModeOf(appId)?.mode ?? 'closed',
       // Mirrors spawnInstance's own derivation so a mount lands in exactly the
       // dir the instance has bound at /data. A sidecar consumer key
@@ -213,7 +235,7 @@ export class AppManager {
     this.portExpose  = new PortManager({
       dataDir:  opts.dataDir,
       registry: this.registry,
-      runner:   this.runners['container'] as ContainerRunner,
+      runner:   this.container,
       resolveRunningInstance: (appId) => {
         const inst = this.getInstancesByApp(appId).find(
           (i) => i.state === 'resumed' || i.state === 'resuming' || i.state === 'started',
@@ -222,7 +244,7 @@ export class AppManager {
       },
     });
     this.osSidecars  = new SidecarManager({
-      runner:      this.runners['container'] as ContainerRunner,
+      runner:      this.container,
       registry:    this.registry,
       permissions: this.permissions,
       tokens:      this.tokens,
@@ -333,7 +355,7 @@ export class AppManager {
   /** Record an adopted instance's lifecycle status (ContainerRunner `measureAdopted`). Never throws. */
   private async measureAdopted(instanceId: string): Promise<void> {
     try {
-      const status = await this.runners.container.measureAdopted?.(instanceId);
+      const status = await this.container.measureAdopted?.(instanceId);
       const inst = this.instances.get(instanceId);
       if (status && inst) inst.lifecycle = status;
     } catch (err) {
@@ -359,24 +381,94 @@ export class AppManager {
   }
 
   /**
-   * Resolve the runner that owns an instance. Reads the runner key off the
-   * stored AppInstance (latched at spawn time). Falls back to the manifest's
-   * `sandbox` field if the instance isn't recorded yet (during spawn), and
-   * finally to ProotRunner if neither is available. Never returns null —
-   * callers always get something they can call methods on.
+   * The runner of an instance: the runtime latched on it at spawn (`sandbox`).
+   * An instance with none, or a runtime that is not installed, is an error;
+   * nothing falls back to another runner (Q17).
    */
-  private runnerOf(instanceIdOrAppId: string): SandboxRunner {
-    const inst = this.instances.get(instanceIdOrAppId);
-    if (inst?.sandbox) return this.runnerById(inst.sandbox);
-    const m = this.registry.getById(inst?.appId ?? instanceIdOrAppId);
-    if (m) return this.runnerById(manifestSandbox(m));
-    return this.runners['proot'];
+  private runnerOf(instanceId: string): SandboxRunner {
+    const sandbox = this.instances.get(instanceId)?.sandbox;
+    if (!sandbox) throw new Error(`${instanceId} has no runtime: it is not a spawned instance`);
+    return this.runtimes.runner(sandbox);
   }
 
-  /** The runner for a runtime id; an unknown id is a Q17 error, never a fallback. */
-  private runnerById(sandbox: string): SandboxRunner {
-    if (sandbox === 'proot' || sandbox === 'container') return this.runners[sandbox];
-    throw new RuntimeUnavailableError('runtime-not-installed', sandbox);
+  /** The capabilities of an instance's runtime (ARI §9.5), or null for an unknown instance. */
+  runtimeCapabilitiesOf(instanceId: string): RuntimeCapabilities | null {
+    const sandbox = this.instances.get(instanceId)?.sandbox;
+    const module = sandbox ? this.runtimes.get(sandbox) : undefined;
+    return module ? module.runner.capabilities() : null;
+  }
+
+  /**
+   * Liveness through the runtime's capability, not its id (ARI dup #11): a
+   * runtime whose instances outlive the shell tracks them itself (their pids
+   * are host pids, invisible here); otherwise the pid is the shell's own child.
+   */
+  private instanceAlive(inst: AppInstance): boolean {
+    if (this.runtimeCapabilitiesOf(inst.instanceId)?.survivesShellRestart) return this.runnerOf(inst.instanceId).isRunning(inst.instanceId);
+    if (inst.pid == null) return false;
+    try { process.kill(inst.pid, 0); return true; } catch { return false; }
+  }
+
+  /** The app's current installation (App Host registry), or null when it cannot be read. */
+  async installationIdOf(appId: string): Promise<string | null> {
+    const scope = this.registry.getScopeId(appId);
+    if (!scope) return null;
+    try { return (await getAppHostServices().registry.findInstallation(appId, scope))?.installationId ?? null; }
+    catch { return null; }
+  }
+
+  /**
+   * The runtime a start of `appId` uses (stream R): the installation's
+   * override, else the manifest's `sandbox`, else the Runtime Settings
+   * default; then installed, enabled, available and capable for what the
+   * manifest needs. Throws the Q17 / D75 / capability errors, never falls back.
+   */
+  async resolveRuntime(appId: string, manifest: AppManifest, opts: { sourceMode?: 'open' | 'closed' } = {}): Promise<ResolvedRuntime & { installationId: string | null }> {
+    const installationId = await this.installationIdOf(appId);
+    let record = null;
+    try { record = await this.runtimeSettings.get(); }
+    catch (err) { console.warn(`[AppManager] Runtime Settings unreadable: ${(err as Error).message}`); }
+    const sourceMode = opts.sourceMode ?? this.sourceModeOf(appId)?.mode ?? 'closed';
+    return { installationId, ...this.runtimes.resolve({ manifest, installationId, sourceMode, record }) };
+  }
+
+  /** Every installed app as the D75 migration and the Runtimes page see it. */
+  async runtimeApps(): Promise<MigrationApp[]> {
+    const out: MigrationApp[] = [];
+    for (const m of this.registry.getAll()) {
+      out.push({ appId: m.id, manifest: m, installationId: await this.installationIdOf(m.id), sourceMode: this.sourceModeOf(m.id)?.mode ?? 'closed' });
+    }
+    return out;
+  }
+
+  /**
+   * D75, in kernel init after the App Host migration (D78): record every
+   * installation's legacy runtime once (runtimes/migrateLegacy.ts). Never
+   * fatal: until it is recorded, an app that names no runtime does not start
+   * (`runtime-unresolved`), and the next boot tries again.
+   */
+  private async migrateRuntimes(): Promise<void> {
+    try {
+      const result = await migrateLegacyRuntimes(await this.runtimeApps(), {
+        store: this.runtimeSettings,
+        env: processLegacyEnv(this.baseRootfs),
+        dataDir: this.dataDir,
+        audit: async (rows, reportFile) => {
+          const count = (d: string) => rows.filter((r) => r.decision === d).length;
+          await new AdminAudit(() => defaultRedis()).record({
+            by: { kind: 'system' }, action: RUNTIME_AUDIT_ACTIONS.migrationRecorded,
+            detail: { report: reportFile, unchanged: count('unchanged'), override: count('override'), incompatible: count('incompatible') },
+          }).catch((err: unknown) => console.warn(`[AppManager] runtime migration audit failed: ${(err as Error).message}`));
+        },
+      });
+      if (result.incomplete) console.warn(`[AppManager] runtime migration waits for installations of: ${result.incomplete.join(', ')}`);
+      if (result.ran) {
+        for (const r of result.rows.filter((x) => x.decision !== 'unchanged')) console.log(`[AppManager] runtime migration: ${r.appId} ${r.decision} (${r.reason})`);
+        console.log(`[AppManager] runtime migration recorded: ${result.reportFile}`);
+      }
+    } catch (err) {
+      console.warn(`[AppManager] runtime migration failed: ${(err as Error).message}`);
+    }
   }
 
   /**
@@ -882,7 +974,7 @@ export class AppManager {
       let res: { ok: boolean; output: string };
       try {
         prepareBuildStaging(manifest.appDir);
-        res = await (this.runners.container as ContainerRunner).buildApp(appId, manifest.appDir);
+        res = await this.container.buildApp(appId, manifest.appDir);
         if (res.ok) {
           installBuild(manifest.appDir, { prune: this.getInstancesByApp(appId).length === 0 });
           writeBuildStamp(manifest.appDir, fingerprint);
@@ -1009,6 +1101,8 @@ export class AppManager {
       console.warn(`[AppManager] sidecar reconcile failed: ${(err as Error).message}`);
     });
     await this.migrateAppHosts();
+    // D75: before any pool fill or service start, so every start resolves on the recorded runtimes.
+    await this.migrateRuntimes();
     this.startReconciler();
     // Background, missing images only — never delays boot.
     for (const m of this.registry.getAll()) {
@@ -1069,7 +1163,7 @@ export class AppManager {
    */
   private async adoptOrphans(): Promise<boolean> {
     try {
-      const runner = this.runners.container;
+      const runner = this.container;
       const orphans = runner.listOrphanRecords ? await runner.listOrphanRecords() : [];
       if (!orphans) return false;
       // Idle warm-pool members stay pool members: adopted as ordinary
@@ -1114,12 +1208,12 @@ export class AppManager {
         }
         const manifest = this.registry.getById(o.appId);
         if (manifest) {
-          this.runners.container.registerAdopted?.(o);
+          this.container.registerAdopted?.(o);
           // Wire the crash handler so a dying adopted container is detected
           // (registerAdopted starts the `docker wait` watcher that fires this).
           // Without it the instance would stick in `resumed` forever and be
           // unrecoverable via `start`/`restart`.
-          this.runners.container.onExit(o.instanceId, (code) => this.handleUnexpectedExit(o.instanceId, o.appId, code));
+          this.container.onExit(o.instanceId, (code) => this.handleUnexpectedExit(o.instanceId, o.appId, code));
           if (!inst.preview) {
             this.providers.registerInstance(inst, manifest);
             this.interfaces.registerInstance(inst, manifest);
@@ -1548,7 +1642,7 @@ export class AppManager {
    * own until the kernel builds it (ARI dup #2).
    */
   private async spawnContext(
-    appId: string, instanceId: string, opts: { manifest: AppManifest; runner: SandboxRunner; owner?: string },
+    appId: string, instanceId: string, opts: { manifest: AppManifest; runtime: ResolvedRuntime; owner?: string },
   ): Promise<Pick<InstanceSpawnContext, 'home' | 'identity'>> {
     void instanceId; // a runtime handle only: never a durable reference (D85 A7)
     // Not resolved yet: stream H resolves it here and fails closed without it.
@@ -1558,7 +1652,7 @@ export class AppManager {
       environmentScope: opts.manifest.environmentScope,
       executionContext: 'application',
       ...(opts.owner ? { userId: opts.owner } : {}),
-      runtime: opts.runner.capabilities(),
+      runtime: opts.runtime.capabilities,
     });
     const identity = await this.identities.identityFor({ appId, installationId, ...(opts.owner ? { userId: opts.owner } : {}) });
     return { home, identity };
@@ -1580,6 +1674,18 @@ export class AppManager {
       cpSync(opts.preview.dataFrom, instanceDataDir, { recursive: true, filter: (src) => basename(src) !== MOUNT_DIR_NAME });
     }
 
+    // The runtime first: a refusal (Q17, D75, a missing capability) is the
+    // instance's error, and every recorded instance has its runtime latched.
+    const sourceMode = opts.preview ? 'open' : this.sourceModeOf(appId)?.mode ?? 'closed';
+    let runtime: ResolvedRuntime;
+    try {
+      runtime = await this.resolveRuntime(appId, manifest, { sourceMode });
+    } catch (err) {
+      this.transition(instanceId, appId, 'creating', null);
+      this.transition(instanceId, appId, 'error', null, err instanceof Error ? err.message : String(err));
+      throw err;
+    }
+    this.upsertInstance(instanceId, appId, { sandbox: runtime.runtime, runtimeSource: runtime.source });
     this.transition(instanceId, appId, 'creating', null);
     // Honor manifest.serverPort when present (currently used by
     // com.aura.registry to pin :4090 so RegistryConfig URLs stay stable).
@@ -1588,10 +1694,9 @@ export class AppManager {
     const owner = opts.inPool ? undefined : opts.preview?.owner ?? opts.userId ?? this.instances.get(instanceId)?.owner ?? DEFAULT_OWNER_ID;
 
     try {
-      const sandbox = manifestSandbox(manifest);
-      const runner = this.runnerById(sandbox);
+      const runner = runtime.module.runner;
       const pid = await runner.spawn(instanceId, appId, port, manifest, {
-        ...await this.spawnContext(appId, instanceId, { manifest, runner, owner }),
+        ...await this.spawnContext(appId, instanceId, { manifest, runtime, owner }),
         appDir:          opts.preview?.appDir ?? manifest.appDir,
         instanceDataDir,
         // Fresh nonce per spawn: tokens of a previous life of a recycled
@@ -1600,12 +1705,12 @@ export class AppManager {
         instanceToken:   this.tokens.mint(instanceId, undefined, owner),
         ...(owner ? { owner } : {}),
         // A preview runs the user's own workspace, not the installed source.
-        sourceMode:      opts.preview ? 'open' : this.sourceModeOf(appId)?.mode ?? 'closed',
+        sourceMode,
         ...(opts.preview ? { preview: opts.preview.workspace } : {}),
       });
       const lifecycle = runner.lifecycleStatus(instanceId) ?? undefined;
       this.upsertInstance(instanceId, appId, {
-        pid, port, startedAt: new Date(), inPool: opts.inPool, sandbox, owner, lifecycle,
+        pid, port, startedAt: new Date(), inPool: opts.inPool, owner, lifecycle,
         ...(opts.preview ? { preview: { workspace: opts.preview.workspace, startedAt: new Date().toISOString() } } : {}),
       });
       if (opts.inPool) this.savePoolIds();
@@ -1693,13 +1798,7 @@ export class AppManager {
       // invisible from inside aura-shell, so `process.kill(pid, 0)` always
       // failed and no container app (Terminal) ever got its warm-pool member
       // — every launch spawned a fresh container instead.
-      let alive = false;
-      if (inst.sandbox === 'container') {
-        alive = this.runnerOf(inst.instanceId).isRunning(inst.instanceId);
-      } else {
-        try { process.kill(inst.pid, 0); alive = true; } catch { /* dead */ }
-      }
-      if (!alive) {
+      if (!this.instanceAlive(inst)) {
         // Reconciler will tidy this up on its next tick; just skip for now.
         continue;
       }
@@ -1792,10 +1891,9 @@ export class AppManager {
    * until the instance is back; any other stop removes them all.
    */
   async stop(instanceId: string, opts: { reason?: 'user' | 'restart' } = {}): Promise<void> {
-    if (!this.runnerOf(instanceId).isRunning(instanceId)) return;
-    const reason = opts.reason ?? 'user';
     const inst = this.instances.get(instanceId);
-    if (!inst) return;
+    if (!inst?.sandbox || !this.runnerOf(instanceId).isRunning(instanceId)) return;
+    const reason = opts.reason ?? 'user';
     const appId = inst.appId;
     const port = this.runnerOf(instanceId).getPort(instanceId);
 
@@ -1832,7 +1930,7 @@ export class AppManager {
 
     // Clear instance after destroy
     this.runnerOf(instanceId).clearToolsDir(instanceId);
-    this.runners.container.clearMountRoot?.(instanceId);
+    this.container.clearMountRoot?.(instanceId);
     this.releaseHostSlot(appId, instanceId);
     this.instances.delete(instanceId);
     this.fsm.delete(instanceId);
@@ -1868,7 +1966,7 @@ export class AppManager {
     }
     // 3. Belt-and-braces: remove any container the host still has for this app
     //    (untracked survivors — adoption-skipped, lost across restarts, etc.).
-    try { await this.runners.container.killAllForApp?.(appId); }
+    try { await this.container.killAllForApp?.(appId); }
     catch (err) { console.warn(`[AppManager] container sweep for ${appId} failed: ${(err as Error).message}`); }
   }
 
@@ -1879,6 +1977,12 @@ export class AppManager {
   forceKill(instanceId: string): void {
     const inst = this.instances.get(instanceId);
     if (!inst) return;
+    if (!inst.sandbox) {
+      // Refused before it had a runtime (resolveRuntime): nothing runs, only the record goes.
+      this.instances.delete(instanceId);
+      this.fsm.delete(instanceId);
+      return;
+    }
     const appId = inst.appId;
     const port = this.runnerOf(instanceId).getPort(instanceId);
     this.providers.unregisterInstance(inst, this.registry.getById(appId));
@@ -1898,7 +2002,7 @@ export class AppManager {
       OsEventBus.emit('app:stateChanged', { instanceId, appId, state: 'destroyed', port: null });
     }
     this.runnerOf(instanceId).clearToolsDir(instanceId);
-    this.runners.container.clearMountRoot?.(instanceId);
+    this.container.clearMountRoot?.(instanceId);
     this.releaseHostSlot(appId, instanceId);
     this.instances.delete(instanceId);
     this.fsm.delete(instanceId);
@@ -1970,6 +2074,7 @@ export class AppManager {
    * already exited or never existed.
    */
   getUpstreamUrl(instanceId: string): { host: string; port: number } | null {
+    if (!this.instances.get(instanceId)?.sandbox) return null;
     const runner = this.runnerOf(instanceId);
     const host   = runner.getHost(instanceId);
     const port   = runner.getPort(instanceId);
@@ -2734,19 +2839,10 @@ export class AppManager {
     for (const inst of Array.from(this.instances.values())) {
       const pid = inst.pid;
       if (pid != null) {
-        let alive = false;
-        // Liveness probe depends on sandbox: PRoot instances live in the
-        // shell's PID namespace so `process.kill(pid, 0)` works; container
-        // instances have HOST pids invisible from inside aura-shell — that
-        // call would always ESRCH and false-positive "dead", triggering a
-        // wrongful forceKill. Defer to the runner instead, which tracks
-        // its own liveness via docker wait.
-        if (inst.sandbox === 'container') {
-          alive = this.runnerOf(inst.instanceId).isRunning(inst.instanceId);
-        } else {
-          try { process.kill(pid, 0); alive = true; }
-          catch { alive = false; }
-        }
+        // Through the runtime's capability (instanceAlive): a container's pid
+        // is a HOST pid, invisible from inside aura-shell, so `process.kill`
+        // would false-positive "dead" and force-kill a healthy instance.
+        const alive = this.instanceAlive(inst);
         if (!alive && inst.state !== 'error' && inst.state !== 'destroyed' && inst.state !== 'destroying') {
           console.warn(`[AppManager] reconcile: ${inst.instanceId} pid=${pid} is gone — marking error`);
           const releasedPort = inst.port;
@@ -2809,7 +2905,7 @@ export class AppManager {
     for (const t of this.instances.values()) if (t.pid != null) trackedPids.add(t.pid);
     // Union pids from both runners so the reconciler doesn't mistake an
     // in-flight container-spawn for a dead PRoot (or vice versa).
-    for (const r of Object.values(this.runners)) {
+    for (const { runner: r } of this.runtimes.list()) {
       for (const pid of r.getActivePids()) trackedPids.add(pid);
     }
     const squatters = listAppOrphans(trackedPids);
@@ -2897,7 +2993,7 @@ export class AppManager {
     for (const instanceId of this.sidecarParking.takeExpired()) {
       if (this.instances.has(instanceId)) continue; // back (and adopted) after all
       console.warn(`[AppManager] ${instanceId} did not come back — reaping its parked sidecars`);
-      this.runners.container.reapSiblingsOf?.(instanceId);
+      this.container.reapSiblingsOf?.(instanceId);
     }
     await this.syncSidecars(2);
   }
@@ -2911,7 +3007,7 @@ export class AppManager {
     // Survivors unknown: their sidecars must not look orphaned.
     if (this.adoptionPending) return;
     const fresh: Array<{ runner: SandboxRunner; info: SidecarInfo }> = [];
-    for (const runner of new Set(Object.values(this.runners))) {
+    for (const runner of new Set(this.runtimes.list().map((m) => m.runner))) {
       if (!runner.listSidecars) continue;
       const list = await runner.listSidecars();
       if (!list) return;

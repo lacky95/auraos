@@ -98,13 +98,11 @@ function fakeManager(records, { pooled = [], running = [] } = {}) {
     registry: { getById: (appId) => (appId === 'io.ex.gone' ? undefined : { id: appId }) },
     providers: { registerInstance: (i) => calls.providers.push(i.instanceId) },
     interfaces: { registerInstance: () => {} },
-    runners: {
-      container: {
-        listOrphanRecords: async () => records,
-        isRunning: (id) => running.includes(id),
-        registerAdopted: (o) => calls.registered.push(o.instanceId),
-        onExit: (id) => calls.exits.push(id),
-      },
+    container: {
+      listOrphanRecords: async () => records,
+      isRunning: (id) => running.includes(id),
+      registerAdopted: (o) => calls.registered.push(o.instanceId),
+      onExit: (id) => calls.exits.push(id),
     },
     loadPoolIds: () => new Set(pooled),
     handleUnexpectedExit: () => {},
@@ -202,7 +200,7 @@ test('after adoption every running UI instance holds its App Host slot; pool mem
 test('while the survivors are unknown, sidecars are never reaped', async () => {
   const fake = {
     adoptionPending: true,
-    runners: { container: { listSidecars: async () => { throw new Error('must not list'); } } },
+    runtimes: { list: () => [{ runner: { listSidecars: async () => { throw new Error('must not list'); } } }] },
   };
   await AppManager.prototype.syncSidecars.call(fake, 1);
 });

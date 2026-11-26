@@ -13,19 +13,18 @@ import { legacyHomeResolver } from '../dist/homes/legacyResolver.js';
 import {
   LINUX_ID_RANGES, OWNER_UID, linuxIdRangeOf, formatPrincipalRef, parsePrincipalRef, ROOT_IDENTITY_PROVIDER,
 } from '../dist/identity/types.js';
-import { AppManifestSchema, manifestSandbox, LEGACY_DEFAULT_SANDBOX } from '../dist/types/manifest.js';
+import { AppManifestSchema } from '../dist/types/manifest.js';
+import { RuntimeRegistry } from '../dist/runtimes/registry.js';
 import { AppManager } from '../dist/app-manager/AppManager.js';
 import { ProotRunner } from '../dist/app-manager/ProotRunner.js';
 import { ContainerRunner } from '../dist/app-manager/ContainerRunner.js';
 
 const base = { id: 'org.p5.app', name: 'P5', version: '1.0.0' };
 
-test('manifest: sandbox has no schema default; an omitted value keeps the legacy meaning', () => {
+test('manifest: sandbox has no schema default (an omitted value is the Runtime Settings default, stream R)', () => {
   const m = AppManifestSchema.parse(base);
   assert.equal(m.sandbox, undefined, 'the omission survives parsing (§11.2)');
-  assert.equal(manifestSandbox(m), LEGACY_DEFAULT_SANDBOX);
-  assert.equal(LEGACY_DEFAULT_SANDBOX, 'proot', 'Stage 1 changes no behaviour; stream R moves the default');
-  assert.equal(manifestSandbox(AppManifestSchema.parse({ ...base, sandbox: 'container' })), 'container');
+  assert.equal(AppManifestSchema.parse({ ...base, sandbox: 'container' }).sandbox, 'container');
 });
 
 test('manifest: sandbox is a runtime id, checked at start, not a closed pair at parse', () => {
@@ -124,21 +123,26 @@ test('AppManager spawn seam: homes and identities are asked, with the runner cap
   };
   const caps = ContainerRunner.prototype.capabilities.call({});
   const manifest = AppManifestSchema.parse({ ...base, environmentScope: 'user' });
-  const ctx = await AppManager.prototype.spawnContext.call(fake, 'org.p5.app', 'org.p5.app-1', { manifest, runner: { capabilities: () => caps }, owner: 'u1' });
+  const ctx = await AppManager.prototype.spawnContext.call(fake, 'org.p5.app', 'org.p5.app-1', { manifest, runtime: { capabilities: caps }, owner: 'u1' });
   assert.equal(ctx.home.kind, 'app-user');
   assert.equal(ctx.identity.uid, 200001);
   assert.deepEqual(asked.home, { installationId: null, environmentScope: 'user', executionContext: 'application', userId: 'u1', runtime: caps });
   assert.deepEqual(asked.identity, { appId: 'org.p5.app', installationId: null, userId: 'u1' });
   // A pool member (no owner) asks for no user.
-  await AppManager.prototype.spawnContext.call(fake, 'org.p5.app', 'org.p5.app-2', { manifest, runner: { capabilities: () => caps } });
+  await AppManager.prototype.spawnContext.call(fake, 'org.p5.app', 'org.p5.app-2', { manifest, runtime: { capabilities: caps } });
   assert.equal('userId' in asked.home, false);
 });
 
-test('AppManager runner selection: an unknown runtime id is a Q17 error, never PRoot', () => {
-  const runners = { proot: { id: 'p' }, container: { id: 'c' } };
-  const self = { runners };
-  assert.equal(AppManager.prototype.runnerById.call(self, 'proot'), runners.proot);
-  assert.equal(AppManager.prototype.runnerById.call(self, 'container'), runners.container);
-  assert.throws(() => AppManager.prototype.runnerById.call(self, 'gvisor'),
+test('AppManager runner selection: a latched runtime id that is not installed is a Q17 error, never PRoot', () => {
+  const runtimes = new RuntimeRegistry();
+  const p = { id: 'p' }, c = { id: 'c' };
+  runtimes.register({ descriptor: { id: 'proot', settingsSchema: { type: 'object', properties: {} } }, runner: p });
+  runtimes.register({ descriptor: { id: 'container', settingsSchema: { type: 'object', properties: {} } }, runner: c });
+  const self = { runtimes, instances: new Map([['a-1', { sandbox: 'proot' }], ['b-1', { sandbox: 'container' }], ['g-1', { sandbox: 'gvisor' }], ['n-1', {}]]) };
+  assert.equal(AppManager.prototype.runnerOf.call(self, 'a-1'), p);
+  assert.equal(AppManager.prototype.runnerOf.call(self, 'b-1'), c);
+  assert.throws(() => AppManager.prototype.runnerOf.call(self, 'g-1'),
     (e) => e instanceof RuntimeUnavailableError && e.code === 'runtime-not-installed' && e.runtime === 'gvisor');
+  assert.throws(() => AppManager.prototype.runnerOf.call(self, 'n-1'), /has no runtime/, 'no latched runtime: no fallback');
+  assert.throws(() => AppManager.prototype.runnerOf.call(self, 'unknown-1'), /has no runtime/);
 });
