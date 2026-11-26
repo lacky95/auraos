@@ -1,0 +1,22 @@
+{
+  "about": "Known architecture debt (tools/dep-check.mjs, D97). The check fails only on violations not listed here; the summary prints the count, which must shrink. Remove an entry when its violation is gone (the check reports it). Never add an entry to make new coupling pass without a review; see modular-kernel-review.md.",
+  "generatedAt": "6ea03f5",
+  "rules": {
+    "core-cycle": "No runtime import cycle between files of @aura/core (type-only imports are exempt).",
+    "core-module-cycle": "No entangled modules in @aura/core: a runtime import A/f -> B/g where g (transitively) imports module A again. Shared contracts belong in leaf files that import no other module.",
+    "core-forbidden": "@aura/core never imports the shell, the UI, Astro, React, the SDK or the CLI.",
+    "package-internals": "A package reaches another workspace package only through its declared entry points (package.json `exports`), never by a relative path, `src/` or `dist/`.",
+    "sdk-core": "@aura/app-sdk imports @aura/core only through its declared entry points and only for types or the declared leaf subpaths (never the kernel root at runtime).",
+    "server-webshell": "The server layer of @aura/shell (API routes, middleware, server/, and the lib modules they reach) never imports Web Shell code (components, layouts, stores, desktop pages) or UI libraries."
+  },
+  "entries": {
+    "core-module-cycle: core/app-hosts -> core/app-manager": "app-hosts/lifecycle.ts needs AppIdentity helpers from app-manager while AppManager wires the App Host services: move the identity helpers into a leaf contract file. Owner: Phase 7/8 (D97 module entry points); 5b CR touches the region.",
+    "core-module-cycle: core/app-manager -> core/app-hosts": "AppManager fetches the App Host singleton (app-hosts/services.ts) itself instead of receiving it from the composition root. Owner: Phase 6 stream K (bootSystem as the composition root).",
+    "core-module-cycle: core/auth -> core/app-manager": "auth/services.ts is a composition root inside the auth module (constructs services from AppManager, capabilities, security). Owner: Phase 6 stream K (composition moves to bootSystem).",
+    "core-module-cycle: core/auth -> core/capabilities": "Same composition root (auth/services.ts). Owner: Phase 6 stream K.",
+    "core-module-cycle: core/auth -> core/security": "Same composition root (auth/services.ts). Owner: Phase 6 stream K.",
+    "core-module-cycle: core/nexus -> core/app-manager": "nexus/removeApp.ts drives AppManager directly (removal orchestration across System Management and Execution). Owner: Phase 7/8 (D97 contracts).",
+    "core-module-cycle: core/notifications -> core/auth": "NotificationService pulls auth/services (and reads the AppManager singleton from globalThis, NotificationService.ts:1729). Owner: Phase 6 stream K (inject the lookups).",
+    "server-webshell: shell/astro.config.mjs -> @astrojs/react": "The one build config always loads React. Owner: Phase 6 stream W (AURA_COMPOSITION=server drops it)."
+  }
+}

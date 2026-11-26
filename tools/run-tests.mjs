@@ -1,9 +1,13 @@
 #!/usr/bin/env node
 // Runs every package and app test suite, continues past failures, and prints
-// per-suite results. Usage: pnpm test [-- --only=core,shell] [--timeout=600] [--with-security]
+// per-suite results. Usage: pnpm test [-- --only=core,shell] [--timeout=600] [--with-security] [--no-arch]
 //
 // --with-security runs the security gate (tools/security-check.mjs) first; its
 // findings fail the run like a failed suite.
+//
+// The architecture dependency check (tools/dep-check.mjs, D97) always runs
+// first (static, under a second); a violation not in tools/dep-baseline.json
+// fails the run like a failed suite. --no-arch skips it.
 //
 // This runs inside the master container, which holds the real Docker socket
 // and data, so each suite gets throwaway state plus a guard: a `docker` stub
@@ -157,6 +161,15 @@ const passed = (r) => r.code === 0 && !incomplete(r);
 const label = (r) => r.timedOut ? 'TIMEOUT' : incomplete(r) ? 'FAILED (no test summary)' : r.code === 0 ? 'ok' : `FAILED (exit ${r.code})`;
 
 const security = args.includes('--with-security') ? runSecurity() : null;
+const arch = args.includes('--no-arch') ? null : runArch();
+
+function runArch() {
+  process.stdout.write('running architecture dependency check ... ');
+  const r = spawnSync(process.execPath, [join(ROOT, 'tools/dep-check.mjs'), `--root=${ROOT}`], { cwd: ROOT, encoding: 'utf-8' });
+  const lines = (r.stdout || r.stderr || '').trim().split('\n');
+  console.log(r.status === 0 ? 'ok' : `FAILED (exit ${r.status})`);
+  return { code: r.status, lines };
+}
 
 function runSecurity() {
   process.stdout.write('running security gate ... ');
@@ -193,5 +206,9 @@ if (security) {
   for (const l of security.lines.slice(1, 41)) console.log(`    ${l.slice(0, 160)}`);
   if (security.lines.length > 41) console.log(`    … ${security.lines.length - 41} more: node tools/security-check.mjs`);
 }
+if (arch) {
+  console.log(`\n${arch.lines[0]}`);
+  for (const l of arch.lines.slice(1, 41)) console.log(`    ${l.slice(0, 200)}`);
+}
 console.log(`\nlogs: ${runDir}`);
-process.exit(results.every(passed) && (!security || security.code === 0) ? 0 : 1);
+process.exit(results.every(passed) && (!security || security.code === 0) && (!arch || arch.code === 0) ? 0 : 1);
