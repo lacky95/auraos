@@ -49,6 +49,10 @@ import { HomeDeniedError, type HomeResolver, type ResolvedHome } from '../homes/
 import { kernelHomeResolver } from '../homes/HomeResolver.js';
 import { TERMINAL_SESSION_APPS } from '../homes/plan.js';
 import { appJumpPermission } from '../auth/GrantStore.js';
+import {
+  APP_ROOT_EXECUTION_OPTION, RootExecutionError, executionConfigOf, executionDecision, type AppRootExecutionPolicy, type ExecutionApproval,
+} from '../identity/execution.js';
+import { securityPolicyValue } from '../security/options.js';
 import { LINUX_ID_RANGES, ROOT_SPAWN_IDENTITY, linuxIdRangeOf, type AppRunAs, type SpawnIdentity, type SpawnIdentityProvider } from '../identity/types.js';
 import { appIdentityProvider, sessionHostIdentityProvider } from '../identity/appIdentityProvider.js';
 import { grantedContextEnv, liveGrantedContextDeps, type GrantedContextDeps } from '../context/grantedContext.js';
@@ -149,12 +153,13 @@ export function terminalRootTransitionOpen(
   return (io.read(file) ?? '').trim() === 'deploy';
 }
 
-export function adoptedIdentity(user: string | undefined): Pick<AppInstance, 'runAs' | 'uid' | 'gid'> {
+export function adoptedIdentity(user: string | undefined): Pick<AppInstance, 'runAs' | 'uid' | 'gid' | 'approvedRoot'> {
   const m = /^(\d+)(?::(\d+))?$/.exec(user ?? '');
   if (!m) return { runAs: 'root', uid: 0, gid: 0 };
   const uid = Number(m[1]);
   const gid = m[2] !== undefined ? Number(m[2]) : uid;
-  if (uid === 0) return { runAs: 'root', uid: 0, gid };
+  // Only an approved root request sets an explicit `--user 0:0` (identity/execution.ts); legacy root sets none.
+  if (uid === 0) return { runAs: 'root', uid: 0, gid, approvedRoot: true };
   // A user's uid (the owner, a member): a System Terminal session host (stream T).
   const range = linuxIdRangeOf(uid);
   return { runAs: range === 'owner' || range === 'user' ? 'user' : 'app', uid, gid };
@@ -185,6 +190,8 @@ export class AppManager {
   private readonly context: GrantedContextDeps;
   /** Stream C: the Context migration's app-source scanner, from the composition point (opts.contractScan). */
   private readonly contractScan: NonNullable<ConstructorParameters<typeof AppManager>[0]['contractScan']> | null;
+  /** The D64 switch `app-root-execution` (identity/execution.ts); a read failure throws (the start fails closed). */
+  private readonly rootExecutionPolicy: () => Promise<AppRootExecutionPolicy>;
   private instances = new Map<string, AppInstance>();
   private nextInstanceNum = new Map<string, number>();
   private activities = new Map<string, AppActivity>();
@@ -264,6 +271,8 @@ export class AppManager {
      * never imports the contract module (D97). Absent: the migration waits.
      */
     contractScan?: (appDir: string, manifest: AppManifest, keys: readonly string[]) => ReturnType<ContextMigrationDeps['scan']>;
+    /** The D64 switch `app-root-execution`; default: the owner's security policy record. */
+    rootExecutionPolicy?: () => Promise<AppRootExecutionPolicy>;
     /** More runtimes next to the built-in ones (ARI; tests register a fake one). */
     runtimes?: RuntimeModule[];
     /** The Runtime Settings store; default: the sealed record in Valkey. */
@@ -326,6 +335,10 @@ export class AppManager {
         identity: async (userId) => (await import('../auth/services.js')).getAuthServices().identity.ensureUser(userId),
       },
     );
+    this.rootExecutionPolicy = opts.rootExecutionPolicy ?? (async () => {
+      const store = (await import('../auth/services.js')).getAuthServices().securityPolicy;
+      return securityPolicyValue(await store.get(), APP_ROOT_EXECUTION_OPTION) === 'refuse' ? 'refuse' : 'approve';
+    });
     // Stream C (Q7): only declared AND granted Context keys reach an app; personal keys from its user's vault (D56).
     this.contractScan = opts.contractScan ?? null;
     this.context = opts.context ?? (() => {
@@ -402,6 +415,8 @@ export class AppManager {
           ...(inst.owner ? { owner: inst.owner } : {}),
           // P5-3: its latched identity, for the aura-base inheritHome sidecar policy.
           ...(inst.runAs === 'app' && inst.uid && inst.gid ? { identity: { uid: inst.uid, gid: inst.gid, range: 'app' as const } } : {}),
+          // An approved root request: uid 0 without capabilities, the same for its aura-base inheritHome sidecar.
+          ...(inst.runAs === 'root' && inst.approvedRoot ? { identity: { ...ROOT_SPAWN_IDENTITY, approvedRoot: true as const } } : {}),
         };
       },
       appHome: (instanceId) => this.appHomeOf(instanceId),
@@ -1885,7 +1900,7 @@ export class AppManager {
     appId: string, instanceId: string,
     opts: {
       manifest: AppManifest; runtime: ResolvedRuntime; owner?: string; inPool?: boolean; preview?: boolean;
-      installation: { installationId: string; runAs?: AppRunAs } | null;
+      installation: { installationId: string; runAs?: AppRunAs; execution?: ExecutionApproval } | null;
     },
   ): Promise<Pick<InstanceSpawnContext, 'home' | 'identity' | 'contextEnv'>> {
     // instanceId: a runtime handle only, for the log line below and the vault audit row; never a durable reference (D85 A7).
@@ -1894,11 +1909,27 @@ export class AppManager {
     }
     // The user it is for: its owner, or the user a pool member is warmed for (D78; stream T keys the pool per user).
     const user = opts.owner ?? (opts.inPool ? this.poolHomeUser(appId, opts.manifest) : undefined);
+    // Owner decision 5-main item 3 (identity/execution.ts): a root request runs only with the owner's
+    // approval of exactly its config; otherwise the app does not start. Never a silent escalation.
+    const requested = executionConfigOf(opts.manifest);
+    let policy: AppRootExecutionPolicy = 'approve';
+    if (requested || opts.installation.execution) {
+      try { policy = await this.rootExecutionPolicy(); }
+      catch (err) {
+        throw new RootExecutionError(appId, 'policy', `${appId}: the root execution policy can't be read (${(err as Error).message}); not started`);
+      }
+    }
+    const execution = executionDecision(appId, requested, opts.installation, policy);
+    if (execution.kind === 'refused') throw new RootExecutionError(appId, execution.reason, execution.message);
     // Stream A (P5-3): the installation's runAs; a System Terminal its user's uid (stream T, D69). Never a root fallback.
     let identity = await this.identities.identityFor({
       appId, installationId: opts.installation.installationId, runAs: opts.installation.runAs ?? 'root',
       ...(user ? { userId: user } : {}),
     });
+    if (execution.kind === 'approved-root' && identity.range === 'root' && identity.uid === 0) {
+      // Runtime root only: no capability, no-new-privileges, no socket (spawn/identityArgs.ts).
+      identity = { ...identity, approvedRoot: true };
+    }
     if (isNonRootIdentity(identity) && opts.runtime.capabilities.identity === 'none') {
       throw new RuntimeCapabilityError(opts.runtime.runtime, ['identity'],
         `${appId} runs as its app identity, and runtime ${opts.runtime.runtime} can't enforce one: not started (no root fallback)`);
@@ -2165,7 +2196,7 @@ export class AppManager {
    * start too: an `app` installation must never start as root because Valkey
    * hiccuped.
    */
-  async installationRunAs(appId: string): Promise<{ installationId: string; runAs?: AppRunAs } | null> {
+  async installationRunAs(appId: string): Promise<{ installationId: string; runAs?: AppRunAs; execution?: ExecutionApproval } | null> {
     const scope = this.registry.getScopeId(appId);
     if (!scope) return null;
     let inst;
@@ -2179,7 +2210,9 @@ export class AppManager {
       await this.syncAppHost(appId);
       try { inst = await getAppHostServices().registry.findInstallation(appId, scope); } catch { inst = null; }
     }
-    return inst ? { installationId: inst.installationId, ...(inst.runAs ? { runAs: inst.runAs } : {}) } : null;
+    return inst ? {
+      installationId: inst.installationId, ...(inst.runAs ? { runAs: inst.runAs } : {}), ...(inst.execution ? { execution: inst.execution } : {}),
+    } : null;
   }
 
   /** The last start of each app under `runAs: app` (the privilege review), since this shell started. */
@@ -2193,14 +2226,18 @@ export class AppManager {
    * dry-run report lists) are applied for the instance. Throws: a start that
    * can't be prepared fails visibly.
    */
+  /** The dependencies of an app that must not install them itself, by the throwaway builder. */
+  private async provisionInBuilder(appId: string, manifest: AppManifest, appDir: string): Promise<void> {
+    if (!needsProvisioning(appDir, manifest.runtime === 'raw' ? 'raw' : 'astro')) return;
+    const r = await this.provisionApp(appId, { appDir });
+    if (!r.ok) throw new Error(`${appId}: its dependencies could not be installed by the builder: ${r.output.trim().split('\n').slice(-5).join(' | ')}`);
+  }
+
   private async prepareNonRootStart(
     appId: string, manifest: AppManifest, appDir: string, instanceDataDir: string, identity: SpawnIdentity, installationId: string | null,
     home: ResolvedHome | undefined,
   ): Promise<void> {
-    if (needsProvisioning(appDir, manifest.runtime === 'raw' ? 'raw' : 'astro')) {
-      const r = await this.provisionApp(appId, { appDir });
-      if (!r.ok) throw new Error(`${appId}: its dependencies could not be installed by the builder: ${r.output.trim().split('\n').slice(-5).join(' | ')}`);
-    }
+    await this.provisionInBuilder(appId, manifest, appDir);
     const rows = appOwnershipSpecs({
       appId, installationId, appDataRoot: dirname(instanceDataDir), instanceDirs: [basename(instanceDataDir)], appDir,
       devServed: manifest.runtime !== 'raw' && serveState(appDir, manifest).mode !== 'prod',
@@ -2262,6 +2299,10 @@ export class AppManager {
       if (TERMINAL_SESSION_APPS.has(appId) && retireForeignSessionData(instanceDataDir, sessionUid)) {
         this.mounts.forget(instanceId);   // nor its cross-app mounts (normally forgotten at its stop already)
       }
+      if (spawnCtx.identity?.approvedRoot) {
+        // Temporary build privileges stay in the throwaway builder: an approved root app never installs itself.
+        await this.provisionInBuilder(appId, manifest, appDir);
+      }
       if (isNonRootIdentity(spawnCtx.identity)) {
         nonRoot = spawnCtx.identity;
         await this.prepareNonRootStart(appId, manifest, appDir, instanceDataDir, nonRoot, installation?.installationId ?? null, spawnCtx.home);
@@ -2271,7 +2312,10 @@ export class AppManager {
       // The owner's explicit dev run of the Terminal is a Preview (its own workspace, its own caches).
       if (TERMINAL_SESSION_APPS.has(appId) && !opts.preview) await this.ensureProductionBuild(appId, manifest);
       const ident = spawnCtx.identity ?? { uid: 0, gid: 0 };
-      this.upsertInstance(instanceId, appId, { runAs: isSessionIdentity(nonRoot) ? 'user' : nonRoot ? 'app' : 'root', uid: ident.uid, gid: ident.gid });
+      this.upsertInstance(instanceId, appId, {
+        runAs: isSessionIdentity(nonRoot) ? 'user' : nonRoot ? 'app' : 'root', uid: ident.uid, gid: ident.gid,
+        approvedRoot: spawnCtx.identity?.approvedRoot === true ? true : undefined,
+      });
       const pid = await runner.spawn(instanceId, appId, port, manifest, {
         ...spawnCtx,
         ...(installation ? { installationId: installation.installationId } : {}),

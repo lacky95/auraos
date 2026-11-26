@@ -66,29 +66,40 @@ function deps(): RunAsDeps {
     ownerAction: (ctx, req) => ownerAction(ctx, req, ownerDeps),
     audit: async (_actor, action, opts) => { audits.push({ action, opts }); },
     mgr: {
-      registry: { getById: (id: string) => (id === 'org.a.notes' || id === 'org.a.new' ? { id, scopeId: 'global' } : undefined) },
+      registry: {
+        getById: (id: string) => (id === 'org.a.notes' || id === 'org.a.new' ? { id, scopeId: 'global' }
+          : id === 'org.a.rooted' ? { id, scopeId: 'global', execution: { runAs: 'root', reason: 'binds port 80 inside' } } : undefined),
+      },
       getAllInstances: () => [{ instanceId: 'org.a.notes', appId: 'org.a.notes' }],
     } as never,
     hosts: {
       findInstallation: async (appId: string) => [...records.values()].find((r) => r.appId === appId) ?? null,
-      setRunAs: async (id: string, runAs: 'app' | 'root', expect?: 'app' | 'root') => {
+      setRunAs: async (id: string, runAs: 'app' | 'root', expect?: 'app' | 'root', execution?: core.ExecutionApproval) => {
         const cur = records.get(id)!;
         if (expect !== undefined && (cur.runAs ?? 'root') !== expect) return { ok: false, installation: cur };
-        const next = { ...cur, runAs };
+        const { execution: _old, ...rest } = cur;
+        const next = { ...rest, runAs, ...(execution ? { execution } : {}) };
         records.set(id, next);
         return { ok: true, installation: next };
       },
     },
+    rootPolicy: async () => rootPolicy,
   };
 }
+
+let rootPolicy: core.AppRootExecutionPolicy = 'approve';
 
 beforeEach(() => {
   approvals = new MemoryApprovals();
   caller = OPERATOR;
   audits = [];
+  rootPolicy = 'approve';
   records = new Map([['i-notes', {
     installationId: 'i-notes', appId: 'org.a.notes', originId: null, scope: 'global', userId: 'default',
     source: { kind: 'oci', ref: 'x' }, state: 'active', createdAt: 0, updatedAt: 0,
+  } as core.AppInstallation], ['i-rooted', {
+    installationId: 'i-rooted', appId: 'org.a.rooted', originId: null, scope: 'global', userId: 'default', runAs: 'app',
+    source: { kind: 'oci', ref: 'y' }, state: 'active', createdAt: 0, updatedAt: 0,
   } as core.AppInstallation]]);
 });
 
@@ -135,4 +146,40 @@ test('route manifest: the flip is owner-managed, the privilege review an owner v
   assert.ok(!flip?.allow.includes('public' as never));
   const review = effectiveRule(ROUTE_ACCESS_MANIFEST, { route: '/api/admin/identity/privilege-review', handlers: ['GET'] }, 'GET');
   assert.deepEqual(review?.allow, ['own-instance', 'owner']);
+});
+
+// ── 5-main item 3: run-as root approves an app's own root request ───────────
+
+test('run-as root on a requesting app approves exactly its request at fresh: digest recorded, high risk shown, audited', async () => {
+  caller = SETTINGS;
+  const digest = core.executionDigest({ v: 1, runAs: 'root' });
+  const first = await read(await postRunAs(req({ appId: 'org.a.rooted', runAs: 'root' }), deps()));
+  assert.equal(first.status, 202);
+  const rec = approvals.records.get(first.body.approvalId)!;
+  assert.equal(rec.level, 'fresh');
+  assert.equal(rec.display.highRisk?.[0]?.item, 'Root execution (runAs: root)');
+  assert.equal(rec.display.reason, 'binds port 80 inside', 'the manifest reason only as the labelled reason');
+  assert.ok(rec.display.details.some((d) => d.includes(digest)));
+  await approvals.approve(rec.id, FRESH_OWNER);
+  const done = await read(await postRunAs(req({ appId: 'org.a.rooted', runAs: 'root' }, rec.id), deps()));
+  assert.deepEqual([done.status, done.body.changed], [200, true]);
+  const inst = records.get('i-rooted')!;
+  assert.deepEqual([inst.runAs, inst.execution?.digest, inst.execution?.via], ['root', digest, 'admin.run-as']);
+  assert.deepEqual(audits.map((a) => a.action), ['app.run-as-changed', 'app.execution-approved']);
+  // The same approval again: nothing to do. Back to app: the approval is gone.
+  caller = OPERATOR;
+  assert.equal((await read(await postRunAs(req({ appId: 'org.a.rooted', runAs: 'root' }), deps()))).body.changed, false);
+  await postRunAs(req({ appId: 'org.a.rooted', runAs: 'app' }), deps());
+  assert.equal(records.get('i-rooted')!.execution, undefined);
+});
+
+test('run-as root on a requesting app is refused while app-root-execution is refuse; a legacy rollback records no approval', async () => {
+  rootPolicy = 'refuse';
+  const r = await read(await postRunAs(req({ appId: 'org.a.rooted', runAs: 'root' }), deps()));
+  assert.deepEqual([r.status, r.body.error], [403, 'root-execution-refused']);
+  assert.equal(records.get('i-rooted')!.runAs, 'app');
+  // An app without a request: the 5-apps rollback, no approval record (legacy root).
+  await postRunAs(req({ appId: 'org.a.notes', runAs: 'app' }), deps());
+  await postRunAs(req({ appId: 'org.a.notes', runAs: 'root' }), deps());
+  assert.deepEqual([records.get('i-notes')!.runAs, records.get('i-notes')!.execution], ['root', undefined]);
 });

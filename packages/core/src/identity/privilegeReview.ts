@@ -13,6 +13,7 @@
  * Pure: the shell gathers the inputs. Nothing secret is in it.
  */
 import type { AppRunAs } from './types.js';
+import type { ExecutionApproval } from './execution.js';
 
 export type MigrationWave = 1 | 2 | 3 | 'terminal';
 /** What stream A expects for the app in its wave. */
@@ -111,9 +112,21 @@ export interface PrivilegeReviewInput {
   instances: Array<{ instanceId: string; uid: number | null }>;
   /** The last start under `runAs: app` since the shell started. */
   lastAppStart?: { at: string; ok: boolean; error?: string };
+  /** The manifest's root request (identity/execution.ts): its digest and the author's reason. */
+  rootRequest?: { digest: string; reason: string } | null;
+  /** The installation's approved privileged execution config, if any. */
+  rootApproval?: ExecutionApproval | null;
 }
 
-export type PrivilegeVerdict = 'app' | 'ready' | 'needs-review' | 'blocked' | 'root';
+export type PrivilegeVerdict = 'app' | 'ready' | 'needs-review' | 'blocked' | 'root' | 'approved-root' | 'not-approved';
+
+/**
+ * How it runs, by the owner decision of 5-main item 3:
+ *   approved-root  root by the owner's approval of exactly its request (or its `run-as root` of a request)
+ *   legacy-root    root from before 5-apps (or the 5-apps rollback): a temporary migration state, NOT an approved root
+ *   not-approved   it requests root and holds no approval of that exact config: it does not start
+ */
+export type ExecutionState = 'app' | 'session-host' | 'approved-root' | 'legacy-root' | 'not-approved' | 'unrecorded';
 
 export interface PrivilegeReviewRow extends PrivilegeReviewInput {
   migration: AppMigrationEntry | null;
@@ -123,12 +136,15 @@ export interface PrivilegeReviewRow extends PrivilegeReviewInput {
    *   needs-review  something must change first (see `elevated`)
    *   blocked       a manifest/runtime need blocks `app`, or it waits for 5-main
    *   root          runs as root (no record)
+   *   approved-root runs as root by your approval of its exact request (no capabilities)
+   *   not-approved  requests root without your approval: does not start
    */
   verdict: PrivilegeVerdict;
   /** "needs elevated privileges: <reason>" rows for the owner's review. */
   elevated: string[];
   /** Instances whose actual uid does not match the recorded runAs. */
   mismatched: string[];
+  execution: ExecutionState;
 }
 
 export interface PrivilegeReview {
@@ -152,15 +168,35 @@ export function buildPrivilegeReview(inputs: readonly PrivilegeReviewInput[], no
       if (sessionHost) return false;
       return i.runAs === 'app' ? x.uid !== i.identity?.uid : x.uid !== 0;
     }).map((x) => x.instanceId);
+    const approvedRoot = i.runAs === 'root' && i.rootApproval?.runAs === 'root'
+      && (!i.rootRequest || i.rootApproval.digest === i.rootRequest.digest);
+    let execution: ExecutionState;
+    if (sessionHost) execution = 'session-host';
+    else if (i.rootRequest && !approvedRoot) execution = 'not-approved';
+    else if (i.runAs === 'app') execution = 'app';
+    else if (i.runAs === null) execution = 'unrecorded';
+    else execution = approvedRoot ? 'approved-root' : 'legacy-root';
+    if (execution === 'legacy-root') elevated.push('legacy root, pending migration (runs as root from before 5-apps; not an approved root request)');
+    if (execution === 'not-approved') {
+      elevated.push(`requests root execution (${i.rootRequest!.digest}) without your approval of that exact config: it does not start `
+        + `(approve: aura admin apps run-as ${i.appId} root)`);
+    }
+    if (execution === 'approved-root' && !i.rootRequest) {
+      elevated.push('approved root that its manifest no longer requests: consider aura admin apps run-as <app> app'.replace('<app>', i.appId));
+    }
     let verdict: PrivilegeVerdict;
-    if (i.runAs === 'app' || sessionHost) verdict = 'app';
+    if (execution === 'not-approved') verdict = 'not-approved';
+    else if (execution === 'approved-root') verdict = 'approved-root';
+    else if (i.runAs === 'app' || sessionHost) verdict = 'app';
     else if (i.runAs === null) verdict = 'root';
     else if (i.needs.some((n) => n.level === 'blocks') || migration?.expect === 'blocked') verdict = 'blocked';
     else if (migration?.expect === 'review') verdict = 'needs-review';
     else verdict = 'ready';
-    return { ...i, migration, verdict, elevated, mismatched };
+    return { ...i, migration, verdict, elevated, mismatched, execution };
   });
-  const summary: Record<PrivilegeVerdict, number> = { app: 0, ready: 0, 'needs-review': 0, blocked: 0, root: 0 };
+  const summary: Record<PrivilegeVerdict, number> = {
+    app: 0, ready: 0, 'needs-review': 0, blocked: 0, root: 0, 'approved-root': 0, 'not-approved': 0,
+  };
   for (const r of rows) summary[r.verdict]++;
   return { version: 1, generatedAt: new Date(now()).toISOString(), rows, summary };
 }

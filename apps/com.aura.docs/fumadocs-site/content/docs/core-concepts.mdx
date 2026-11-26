@@ -103,6 +103,31 @@ clear error at start, never replaced by another one. PRoot does not
 enforce read-only binds, so closed apps cannot run on it. `useProot` in a
 manifest is ignored.
 
+### Who an app runs as, and asking for root
+
+A new installation runs as its own app identity: a non-root uid with no
+capabilities. An app that really needs root inside its container can
+**request** it in its manifest; a request is never a grant:
+
+```json
+"execution": { "runAs": "root", "reason": "binds port 80 inside its container" }
+```
+
+- The install or update dialog shows it under **High risk** and needs the
+  owner's password. The approval is bound to that installation and that
+  exact request; an update that introduces or changes it asks again.
+- Not approved (or denied, or turned off with the security option
+  `app-root-execution`): the app is installed but does not start ("root
+  execution not approved"). It is never run as root, or as anything else,
+  silently. Approve it later with `aura admin apps run-as <app> root`.
+- It is runtime root only: still no capabilities, `no-new-privileges`, no
+  Docker socket and no host access. Privileged sidecars keep their own
+  mechanism (`services[]` templates and `sidecars.privileged`); installing
+  dependencies stays in the throwaway builder. PRoot refuses root.
+- `aura admin apps privileges` lists approved root, root requests that are
+  not approved, and installations still running as legacy root from before
+  5-apps (a migration state, not an approval).
+
 ## Proxy and iframe
 
 Each app window is an iframe on the app's own **App Host**:

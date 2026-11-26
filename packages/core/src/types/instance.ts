@@ -68,6 +68,8 @@ export interface AppInstance {
   runAs?: 'root' | 'app' | 'user';
   uid?: number;
   gid?: number;
+  /** `runAs: root` from an approved root request (identity/execution.ts): uid 0 without capabilities. Absent: legacy root. */
+  approvedRoot?: true;
 }
 
 export type SidecarState = 'running' | 'starting' | 'stopped' | 'error' | 'unknown';

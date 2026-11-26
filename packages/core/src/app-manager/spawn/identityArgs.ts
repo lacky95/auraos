@@ -3,6 +3,8 @@
  *
  * `root` (today, and every installation recorded before 5-apps): nothing is
  * added, the container runs as the image's root with Docker's default set.
+ * That is the legacy migration state; an APPROVED root request
+ * (identity/execution.ts) runs as uid 0 with the flags below and no passwd.
  *
  * Any other identity (`runAs: app`, the installation's app uid from the
  * identity registry):
@@ -130,8 +132,19 @@ export interface ContainerIdentityOpts {
   instanceId: string;
 }
 
-/** The `docker run` flags of an app container's identity; empty for root (today). */
+/**
+ * An approved root request (identity/execution.ts): uid 0 and nothing more.
+ * Runtime root never implies privileged mode, a capability, a device, the
+ * Docker socket or host access, so it gets the same no-capability flags as an
+ * app identity; the image's own passwd names root.
+ */
+export function isApprovedRootIdentity(identity: SpawnIdentity | undefined | null): boolean {
+  return !!identity && identity.approvedRoot === true && identity.uid === 0;
+}
+
+/** The `docker run` flags of an app container's identity; empty for legacy root (5-apps migration). */
 export function containerIdentityArgs(identity: SpawnIdentity | undefined, opts?: ContainerIdentityOpts): string[] {
+  if (isApprovedRootIdentity(identity)) return [...processIdentityFlags(identity!), '-e', 'AURA_RUN_AS=root'];
   if (!isNonRootIdentity(identity)) return [];
   if (!opts) throw new Error('a non-root app identity needs its identity files');
   return [
@@ -159,7 +172,10 @@ export interface SidecarIdentitySpec {
 export function sidecarIdentityArgs(
   spec: SidecarIdentitySpec, parent: SpawnIdentity | null | undefined, opts: ContainerIdentityOpts & { baseImage: string },
 ): string[] {
-  if (spec.user || !spec.inheritHome || spec.image !== opts.baseImage || !isNonRootIdentity(parent)) return [];
+  if (spec.user || !spec.inheritHome || spec.image !== opts.baseImage) return [];
+  // The app's own code under an approved root request: uid 0 without capabilities, like the app.
+  if (isApprovedRootIdentity(parent)) return processIdentityFlags(parent!);
+  if (!isNonRootIdentity(parent)) return [];
   return [...processIdentityFlags(parent), ...identityFileMounts(opts.appDataVolume, opts.instanceId)];
 }
 

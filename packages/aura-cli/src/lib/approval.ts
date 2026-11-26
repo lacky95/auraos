@@ -18,7 +18,11 @@ export interface ApprovalView {
   level: 'session' | 'fresh';
   state: ApprovalState;
   expiresAt: number;
-  display: { title: string; details: string[]; requestedBy: string; reason?: string };
+  display: {
+    title: string; details: string[]; requestedBy: string; reason?: string;
+    /** The server's high-risk review (shell lib/approvals/display.ts), printed first. */
+    highRisk?: Array<{ item: string; why: string; added?: boolean }>;
+  };
 }
 
 export const APPROVAL_HEADER = 'X-Aura-Approval';
@@ -64,8 +68,10 @@ export async function operatorCode(subject: string): Promise<string> {
 
 /** The lines the CLI prints for an approval: what the server built, the requester's words labelled. */
 export function approvalLines(v: Pick<ApprovalView, 'display' | 'level'>): string[] {
+  const risks = v.display.highRisk ?? [];
   return [
     v.display.title,
+    ...(risks.length ? ['  HIGH RISK:', ...risks.flatMap((r) => [`    ${r.added ? 'NEW: ' : ''}${r.item}`, `      ${r.why}`])] : []),
     ...v.display.details.map((d) => `  ${d}`),
     `  Requested by: ${v.display.requestedBy}`,
     ...(v.display.reason ? [`  In the requester's own words (not verified): ${v.display.reason}`] : []),

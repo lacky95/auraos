@@ -516,6 +516,21 @@ export const AppManifestSchema = z.object({
    */
   environmentScope: z.enum(['global', 'user']).default('global'),
   /**
+   * A REQUEST for privileged execution (owner decision 2026-11-26, 5-main
+   * item 3; identity/execution.ts): `{ runAs: 'root', reason }` asks for the
+   * app process to run as uid 0. Never a grant: only the owner's explicit
+   * approval at `fresh` (the install or update approval, or `aura admin apps
+   * run-as <app> root`) grants it, bound to this exact config; without it the
+   * app is installed but does not start. Runtime root only: still no
+   * capability (`--cap-drop ALL`), no-new-privileges, no Docker socket, no
+   * device, no host access, so the block takes no other key. PRoot refuses
+   * root. `reason` is the author's own words, shown labelled as such.
+   */
+  execution: z.object({
+    runAs: z.literal('root', { errorMap: () => ({ message: "execution.runAs: only 'root' can be requested (no request runs the app as its own app identity)" }) }),
+    reason: z.string().trim().min(1, { message: 'execution.reason: say why the app needs root' }).max(300),
+  }).strict({ message: 'execution: only runAs and reason. Root never implies privileged mode, capabilities, devices, the Docker socket or host access; those have their own mechanisms (services[] templates with sidecars.privileged)' }).optional(),
+  /**
    * What happens when the user clicks the app icon while at least one instance is already running.
    * Only meaningful for apps where BOTH instanceMode='multi' AND activityMode='multi'.
    * 'new-instance' → always spawn a new backend process (activities opened explicitly via "+ NEW WINDOW")
@@ -892,6 +907,10 @@ export const AppManifestSchema = z.object({
   // A sidecar has no port to fall back on but its template's.
   (m) => m.hosts.every((h) => !h.service || h.port != null || m.services.find((s) => s.name === h.service)?.port != null),
   { message: 'hosts[].port is required when its service template declares no port', path: ['hosts'] },
+).refine(
+  // R2: PRoot runs an app only under its own app identity (a root tracee reaches the master).
+  (m) => !(m.execution && m.sandbox === 'proot'),
+  { message: 'execution.runAs root can\'t run on the proot runtime (it runs apps only under their own app identity): use sandbox container', path: ['execution'] },
 );
 
 export type AppManifest = z.infer<typeof AppManifestSchema>;

@@ -5,6 +5,7 @@
  * themselves are in hostRules.ts.
  */
 import type { NexusSource } from '../nexus/types.js';
+import type { ExecutionApproval } from '../identity/execution.js';
 
 export type AppInstallationState = 'active' | 'reserved' | 'retired';
 
@@ -33,6 +34,14 @@ export interface AppInstallation {
    * which run as `root`. Changed only by the owner (`aura admin apps run-as`).
    */
   runAs?: 'root' | 'app';
+  /**
+   * The owner-approved privileged execution config (identity/execution.ts):
+   * set with `runAs: root` by an approved install/update that binds the
+   * manifest's `execution` request, or by the owner's `run-as root` for an
+   * app that requests it. Absent with `runAs: root`: legacy root, the 5-apps
+   * migration state, never an approved root.
+   */
+  execution?: ExecutionApproval;
   createdAt: number;
   updatedAt: number;
 }

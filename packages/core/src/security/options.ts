@@ -183,6 +183,19 @@ export const SECURITY_OPTIONS: readonly SecurityOption[] = Object.freeze([
     since: '2026-11-26', phase: '5 (P5-3)',
   },
   {
+    id: 'app-root-execution',
+    title: 'Root execution requests of apps',
+    description: 'An app may REQUEST root in its manifest (`execution: { runAs: "root", reason }`). approve (default): you can '
+      + 'approve a request at install or update with your password (the high-risk section of the dialog), or later with '
+      + '`aura admin apps run-as <app> root`; the approval is bound to that installation and that exact config, and an update '
+      + 'that introduces or expands it asks again. Approved root is runtime root only: no capability, no-new-privileges, no '
+      + 'Docker socket, no host access. refuse: no root request runs; such an app is installed but does not start. Either way an '
+      + 'app whose request is not approved does not start (never a silent escalation). Legacy root installations (before 5-apps) '
+      + 'are not affected (owner decision 5-main item 3).',
+    type: 'enum', values: ['approve', 'refuse'], default: 'approve', source: 'policy',
+    restartRequired: false, change: 'fresh', since: '2026-11-26', phase: '5 (5-main, root requests)',
+  },
+  {
     id: PROOT_HOST,
     title: 'PRoot on this host',
     description: 'Whether the proot runtime can run apps at all. true (set in docker-compose): PRoot apps run wrapped in PRoot '

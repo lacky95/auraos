@@ -9,7 +9,7 @@
  * for the same request.
  */
 import { isCredentialName, normaliseInject, SENSITIVE_APPS } from '@aura/core';
-import type { ApprovalDisplay, ApprovalLevel, ApprovalRequester, InstallBinding, PermissionDiff } from '@aura/core';
+import type { ApprovalDisplay, ApprovalLevel, ApprovalRequester, ApprovalRisk, InstallBinding, PermissionDiff } from '@aura/core';
 
 /** Tools and permissions that hand over the host or its container runtime: `fresh` (5.10). */
 const RISKY_TOOLS: ReadonlySet<string> = new Set(['docker', '*']);
@@ -47,9 +47,69 @@ export function requesterReason(raw: unknown): string | undefined {
 
 // ── nexus.install / nexus.update ────────────────────────────────────────────
 
-export function installLevel(binding: InstallBinding): ApprovalLevel {
-  // Stream C: an approval that grants Context keys (secrets) needs the password, like any grant of one.
-  return binding.tools.some(isRiskyTool) || binding.permissions.some(isRiskyPermission) || (binding.context ?? []).length > 0 ? 'fresh' : 'session';
+/**
+ * The high-risk review of an install or update (owner decision 5-main item 3):
+ * every item the manifest and the binding can ask for that hands over root,
+ * the host, secrets, the owner's Terminal, other apps or the network. One
+ * server-built line each (never the requester's wording); any one of them
+ * makes the approval `fresh`. The table is in phase5-rootreq-progress.md and
+ * docs/approvals: keep the three in step.
+ */
+export function installRisks(binding: InstallBinding, diff: PermissionDiff): ApprovalRisk[] {
+  const out: ApprovalRisk[] = [];
+  const newInstall = diff.versionFrom === null;
+  const toolAdded = (t: string) => newInstall || diff.toolsAdded.includes(t);
+  const permAdded = (p: string) => newInstall || diff.permissionsAdded.includes(p);
+  const add = (item: string, why: string, added: boolean) => out.push({ item, why, added });
+
+  const ex = binding.execution;
+  if (ex) {
+    add('Root execution (runAs: root)',
+      ex.renew
+        ? 'It asks to run as root inside its container. Approving grants exactly this request to this installation; '
+          + 'without it the app is installed but does not start. Root here still has no capabilities, no Docker socket and no host access.'
+        : 'It keeps the root execution you approved for this installation (same config). Still no capabilities, no Docker socket, no host access.',
+      ex.renew);
+  }
+  if (SENSITIVE_APPS.has(binding.appId)) {
+    add(`Sensitive app id ${binding.appId}`, 'A copy under this id shadows a built-in app that holds owner powers (Settings, Terminal, Nexus).', newInstall);
+  }
+  for (const t of binding.tools ?? []) {
+    if (t === 'docker') add('Tool: docker', 'Controls the container runtime, which is root on the host.', toolAdded(t));
+    else if (t === '*') add('Tool: * (every tool)', 'Every tool AuraOS can provide, now and later, docker included.', toolAdded(t));
+    else if (t === '#') add('Tool: # (all except the named ones)', 'Every tool AuraOS can provide except those it names, and every tool added later.', toolAdded(t));
+  }
+  for (const p of binding.permissions ?? []) {
+    if (p === 'sidecars.privileged') add(`Permission: ${p}`, 'It may start sidecars with --privileged, added capabilities, devices or host ports.', permAdded(p));
+    else if (p === 'sidecars.anyImage') add(`Permission: ${p}`, 'It may start sidecars from any image, not only its declared templates.', permAdded(p));
+    else if (p.startsWith('terminal.')) add(`Permission: ${p}`, 'Access to your System Terminal: its sessions or what their screens show.', permAdded(p));
+    else if (p.startsWith('notifications.')) add(`Permission: ${p}`, 'Notifications beyond its own: locked, pop-up, blocking system modals or reading other apps\' notifications (once you grant it).', permAdded(p));
+    else if (p.startsWith('system.kv.os.')) add(`Permission: ${p}`, 'Writes OS-wide shared state that other apps and AuraOS read.', permAdded(p));
+    else if (p === 'apps.mount') add(`Permission: ${p}`, 'It may mount other apps\' source and data into its sandbox (writable when a mount is made with --wr).', permAdded(p));
+    else if (p === 'sidecars.mounts') add(`Permission: ${p}`, 'Its sidecars may get other apps\' files mounted at runtime.', permAdded(p));
+    else if (p === 'apps.port') add(`Permission: ${p}`, 'It may pull other apps\' ports onto its loopback and publish its own ports on the host.', permAdded(p));
+  }
+  if ((binding.context ?? []).length) {
+    const added = newInstall ? binding.context : (diff.contextAdded ?? []);
+    add(`Context secrets: ${list(binding.context)}`, 'Approving grants it these Context keys (secrets and variables); an app that holds a value can leak it.', added.length > 0);
+  }
+  const x = binding.exposure;
+  for (const sc of x?.sidecars ?? []) {
+    const what = [
+      sc.privileged ? '--privileged' : '', sc.capabilities.length ? `capabilities ${list(sc.capabilities)}` : '',
+      sc.devices.length ? `devices ${list(sc.devices)}` : '', sc.publish.length ? `host ports ${list(sc.publish)}` : '',
+      sc.dockerSocket ? 'the Docker socket' : '', sc.root ? 'as the image\'s root' : '',
+    ].filter(Boolean).join(', ');
+    add(`Sidecar ${sc.name} (${sc.image})`, `A sidecar template with ${what}: host privileges beyond an app container.`, newInstall);
+  }
+  if (x?.hostPublish.length) add(`Host ports: ${x.hostPublish.join(', ')}`, 'Publishes its ports on the host (127.0.0.1) at every start.', newInstall);
+  if (x?.portExposes.length) add(`Other apps' ports: ${list(x.portExposes)}`, 'Pulls these apps\' ports onto its loopback at every start.', newInstall);
+  return out;
+}
+
+/** Any high-risk item, or a Context grant, needs the password (D9, 5-main item 3). */
+export function installLevel(binding: InstallBinding, diff: PermissionDiff): ApprovalLevel {
+  return installRisks(binding, diff).length > 0 || (binding.context ?? []).length > 0 ? 'fresh' : 'session';
 }
 
 export function installDisplay(binding: InstallBinding, diff: PermissionDiff, requestedBy: string): ApprovalDisplay {
@@ -68,6 +128,7 @@ export function installDisplay(binding: InstallBinding, diff: PermissionDiff, re
     details.push('Replaces the installed source with this prepared tree; the previous tree is kept for rollback.');
   }
   if (binding.identity) details.push(`Identity: ${binding.identity.action}${binding.identity.appId ? ` as ${binding.identity.appId}` : ''}`);
+  if (binding.execution) details.push(`Root execution request: ${binding.execution.digest}${binding.execution.renew ? ' (needs your approval now)' : ' (already approved)'}`);
   if (diff.toolsAdded.length) details.push(`Tools it gains: ${list(diff.toolsAdded)}`);
   if (diff.permissionsAdded.length) details.push(`Permissions it gains: ${list(diff.permissionsAdded)}`);
   if (diff.dataProviderAdded) details.push('Exposes data other apps can read');
@@ -78,10 +139,14 @@ export function installDisplay(binding: InstallBinding, diff: PermissionDiff, re
   details.push(`All tools: ${binding.tools.length ? list(binding.tools) : 'none'}`);
   details.push(`All permissions: ${binding.permissions.length ? list(binding.permissions) : 'none'}`);
   if ((binding.context ?? []).length) details.push(`All Context keys: ${list(binding.context)}`);
-  if (binding.tools.includes('docker')) details.push('Warning: docker controls the container runtime, which is root on the host.');
-  else if (binding.tools.includes('*')) details.push('Warning: * grants every tool AuraOS can provide.');
-  if (binding.permissions.some(isRiskyPermission)) details.push('Warning: it may start privileged or arbitrary sidecar images.');
-  return { title: clip(title), details: details.map((d) => clip(d)), requestedBy };
+  const risks = installRisks(binding, diff);
+  // The app author's words for its root request: only as the labelled reason, never as AuraOS's text.
+  const reason = binding.execution ? requesterReason(binding.execution.reason) : undefined;
+  return {
+    title: clip(title), details: details.map((d) => clip(d)), requestedBy,
+    ...(risks.length ? { highRisk: risks.map((r) => ({ item: clip(r.item, 160), why: clip(r.why), added: r.added })) } : {}),
+    ...(reason ? { reason } : {}),
+  };
 }
 
 // ── app.patch.activate / app.source.open (Track P, D9) ──────────────────────
@@ -94,7 +159,7 @@ export function installDisplay(binding: InstallBinding, diff: PermissionDiff, re
 export function patchLevel(appId: string, binding: InstallBinding, diff: PermissionDiff): ApprovalLevel {
   const changes = diff.toolsAdded.length + diff.toolsRemoved.length + diff.permissionsAdded.length + diff.permissionsRemoved.length
     + (diff.contextAdded ?? []).length > 0;
-  return SENSITIVE_APPS.has(appId) || changes ? 'fresh' : installLevel(binding);
+  return SENSITIVE_APPS.has(appId) || changes ? 'fresh' : installLevel(binding, diff);
 }
 
 /** Opening an app's source: one click, the password for a sensitive app. */

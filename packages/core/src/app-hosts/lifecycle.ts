@@ -18,6 +18,7 @@ import { APP_HOST_DEFAULT_USER, sameAppSource, type AppHostStore } from './AppHo
 import { manifestHostClaim, type ManifestHostGuard } from './manifestHostGuard.js';
 import { isProtectedHostName } from './hostRules.js';
 import { newInstallationRunAs } from '../identity/types.js';
+import type { ExecutionApproval } from '../identity/execution.js';
 
 export interface AppIdentityFacts {
   appId: string;
@@ -155,6 +156,26 @@ export class AppHostLifecycle {
     }
     await this.acceptManifestHosts(app.appId, manifestHosts);
     await this.sync(app);
+  }
+
+  /** The app's active installation in this scope, or null (what an install's execution binding compares with). */
+  async installationOf(appId: string, scope: ScopeId): Promise<AppInstallation | null> {
+    const i = await this.registry.findInstallation(appId, scope);
+    return i && i.state === 'active' ? i : null;
+  }
+
+  /**
+   * An approved install or update bound this root request (identity/
+   * execution.ts): the installation runs as root with exactly this config.
+   * The same digest already approved stays as it was (the update keeps it).
+   */
+  async approveExecution(appId: string, scope: ScopeId, approval: ExecutionApproval): Promise<AppInstallation> {
+    const i = await this.registry.findInstallation(appId, scope);
+    if (!i || i.state !== 'active') throw new Error(`${appId} has no active installation to record its root approval on`);
+    if (i.runAs === 'root' && i.execution?.digest === approval.digest) return i;
+    const r = await this.registry.setRunAs(i.installationId, 'root', undefined, approval);
+    if (!r.ok || !r.installation) throw new Error(`${appId}: its installation record changed while recording the root approval`);
+    return r.installation;
   }
 
   /** Keep-data uninstall. */

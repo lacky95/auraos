@@ -119,6 +119,20 @@ export interface ApprovalDisplay {
    * under a label saying so; they never replace `title` or `details`.
    */
   reason?: string;
+  /**
+   * What is high risk in it (the install dialog's review, shell
+   * lib/approvals/display.ts `installRisks`): one server-built line each,
+   * shown first and prominently. Never the requester's wording.
+   */
+  highRisk?: ApprovalRisk[];
+}
+
+/** One high-risk item of an approval: what, and why it is dangerous, in one line. */
+export interface ApprovalRisk {
+  item: string;
+  why: string;
+  /** New with this request (an install, or added by this update). */
+  added: boolean;
 }
 
 export interface ApprovalRecord {

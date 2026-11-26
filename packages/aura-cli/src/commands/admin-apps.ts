@@ -18,6 +18,8 @@ interface ReviewRow {
   identity: { uid: number; gid: number } | null; verdict: string; elevated: string[]; mismatched: string[];
   migration: { wave: number | string; expect: string; note: string } | null;
   instances: Array<{ instanceId: string; uid: number | null }>;
+  /** app | session-host | approved-root | legacy-root | not-approved | unrecorded (owner decision 5-main item 3). */
+  execution?: string;
   lastAppStart?: { at: string; ok: boolean; error?: string };
 }
 interface Review { rows: ReviewRow[]; summary: Record<string, number> }
@@ -35,6 +37,7 @@ function refusal(err: unknown): string {
 
 const VERDICT: Record<string, (s: string) => string> = {
   app: color.green, ready: (s) => s, 'needs-review': color.yellow, blocked: color.yellow, root: color.dim,
+  'approved-root': color.yellow, 'not-approved': color.red,
 };
 
 export function registerAdminApps(admin: Command): void {

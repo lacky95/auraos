@@ -1,6 +1,6 @@
 /** Public surface of the Nexus distribution layer. */
 export * from './types.js';
-export { computePermissionDiff, diffRequiresApproval, renderDiffPlainText } from './PermissionDiff.js';
+export { computePermissionDiff, diffRequiresApproval, installExposure, renderDiffPlainText } from './PermissionDiff.js';
 export { validateStagedDir, NexusValidationError } from './Validator.js';
 export { Resolver } from './Resolver.js';
 export { IndexClient } from './IndexClient.js';

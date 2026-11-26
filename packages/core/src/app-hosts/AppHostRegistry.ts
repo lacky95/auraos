@@ -18,6 +18,7 @@
  * a retired name can't be allocated again.
  */
 import { randomUUID } from 'node:crypto';
+import type { ExecutionApproval } from '../identity/execution.js';
 import type { Redis } from '@aura/kv-store';
 import type {
   AllocateAppHostInput, AppHostLabelTombstone, AppHostRecord, AppHostRegistry, AppHostResolution,
@@ -133,8 +134,10 @@ export interface AppHostStore extends AppHostRegistry {
    * The owner's runAs flip of one installation (P5-3), compare-and-set.
    * `expect` is the runAs the caller decided on (absent counts as `root`):
    * a changed record is refused (`{ ok: false }`), never overwritten.
+   * `execution` (only with `root`): the approved privileged execution config
+   * it records; `app`, or `root` without it, removes any (identity/execution.ts).
    */
-  setRunAs(installationId: string, runAs: 'root' | 'app', expect?: 'root' | 'app'): Promise<{ ok: boolean; installation: AppInstallation | null }>;
+  setRunAs(installationId: string, runAs: 'root' | 'app', expect?: 'root' | 'app', execution?: ExecutionApproval): Promise<{ ok: boolean; installation: AppInstallation | null }>;
   /** `null` until the first boot migration recorded them. */
   getKnownManifestHosts(): Promise<Set<string> | null>;
   addKnownManifestHosts(claims: readonly string[]): Promise<void>;
@@ -264,13 +267,18 @@ export function createAppHostRegistry(kv: Redis | (() => Redis), opts: AppHostRe
       });
     },
 
-    async setRunAs(id, runAs, expect) {
+    async setRunAs(id, runAs, expect, execution) {
       if (runAs !== 'root' && runAs !== 'app') throw new Error(`invalid runAs '${String(runAs)}'`);
+      if (execution && (runAs !== 'root' || execution.runAs !== 'root' || !/^sha256:[0-9a-f]{64}$/.test(execution.digest))) {
+        throw new Error('invalid execution approval');
+      }
       const cur = await readInstallation(id);
       if (!cur) return { ok: false, installation: null };
       if (expect !== undefined && (cur.value.runAs ?? 'root') !== expect) return { ok: false, installation: cur.value };
-      if ((cur.value.runAs ?? 'root') === runAs && cur.value.runAs !== undefined) return { ok: true, installation: cur.value };
-      const next: AppInstallation = { ...cur.value, runAs, updatedAt: now() };
+      const sameExecution = (cur.value.execution?.digest ?? null) === (execution?.digest ?? null);
+      if ((cur.value.runAs ?? 'root') === runAs && cur.value.runAs !== undefined && sameExecution) return { ok: true, installation: cur.value };
+      const { execution: _old, ...rest } = cur.value;
+      const next: AppInstallation = { ...rest, runAs, ...(execution ? { execution } : {}), updatedAt: now() };
       const ok = await commit(
         [{ key: installKey(id), expect: cur.raw }],
         [{ op: 'set', key: installKey(id), value: JSON.stringify(next) }],

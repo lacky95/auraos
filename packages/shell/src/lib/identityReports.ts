@@ -189,6 +189,11 @@ export async function privilegeReview(): Promise<core.PrivilegeReview> {
       instances: instances.filter((i) => i.appId === m.id && !i.inPool)
         .map((i) => ({ instanceId: i.instanceId, uid: typeof i.uid === 'number' ? i.uid : null })),
       ...(last ? { lastAppStart: last } : {}),
+      rootRequest: (() => {
+        const c = core.executionConfigOf(m);
+        return c ? { digest: core.executionDigest(c), reason: String((m as { execution?: { reason?: string } }).execution?.reason ?? '') } : null;
+      })(),
+      rootApproval: inst?.execution ?? null,
     });
   }
   return core.buildPrivilegeReview(inputs);

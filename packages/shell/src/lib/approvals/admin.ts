@@ -22,7 +22,7 @@
  */
 import * as core from '@aura/core';
 import type { APIContext } from 'astro';
-import type { AccessPrincipal, ApprovalAction, ApprovalLevel, ChangeAttribution } from '@aura/core';
+import type { AccessPrincipal, ApprovalAction, ApprovalLevel, ApprovalRisk, ChangeAttribution } from '@aura/core';
 import { authenticate } from '../auth.ts';
 import { bearerToken, type CallerPrincipal } from '../access/identify.ts';
 import { shellOwner } from '../appHostHandoff.ts';
@@ -43,6 +43,10 @@ export interface AdminRequest {
   /** For the dialog, from the validated request: "Grant io.lakner.terminalx terminal.screen.read". */
   title: string;
   details?: readonly string[];
+  /** Server-built high-risk lines, shown first (e.g. approving an app's root request, lib/appRunAs.ts). */
+  highRisk?: readonly ApprovalRisk[];
+  /** An app's own words that go with it (its manifest's reason), shown only under the dialog's label. */
+  reason?: string;
   /**
    * The owner's desktop session alone is not enough: the change is confirmed
    * in the shell's approval dialog (Settings) or by the host operator.
@@ -125,7 +129,11 @@ async function approvedRequest(
   }
   return gate.needsApproval({
     action: req.action, payload: req.payload, level: req.level,
-    display: (by) => adminDisplay(req.title, req.details ?? [], by),
+    display: (by) => ({
+      ...adminDisplay(req.title, req.details ?? [], by),
+      ...(req.highRisk?.length ? { highRisk: [...req.highRisk] } : {}),
+      ...(req.reason ? { reason: req.reason } : {}),
+    }),
   });
 }
 
