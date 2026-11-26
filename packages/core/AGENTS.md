@@ -51,7 +51,7 @@ presentation-contracts: theme layout keymap
 - **Platform services** may use kernel contracts; kernel sectors reach them only through a contract that is handed in.
 - **Core never imports** `@aura/shell`, `@aura/ui`, `@aura/app-sdk`, `@aura/cli`, Astro, React or socket.io.
 
-**Enforced by `pnpm arch`:** `core-cycle`, `core-module-cycle`, `core-forbidden`, `foundation-leaf` and `kernel-presentation`. Planned rules, each with a baseline: `contract-leaf` and `runtime-no-bus` (5b), `core-deep-import` and `event-owner` (Phase 7), `kv-owner` (Phase 7–8).
+**Enforced by `pnpm arch`:** `core-cycle`, `core-module-cycle`, `core-forbidden`, `foundation-leaf`, `kernel-presentation` and `agent-agnostic`. Planned rules, each with a baseline: `contract-leaf` and `runtime-no-bus` (5b), `core-deep-import` and `event-owner` (Phase 7), `kv-owner` (Phase 7–8).
 
 ## Public contract
 
@@ -86,6 +86,7 @@ Add no new one. From Phase 6, `bootSystem()` creates them in one place.
 - **Workload identity comes from the token,** never from the network address (D89). The kernel mints the token on every spawn.
 - **The kernel reports runtime exits** (`app:crashed`, `app:stateChanged`); a runtime never emits on the bus (G1).
 - **No local assumption is added** where D85 keeps multi-system open: `systemId` stays on records, refs are qualified.
+- **Agent-agnostic:** kernel contracts and code never name an agent product (`claude`, `codex`, `.claude`, `CODEX_HOME`, `config.toml`, ...). An app or adapter supplies product specifics as data or through a generic contract; the kernel keeps authorization and enforcement.
 
 ## Known debt (`tools/dep-baseline.json`; each entry has an owner, and it must shrink)
 
@@ -100,6 +101,7 @@ Add no new one. From Phase 6, `bootSystem()` creates them in one place.
 | `AppManager → keymap/KeymapRegistry` (kernel uses presentation) | Phase 8 (AppManager decomposition) |
 | Arriving with 5-main: `AppManager ↔ auth/services` (stream A's dynamic import) | 5b K |
 | Arriving with 5-main: `runtimes/builtins → app-manager/ProotRunner` (R2) | 5b CR, PR |
+| `agent-agnostic` hits: home seeder, home import markers, privilege notes (audit #2, #10/#11); the `claude-code` alias (#5) | 5b; Phase 6 |
 
 **Phase 8 (committed):** AppManager is decomposed behind a compatibility facade into real modules. Each gets its own responsibility, state, contract and tests: activities and navigation, the service supervisor, previews, build and tools.
 

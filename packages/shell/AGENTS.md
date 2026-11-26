@@ -7,7 +7,7 @@ The principles are in the root `AGENTS.md`. This package holds two layers outsid
 | **Server** | `src/pages/api/**` (166 routes), `src/middleware.ts`, `server/*.mjs` (App Host gateway, WS proxy, socket.io `/os-events`, SSE mux), `server.mjs`, `astro.config.mjs`, and the `src/lib/**` files they reach | transport, plus enforcement at the edge. It calls the kernel; it doesn't own kernel state |
 | **Web Shell** | `src/pages/*.astro` (desktop pages), `src/components/**`, `src/layouts/**`, `src/stores/**`, and the `src/lib/**` files only they reach | presentation; one client among several |
 
-## Rules (enforced: `server-webshell`, `package-internals`)
+## Rules (enforced: `server-webshell`, `package-internals`, `agent-agnostic`)
 
 - **The server layer never imports Web Shell code** (components, layouts, stores, desktop pages) or UI libraries (React, `@aura/ui`, nanostores, `socket.io-client`).
   - The one baselined exception: `astro.config.mjs` always loads `@astrojs/react`. Phase 6 W fixes it with `AURA_COMPOSITION=server`.
@@ -24,6 +24,7 @@ The principles are in the root `AGENTS.md`. This package holds two layers outsid
   - `lib/desktopSession.ts` respawns PRoot instances (5b RS).
 - **Until Phase 6, `middleware.ts` is the kernel's init owner.** Phase 6 K moves init into core `bootSystem()`, and the middleware then waits for readiness. Don't add init steps here; register server-layer hooks instead (Phase 6, `lib/bootHooks.ts`).
 - **No new `globalThis` or `Symbol.for()` state.** There are already about 35 files with it.
+- **Agent-agnostic server layer:** `src/lib` and `server/` never name an agent product in code; the Terminal app (or another adapter) owns product strings and hands the shell generic data. Baselined debt: the agent-hooks approval text and route notes (audit #1, 5b), onboarding probes and `terminalScreen.ts` banner scraping (#4, #6, Phase 6).
 - **The access policy for every `/api` route** lives in `src/lib/access` (see its `AGENTS.md`). A new route needs a manifest row, or it is denied.
 
 ## Tests

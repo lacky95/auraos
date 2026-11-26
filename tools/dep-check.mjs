@@ -40,6 +40,7 @@ const RULES = {
   'server-webshell': 'The server layer of @aura/shell (API routes, middleware, server/, and the lib modules they reach) never imports Web Shell code (components, layouts, stores, desktop pages) or UI libraries.',
   'foundation-leaf': 'Foundation modules of @aura/core (sector map in packages/core/AGENTS.md) import no other sector at runtime, except the barrel (src/index.ts) and the composition root (src/system/bootstrap.ts).',
   'kernel-presentation': 'Kernel sectors never import presentation-contract modules (theme, layout, keymap) at runtime.',
+  'agent-agnostic': 'Agent-aware but agent-agnostic (owner, philosophy audit): no product-specific agent knowledge (claude, codex, anthropic, openai, .claude/.codex paths, CLAUDE_CONFIG_DIR, CODEX_HOME, config.toml) in the code of @aura/core src or the shell server infrastructure (src/lib, server/); it belongs in apps, adapters, the home seed, docs and tests. Comments and the AGENTS.md/CLAUDE.md file convention do not count.',
   'agents-docs': 'Every AGENTS.md has a sibling CLAUDE.md that is exactly `@AGENTS.md`; the chain of AGENTS.md files from the root to any directory stays under 28 KiB (Codex stops adding files at project_doc_max_bytes, 32 KiB by default); the sector map in packages/core/AGENTS.md names every core module exactly once.',
 };
 
@@ -370,6 +371,23 @@ if (existsSync(kernelDoc)) {
       if (sa === 'foundation' && sb !== 'foundation' && !COMPOSITION_EXEMPT.has(e.from)) add('foundation-leaf', `${e.from} -> ${e.to}`, { from: e.from, line: e.line, detail: `${a} (foundation) imports ${b} (${sb})` });
       if (KERNEL_SECTORS.has(sa) && sb === 'presentation-contracts' && !COMPOSITION_EXEMPT.has(e.from)) add('kernel-presentation', `${e.from} -> ${e.to}`, { from: e.from, line: e.line, detail: `${a} (${sa}) imports ${b}` });
     }
+  }
+}
+
+// ── agent-agnostic (owner decision, philosophy audit 2026-11-26) ───────────────
+// Code only (comments blanked by stripComments; strings count, they are behaviour). One entry per file and term.
+const AGENT_TERMS = /(?<![A-Za-z0-9_])(claude-code|claude|codex|anthropic|openai|CLAUDE_CONFIG_DIR|CODEX_HOME|config\.toml)(?![A-Za-z0-9_])/gi;
+const AGENT_SCOPE = (r) => /^core\/src\//.test(r) || /^shell\/(src\/lib|server)\//.test(r);
+const AGENT_ALLOW = (r) => /(^|\/)adapters\//.test(r);
+for (const f of files.values()) {
+  if (!AGENT_SCOPE(f.rel) || AGENT_ALLOW(f.rel)) continue;
+  const code = stripComments(readFileSync(f.path, 'utf8')).replace(/CLAUDE\.md/g, '');
+  const seen = new Set();
+  for (const m of code.matchAll(AGENT_TERMS)) {
+    const term = m[1].toLowerCase();
+    if (seen.has(term)) continue;
+    seen.add(term);
+    add('agent-agnostic', `${f.rel} -> ${term}`, { from: f.rel, line: code.slice(0, m.index).split('\n').length, detail: `product name '${m[1]}' in kernel or shell infrastructure code` });
   }
 }
 

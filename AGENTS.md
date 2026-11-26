@@ -54,6 +54,7 @@ Simple by default. Modular by design. Replaceable by contract. Language-independ
 11. **Explicit composition:** wiring happens in one composition root (`bootSystem()`, Phase 6), not inside domain modules.
 12. **Security, authorization and lifecycle invariants are preserved** by every change; a refactor never weakens one.
 13. **Shared foundations stay minimal:** types, logger, the bus primitive, error codes. No grab-bag.
+14. **Agent-aware but agent-agnostic (owner):** product knowledge (Claude, Codex, their paths, env vars and config formats) belongs in apps, integrations and adapters (the home seed, `.aura/adapters/`, the Terminal's hook writer), never in generic kernel contracts or shell infrastructure. Adding a new agent, app or service must not need a kernel or shell change. Reuse the existing mechanisms (Interface Registry, capability registry, approvals, home seed); no speculative adapter framework. `pnpm arch` rule `agent-agnostic`.
 
 ## Replaceability and language independence
 
