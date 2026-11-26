@@ -54,16 +54,17 @@ const APP = { uid: 200_007, gid: 200_007, range: 'app' };
 
 // ── the installation record ─────────────────────────────────────────────────
 
-test('runAs: new installations start as app, built-in ones as root; old records have none (root)', async () => {
-  assert.equal(newInstallationRunAs('global'), 'app');
-  assert.equal(newInstallationRunAs('user'), 'app');
+test('runAs: new installations start as root (no automatic switch, D95 1); old records have none (root)', async () => {
+  assert.equal(newInstallationRunAs('global'), 'root');
+  assert.equal(newInstallationRunAs('user'), 'root');
   assert.equal(newInstallationRunAs('system'), 'root');
   const reg = createAppHostRegistry(r);
   const life = new AppHostLifecycle(reg);
   const g = (await life.sync({ appId: 'org.a.notes', originId: null, scope: 'global', source: SRC })).installation;
   const s = (await life.sync({ appId: 'com.aura.counter', originId: null, scope: 'system', source: { kind: 'system', ref: 'com.aura.counter' } })).installation;
-  assert.equal(g.runAs, 'app');
+  assert.equal(g.runAs, 'root');
   assert.equal(s.runAs, 'root');
+  await reg.setRunAs(g.installationId, 'app', 'root');
   const old = await reg.createInstallation({ appId: 'org.a.old', originId: null, scope: 'global', source: SRC });
   assert.equal(old.runAs, undefined, 'a record written without it (before 5-apps) stays without it');
   // An update of the same installation keeps its runAs.

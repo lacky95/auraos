@@ -160,13 +160,13 @@ export type AppRunAs = 'root' | 'app';
 export const APP_RUN_AS_VALUES: readonly AppRunAs[] = ['root', 'app'];
 
 /**
- * The runAs of a NEW installation (5-apps): every installed app starts as
- * `app`; the built-in apps a fresh system records at first boot start as
- * `root` and are flipped by the owner per wave, until 5-main makes `app` the
- * default for all.
+ * The runAs of a NEW installation: `root`, for every scope. No app is switched
+ * to its app identity automatically (owner decision D95 1): each switch is the
+ * owner's explicit flip (`aura admin apps run-as <app> app`) with its own
+ * validation and rollback. (`scope` stays for the later per-scope default.)
  */
-export function newInstallationRunAs(scope: string): AppRunAs {
-  return scope === 'system' ? 'root' : 'app';
+export function newInstallationRunAs(_scope: string): AppRunAs {
+  return 'root';
 }
 
 /** Today's behaviour: every app process is root. */
