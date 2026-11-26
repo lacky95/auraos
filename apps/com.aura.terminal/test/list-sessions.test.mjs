@@ -140,8 +140,8 @@ test('list_sessions: compact rows keep today\'s names, verbose keeps every field
   assert.equal(hits['-3'], 1);
 });
 
-test('OS API calls carry the instance token; calls through the proxy never do', async () => {
+test('OS API calls and calls through the proxy carry the instance token (D89: the shell judges by it and strips it)', async () => {
   await router.listAll({ includePaused: true });
   assert.deepEqual([...auth.os], ['Bearer aura1.term.token']);
-  assert.deepEqual([...auth.proxy], [null]);
+  assert.deepEqual([...auth.proxy], ['Bearer aura1.term.token']);
 });

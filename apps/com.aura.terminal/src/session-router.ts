@@ -44,12 +44,21 @@ export function proxyUrl(instanceId: string, path: string): string {
 /**
  * A call to the OS API itself, as this instance: it carries
  * AURA_INSTANCE_TOKEN (the SDK's `osAuthHeaders`, which never adds it to a
- * proxied path, so `remoteJson` below stays tokenless: the proxy would hand
- * the token to the other instance).
+ * proxied path).
  */
 function osFetch(path: `/${string}`, init: RequestInit = {}): Promise<Response> {
   const url = `${OS_BASE}${path}`;
   return fetch(url, { ...init, headers: { ...(init.headers as Record<string, string> | undefined), ...osAuthHeaders(url) } });
+}
+
+/**
+ * This instance's token for a call through the OS proxy to another Terminal
+ * instance. The shell judges the caller by it (an owner agent's upstream takes
+ * no address-only caller, D89 B3) and strips it before the upstream (B2).
+ */
+function proxyAuth(): Record<string, string> {
+  const token = process.env['AURA_INSTANCE_TOKEN'];
+  return token ? { authorization: `Bearer ${token}` } : {};
 }
 
 /**
@@ -61,7 +70,7 @@ export async function remoteJson<T>(instanceId: string, path: string, init: Requ
   const { timeoutMs = 10_000, ...rest } = init;
   let res: Response;
   try {
-    res = await fetch(proxyUrl(instanceId, path), { ...rest, signal: AbortSignal.timeout(timeoutMs) });
+    res = await fetch(proxyUrl(instanceId, path), { ...rest, headers: { ...(rest.headers as Record<string, string> | undefined), ...proxyAuth() }, signal: AbortSignal.timeout(timeoutMs) });
   } catch (err) {
     throw new SessionError(502, 'unreachable', `${instanceId}: ${(err as Error).message}`,
       'The instance did not answer — it may be restarting. Retry in ~3 s; do NOT open a new instance.', 3_000);

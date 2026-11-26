@@ -872,7 +872,17 @@ test('stripShellCredentials: bearers', () => {
     assert.equal(stripShellCredentials(new Headers({ authorization: `Bearer ${token}` }), 'data').get('authorization'), null);
     assert.equal(stripShellCredentials(new Headers({ authorization: `bearer  ${token}` }), 'data').get('authorization'), null);
   }
-  for (const value of ['Bearer aura1.a.b', 'Bearer aura_k1_x', 'Bearer app-token', 'Basic Zm9v']) {
+  // D89 B2: instance tokens and API keys never reach an app either; the app's own auth does.
+  for (const token of ['aura1.a.b', 'aura_k1_x']) {
+    for (const surface of ['proxy-http', 'ws-proxy', 'app-hosts-http', 'data']) {
+      assert.equal(stripShellCredentials(new Headers({ authorization: `Bearer ${token}` }), surface).get('authorization'), null, `${token} ${surface}`);
+    }
+    assert.deepEqual(stripShellCredentials(['Authorization', `bearer ${token}`, 'X-App', 'k'], 'app-hosts-upgrade'), ['X-App', 'k']);
+    const obj: Record<string, unknown> = { authorization: `Bearer ${token}` };
+    stripShellCredentials(obj, 'ws-proxy');
+    assert.deepEqual(obj, {});
+  }
+  for (const value of ['Bearer app-token', 'Bearer aura1x', 'Basic Zm9v']) {
     assert.equal(stripShellCredentials(new Headers({ authorization: value }), 'data').get('authorization'), value);
   }
 });
@@ -891,7 +901,7 @@ test('stripShellCredentials: each header form', () => {
   assert.equal(h.get('x-app'), 'keep');
 });
 
-test('stripShellCredentials counts what it removes and what it forwards', () => {
+test('stripShellCredentials counts what it removes', () => {
   const prev = g[BRIDGE];
   const counted: string[] = [];
   g[BRIDGE] = { countCredential: (k: string, s: string) => counted.push(`${k}|${s}`) };
@@ -901,7 +911,7 @@ test('stripShellCredentials counts what it removes and what it forwards', () => 
     stripShellCredentials(new Headers({ authorization: 'Bearer aura-admin1.x' }), 'ws-proxy');
     stripShellCredentials(new Headers({ cookie: 'aura_session=x' }), 'proxy-http');
     assert.deepEqual(counted, [
-      'forwarded-instance-token|data', 'forwarded-api-key|data', 'stripped-admin-bearer|ws-proxy', 'stripped-session-cookie|proxy-http',
+      'stripped-instance-token|data', 'stripped-api-key|data', 'stripped-admin-bearer|ws-proxy', 'stripped-session-cookie|proxy-http',
     ]);
   } finally {
     if (prev) g[BRIDGE] = prev; else delete g[BRIDGE];
