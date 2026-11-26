@@ -118,7 +118,6 @@ export interface ResolvedSidecarSpec {
    * container. Present only when set, like `inheritHome`.
    */
   ownTools?: true;
-  inheritDockerSocket: boolean;
   mounts: { own: boolean; inherit: boolean; exclude: string[]; forceRo: boolean };
 }
 
@@ -133,8 +132,6 @@ export interface ResolveContext {
   appDataVolume: string;
   /** Does the pre-`.sidecars` per-app volume `aura-<appId>-<vol>` exist? (SDK precedence) */
   legacyVolumeExists: (name: string) => boolean;
-  /** Does the app's own tools[] grant docker? */
-  hasDockerTool: boolean;
 }
 
 export class SpecError extends Error {
@@ -280,7 +277,6 @@ export function resolveSidecarSpec(req: SidecarSpawnRequest, ctx: ResolveContext
     inheritTools: tpl.inheritTools === true,
     ...(tpl.inheritHome ? { inheritHome: true as const } : {}),
     ...(tpl.tools ? { ownTools: true as const } : {}),
-    inheritDockerSocket: false, // refused above (J.7); the field stays until SidecarManager (stream C) drops it
     mounts,
   };
 }
@@ -296,5 +292,8 @@ function canonical(v: unknown): string {
 
 /** Identity of a resolved spec: equal hash → the running container can be adopted as-is. */
 export function specHash(spec: ResolvedSidecarSpec): string {
-  return createHash('sha256').update(canonical(spec)).digest('hex').slice(0, 16);
+  // `inheritDockerSocket: false` was part of every spec before the socket
+  // went (J.7, stream C): hashed as before, so no existing sidecar is
+  // recreated just because the field is gone.
+  return createHash('sha256').update(canonical({ ...spec, inheritDockerSocket: false })).digest('hex').slice(0, 16);
 }

@@ -48,7 +48,8 @@ export function requesterReason(raw: unknown): string | undefined {
 // ── nexus.install / nexus.update ────────────────────────────────────────────
 
 export function installLevel(binding: InstallBinding): ApprovalLevel {
-  return binding.tools.some(isRiskyTool) || binding.permissions.some(isRiskyPermission) ? 'fresh' : 'session';
+  // Stream C: an approval that grants Context keys (secrets) needs the password, like any grant of one.
+  return binding.tools.some(isRiskyTool) || binding.permissions.some(isRiskyPermission) || (binding.context ?? []).length > 0 ? 'fresh' : 'session';
 }
 
 export function installDisplay(binding: InstallBinding, diff: PermissionDiff, requestedBy: string): ApprovalDisplay {
@@ -71,10 +72,12 @@ export function installDisplay(binding: InstallBinding, diff: PermissionDiff, re
   if (diff.permissionsAdded.length) details.push(`Permissions it gains: ${list(diff.permissionsAdded)}`);
   if (diff.dataProviderAdded) details.push('Exposes data other apps can read');
   if (diff.intentFiltersAdded.length) details.push(`New intent filters: ${list(diff.intentFiltersAdded)}`);
+  if ((diff.contextAdded ?? []).length) details.push(`Context keys it may read (granted with this approval): ${list(diff.contextAdded)}`);
   if (diff.toolsRemoved.length) details.push(`Tools it gives up: ${list(diff.toolsRemoved)}`);
   if (diff.permissionsRemoved.length) details.push(`Permissions it gives up: ${list(diff.permissionsRemoved)}`);
   details.push(`All tools: ${binding.tools.length ? list(binding.tools) : 'none'}`);
   details.push(`All permissions: ${binding.permissions.length ? list(binding.permissions) : 'none'}`);
+  if ((binding.context ?? []).length) details.push(`All Context keys: ${list(binding.context)}`);
   if (binding.tools.includes('docker')) details.push('Warning: docker controls the container runtime, which is root on the host.');
   else if (binding.tools.includes('*')) details.push('Warning: * grants every tool AuraOS can provide.');
   if (binding.permissions.some(isRiskyPermission)) details.push('Warning: it may start privileged or arbitrary sidecar images.');
@@ -89,7 +92,8 @@ export function installDisplay(binding: InstallBinding, diff: PermissionDiff, re
  * and for Docker or every tool.
  */
 export function patchLevel(appId: string, binding: InstallBinding, diff: PermissionDiff): ApprovalLevel {
-  const changes = diff.toolsAdded.length + diff.toolsRemoved.length + diff.permissionsAdded.length + diff.permissionsRemoved.length > 0;
+  const changes = diff.toolsAdded.length + diff.toolsRemoved.length + diff.permissionsAdded.length + diff.permissionsRemoved.length
+    + (diff.contextAdded ?? []).length > 0;
   return SENSITIVE_APPS.has(appId) || changes ? 'fresh' : installLevel(binding);
 }
 

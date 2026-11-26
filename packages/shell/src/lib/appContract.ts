@@ -10,12 +10,12 @@
  *                                      and with `?datadir=1` the writes outside
  *                                      its dataDir
  *
- * Phase 3 backs `context.get` with today's one global Context, limited to the
- * keys the app declares in `context[]`, plus (D56) the credentials of the
- * caller's user vault its app was granted `credential.read:<KEY>` for. Phase 5 changes only what sits behind
- * it (Context granted per app and user). Nothing here changes enforcement
- * beyond Phase 3a: an undeclared key is a new API's refusal, every other
- * undeclared use is reported only.
+ * `context.get` follows the one rule of the spawn env (Phase 5 stream C,
+ * core context/grantedContext.ts): a key the app declares in `context[]` AND
+ * holds: from the vault of the user the instance acts for (`credential.read`,
+ * D56), else from the system Context (`context.read:<KEY>`). An undeclared
+ * key is refused (and counted in the access report); a declared one the
+ * owner has not granted is refused too, naming the grant.
  */
 import * as core from '@aura/core';
 import type { AppManifest, ContextStore } from '@aura/core';
@@ -38,13 +38,9 @@ export interface ContextReadDeps {
   resolve(request: Request): Promise<ResolvedPrincipal>;
   /** The app's manifest `context[]`, undefined for an unknown app. */
   declared(appId: string): readonly string[] | undefined;
-  read(key: string): Promise<string | null>;
+  /** The granted-Context lookups (core `liveGrantedContextDeps`). */
+  context: core.GrantedContextDeps;
   signal(signal: ContractSignal, appId: string): void;
-  /**
-   * D56: a credential in the vault of the user the instance acts for, when
-   * its app holds the owner's `credential.read:<KEY>` grant; else null.
-   */
-  vault?(instance: core.InstancePrincipal, key: string): Promise<string | null>;
 }
 
 /**
@@ -61,35 +57,42 @@ export async function readContext(request: Request, key: string | undefined, dep
     return reply({ error: 'server-only', message: 'Context values go only to an app\'s own server, with its instance token (osClient.context.get).' },
       p.kind === 'anonymous' ? 401 : 403);
   }
-  // A granted vault credential (D56): the owner's grant to this app stands in for the declaration.
-  const granted = deps.vault ? await deps.vault(p, key) : null;
-  if (granted !== null) {
-    deps.signal('context-get', p.appId);
-    return reply({ key, value: granted });
+  const inst = p as core.InstancePrincipal;
+  const got = await core.grantedContextValue({
+    appId: inst.appId, declared: deps.declared(inst.appId), key, instanceId: inst.instanceId,
+    ...(inst.userId ? { userId: inst.userId } : {}),
+  }, deps.context);
+  if ('refused' in got) {
+    if (got.refused === 'undeclared') {
+      deps.signal('context-undeclared', inst.appId);
+      return reply({ error: 'context-undeclared', message: `Declare "${key}" in app.manifest.json context[] to read it.` }, 403);
+    }
+    deps.signal('context-get', inst.appId);
+    if (got.refused === 'not-granted') {
+      return reply({ error: 'context-not-granted', message: `The owner has not granted ${key} to this app (aura admin grant ${inst.appId} context.read:${key}).` }, 403);
+    }
+    return reply({ error: 'not-set', message: `The owner has not set ${key}.` }, 404);
   }
-  const declared = deps.declared(p.appId);
-  if (!declared?.includes(key)) {
-    deps.signal('context-undeclared', p.appId);
-    return reply({ error: 'context-undeclared', message: `Declare "${key}" in app.manifest.json context[] to read it.` }, 403);
-  }
-  deps.signal('context-get', p.appId);
-  const value = await deps.read(key);
-  if (value === null) return reply({ error: 'not-set', message: `The owner has not set ${key}.` }, 404);
-  return reply({ key, value });
+  deps.signal('context-get', inst.appId);
+  return reply({ key, value: got.value });
 }
 
-export function liveContextReadDeps(store: Pick<ContextStore, 'get'>, signal: ContextReadDeps['signal']): ContextReadDeps {
+/** The live Context read: the registry's declarations, GrantStore, the system Context, the vault, the audit. */
+export function liveContextReadDeps(store: Pick<ContextStore, 'get' | 'resolveEnv'>, signal: ContextReadDeps['signal']): ContextReadDeps {
+  const svc = core.getAuthServices();
   return {
     resolve: async (request) => (await import('./auth.ts')).resolveCaller(request),
     declared: (appId) => {
       try { return (core.getAppManager().getManifest(appId) as (AppManifest & { context?: string[] }) | undefined)?.context; } catch { return undefined; }
     },
-    read: (key) => store.get(key),
+    context: core.liveGrantedContextDeps({
+      grants: svc.grants,
+      appScope: (appId) => { try { return core.getAppManager().registry.getScopeId(appId) ?? undefined; } catch { return undefined; } },
+      store,
+      vault: new core.CredentialVault(),
+      audit: (entry) => svc.audit.record(entry),
+    }),
     signal,
-    vault: async (instance, key) => {
-      const { contextVaultRead, liveCredentialDeps } = await import('./credentials.ts');
-      return contextVaultRead(liveCredentialDeps(), instance, key);
-    },
   };
 }
 

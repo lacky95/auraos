@@ -6,7 +6,7 @@ import type { AppManifest } from '../types/manifest.js';
 import { lifecyclePath } from '../types/manifest.js';
 import { ALL_TOOLS_PATH, MY_TOOLS_PATH, SHARED_HOME_PATH, currentToolsMode, provisionAllowlist } from './tool-provision.js';
 import { prootHomeBind } from './spawn/homeArgs.js';
-import { declaredContextEnv, prootContextBinds } from './spawn/contextArgs.js';
+import { prootContextBinds } from './spawn/contextArgs.js';
 import { prootIdentityLaunch, requireProotIdentity, writeIdentityFiles } from './spawn/identityArgs.js';
 import { WORKSPACE_ROOT_FILES } from './ContainerRunner.js';
 import type { SpawnIdentity } from '../identity/types.js';
@@ -14,7 +14,6 @@ import type { RuntimeCapabilities, RuntimeSettings } from '../runtimes/types.js'
 import type { SandboxExecOpts, SandboxRunner, SandboxRunnerOpts } from './SandboxRunner.js';
 import { OutputLog } from './outputLog.js';
 import type { SpawnContext } from '../scopes/types.js';
-import { ContextStore } from '../context/ContextStore.js';
 import { VolumeStore } from '../context/VolumeStore.js';
 import { PROOT_HOST, securityEnvValue } from '../security/options.js';
 import {
@@ -247,8 +246,6 @@ export class ProotRunner implements SandboxRunner {
   private appsDir: string;
   private dataDir: string;
   private osApiBase: string;
-  /** OS-wide env/secret store: only the keys an app declares reach it. */
-  private contextStore: ContextStore;
   /** OS-managed shared volumes, bound into every sandbox. */
   private volumeStore: VolumeStore;
 
@@ -258,7 +255,6 @@ export class ProotRunner implements SandboxRunner {
     this.appsDir = opts.appsDir;
     this.dataDir = opts.dataDir;
     this.osApiBase = opts.osApiBase;
-    this.contextStore = new ContextStore(opts.dataDir);
     this.volumeStore = new VolumeStore(opts.dataDir);
   }
 
@@ -339,11 +335,6 @@ export class ProotRunner implements SandboxRunner {
     // (the args reference the dir). Wildcard apps get the whole store mirrored;
     // explicit apps get just their declared tools.
     this.provisionToolsDir(instanceId, manifest);
-    // The context env: only the keys the manifest declares, read live from
-    // Valkey on every spawn (nothing is read for an app that declares none).
-    const contextEnv = manifest.context?.length
-      ? declaredContextEnv(await this.contextStore.resolveEnv(), manifest.context)
-      : {};
     // OS-managed shared volumes — bound into the proot (RW; proot --bind can't
     // enforce read-only: an RO volume is protected only by its ownership).
     await this.volumeStore.ensureAll();
@@ -371,7 +362,9 @@ export class ProotRunner implements SandboxRunner {
     // process tree (see provisionAllowlist).
     const shellHostname = process.env['AURA_SHELL_HOSTNAME'];
     const env: Record<string, string> = {
-      ...contextEnv,
+      // The Context keys the kernel granted this start (declared AND granted,
+      // stream C); the fixed OS vars below override, so a key can't clobber them.
+      ...(ctx.contextEnv ?? {}),
       PATH: PROOT_PATH,
       // The App Home, through the bind in prootBinds (never the master's home).
       HOME: SHARED_HOME_PATH,

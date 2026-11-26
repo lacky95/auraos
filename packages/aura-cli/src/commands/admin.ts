@@ -48,8 +48,10 @@ export function notifPermission(name: string): string {
   if (name === 'terminal.embed' || name === 'terminal.sessions.list' || name === 'terminal.screen.read') return name;
   // Writing an OS-wide KV topic (system.kv.os.<topic>.write) also goes by its full name.
   if (/^system\.kv\.os\.[A-Za-z0-9_-]{1,128}\.write$/.test(name)) return name;
+  // A system Context key (Phase 5 stream C): context.read:<KEY>, for an app that declares it in context[].
+  if (/^context\.read:[A-Z_][A-Z0-9_]{0,127}$/.test(name)) return name;
   const p = FEATURES[name];
-  if (!p) fail(`unknown notification permission '${name}' — use locked | popup | read | systemModal, or terminal.embed | terminal.sessions.list | terminal.screen.read | system.kv.os.<topic>.write`);
+  if (!p) fail(`unknown notification permission '${name}' — use locked | popup | read | systemModal, or terminal.embed | terminal.sessions.list | terminal.screen.read | system.kv.os.<topic>.write | context.read:<KEY>`);
   return p!;
 }
 
@@ -125,7 +127,7 @@ export function registerAdmin(program: Command): void {
 
   admin
     .command('grant <app> <features...>')
-    .description("Grant privileged notification features (locked | popup | read | systemModal) to an app. The app must also request them in its manifest. read = other senders' notifications, scoped with --scope.")
+    .description("Grant privileged notification features (locked | popup | read | systemModal), or a system Context key (context.read:<KEY>), to an app. The app must also request them in its manifest (a Context key: in context[]). read = other senders' notifications, scoped with --scope.")
     .option('--scope <scope>', 'read: app:<appId>, sender:<senderKey> (comma-separated) or all')
     .option('--include-secret', 'read: secret notifications too (default: not)')
     .action((app: string, features: string[], opts: { scope?: string; includeSecret?: boolean }) => grantNotif('grant', app, features, opts));

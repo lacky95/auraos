@@ -191,14 +191,17 @@ try {
           <label>INJECT AS</label>
           <div class="ctx-checks">
             <label class="aura-check"><input type="checkbox" id="ctx-inject-env" checked /><span class="aura-check-box" aria-hidden="true"><Icon name="check" /></span><span>Env var</span></label>
-            <label class="aura-check"><input type="checkbox" id="ctx-inject-file" checked /><span class="aura-check-box" aria-hidden="true"><Icon name="check" /></span><span>File</span></label>
+            <label class="aura-check"><input type="checkbox" id="ctx-inject-file" /><span class="aura-check-box" aria-hidden="true"><Icon name="check" /></span><span>File (AuraOS shells only)</span></label>
           </div>
         </div>
         <button id="ctx-add">SET</button>
       </div>
       <p class="ctx-hint">
-        Injected into every app as <b>$KEY</b> and <b>/run/context/KEY</b>.
-        File changes apply live; env changes on next app restart.
+        Apps get a key only when they declare it and you grant it
+        (<b>aura admin grant &lt;app&gt; context.read:KEY</b>, or with the app's install approval);
+        it then reaches the app as <b>$KEY</b> and through <b>osClient.context.get</b>.
+        A File key is materialised at <b>/run/context/KEY</b> in the AuraOS shells only.
+        Env changes apply on the next app restart.
       </p>
     </div>
 

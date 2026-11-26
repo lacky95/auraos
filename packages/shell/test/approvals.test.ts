@@ -376,12 +376,13 @@ test('the owner list: pending requests only for the owner on the shell', async (
 
 const BINDING: InstallBinding = {
   action: 'nexus.install', appId: 'com.example.notes', name: 'Notes', version: '1.2.0', source: 'oci',
-  address: 'ghcr.io/x/notes:1.2.0', digest: 'sha256:aaa', scope: 'user', identity: null, tools: ['git'], permissions: [],
+  address: 'ghcr.io/x/notes:1.2.0', digest: 'sha256:aaa', scope: 'user', identity: null, tools: ['git'], permissions: [], context: [],
   replaceCheckout: false,
 };
 const DIFF: PermissionDiff = {
   appId: 'com.example.notes', versionFrom: null, versionTo: '1.2.0', toolsAdded: ['git'], toolsRemoved: [],
   permissionsAdded: [], permissionsRemoved: [], dataProviderAdded: false, dataProviderRemoved: false, intentFiltersAdded: [],
+  contextAdded: [], contextRemoved: [],
 };
 
 /** Core's pipeline as far as the gate: ask `approval`, else stop at permission.needed. */
@@ -419,6 +420,28 @@ test('install without an approval answers needs-approval with the exact diff; wi
   assert.equal((await install(TERMINAL, { 'x-aura-approval': id })).status, 202, 'single use');
 });
 
+test('stream C: an approved install grants the Context keys it names, attributed to the approver', async () => {
+  const granted: Array<{ id: string; permission: string; appScope?: string; by: unknown }> = [];
+  const fakeGrants = () => ({
+    grants: { grant: async (s: { id: string }, permission: string, o: { by: unknown; appScope?: string }) => { granted.push({ id: s.id, permission, appScope: o.appScope, by: o.by }); return { record: {}, changed: true }; } },
+    audit: { record: async () => '' },
+  }) as never;
+  const binding = { ...BINDING, context: ['OPENAI_API_KEY'] };
+  const run = async (headers: Record<string, string> = {}) => {
+    const gate = installGate(deps(), NEXUS_OWNER, new Request('http://shell.test/api/nexus/install', { method: 'POST', headers }), undefined, undefined, fakeGrants);
+    return read(await runInstall(pipeline(binding, gate.approval), gate));
+  };
+  const first = await run();
+  assert.equal(first.status, 202);
+  assert.equal(first.body.level, 'fresh');
+  assert.equal(granted.length, 0, 'nothing granted before the owner decides');
+  await decide(first.body.approvalId, 'approve', { password: PASSWORD });
+  const done = await run({ 'x-aura-approval': first.body.approvalId });
+  assert.equal(done.body.ok, true);
+  assert.deepEqual(granted.map((g) => [g.id, g.permission, g.appScope]), [['com.example.notes', 'context.read:OPENAI_API_KEY', 'user']]);
+  assert.equal((granted[0]!.by as { kind: string }).kind, 'user');
+});
+
 test('a moved tag, another scope or another requester needs a new approval', async () => {
   const { body } = await install(NEXUS_OWNER);
   await decide(body.approvalId, 'approve');
@@ -445,6 +468,10 @@ test('docker or privileged sidecars make an install fresh; the host operator con
   assert.equal(installLevel({ ...BINDING, tools: ['docker'] }), 'fresh');
   assert.equal(installLevel({ ...BINDING, permissions: ['sidecars.privileged'] }), 'fresh');
   assert.equal(installLevel(BINDING), 'session');
+  // Stream C: an approval that grants Context keys needs the password and lists them.
+  assert.equal(installLevel({ ...BINDING, context: ['OPENAI_API_KEY'] }), 'fresh');
+  assert.ok(installDisplay({ ...BINDING, context: ['OPENAI_API_KEY'] }, { ...DIFF, contextAdded: ['OPENAI_API_KEY'] }, 'x').details
+    .some((d) => /Context keys it may read \(granted with this approval\): OPENAI_API_KEY/.test(d)));
   assert.ok(installDisplay({ ...BINDING, tools: ['docker'] }, DIFF, 'x').details.some((d) => /root on the host/.test(d)));
 
   const host = await install(ANON);

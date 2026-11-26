@@ -321,24 +321,30 @@ test('a raw read is refused without the grant, allowed with it, and audited; ano
   const rows = await listCredentials(deps(), 'default');
   assert.equal(rows[0]!.consumers[0]!.canRead, true);
   assert.equal(rows[0]!.lastUsedBy, 'com.example.notes');
-  // context.get reads the granted credential too.
-  const ctxRead = await readContext(req('GET', '/api/os/context/GITHUB_TOKEN'), 'GITHUB_TOKEN', {
+  // context.get reads the granted credential too, when the app declares it (stream C: one rule with the env).
+  const ctxDeps = (declared: string[]) => ({
     resolve: async () => ({ principal: NOTES, via: 'instance-token' } as unknown as ResolvedPrincipal),
-    declared: () => [], read: async () => null, signal: () => undefined,
-    vault: async (p, key) => (await import('../src/lib/credentials.ts')).contextVaultRead(deps(), p, key),
+    declared: () => declared, signal: () => undefined,
+    context: core.liveGrantedContextDeps({
+      grants: grants as never, appScope: () => 'user', store: { get: async () => null, resolveEnv: async () => ({}) },
+      vault, audit: async (e) => { audits.push(e as never); },
+    }),
   });
+  const ctxRead = await readContext(req('GET', '/api/os/context/GITHUB_TOKEN'), 'GITHUB_TOKEN', ctxDeps(['GITHUB_TOKEN']));
   assert.equal((await ctxRead.json() as { value: string }).value, SECRET);
+  assert.equal(audits.filter((a) => a.action === 'vault.read').length, 3, 'the context.get read is audited too');
+  // Undeclared: refused, grant or not.
+  assert.equal((await readContext(req('GET', '/api/os/context/GITHUB_TOKEN'), 'GITHUB_TOKEN', ctxDeps([]))).status, 403);
 
   // Another app with the handle: unknown. A page through the gateway: server-only.
   assert.equal((await readValue(handle, SPY)).status, 404);
   via = 'gateway';
   assert.equal((await readValue(handle, NOTES)).body.error, 'server-only');
   via = 'instance-token';
-  // An app without the grant gets nothing from context.get either.
+  // An app without the grant gets nothing from context.get either, declared or not.
   const spyCtx = await readContext(req('GET', '/api/os/context/GITHUB_TOKEN'), 'GITHUB_TOKEN', {
+    ...ctxDeps(['GITHUB_TOKEN']),
     resolve: async () => ({ principal: SPY, via: 'instance-token' } as unknown as ResolvedPrincipal),
-    declared: () => [], read: async () => null, signal: () => undefined,
-    vault: async (p, key) => (await import('../src/lib/credentials.ts')).contextVaultRead(deps(), p, key),
   });
   assert.equal(spyCtx.status, 403);
 });

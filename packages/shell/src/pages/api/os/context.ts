@@ -10,9 +10,11 @@ import { contextWrite } from '../../../lib/approvals/display.ts';
  *   GET  /api/os/context           → { entries: [{ key, updatedAt }] }  (NO values)
  *   POST /api/os/context           → body { key, value } upserts; returns { key, updatedAt }
  *
- * Values are sealed at rest in the KV and materialised to /data/context/system/<KEY>
- * (mounted into every app container at /run/context). Values are NEVER returned
- * over this API — the UI shows a "set" indicator, not the secret.
+ * Values are sealed at rest in the KV; `file` entries are materialised to
+ * /data/context/system/<KEY> for the AuraOS shells only (/run/context in the
+ * master). An app gets a key only when it declares it and holds the owner's
+ * grant (Phase 5 stream C). Values are NEVER returned over this API — the UI
+ * shows a "set" indicator, not the secret.
  *
  * Delete lives in ./context/[key].ts.
  *

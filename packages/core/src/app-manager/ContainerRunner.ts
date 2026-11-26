@@ -26,7 +26,6 @@ import type { ResourceUsage, SidecarInfo } from '../types/instance.js';
 import { SIDECAR_PS_FORMAT, USAGE_STATS_FORMAT, parseSidecarPs, parseUsageStats } from './sidecars.js';
 import type { InstanceSpawnContext } from './SandboxRunner.js';
 import { OWNER_LABEL, PREVIEW_LABEL } from './instanceOwner.js';
-import { ContextStore } from '../context/ContextStore.js';
 import { VolumeStore, type VolumeEntry } from '../context/VolumeStore.js';
 import {
   ASTRO_START_SHELL, RAW_START_SHELL, PROVISION_TIMEOUT_MS, ProvisionWatch, nextHealthDeadline,
@@ -311,8 +310,6 @@ export class ContainerRunner implements SandboxRunner {
   private appDataVolume!: string;
   /** Named volume backing /workspace/node_modules. Resolved once. */
   private nodeModulesVolume!: string;
-  /** OS-wide env/secret store, injected into every container. */
-  private contextStore: ContextStore;
   /** OS-managed shared volumes, mounted into every container. */
   private volumeStore: VolumeStore;
   /** The per-user private Terminal networks (D58). */
@@ -330,7 +327,6 @@ export class ContainerRunner implements SandboxRunner {
     this.appsDir      = opts.appsDir;
     this.dataDir      = opts.dataDir;
     this.osApiBase    = opts.osApiBase;
-    this.contextStore = new ContextStore(opts.dataDir);
     this.volumeStore  = new VolumeStore(opts.dataDir);
     // Apps need to call back into the shell over the shared network. If
     // osApiBase points at 127.0.0.1 (the PRoot-compatible default), rewrite
@@ -443,12 +439,6 @@ export class ContainerRunner implements SandboxRunner {
     };
   }
 
-  /** OS Context env, resolved live (same source every app container gets). */
-  public async resolveContextEnv(): Promise<Record<string, string>> {
-    this.contextStore.ensureDir();
-    return this.contextStore.resolveEnv();
-  }
-
   // ─── Spawn ────────────────────────────────────────────────────────────
   async spawn(instanceId: string, appId: string, port: number, manifest: AppManifest, ctx: InstanceSpawnContext): Promise<number> {
     // On a first boot without the base image the shell builds it in the
@@ -468,13 +458,6 @@ export class ContainerRunner implements SandboxRunner {
       survivorsUnknown: () => this.survivorsUnknown(),
     });
 
-    // Resolve OS Context (env/secret) LIVE from Valkey on every spawn so a
-    // respawned app always sees current values (the master never restarts,
-    // never caches these). ensureDir guarantees the volume-subpath mount
-    // source exists even before the first `set`.
-    this.contextStore.ensureDir();
-    const contextEnv = await this.contextStore.resolveEnv();
-
     // OS-managed shared volumes — resolved live too, and ensureAll guarantees
     // each volume's subpath dir exists before docker mounts it.
     await this.volumeStore.ensureAll();
@@ -487,7 +470,7 @@ export class ContainerRunner implements SandboxRunner {
 
     // A non-root app (stream A): its passwd and group, mounted read-only.
     if (isNonRootIdentity(ctx.identity)) writeIdentityFiles(this.dataDir, instanceId, ctx.identity, ctx.installationId ?? null);
-    const args = this.buildDockerArgs(instanceId, appId, port, manifest, hostname, ctx, contextEnv, contextVolumes, term);
+    const args = this.buildDockerArgs(instanceId, appId, port, manifest, hostname, ctx, contextVolumes, term);
     console.log(`[ContainerRunner] Spawning ${hostname} (app=${appId}) on port ${port}`);
 
     // Use spawnSync (not execSync with a joined string) so multi-word args
@@ -662,7 +645,6 @@ export class ContainerRunner implements SandboxRunner {
     manifest: AppManifest,
     hostname: string,
     ctx: InstanceSpawnContext,
-    contextEnv: Record<string, string>,
     contextVolumes: VolumeEntry[],
     term: TermNetwork | null = null,
   ): string[] {
@@ -817,12 +799,13 @@ export class ContainerRunner implements SandboxRunner {
       // user's Private Home. The resolver created the dir, so docker can mount
       // the subpath at container start; without one the spawn is refused.
       ...containerHomeMount({ appDataVolume, home: ctx.home }),
-      // OS Context: /run/context and the shared Context Volumes (spawn/contextArgs.ts).
+      // The shared Context Volumes (spawn/contextArgs.ts). No /run/context (stream C).
       ...containerContextMounts({ appDataVolume, volumes: contextVolumes }),
       // No Docker socket, ever (stream J.7, spawn/socketArgs.ts): only a root tab's session has it.
-      // OS Context env FIRST — the fixed OS vars below are pushed after, so a
+      // The Context keys the kernel granted this start (declared AND granted,
+      // stream C) FIRST — the fixed OS vars below are pushed after, so a
       // context key can't clobber them (docker's last-wins semantics).
-      ...containerContextEnv(contextEnv),
+      ...containerContextEnv(ctx.contextEnv),
     ];
 
     a.push(

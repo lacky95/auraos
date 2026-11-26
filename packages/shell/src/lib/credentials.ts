@@ -166,9 +166,7 @@ function serverInstance(r: ResolvedPrincipal): core.InstancePrincipal | Response
 /** Whether `appId` holds the read grant of `name` in `userId`'s vault, pinned to its install scope. */
 async function holdsRead(deps: CredentialDeps, appId: string, userId: string, name: string): Promise<boolean> {
   const g = await deps.grants.get({ kind: 'app', id: appId }, readPermission(name), core.userScope(userId)) as { appScope?: string } | null;
-  if (!g) return false;
-  const scope = deps.appScope(appId);
-  return !(g.appScope && scope && g.appScope !== scope);
+  return core.appGrantCounts(g, deps.appScope(appId));
 }
 
 async function reveal(deps: CredentialDeps, p: core.InstancePrincipal, userId: string, name: string, via: string): Promise<string | null> {
@@ -215,17 +213,6 @@ export async function readCredential(request: Request, handle: string | undefine
   const value = await reveal(deps, p, userId, held.name, 'handle');
   if (value === null) return json({ error: 'not-found' }, 404);
   return json({ name: held.name, value });
-}
-
-/**
- * `osClient.context.get(NAME)` for a vault credential: the value when the
- * instance's app holds the read grant for its user, else null (the caller
- * goes on to the global Context).
- */
-export async function contextVaultRead(deps: CredentialDeps, p: core.InstancePrincipal, name: string): Promise<string | null> {
-  if (!p.userId || !core.isCredentialName(name)) return null;
-  if (!(await holdsRead(deps, p.appId, p.userId, name))) return null;
-  return reveal(deps, p, p.userId, name, 'context.get');
 }
 
 // ── the owner's view (Settings → Users & Identities → Secrets) ──────────────

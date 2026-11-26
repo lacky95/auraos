@@ -19,18 +19,25 @@ const inst = (appId: string, via: ResolvedPrincipal['via'] = 'instance-token'): 
   ({ principal: { kind: 'instance', appId, instanceId: `${appId}-1`, verification: 'verified' }, via });
 const req = (path: string) => new Request(`http://shell${path}`);
 
-function ctxDeps(resolved: ResolvedPrincipal, values: Record<string, string> = { OPENAI_API_KEY: 'sk-1' }) {
+function ctxDeps(resolved: ResolvedPrincipal, values: Record<string, string> = { OPENAI_API_KEY: 'sk-1' }, granted: string[] = ['OPENAI_API_KEY', 'UNSET_KEY']) {
   const signals: string[] = [];
   const d: ContextReadDeps = {
     resolve: async () => resolved,
     declared: (appId) => (appId === 'com.ex.notes' ? ['OPENAI_API_KEY', 'UNSET_KEY'] : appId === 'com.ex.bare' ? [] : undefined),
-    read: async (k) => values[k] ?? null,
+    // Stream C: the system Context behind context.read:<KEY> grants (no vault here: the instance acts for no user).
+    context: {
+      systemGranted: async (_app, key) => granted.includes(key),
+      vaultGranted: async () => false,
+      systemEnv: async () => ({}),
+      systemValue: async (k) => values[k] ?? null,
+      vaultValue: async () => null,
+    },
     signal: (s, appId) => signals.push(`${s}|${appId}`),
   };
   return { d, signals };
 }
 
-test('context.get: a declared key to the app\'s own server', async () => {
+test('context.get: a declared and granted key to the app\'s own server', async () => {
   const { d, signals } = ctxDeps(inst('com.ex.notes'));
   const res = await readContext(req('/api/os/context/OPENAI_API_KEY'), 'OPENAI_API_KEY', d);
   assert.equal(res.status, 200);
@@ -40,6 +47,16 @@ test('context.get: a declared key to the app\'s own server', async () => {
   const unset = await readContext(req('/x'), 'UNSET_KEY', d);
   assert.equal(unset.status, 404);
   assert.equal((await unset.json()).error, 'not-set');
+});
+
+test('context.get: a declared key the owner has not granted is refused, naming the grant (stream C)', async () => {
+  const { d } = ctxDeps(inst('com.ex.notes'), undefined, []);
+  const res = await readContext(req('/x'), 'OPENAI_API_KEY', d);
+  assert.equal(res.status, 403);
+  const body = await res.json();
+  assert.equal(body.error, 'context-not-granted');
+  assert.match(body.message, /context\.read:OPENAI_API_KEY/);
+  assert.ok(!JSON.stringify(body).includes('sk-1'));
 });
 
 test('context.get: an undeclared key is refused and counted; pages, owners and anonymous get nothing', async () => {
