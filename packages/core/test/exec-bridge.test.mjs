@@ -1,8 +1,11 @@
-// Phase 5 stream X: DockerApi against a fake Engine API on a unix socket
-// (exec create, hijacked start, resize, inspect, logs), and ExecBridge's
-// protocol on top of it: TTY round trip, resize, exit codes, signals, the
-// capped non-TTY run, stderr kept apart, logs (engine and the PRoot ring,
-// tail and follow), what is refused, and the audit attribution.
+// Phase 5 streams X and J: DockerApi against a fake Engine API on a unix
+// socket (exec create, hijacked start, resize, inspect, logs), and ExecBridge
+// on top of it: sessions enter the running app through the container
+// runtime's session broker (J, D74: one exec of aura-session-enter in the
+// broker, the kernel's spec as its input), TTY round trip, resize, exit
+// codes, signals and the launcher's end, the capped non-TTY run, stderr kept
+// apart, logs (engine and the PRoot ring, tail and follow), what is refused
+// (J.5), and the audit attribution.
 //
 //   pnpm --filter @aura/core test
 import { test } from 'node:test';
@@ -10,11 +13,15 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DockerApi, EngineDemux } from '../dist/app-manager/DockerApi.js';
 import {
   ExecBridge, ExecBridgeError, parseSessionOpen, parseSince, parseTail, execAudit, DEFAULT_JUMP_ARGV,
+  sessionCallerOf,
 } from '../dist/app-manager/ExecBridge.js';
+import { SessionBroker } from '../dist/app-manager/SessionBroker.js';
+import { HomeDeniedError } from '../dist/homes/types.js';
 import { OutputLog } from '../dist/app-manager/outputLog.js';
 
 const frame = (stream, text) => {
@@ -56,7 +63,7 @@ async function fakeEngine(t, { tty = false, logsFollowExtra = null } = {}) {
     }
     if (req.method === 'GET' && (m = /^\/exec\/([^/]+)\/json$/.exec(url.pathname))) {
       const e = execs.get(m[1]);
-      return json(res, 200, { Running: e.running, ExitCode: e.exitCode });
+      return json(res, 200, { Running: e.running, ExitCode: e.exitCode, Pid: e.running ? 4242 : 0 });
     }
     if (req.method === 'GET' && (m = /^\/containers\/([^/]+)\/json$/.exec(url.pathname))) {
       return json(res, 200, { State: { Running: true }, Config: { Tty: tty } });
@@ -83,7 +90,10 @@ async function fakeEngine(t, { tty = false, logsFollowExtra = null } = {}) {
     let bodyLeft = Number(req.headers['content-length'] ?? 0);
     socket.write('HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.raw-stream\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n');
     const finish = (code) => { e.running = false; e.exitCode = code; socket.end(); };
-    const argv = e.spec.Cmd;
+    let argv = e.spec.Cmd;
+    // The session broker's launcher: its input is the kernel's spec; end/reap answer at once.
+    if (argv[1] === 'end' || argv[1] === 'reap') return finish(0);
+    if (argv[1] === 'enter') { e.enter = JSON.parse(argv[2]); argv = e.enter.argv; }
     if (!e.spec.Tty) {
       socket.write(frame(1, `ran ${argv.join(' ')}\n`));
       socket.write(frame(2, 'to stderr\n'));
@@ -112,20 +122,55 @@ async function fakeEngine(t, { tty = false, logsFollowExtra = null } = {}) {
   return { socketPath, calls, execs, api: new DockerApi({ socketPath }) };
 }
 
-function bridgeOver(engine, { sandbox = 'container', running = true, sidecars = [], log = null } = {}) {
+const CONTAINER_CAPS = { isolation: 'namespace', privateHomeSession: true, sessionExec: true, identity: 'enforced', readOnlyBinds: true, mounts: true, portExpose: true, sidecars: true, warmPool: true, survivesShellRestart: true };
+const PROOT_CAPS = { ...CONTAINER_CAPS, isolation: 'ptrace', privateHomeSession: false, sessionExec: false, identity: 'emulated', readOnlyBinds: false };
+const CONTAINER_ID = 'c'.repeat(64);
+const owner = { user: { userId: 'u1', role: 'owner' } };
+
+/** The kernel's decision as AppManager.sessionContext makes it (its own tests: phase5-homes). */
+function defaultContext(req) {
+  if (req.mode === 'app') return { kind: 'app', home: { mode: 'app', hostPath: null }, uid: 200001, gid: 200001, groups: [], env: { HOME: '/home/aura' } };
+  return {
+    kind: 'user', home: { mode: req.mode, hostPath: req.mode === 'private' ? '/data/aura/home/u1' : null },
+    uid: 1000, gid: 1000, groups: [1000], env: { HOME: '/home/aura', TMPDIR: '/run/aura-session' }, userId: req.caller.user.userId,
+    passwd: 'aura-user-1000:x:1000:1000::/home/aura:/bin/bash\n',
+  };
+}
+
+function bridgeOver(engine, { sandbox = 'container', running = true, sidecars = [], log = null, context = defaultContext } = {}) {
   const instances = new Map([['io.test.app-1', { appId: 'io.test.app', instanceId: 'io.test.app-1', state: 'resumed' }]]);
-  return new ExecBridge({
+  const dir = mkdtempSync(join(tmpdir(), 'broker-'));
+  const helper = join(dir, 'helper-src');
+  writeFileSync(helper, '#!/bin/true\n');
+  const docker = [];
+  const broker = engine ? new SessionBroker({
+    engine, dataDir: dir, appDataVolume: 'aura_aura-app-data',
+    docker: async (args) => { docker.push(args); return args[0] === 'inspect' ? 'true session-broker' : ''; },
+    helperBinary: async () => helper,
+  }) : null;
+  const bridge = new ExecBridge({
     engine,
     instance: (id) => instances.get(id),
     runner: () => ({
       isRunning: () => running,
+      capabilities: () => (sandbox === 'container' ? CONTAINER_CAPS : PROOT_CAPS),
       ...(sandbox === 'container'
-        ? { engineContainer: () => ({ container: 'aura-io.test.app-1', workdir: '/workspace/apps/io.test.app' }) }
+        ? {
+          engineContainer: () => ({ container: 'aura-io.test.app-1', workdir: '/workspace/apps/io.test.app' }),
+          openSession: (id, spec, out) => broker.openSession({ ...spec, cwd: spec.cwd ?? '/workspace/apps/io.test.app' }, { containerId: CONTAINER_ID, pid: 777 }, out),
+        }
         : { outputLog: () => log }),
     }),
     sidecars: () => sidecars,
+    sessionContext: async (id, req) => context(req),
   });
+  bridge.docker = docker;
+  bridge.broker = broker;
+  return bridge;
 }
+
+/** The launcher exec of the session (the broker's `enter`), skipping its reap. */
+const enterOf = (eng) => [...eng.execs.values()].find((e) => e.spec.Cmd[1] === 'enter');
 
 const until = async (cond, ms = 2000) => {
   const end = Date.now() + ms;
@@ -140,21 +185,28 @@ test('EngineDemux splits frames across chunk boundaries', () => {
   assert.deepEqual(got, [[1, 'abc'], [2, 'de'], [1, 'f']]);
 });
 
-test('TTY session: root in the app container, env, resize, round trip, exit code', async (t) => {
+test('TTY session: in the running app as the user, with the Private Home (D74, J.2)', async (t) => {
   const eng = await fakeEngine(t);
   const bridge = bridgeOver(eng.api);
   const open = parseSessionOpen({ op: 'open', kind: 'jump', tty: true, cols: 120, rows: 40, env: { TERM: 'xterm-256color', LANG: 'C.UTF-8', EVIL: 'x' } });
   let out = '';
-  const s = await bridge.openSession('io.test.app-1', open, (ch, d) => { assert.equal(ch, 1); out += d; });
-  const e = eng.execs.get('e1');
-  assert.equal(e.container, 'aura-io.test.app-1');
-  assert.equal(e.spec.User, '0', 'explicit root: 5-apps containers run with --user');
+  const s = await bridge.openSession('io.test.app-1', open, (ch, d) => { assert.equal(ch, 1); out += d; }, owner);
+  const e = enterOf(eng);
+  assert.equal(e.container, 'aura-session-broker', 'one exec in the broker, never a new container');
+  assert.equal(e.spec.User, '0');
   assert.equal(e.spec.Tty, true);
-  assert.deepEqual(e.spec.Cmd, DEFAULT_JUMP_ARGV);
-  assert.equal(e.spec.WorkingDir, '/workspace/apps/io.test.app');
-  assert.ok(e.spec.Env.includes('AURA_HOSTNAME=io.test.app'));
-  assert.ok(e.spec.Env.includes('TERM=xterm-256color'));
-  assert.ok(!e.spec.Env.some((v) => v.startsWith('EVIL=')), 'only the terminal env passes');
+  assert.equal(e.spec.Cmd.length, 3);
+  assert.match(e.spec.Cmd[0], /\/aura\/runtime\/session-broker\/aura-session-enter-[0-9a-f]{16}$/);
+  const x = e.enter;
+  assert.deepEqual([x.v, x.kind, x.home, x.homePath, x.uid, x.gid, x.groups], [1, 'user', 'private', '/data/aura/home/u1', 1000, 1000, [1000]]);
+  assert.deepEqual([x.container, x.pid, x.tty, x.cwd], [CONTAINER_ID, 777, true, '/workspace/apps/io.test.app']);
+  assert.deepEqual(x.argv, DEFAULT_JUMP_ARGV);
+  assert.ok(x.env.includes('TERM=xterm-256color') && x.env.includes('HOME=/home/aura'));
+  assert.ok(x.env.some((v) => /^AURA_SESSION=[0-9a-f-]{36}$/.test(v)));
+  assert.ok(!x.env.some((v) => v.startsWith('EVIL=')), 'only the terminal env passes');
+  assert.equal(x.socket, undefined, 'a user session never gets the Docker socket');
+  assert.match(x.passwd, /^aura-user-1000:/);
+  assert.deepEqual(bridge.broker.sessions().map((r) => [r.kind, r.home, r.launcherPid, r.userId]), [['user', 'private', 4242, 'u1']]);
   await until(() => e.resized);
   assert.deepEqual(e.resized, [120, 40]);
   s.resize(100, 30);
@@ -164,6 +216,19 @@ test('TTY session: root in the app container, env, resize, round trip, exit code
   assert.equal(await s.exited, 3);
   assert.match(out, /echo:\x03/);
   assert.match(out, /exit 3/);
+  await until(() => bridge.broker.sessions().length === 0);
+});
+
+test('the broker is adopted by its label, the helper staged once, stale launchers reaped first (D77)', async (t) => {
+  const eng = await fakeEngine(t);
+  const bridge = bridgeOver(eng.api);
+  const open = parseSessionOpen({ op: 'open', kind: 'exec', argv: ['true'], tty: false });
+  for (let i = 0; i < 2; i++) { const s = await bridge.openSession('io.test.app-1', open, () => {}, owner); s.endInput(); await s.exited; }
+  assert.equal(bridge.docker.filter((a) => a[0] === 'inspect').length, 1, 'set up once per shell');
+  assert.ok(!bridge.docker.some((a) => a[0] === 'run'), 'an existing broker is adopted, never duplicated');
+  const reaps = [...eng.execs.values()].filter((e) => e.spec.Cmd[1] === 'reap');
+  assert.equal(reaps.length, 1);
+  assert.deepEqual(reaps[0].spec.Cmd.slice(2), [], 'a new shell keeps no launcher of the previous one');
 });
 
 test('non-TTY session keeps stdout and stderr apart; stdin EOF; exit code', async (t) => {
@@ -171,57 +236,83 @@ test('non-TTY session keeps stdout and stderr apart; stdin EOF; exit code', asyn
   const bridge = bridgeOver(eng.api);
   const open = parseSessionOpen({ op: 'open', kind: 'exec', argv: ['false', 'x'], tty: false });
   const got = { 1: '', 2: '' };
-  const s = await bridge.openSession('io.test.app-1', open, (ch, d) => { got[ch] += d; });
+  const s = await bridge.openSession('io.test.app-1', open, (ch, d) => { got[ch] += d; }, owner);
   s.input(Buffer.from('hello'));
   s.endInput();
   assert.equal(await s.exited, 1);
   assert.equal(got[1], 'ran false x\nstdin:hello');
   assert.equal(got[2], 'to stderr\n');
-  assert.equal(eng.execs.get('e1').resized, undefined, 'no resize without a TTY');
+  assert.equal(enterOf(eng).resized, undefined, 'no resize without a TTY');
 });
 
-test('a signal without a TTY ends the session', async (t) => {
+test('a closed session ends its launcher in the broker (disconnect, End, timeout)', async (t) => {
   const eng = await fakeEngine(t);
-  const s = await bridgeOver(eng.api).openSession('io.test.app-1', parseSessionOpen({ op: 'open', kind: 'exec', argv: ['hang'], tty: false }), () => {});
+  const s = await bridgeOver(eng.api).openSession('io.test.app-1', parseSessionOpen({ op: 'open', kind: 'exec', argv: ['hang'], tty: false }), () => {}, owner);
   assert.equal(s.signal('TERM'), false);
-  assert.equal(await s.exited, null, 'still running in the engine: no exit code');
+  await until(() => [...eng.execs.values()].some((e) => e.spec.Cmd[1] === 'end'));
+  const end = [...eng.execs.values()].find((e) => e.spec.Cmd[1] === 'end');
+  assert.deepEqual(end.spec.Cmd.slice(2), ['4242']);
 });
 
-test('run: capped output, stdin, timeout', async (t) => {
+test('run: capped output, stdin, timeout; user is a sidecar\'s only', async (t) => {
   const eng = await fakeEngine(t);
   const bridge = bridgeOver(eng.api);
-  const r = await bridge.run('io.test.app-1', { cmd: ['echo', 'hi'], stdin: 'abc', env: { FOO: 'bar' } });
+  const r = await bridge.run('io.test.app-1', { cmd: ['echo', 'hi'], stdin: 'abc', env: { FOO: 'bar', HOME: '/evil' } }, { caller: owner });
   assert.deepEqual(r, { exitCode: 0, stdout: 'ran echo hi\nstdin:abc', stderr: 'to stderr\n', truncated: false, timedOut: false });
-  assert.ok(eng.execs.get('e1').spec.Env.includes('FOO=bar'));
-  const big = await bridge.run('io.test.app-1', { cmd: ['big'] });
+  assert.ok(enterOf(eng).enter.env.includes('FOO=bar'));
+  assert.ok(enterOf(eng).enter.env.includes('HOME=/home/aura'), 'the kernel\'s keys are not the caller\'s');
+  const big = await bridge.run('io.test.app-1', { cmd: ['big'] }, { caller: owner });
   assert.equal(big.truncated, true);
   assert.equal(big.stdout.length, 4 * 1024 * 1024);
-  const hang = await bridge.run('io.test.app-1', { cmd: ['hang'], timeoutMs: 1000 });
+  const hang = await bridge.run('io.test.app-1', { cmd: ['hang'], timeoutMs: 1000 }, { caller: owner });
   assert.equal(hang.timedOut, true);
   assert.equal(hang.exitCode, null);
   await assert.rejects(bridge.run('io.test.app-1', { cmd: [] }), (e) => e instanceof ExecBridgeError && e.status === 400);
   await assert.rejects(bridge.run('io.test.app-1', { cmd: ['x'], stdin: 'y'.repeat(70 * 1024) }), (e) => e.status === 413);
   await assert.rejects(bridge.run('io.test.app-1', { cmd: ['x'], env: { 'BAD KEY': '1' } }), (e) => e.status === 400);
+  await assert.rejects(bridge.run('io.test.app-1', { cmd: ['x'], user: '0' }, { caller: owner }), (e) => e.status === 400 && /sidecar only/.test(e.message));
 });
 
-test('refused: unknown, stopped, PRoot, missing or paused container, home modes', async (t) => {
+test('home modes: ephemeral and app; the instance itself gets app only', async (t) => {
+  const eng = await fakeEngine(t);
+  const bridge = bridgeOver(eng.api);
+  const run = async (open, caller) => { const s = await bridge.openSession('io.test.app-1', parseSessionOpen(open), () => {}, caller); s.endInput(); await s.exited; const e = [...eng.execs.values()].filter((x) => x.spec.Cmd[1] === 'enter').at(-1); return e.enter; };
+  const eph = await run({ op: 'open', kind: 'exec', argv: ['true'], home: 'ephemeral' }, owner);
+  assert.deepEqual([eph.kind, eph.home, eph.homePath, eph.uid], ['user', 'ephemeral', undefined, 1000]);
+  const app = await run({ op: 'open', kind: 'exec', argv: ['true'], home: 'app' }, owner);
+  assert.deepEqual([app.kind, app.home, app.uid, app.gid], ['app', 'app', 200001, 200001], 'D79: the app\'s identity');
+  const self = await run({ op: 'open', kind: 'exec', argv: ['true'] }, {});
+  assert.deepEqual([self.kind, self.home], ['app', 'app'], 'no human user: the app identity only');
+  await assert.rejects(bridge.openSession('io.test.app-1', parseSessionOpen({ op: 'open', kind: 'jump', home: 'private' }), () => {}, {}), (e) => e.status === 403);
+});
+
+test('refused, nothing runs: unknown, stopped, PRoot, root instance, unauthorized, bad home (J.5)', async (t) => {
   const eng = await fakeEngine(t);
   const open = parseSessionOpen({ op: 'open', kind: 'jump', tty: true });
-  await assert.rejects(bridgeOver(eng.api).openSession('nope-1', open, () => {}), (e) => e.status === 404);
-  await assert.rejects(bridgeOver(eng.api, { running: false }).openSession('io.test.app-1', open, () => {}), (e) => e.status === 409 && e.code === 'not-running');
-  await assert.rejects(bridgeOver(eng.api, { sandbox: 'proot' }).openSession('io.test.app-1', open, () => {}), (e) => e.code === 'runtime-unsupported');
-  const gone = new ExecBridge({
-    engine: eng.api, instance: () => ({ appId: 'a', instanceId: 'a' }), sidecars: () => [],
-    runner: () => ({ isRunning: () => true, engineContainer: () => ({ container: 'aura-gone' }) }),
-  });
-  await assert.rejects(gone.openSession('a', open, () => {}), (e) => e.status === 404);
-  const paused = new ExecBridge({
-    engine: eng.api, instance: () => ({ appId: 'a', instanceId: 'a' }), sidecars: () => [],
-    runner: () => ({ isRunning: () => true, engineContainer: () => ({ container: 'aura-paused' }) }),
-  });
-  await assert.rejects(paused.openSession('a', open, () => {}), (e) => e.status === 409);
-  assert.throws(() => parseSessionOpen({ op: 'open', kind: 'jump', tty: true, home: 'private' }), (e) => e.code === 'capability-missing');
-  assert.equal(eng.execs.size, 0, 'nothing was executed');
+  await assert.rejects(bridgeOver(eng.api).openSession('nope-1', open, () => {}, owner), (e) => e.status === 404);
+  await assert.rejects(bridgeOver(eng.api, { running: false }).openSession('io.test.app-1', open, () => {}, owner), (e) => e.status === 409 && e.code === 'not-running');
+  for (const home of ['private', 'app', 'ephemeral']) {
+    await assert.rejects(bridgeOver(eng.api, { sandbox: 'proot' }).openSession('io.test.app-1', parseSessionOpen({ op: 'open', kind: 'jump', home }), () => {}, owner),
+      (e) => e.status === 409 && e.code === 'capability-missing' && /sessionExec/.test(e.message), `PRoot ${home}`);
+  }
+  const rootApp = () => { throw new HomeDeniedError('root-instance', 'a private jump needs a non-root target instance'); };
+  await assert.rejects(bridgeOver(eng.api, { context: rootApp }).openSession('io.test.app-1', open, () => {}, owner),
+    (e) => e.status === 409 && e.code === 'capability-missing' && /identity \(instance runs as root/.test(e.message));
+  const noGrant = () => { throw new HomeDeniedError('not-authorized', 'user u2 holds no app.jump grant'); };
+  await assert.rejects(bridgeOver(eng.api, { context: noGrant }).openSession('io.test.app-1', open, () => {}, { user: { userId: 'u2', role: 'member' } }),
+    (e) => e.status === 403);
+  assert.throws(() => parseSessionOpen({ op: 'open', kind: 'jump', home: 'shared' }), (e) => e.status === 400);
+  assert.throws(() => parseSessionOpen({ op: 'open', kind: 'jump', home: 'app', sidecar: 'db' }), (e) => e.status === 400);
+  assert.equal(enterOf(eng), undefined, 'nothing was executed');
+});
+
+test('sessionCallerOf: the verified principal decides the user, never the frame', () => {
+  assert.deepEqual(sessionCallerOf({ kind: 'operator', verification: 'verified' }, 'owner', 'default'), { user: { userId: 'default', role: 'owner' } });
+  assert.deepEqual(sessionCallerOf({ kind: 'user', userId: 'u1', role: 'owner' }, 'owner', 'default'), { user: { userId: 'u1', role: 'owner' } });
+  assert.deepEqual(sessionCallerOf({ kind: 'user', userId: 'bob', role: 'member' }, 'member', 'default'), { user: { userId: 'bob', role: 'member' } });
+  assert.deepEqual(sessionCallerOf({ kind: 'user', userId: 'bob', role: 'member' }, 'owner', 'default'), {}, 'a member never passes as the owner');
+  assert.deepEqual(sessionCallerOf({ kind: 'instance', appId: 'com.aura.terminal', instanceId: 't-1', userId: 'default' }, 'owner', 'default'), { user: { userId: 'default', role: 'owner' } });
+  assert.deepEqual(sessionCallerOf({ kind: 'instance', appId: 'io.test.app', instanceId: 'io.test.app-1', userId: 'default' }, 'self', 'default'), {}, 'the instance itself is no user');
 });
 
 test('parseSessionOpen validates the first frame', () => {
@@ -232,7 +323,8 @@ test('parseSessionOpen validates the first frame', () => {
   assert.throws(() => parseSessionOpen({ op: 'open', kind: 'jump', cwd: 'rel' }), /cwd/);
   assert.throws(() => parseSessionOpen({ op: 'open', kind: 'jump', sidecar: '../x' }), /sidecar/);
   const o = parseSessionOpen({ op: 'open', kind: 'jump', tty: true, cols: 0, rows: 5000, env: { TERM: 'xterm; rm -rf /' } });
-  assert.deepEqual([o.cols, o.rows, o.env], [80, 24, {}]);
+  assert.deepEqual([o.cols, o.rows, o.env, o.home], [80, 24, {}, undefined]);
+  assert.equal(parseSessionOpen({ op: 'open', kind: 'jump', home: 'ephemeral' }).home, 'ephemeral');
 });
 
 test('sidecar session: the sidecar container, its image user', async (t) => {
@@ -245,6 +337,7 @@ test('sidecar session: the sidecar container, its image user', async (t) => {
   assert.equal(e.container, 'aura-io.test.app-1--db');
   assert.equal(e.spec.User, undefined);
   assert.ok(!e.spec.Env.some((v) => v.startsWith('AURA_HOSTNAME=')));
+  assert.equal(e.enter, undefined, 'a sidecar is no in-environment session');
 });
 
 test('logs: engine frames split by stream; follow until closed', async (t) => {

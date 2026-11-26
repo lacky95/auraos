@@ -2,14 +2,14 @@
 // against a minimal WebSocket server (the CLI has no `ws` dependency): the
 // open frame and the instance token on the handshake, stdout and stderr kept
 // apart, the exit code, the refusals a caller falls back on, the SSE parser
-// of the logs route, and AURA_EXEC_VIA.
+// of the logs route; the open frame carries --home (stream J).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { createHash } from 'node:crypto';
 import type { AddressInfo, Socket } from 'node:net';
 import { PassThrough } from 'node:stream';
-import { EXEC_SUBPROTOCOL, SseParser, execVia, runSession, sessionUrl, type SessionIo } from '../src/lib/exec-client.js';
+import { EXEC_SUBPROTOCOL, SseParser, runSession, sessionUrl, type SessionIo } from '../src/lib/exec-client.js';
 
 /** Server → client frame (unmasked). */
 function frame(opcode: number, payload: Buffer): Buffer {
@@ -112,7 +112,7 @@ test('a session: the open frame, the token on the handshake, stdout and stderr a
       send.close();
     },
   });
-  const r = await captured(s.base, (io) => runSession({ instanceId: 'com.acme.notes-1', kind: 'exec', argv: ['ls', '-la'], tty: false }, io));
+  const r = await captured(s.base, (io) => runSession({ instanceId: 'com.acme.notes-1', kind: 'exec', argv: ['ls', '-la'], tty: false, home: 'ephemeral' }, io));
   assert.deepEqual(r.result, { opened: true, code: 5 });
   assert.equal(r.out, 'hello\n');
   assert.equal(r.err, 'oops\n');
@@ -122,6 +122,7 @@ test('a session: the open frame, the token on the handshake, stdout and stderr a
   assert.equal(openFrame!['kind'], 'exec');
   assert.deepEqual(openFrame!['argv'], ['ls', '-la']);
   assert.equal(openFrame!['tty'], false);
+  assert.equal(openFrame!['home'], 'ephemeral');
   assert.deepEqual(Object.keys(openFrame!['env'] as object).sort(), ['COLORTERM', 'LANG', 'LC_ALL', 'TERM']);
 });
 
@@ -137,13 +138,9 @@ test('refusals before the session opens are reported for a fallback', async (t) 
   assert.equal(b.out, '');
 });
 
-test('sessionUrl, execVia, SseParser', () => {
+test('sessionUrl, SseParser', () => {
   assert.equal(sessionUrl('a.b-1', 'https://shell.example:8443'), 'wss://shell.example:8443/api/instances/a.b-1/session');
   assert.equal(sessionUrl('a b', 'http://aura-shell:3000'), 'ws://aura-shell:3000/api/instances/a%20b/session');
-  assert.equal(execVia({}), 'auto');
-  assert.equal(execVia({ AURA_EXEC_VIA: 'API' }), 'api');
-  assert.equal(execVia({ AURA_EXEC_VIA: 'docker' }), 'docker');
-  assert.equal(execVia({ AURA_EXEC_VIA: 'x' }), 'auto');
   const got: Array<[string, string]> = [];
   const p = new SseParser((e) => got.push([e.event, e.data]));
   p.push(': ok\n\nevent: out\ndata: "a\\n"\n\nevent: er');

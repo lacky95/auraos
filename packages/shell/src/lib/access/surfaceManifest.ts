@@ -59,7 +59,7 @@ export const SURFACE_MANIFEST: readonly AccessSurface[] = [
       allow: ['own-instance', 'owner'],
       target: 'instance',
       guard: 'rule',
-      note: 'Phase 5 stream X: jump and exec through the shell (D74). The owner (login, host operator, or a trusted owner agent such as the System Terminal, D29) or the instance itself by its own token; the user is the verified principal\'s (its `u` claim), never a header. Decided at the upgrade in every access mode (surfaceGate `everyMode`: it executes as root in the app container). A sidecar target is the owner\'s only; session.opened/closed are audited.',
+      note: 'Phase 5 streams X and J: jump and exec as a session inside the running app environment (D74). The owner (login, host operator, or a trusted owner agent such as the System Terminal, D29) or the instance itself by its own token (the app identity only); the user is the verified principal\'s (its `u` claim), never a header. A member\'s own login passes the upgrade and the kernel requires its `app.jump:<installationId>` grant before anything runs (D82; server/exec-bridge.mjs). Decided at the upgrade in every access mode (surfaceGate `everyMode`). A sidecar target is the owner\'s only; session.opened/closed are audited with the home mode.',
     },
   },
   {

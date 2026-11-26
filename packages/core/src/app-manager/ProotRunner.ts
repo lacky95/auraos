@@ -8,7 +8,6 @@ import { ALL_TOOLS_PATH, MY_TOOLS_PATH, currentToolsMode, provisionAllowlist } f
 import { prootHomeBind, prootHomeEnv } from './spawn/homeArgs.js';
 import type { ResolvedHome } from '../homes/types.js';
 import { prootContextBinds } from './spawn/contextArgs.js';
-import { prootSocketBinds } from './spawn/socketArgs.js';
 import type { RuntimeCapabilities } from '../runtimes/types.js';
 import type { SandboxExecOpts, SandboxRunner, SandboxRunnerOpts } from './SandboxRunner.js';
 import { OutputLog } from './outputLog.js';
@@ -74,8 +73,6 @@ export interface ProotBindSpec {
   contextBinds: string[];
   /** The allowlist dir, and the store too in legacy symlink mode; null without a toolchain. */
   tools: { myTools: string; allTools: string | null } | null;
-  /** The Docker socket when granted (spawn/socketArgs.ts). */
-  socketBinds: string[];
 }
 
 /**
@@ -148,8 +145,6 @@ export function prootBinds(spec: ProotBindSpec): string[] {
     args.push(`--bind=${spec.tools.myTools}:${MY_TOOLS_PATH}`);
   }
 
-  // The Docker socket when `tools[]` grants `docker` (spawn/socketArgs.ts).
-  args.push(...spec.socketBinds);
 
   return args;
 }
@@ -463,7 +458,6 @@ export class ProotRunner implements SandboxRunner {
       homeBind: prootHomeBind({ home }),
       contextBinds: prootContextBinds({ systemDir: this.contextStore.systemDir, volumesDir: this.volumeStore.volumesDir, volumes: contextVolumes }),
       tools: hasTools ? { myTools, allTools: currentToolsMode(this.dataDir) === 'symlink' ? toolBinDir : null } : null,
-      socketBinds: prootSocketBinds(manifest.tools),
     });
     args.push(...entrypointArgv);
     return args;

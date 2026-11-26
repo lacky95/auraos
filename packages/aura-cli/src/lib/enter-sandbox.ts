@@ -1,10 +1,6 @@
-import { runnerShellUrl } from './identity.js';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
-import { spawn, type ChildProcess } from 'node:child_process';
 import { stdout, env as procEnv } from 'node:process';
-import { color, fail, info, ok } from './format.js';
-import { execVia, runSession, type SessionRequest } from './exec-client.js';
+import { color, fail, info, ok, warn } from './format.js';
+import { runSession, type HomeMode, type SessionRequest } from './exec-client.js';
 
 /**
  * Tell the AuraOS Terminal which sandbox the live shell is now in.
@@ -34,90 +30,13 @@ export function callerHostLabel(): string {
     || 'aura-shell';
 }
 
-/**
- * Work around `docker exec -it`'s TTY-size race for jumped shells.
- *
- * docker reads the local TTY winsize once at attach and otherwise only
- * resizes the remote PTY when it receives a SIGWINCH. On a freshly-attached
- * interactive shell that the user doesn't manually resize, the remote PTY can
- * stay at node-pty's 80x24 default — so TUIs and line-wrapping inside the
- * jumped session render at 80 columns even though the host terminal is sized
- * correctly. The terminal app's own fit/resize logic can't help here: it sizes
- * the xterm/node-pty, not this new remote PTY.
- *
- * Emitting SIGWINCH at the docker client right after it starts forces it to
- * re-read our (correct) TTY size and POST it to the remote PTY. It's harmless
- * when the size is already right — it just re-applies the same dimensions.
- *
- * Two layers, both idempotent:
- *   1. Staggered initial nudges cover the gap between the child starting and
- *      docker finishing the attach + installing its SIGWINCH handler. They run
- *      a bit longer/denser than strictly needed so a slow daemon or cold image
- *      pull (attach >600 ms) still gets sized without the user touching the
- *      window.
- *   2. A live SIGWINCH forwarder for the child's whole lifetime: every resize
- *      the host TTY sees while we're jumped is re-posted to the docker client,
- *      so ongoing resizes propagate to the remote PTY even if process-group
- *      delivery races docker's own handler. Removed on exit so we don't leak a
- *      listener across successive jumps.
- */
-export function syncDockerExecWinsize(child: ChildProcess): void {
-  const nudge = () => { try { child.kill('SIGWINCH'); } catch { /* already exited */ } };
-  child.once('spawn', () => {
-    for (const ms of [120, 300, 600, 1200, 2000]) setTimeout(nudge, ms);
-  });
-  const onWinch = () => nudge();
-  process.on('SIGWINCH', onWinch);
-  child.on('exit', () => process.removeListener('SIGWINCH', onWinch));
-}
+export const HOME_MODES: readonly HomeMode[] = ['private', 'app', 'ephemeral'];
 
-/**
- * Drop into the target instance's sandbox in the CURRENT terminal session
- * (stdio: 'inherit' replaces our process). On exit, the user is back at
- * the calling shell. Dispatches on the instance's sandbox kind:
- *
- *   - 'proot'     → spawn `proot ...` with the same bind topology
- *                    ProotRunner uses at app boot, so the env inside this
- *                    exec shell matches what the live app sees.
- *   - 'container' → `docker exec -it aura-<instanceId> bash`. Joins the
- *                    sibling container's namespace directly — full kernel-
- *                    level isolation, identical to what `aura jump` users
- *                    expect when they say "isolated in that app".
- *
- * Requires (for container mode):
- *   - `docker` CLI on PATH of the calling shell (terminal proot gets this
- *     via the wildcard cap allowlist now that we copy it into the
- *     toolchain store).
- *   - `/var/run/docker.sock` bind-mounted into the calling sandbox so the
- *     CLI can reach the host daemon. ProotRunner binds it for any app
- *     whose manifest tools[] mentions 'docker' (incl. via '*' wildcard).
- */
-export interface SandboxLaunch {
-  /** Scoped host path to the app's source dir. Resolved server-side (any
-   *  scope). Falls back to `/workspace/apps/<appId>` when absent. */
-  appDir?: string;
-  /** Scoped host path to this instance's data dir. Falls back to the legacy
-   *  `/data/apps/<appId>/<instanceId>` when absent. */
-  instanceDataDir?: string;
-  /** Interactive cwd inside the sandbox; HOME remains shared. */
-  startDir?: string;
-}
-
-export function enterSandbox(
-  instanceId: string,
-  appId: string,
-  port: number | null,
-  tools: string[],
-  sandbox: 'proot' | 'container' | undefined,
-  cmd?: string,
-  launch?: SandboxLaunch,
-): void {
-  // Container sandboxes normalise every scope to `/workspace/apps/<appId>`
-  // INSIDE the container (ContainerRunner), so enterContainer keeps that
-  // in-container path and ignores the scoped host `launch` paths. Only the
-  // proot path runs against real host paths and needs the scope-correct dirs.
-  if (sandbox === 'container') return enterContainer(instanceId, appId, cmd, launch?.startDir);
-  return enterProot(instanceId, appId, port, tools, cmd, launch);
+/** `--home`: private (default), app or ephemeral; anything else fails. */
+export function parseHomeMode(v: string | undefined): HomeMode | undefined {
+  if (v === undefined) return undefined;
+  if (!(HOME_MODES as readonly string[]).includes(v)) fail(`--home must be one of ${HOME_MODES.join(', ')}`);
+  return v as HomeMode;
 }
 
 /** The positional-argument jump into `startDir`, with today's fallback message. */
@@ -126,235 +45,59 @@ function startDirArgv(startDir: string): string[] {
 }
 
 /**
- * Phase 5 stream X: run the session through the shell's exec bridge when it
- * is available (lib/exec-client.ts). Calls `fallback` when the bridge could
- * not open it (nothing ran), unless AURA_EXEC_VIA=api; AURA_EXEC_VIA=docker
- * goes straight to the fallback. Exits the process with the session's code.
+ * Run a session through the shell's exec bridge (lib/exec-client.ts) and exit
+ * with its code. There is no other path (stream J, D36): the CLI never runs
+ * docker or proot itself; a target the bridge refuses (a PRoot runtime, a
+ * root instance for --home private) is reported as refused.
  */
-function viaBridge(req: SessionRequest, label: string | null, fallback: () => void): void {
-  const via = execVia();
-  if (via === 'docker') return fallback();
+function viaBridge(req: SessionRequest, label: string | null): void {
   const restoreHost = label ? callerHostLabel() : null;
   if (label) setTerminalHost(label);
   void runSession(req).then((r) => {
-    if (r.opened) {
-      if (restoreHost) setTerminalHost(restoreHost);
-      if (label) ok(`shell exited (code ${r.code ?? 1})`);
-      process.exit(r.code ?? 1);
-    }
     if (restoreHost) setTerminalHost(restoreHost);
-    if (via === 'api') fail(`exec bridge: ${r.reason}`);
-    if (process.env['AURA_LOG']) info(`exec bridge unavailable (${r.reason}); using docker`);
-    fallback();
+    if (!r.opened) fail(`session refused: ${r.reason}`);
+    if (label) ok(`shell exited (code ${r.code ?? 1})`);
+    process.exit(r.code ?? 1);
   });
 }
 
-/** Enters the app's container: the exec bridge first, `docker exec` as the fallback. */
-function enterContainer(instanceId: string, appId: string, cmd?: string, startDir?: string): void {
-  const tty = !cmd || (process.stdin.isTTY && stdout.isTTY);
-  const argv = cmd ? ['bash', '-lc', cmd] : startDir ? startDirArgv(startDir) : undefined;
-  if (!cmd) info(`entering container of ${color.bold(instanceId)} (sandbox=container, via the shell)`);
-  viaBridge({ instanceId, kind: cmd ? 'exec' : 'jump', tty, ...(argv ? { argv } : {}) }, cmd ? null : appId,
-    () => dockerExecContainer(instanceId, appId, cmd, startDir));
-}
-
-/** Joins the sibling container's namespace via docker exec (the fallback until 5-main). */
-function dockerExecContainer(instanceId: string, appId: string, cmd?: string, startDir?: string): void {
-  // Mirrors ContainerRunner.containerName() — same sanitisation rule.
-  const containerName = 'aura-' + instanceId.replace(/[^a-zA-Z0-9_.-]/g, '_');
-  const appDir = `/workspace/apps/${appId}`;
-  // Land in the app's folder so `pwd` shows the project, but DON'T override
-  // HOME — the container is launched with HOME=/home/aura pointing at the
-  // shared persistent volume, and we want CLI state (`~/.claude` etc.) to
-  // survive across jumps. AURA_HOSTNAME is re-asserted defensively in case
-  // someone reuses this function against a container that lacks it.
-  // Pass through terminal-capability env so TUI apps (claude, htop, vim, …)
-  // render the rich version, not the dumb fallback. node-pty in the Terminal
-  // app's pty-server sets these for its own bash; without them, `docker exec`
-  // inside a jumped session inherits a bare TERM=xterm and claude switches
-  // to the compact one-line greeting instead of the boxed welcome card.
-  //   • TERM=xterm-256color  → enables 256-colour + box-drawing detection
-  //   • COLORTERM=truecolor  → unlocks the 24-bit colour paths
-  //   • LANG=C.UTF-8         → UTF-8 box chars render correctly
-  //   • LC_ALL falls back to LANG when unset; we set both so a parent that
-  //     exported LC_ALL=C doesn't leak through and downgrade us.
-  const termEnv: string[] = [];
-  const passthrough: Record<string, string> = {
-    TERM:       process.env['TERM']      ?? 'xterm-256color',
-    COLORTERM:  process.env['COLORTERM'] ?? 'truecolor',
-    LANG:       process.env['LANG']      ?? 'C.UTF-8',
-    LC_ALL:     process.env['LC_ALL']    ?? 'C.UTF-8',
-  };
-  for (const [k, v] of Object.entries(passthrough)) termEnv.push('-e', `${k}=${v}`);
-  const execArgs = [
-    // A one-off `cmd` may be piped (`aura exec … -- cmd | grep`): -t there
-    // makes docker refuse with "the input device is not a TTY".
-    'exec', cmd && !(process.stdin.isTTY && stdout.isTTY) ? '-i' : '-it',
-    '--workdir', appDir,
-    '-e', `AURA_HOSTNAME=${appId}`,
-    ...termEnv,
-    containerName,
-  ];
-  // Positional arguments avoid shell interpolation; absent data falls back to source.
-  const shellArgs = cmd ? ['bash', '-lc', cmd] : startDir ? startDirArgv(startDir) : ['bash', '-i'];
-  const args = [...execArgs, ...shellArgs];
-  // One-off `cmd` runs print only the command's own output, like docker exec.
-  if (!cmd) info(`entering container ${color.bold(containerName)} (sandbox=container, cwd=${startDir ?? appDir})`);
-  // Interactive jumps update the Terminal's host indicator; one-off `cmd` runs
-  // don't (they return immediately and shouldn't flicker the bar).
-  const restoreHost = cmd ? null : callerHostLabel();
-  if (!cmd) setTerminalHost(appId);
-  const child = spawn('docker', args, { stdio: 'inherit' });
-  syncDockerExecWinsize(child);
-  child.on('exit', (code) => {
-    if (restoreHost) setTerminalHost(restoreHost);
-    if (!cmd) ok(`shell exited (code ${code ?? 0})`);
-    process.exit(code ?? 0);
-  });
-  child.on('error', (err) => fail(
-    `docker exec failed: ${err.message}\n` +
-    `  Hint: the calling sandbox needs both the docker CLI on PATH and a bound /var/run/docker.sock.\n` +
-    `  Terminal-proot apps get this automatically when their manifest tools[] include '*' (the wildcard\n` +
-    `  cap allowlist now ships docker, and ProotRunner binds the host docker socket).`
-  ));
+export interface EnterOpts {
+  /** A one-off command (`bash -lc`); none = an interactive shell. */
+  cmd?: string;
+  /** Interactive cwd inside the sandbox. */
+  startDir?: string;
+  /** D67: private (default), app or ephemeral. */
+  home?: HomeMode;
 }
 
 /**
- * Enter (or run a command in) a SIDECAR container of an instance.
- *
- * Sidecars run foreign images, so nothing about them is known: no bash, no
- * /workspace. An interactive entry prefers bash and falls back to sh; a `cmd`
- * is exec'd as given (argv, no shell), so `aura exec … -- ls -la` behaves the
- * way `docker exec` does. Same caller prerequisite as every container jump:
- * the docker CLI plus a bound socket.
+ * Enter the RUNNING instance (D74): a session inside its environment with
+ * the chosen home, opened by the shell (stream J). `exec` is the same
+ * session without a TTY (J.4).
  */
-export function enterSidecar(container: string, label: string, cmd?: string[], via?: { instanceId: string; service: string }): void {
+export function enterSandbox(instanceId: string, appId: string, opts: EnterOpts = {}): void {
+  const { cmd, startDir, home } = opts;
+  const tty = !cmd || (process.stdin.isTTY && stdout.isTTY);
+  const argv = cmd ? ['bash', '-lc', cmd] : startDir ? startDirArgv(startDir) : undefined;
+  if (!cmd) {
+    info(`entering ${color.bold(instanceId)} (home: ${home ?? 'private'})`);
+    // J.3 residual risk: whatever runs from the app's tree runs with the user's Private Home.
+    if ((home ?? 'private') === 'private') warn('this app\'s code runs with your home; use --home ephemeral for untrusted apps');
+  }
+  viaBridge({ instanceId, kind: cmd ? 'exec' : 'jump', tty, ...(argv ? { argv } : {}), ...(home ? { home } : {}) }, cmd ? null : appId);
+}
+
+/**
+ * Enter (or run a command in) a SIDECAR of an instance: an owner-only bridge
+ * exec in the actual sidecar with its image user, never a Private Home (J.4).
+ * Sidecars run foreign images: an interactive entry prefers bash and falls
+ * back to sh; a `cmd` is exec'd as given (argv, no shell).
+ */
+export function enterSidecar(instanceId: string, service: string, label: string, cmd?: string[]): void {
   const interactive = !cmd || cmd.length === 0;
-  if (!via) return dockerExecSidecar(container, label, cmd);
-  if (interactive) info(`entering sidecar ${color.bold(label)} (via the shell)`);
+  if (interactive) info(`entering sidecar ${color.bold(label)}`);
   viaBridge({
-    instanceId: via.instanceId, sidecar: via.service, kind: interactive ? 'jump' : 'exec',
+    instanceId, sidecar: service, kind: interactive ? 'jump' : 'exec',
     tty: interactive || (process.stdin.isTTY && stdout.isTTY), ...(interactive ? {} : { argv: cmd! }),
-  }, interactive ? label : null, () => dockerExecSidecar(container, label, cmd));
+  }, interactive ? label : null);
 }
-
-/** `docker exec` into a sidecar (the fallback until 5-main). */
-function dockerExecSidecar(container: string, label: string, cmd?: string[]): void {
-  const termEnv: string[] = [];
-  const passthrough: Record<string, string> = {
-    TERM:      process.env['TERM']      ?? 'xterm-256color',
-    COLORTERM: process.env['COLORTERM'] ?? 'truecolor',
-    LANG:      process.env['LANG']      ?? 'C.UTF-8',
-    LC_ALL:    process.env['LC_ALL']    ?? 'C.UTF-8',
-  };
-  for (const [k, v] of Object.entries(passthrough)) termEnv.push('-e', `${k}=${v}`);
-  const interactive = !cmd || cmd.length === 0;
-  // -t only with a real terminal on both ends, or docker refuses ("the input
-  // device is not a TTY") when the command is piped.
-  const tty = process.stdin.isTTY && stdout.isTTY ? ['-it'] : ['-i'];
-  const shellArgs = interactive
-    ? ['sh', '-c', 'command -v bash >/dev/null 2>&1 && exec bash -i || exec sh -i']
-    : cmd!;
-  const args = ['exec', ...tty, ...termEnv, container, ...shellArgs];
-  if (interactive) info(`entering sidecar ${color.bold(container)}`);
-  const restoreHost = interactive ? callerHostLabel() : null;
-  if (interactive) setTerminalHost(label);
-  const child = spawn('docker', args, { stdio: 'inherit' });
-  syncDockerExecWinsize(child);
-  child.on('exit', (code) => {
-    if (restoreHost) setTerminalHost(restoreHost);
-    if (interactive) ok(`shell exited (code ${code ?? 0})`);
-    process.exit(code ?? 0);
-  });
-  child.on('error', (err) => fail(
-    `docker exec failed: ${err.message}\n` +
-    `  Hint: entering a sidecar needs the docker CLI on PATH and a bound /var/run/docker.sock\n` +
-    `  (the AuraOS Terminal and the master shell have both).`
-  ));
-}
-
-/** Joins the proot-mode app's sandbox by spawning a sibling proot with
- *  the same bind topology ProotRunner uses at boot. */
-function enterProot(
-  instanceId: string,
-  appId: string,
-  port: number | null,
-  tools: string[],
-  cmd?: string,
-  launch?: SandboxLaunch,
-): void {
-  const appsDir   = process.env['AURA_APPS_DIR']      ?? '/workspace/apps';
-  const dataDir   = process.env['AURA_DATA_DIR']      ?? '/data';
-  const rootfs    = process.env['AURA_BASE_ROOTFS']   ?? '/os/base-rootfs';
-  const toolchain = process.env['AURA_TOOLCHAIN_DIR'] ?? '/os/toolchain';
-  const useProot  = process.env['AURA_USE_PROOT'] === 'true' && existsSync(rootfs);
-
-  // Prefer the scope-correct paths resolved server-side; fall back to the
-  // legacy system-scope layout only when the caller didn't supply them (older
-  // shell without the `launch` DTO field).
-  const appDir       = launch?.appDir          ?? join(appsDir, appId);
-  const instDataDir  = launch?.instanceDataDir ?? join(dataDir, 'apps', appId, instanceId);
-  const toolBinDir   = join(toolchain, 'bin');
-
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    APP_ID: appId,
-    APP_INSTANCE_ID: instanceId,
-    APP_PORT: port?.toString() ?? '',
-    // Never AURA_SHELL_URL: this value decides where the sandbox may send its token.
-    OS_API_BASE: runnerShellUrl(),
-    // The host shell exports AURA_TERM_LABEL (= "aura-shell") to pin its own
-    // title; clear it here so the jumped proot shows the app (via APP_ID),
-    // not the host we jumped from. Container jumps get a fresh env, so this
-    // leak only affects proot.
-    AURA_TERM_LABEL: '',
-  };
-
-  const command = cmd ? ['bash', '-lc', cmd] : launch?.startDir
-    ? ['bash', '-c', 'cd -- "$1" 2>/dev/null || printf "Workspace unavailable; using %s\\n" "$PWD"; exec bash -i', 'aura-jump', useProot ? launch.startDir : join(instDataDir, launch.startDir.slice('/data/'.length))]
-    : ['bash', '-i'];
-
-  // Drive the Terminal's host indicator (interactive jumps only). Capture the
-  // caller's label before spawning so we can restore the bar on exit.
-  const restoreHost = cmd ? null : callerHostLabel();
-  if (!cmd) setTerminalHost(appId);
-
-  if (!useProot) {
-    info(`PRoot disabled — opening shell in master cwd=${appDir}`);
-    const child = spawn(command[0]!, command.slice(1), { cwd: appDir, env, stdio: 'inherit' });
-    child.on('exit', (code) => {
-      if (restoreHost) setTerminalHost(restoreHost);
-      process.exit(code ?? 0);
-    });
-    return;
-  }
-
-  const args: string[] = [
-    `--rootfs=${rootfs}`,
-    '--bind=/workspace:/workspace',
-    `--bind=${instDataDir}:/data`,
-    '--bind=/proc',
-    '--bind=/dev',
-    '--bind=/tmp',
-    '--bind=/etc/resolv.conf:/etc/resolv.conf',
-    '--bind=/usr/local/bin/node:/usr/local/bin/node',
-    `--cwd=${appDir}`,
-  ];
-  for (const tool of tools) {
-    const binaryName = tool === 'claude-code' ? 'claude' : tool;
-    const toolPath = join(toolBinDir, binaryName);
-    if (existsSync(toolPath)) args.push(`--bind=${toolPath}:/usr/local/bin/${binaryName}`);
-  }
-  args.push(...command);
-
-  info(`entering PRoot for ${color.bold(instanceId)} (sandbox=proot, cwd=${appDir})`);
-  const child = spawn('proot', args, { env, stdio: 'inherit' });
-  child.on('exit', (code) => {
-    if (restoreHost) setTerminalHost(restoreHost);
-    ok(`shell exited (code ${code ?? 0})`); process.exit(code ?? 0);
-  });
-  child.on('error', (err) => fail(`proot failed: ${err.message}`));
-}
-
-/** Back-compat shim. Older imports of `enterProot` still work. */
-export { enterSandbox as enterProot };

@@ -8,7 +8,6 @@ import { lifecyclePath } from '../types/manifest.js';
 import { MY_TOOLS_PATH, currentToolsMode, provisionAllowlist, toolchainMirrorBin } from './tool-provision.js';
 import { containerHomeEnv, containerHomeMount } from './spawn/homeArgs.js';
 import { containerContextEnv, containerContextMounts } from './spawn/contextArgs.js';
-import { containerSocketArgs } from './spawn/socketArgs.js';
 import { containerNetworkArgs, containerNetworkEnv, containerShellBase, rawSocketArgs, terminalNetworkUser } from './spawn/networkArgs.js';
 import { TERM_NETWORK_CONTAINER_LABEL, TermNetworks, type TermNetwork } from './TermNetworks.js';
 import { containerIdentityArgs, isNonRootIdentity, writeIdentityFiles } from './spawn/identityArgs.js';
@@ -18,7 +17,10 @@ import type { RuntimeCapabilities } from '../runtimes/types.js';
 import { MOUNT_ROOT_PATH } from './MountManager.js';
 import { KEEP_RESTART_LABEL, keptAcrossRestart, type KeepSiblings } from './sidecarParking.js';
 import type { SandboxExecOpts, SandboxRunner, SandboxRunnerOpts } from './SandboxRunner.js';
-import type { EngineContainer } from './ExecBridge.js';
+import type { EngineContainer, ExecSession, SessionSpec } from './ExecBridge.js';
+import { ExecBridgeError } from './ExecBridge.js';
+import { DockerApi, type EngineClient } from './DockerApi.js';
+import { SessionBroker } from './SessionBroker.js';
 import type { ResourceUsage, SidecarInfo } from '../types/instance.js';
 import { SIDECAR_PS_FORMAT, USAGE_STATS_FORMAT, parseSidecarPs, parseUsageStats } from './sidecars.js';
 import type { InstanceSpawnContext } from './SandboxRunner.js';
@@ -43,6 +45,17 @@ const LIFECYCLE_TIMEOUT_MS = 5_000;
 const SHARED_NETWORK = process.env['AURA_DOCKER_NETWORK'] ?? 'aura-net';
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * The app container's env keys a session inherits (J.2: the app's spawn env
+ * minus anything secret). An allowlist: Context keys, the instance token and
+ * the lifecycle token never reach a session.
+ */
+export const SESSION_APP_ENV: ReadonlySet<string> = new Set([
+  'APP_ID', 'APP_INSTANCE_ID', 'APP_PORT', 'OS_API_BASE', 'AURA_LAYER_TAG', 'AURA_SERVE', 'AURA_HOSTNAME',
+  'AURA_SHELL_HOSTNAME', 'AURA_TOOLS_MODE', 'AURA_MOUNT_ROOT', 'AURA_RUN_AS', 'ASTRO_TELEMETRY_DISABLED',
+  'NODE_ENV', 'NODE_VERSION', 'YARN_VERSION', 'PATH', 'TERM', 'COLORTERM', 'LANG', 'LC_ALL',
+]);
 
 /**
  * The long-running `docker logs -f` / `docker wait` watchers: two per app
@@ -345,14 +358,17 @@ export class ContainerRunner implements SandboxRunner {
    * Today's container runtime (ARI §2.3): namespaces, enforced read-only
    * binds, mounts, port expose, sidecars, re-adoption. It enforces an app
    * identity (`--user`, no capabilities, no-new-privileges: stream A,
-   * `identity: enforced`); jump is a `docker exec`, not an isolated session
-   * yet: stream J flips `sessionExec` and `privateHomeSession`.
+   * `identity: enforced`). Sessions enter the running container through the
+   * session broker (stream J, D74: `openSession`), with the Private Home
+   * bound in the session's own mount namespace only (`privateHomeSession`).
+   * Whether a given instance may get a private session also depends on its
+   * installation running non-root (J.5): the kernel checks that per instance.
    */
   public capabilities(): RuntimeCapabilities {
     return {
       isolation: 'namespace',
-      privateHomeSession: false,
-      sessionExec: false,
+      privateHomeSession: true,
+      sessionExec: true,
       identity: 'enforced',
       readOnlyBinds: true,
       mounts: true,
@@ -800,8 +816,7 @@ export class ContainerRunner implements SandboxRunner {
       ...containerHomeMount({ appDataVolume, home: ctx.home }),
       // OS Context: /run/context and the shared Context Volumes (spawn/contextArgs.ts).
       ...containerContextMounts({ appDataVolume, volumes: contextVolumes }),
-      // The Docker socket when `tools[]` grants `docker` (spawn/socketArgs.ts).
-      ...containerSocketArgs(manifest.tools),
+      // No Docker socket, ever (stream J.7, spawn/socketArgs.ts): only a root tab's session has it.
       // OS Context env FIRST — the fixed OS vars below are pushed after, so a
       // context key can't clobber them (docker's last-wins semantics).
       ...containerContextEnv(contextEnv),
@@ -1580,6 +1595,47 @@ export class ContainerRunner implements SandboxRunner {
   engineContainer(instanceId: string): EngineContainer | null {
     const c = this.containers.get(instanceId);
     return c ? { container: this.containerName(instanceId), workdir: `/workspace/apps/${c.appId}` } : null;
+  }
+
+  /** The Engine API client (stream X's), shared by the session broker. */
+  private engineClient: EngineClient | null = null;
+  private broker: SessionBroker | null = null;
+  /** Tests: a fake engine and broker. */
+  setSessionBroker(engine: EngineClient, broker: SessionBroker): void { this.engineClient = engine; this.broker = broker; }
+  private sessionBroker(): { engine: EngineClient; broker: SessionBroker } {
+    this.engineClient ??= new DockerApi();
+    this.broker ??= new SessionBroker({
+      engine: this.engineClient, dataDir: this.dataDir, appDataVolume: this.appDataVolume,
+      dockerCli: () => { const p = join(toolchainMirrorBin(this.dataDir), 'docker'); return existsSync(p) ? p : null; },
+    });
+    return { engine: this.engineClient, broker: this.broker };
+  }
+
+  /** The open in-environment sessions (diagnose). */
+  openSessions(): ReturnType<SessionBroker['sessions']> {
+    return this.broker?.sessions() ?? [];
+  }
+
+  /**
+   * Stream J (D74): a session inside the RUNNING app container, through the
+   * session broker. The container's own non-secret env (SESSION_APP_ENV) is
+   * the session's base; the kernel's spec decides identity, home and the rest.
+   */
+  async openSession(instanceId: string, spec: SessionSpec, onOutput: (channel: 1 | 2, data: Buffer) => void): Promise<ExecSession> {
+    const c = this.containers.get(instanceId);
+    if (!c) throw new ExecBridgeError(409, 'not-running', `${instanceId} is not running in a container`);
+    const { engine, broker } = this.sessionBroker();
+    const info = await engine.containerInspect(this.containerName(instanceId));
+    if (!info.State?.Running || !info.State.Pid || !info.Id) throw new ExecBridgeError(409, 'not-running', `${instanceId} is not running`);
+    if (info.State.Paused) throw new ExecBridgeError(409, 'not-running', `${instanceId} is paused`);
+    const env: Record<string, string> = {};
+    for (const kv of info.Config?.Env ?? []) {
+      const at = kv.indexOf('=');
+      if (at > 0 && SESSION_APP_ENV.has(kv.slice(0, at))) env[kv.slice(0, at)] = kv.slice(at + 1);
+    }
+    return broker.openSession({
+      ...spec, env: { ...env, ...spec.env }, cwd: spec.cwd ?? `/workspace/apps/${c.appId}`,
+    }, { containerId: info.Id, pid: info.State.Pid }, onOutput);
   }
 
   isRunning(instanceId: string): boolean {

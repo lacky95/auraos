@@ -1,7 +1,7 @@
 import type { Command } from 'commander';
 import { api } from '../lib/client.js';
 import { color, fail, ok, stateColor, table, uptime } from '../lib/format.js';
-import { enterSandbox } from '../lib/enter-sandbox.js';
+import { enterSandbox, parseHomeMode } from '../lib/enter-sandbox.js';
 
 interface AppInstanceDto {
   instanceId: string;
@@ -78,18 +78,13 @@ export function registerInst(program: Command): void {
   inst
     .command('shell <instanceId>')
     .option('-c, --cmd <cmd>', 'Run a single command instead of an interactive shell')
-    .description('Drop into an interactive shell inside the running sandbox of an instance (docker-exec-style; works for both proot and container sandboxes).')
-    .action(async (instanceId: string, opts: { cmd?: string }) => {
-      const dto = await api.get<{
-        instance: { appId: string; port: number | null; sandbox?: 'proot' | 'container' };
-        launch?: { appDir?: string; instanceDataDir?: string; tools?: string[] };
-      }>(`/api/instances/${encodeURIComponent(instanceId)}/status`);
-      const target = dto.instance;
-      if (!target?.appId) fail(`Instance not found: ${instanceId}`);
-      // Tools + scoped paths come from the registry-backed DTO (scope-correct
-      // for system/global/user apps), not a hardcoded /workspace/apps read.
-      const tools = dto.launch?.tools ?? [];
-      enterSandbox(instanceId, target.appId, target.port, tools, target.sandbox, opts.cmd, dto.launch);
+    .option('--home <mode>', 'private (default) | app | ephemeral')
+    .description('A session inside the running instance (the same as aura jump; with -c, aura exec).')
+    .action(async (instanceId: string, opts: { cmd?: string; home?: string }) => {
+      const dto = await api.get<{ instance: { appId: string } }>(`/api/instances/${encodeURIComponent(instanceId)}/status`);
+      if (!dto.instance?.appId) fail(`Instance not found: ${instanceId}`);
+      const home = parseHomeMode(opts.home);
+      enterSandbox(instanceId, dto.instance.appId, { ...(opts.cmd ? { cmd: opts.cmd } : {}), ...(home ? { home } : {}) });
     });
 
   inst

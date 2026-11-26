@@ -43,7 +43,7 @@ test('declarations: permissions, context, sidecars with images, consumes, docker
     auraContract: 1, permissions: ['sidecars.spawn', 'sidecars.privileged'], context: ['A_KEY'],
     sidecars: [{ name: 'db', image: 'postgres:16' }], consumes: ['com.aura.docs/search', 'tts'], docker: true, privileged: true,
   });
-  assert.equal(contractDeclarations(parse({ tools: ['*'] })).docker, true);
+  assert.equal(contractDeclarations(parse({ tools: ['*'] })).docker, false, 'J.7: `*` never grants docker');
   assert.equal(contractDeclarations(parse({ tools: ['git'] })).docker, false);
 });
 
@@ -52,9 +52,9 @@ test('findings: what the manifest uses but does not declare', () => {
   assert.deepEqual(codes(parse({ auraContract: 9 })), ['contract-unknown']);
   assert.deepEqual(codes(parse({ auraContract: 1, services: [{ name: 'db', image: 'x' }] })), ['sidecars-undeclared']);
   assert.deepEqual(codes(parse({ auraContract: 1, permissions: ['sidecars.spawn'], services: [{ name: 'db', image: 'x', privileged: true }] })), ['privileged-undeclared']);
-  assert.deepEqual(codes(parse({ auraContract: 1, permissions: ['sidecars.spawn'], services: [{ name: 'db', image: 'x', inheritDockerSocket: true }] })), ['docker-undeclared']);
+  assert.deepEqual(codes(parse({ auraContract: 1, permissions: ['sidecars.spawn'], services: [{ name: 'db', image: 'x', inheritDockerSocket: true }] })), ['docker-socket-removed']);
   assert.deepEqual(codes(parse({ auraContract: 1, permissions: ['sidecars.spawn', 'sidecars.privileged'], services: [{ name: 'db', image: 'x', devices: ['/dev/x'] }] })), []);
-  assert.deepEqual(codes(parse({ auraContract: 1, tools: ['docker'], services: [{ name: 'db', image: 'x', publish: [{ host: 1, container: 2 }] }] })), []);
+  assert.deepEqual(codes(parse({ auraContract: 1, tools: ['docker'], services: [{ name: 'db', image: 'x', publish: [{ host: 1, container: 2 }] }] })), ['docker-socket-removed'], 'J.7: a docker entry gets no socket, only a warning');
 });
 
 test('layerWrites keeps written leaves outside scratch paths', () => {

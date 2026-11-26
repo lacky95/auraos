@@ -53,7 +53,10 @@ import type { AppRunAs, SpawnIdentity, SpawnIdentityProvider } from '../identity
 import { appIdentityProvider } from '../identity/appIdentityProvider.js';
 import { appOwnershipSpecs, applyAppOwnership } from '../identity/appOwnership.js';
 import { RuntimeCapabilityError } from '../runtimes/types.js';
-import { isNonRootIdentity } from './spawn/identityArgs.js';
+import { BASE_GROUP, BASE_PASSWD, identityAccountName, isNonRootIdentity } from './spawn/identityArgs.js';
+import { renderGroup, renderPasswd, type PasswdEntry } from '../identity/passwd.js';
+import type { SessionCaller, SessionContext } from './ExecBridge.js';
+import type { JumpHomeMode } from '../homes/types.js';
 import { selectOrphanSidecars } from './sidecars.js';
 import { SidecarParking, keepServicesOf } from './sidecarParking.js';
 import {
@@ -276,6 +279,7 @@ export class AppManager {
       instance: (id) => this.instances.get(id),
       runner:   (id) => this.runnerOf(id),
       sidecars: (id) => this.getSidecars(id),
+      sessionContext: (id, req) => this.sessionContext(id, req),
     });
     this.osSidecars  = new SidecarManager({
       runner:      this.container,
@@ -1785,6 +1789,106 @@ export class AppManager {
       if (!h || h.hostPath === home.hostPath) running.push(inst.instanceId);
     }
     return { installationId: installation.installationId, home, running };
+  }
+
+  /**
+   * Stream J (D74, D79, J.2–J.5): the kernel's decision for a session in a
+   * running instance: its identity, home, base env and account files. The
+   * runtime only executes it (SandboxRunner `openSession`).
+   *
+   *   no user (the instance itself)   `app` only, as the app's identity
+   *   private, ephemeral              the user's D70 uid/gid; the Home Resolver
+   *                                   checks the runtime, the user and a
+   *                                   non-root target (J.5); a member needs
+   *                                   `app.jump:<installationId>`
+   *   app                             the app's uid/gid and App Home (D79): the
+   *                                   owner, or a member with `app.jump`; a root
+   *                                   instance is the owner's only
+   *   root tab                        uid 0 with Docker's default set, the user's
+   *                                   Private Home and the Docker socket, only in
+   *                                   the user's own Terminal instance (J.6; the
+   *                                   shell checked the approved grant)
+   *
+   * The target counts as root unless BOTH the running instance and its
+   * installation say `runAs: app` (the runtime flag `identity: enforced` is
+   * static, phase5b P-2).
+   */
+  async sessionContext(instanceId: string, req: { mode: JumpHomeMode; caller: SessionCaller }): Promise<SessionContext> {
+    const inst = this.instances.get(instanceId);
+    const manifest = inst ? this.registry.getById(inst.appId) : undefined;
+    if (!inst || !manifest) throw new HomeDeniedError('installation-unresolved', `Instance not found: ${instanceId}`);
+    const installation = await this.installationRunAs(inst.appId);
+    if (!installation) throw new HomeDeniedError('installation-unresolved', `${inst.appId} has no recorded installation`);
+    const nonRoot = inst.runAs === 'app' && installation.runAs === 'app' && !!inst.uid && !!inst.gid;
+    const app = nonRoot ? { uid: inst.uid!, gid: inst.gid! } : { uid: 0, gid: 0 };
+    const appAccount: PasswdEntry[] = nonRoot ? [{ name: identityAccountName({ ...app, range: 'app' }, installation.installationId), uid: app.uid, gid: app.gid, gecos: 'AuraOS app' }] : [];
+    const runtime = this.runnerOf(instanceId).capabilities();
+    const base = { HOME: '/home/aura', SHELL: '/bin/bash', TMPDIR: '/run/aura-session', AURA_SESSION_HOME: req.mode };
+    const files = (accounts: PasswdEntry[]) => ({
+      passwd: renderPasswd(BASE_PASSWD, accounts),
+      group: renderGroup(BASE_GROUP, accounts.map((a) => ({ name: a.name, gid: a.gid }))),
+    });
+
+    const user = req.caller.user;
+    if (!user) {
+      if (req.mode !== 'app' || req.caller.root) throw new HomeDeniedError('not-authorized', 'a session without a human user runs as the app only');
+      const name = appAccount[0]?.name ?? 'root';
+      return {
+        kind: 'app', home: { mode: 'app', hostPath: null }, uid: app.uid, gid: app.gid, groups: [],
+        env: { ...base, USER: name, LOGNAME: name }, ...(nonRoot ? files(appAccount) : {}),
+      };
+    }
+    const principal = { userId: user.userId, role: user.role };
+    const homeReq = {
+      installationId: installation.installationId, environmentScope: manifest.environmentScope ?? 'global',
+      userId: user.userId, principal, appIdentity: app, runtime,
+    } as const;
+
+    if (req.caller.root) {
+      // J.6: only into the user's own Terminal instance, its session context (P5-4).
+      if (!TERMINAL_SESSION_APPS.has(inst.appId) || inst.owner !== user.userId || inst.inPool) {
+        throw new HomeDeniedError('not-authorized', 'a root tab opens only in your own Terminal instance');
+      }
+      const home = await this.homes.resolve({ ...homeReq, executionContext: 'terminal-session' });
+      return {
+        kind: 'root', home: { mode: 'private', hostPath: home.hostPath }, uid: 0, gid: 0, groups: [],
+        env: { ...base, USER: 'root', LOGNAME: 'root', AURA_ROOT_SESSION: '1' }, dockerSocket: true, userId: user.userId,
+      };
+    }
+
+    if (user.role !== 'owner' && !(await this.mayJumpApp(user.userId, installation.installationId))) {
+      throw new HomeDeniedError('not-authorized', `user ${user.userId} holds no app.jump grant for ${inst.appId}`);
+    }
+    const home = await this.homes.resolve({ ...homeReq, executionContext: 'jump', jumpHomeMode: req.mode });
+    if (req.mode === 'app') {
+      if (!nonRoot && user.role !== 'owner') throw new HomeDeniedError('not-authorized', 'an app session into a root instance is the owner\'s only');
+      const name = appAccount[0]?.name ?? 'root';
+      return {
+        kind: 'app', home: { mode: 'app', hostPath: null }, uid: app.uid, gid: app.gid, groups: [],
+        env: { ...base, USER: name, LOGNAME: name }, ...(nonRoot ? files(appAccount) : {}), userId: user.userId,
+      };
+    }
+    const id = await this.userLinuxIdentity(user.userId);
+    if (!id) throw new HomeDeniedError('identity-unresolved', `user ${user.userId} has no active Linux identity`);
+    if (id.uid === 0 || id.gid === 0) throw new HomeDeniedError('identity-unresolved', 'a user identity is never root');
+    const name = identityAccountName({ ...id, range: 'user' }, null);
+    const accounts: PasswdEntry[] = [...appAccount.filter((a) => a.uid !== id.uid), { name, uid: id.uid, gid: id.gid, gecos: 'AuraOS user' }];
+    return {
+      kind: 'user', home: { mode: req.mode, hostPath: req.mode === 'private' ? home.hostPath : null },
+      uid: id.uid, gid: id.gid, groups: [id.gid],
+      env: { ...base, USER: name, LOGNAME: name }, ...files(accounts), userId: user.userId,
+    };
+  }
+
+  /** A human user's active D70 identity, or null. */
+  private async userLinuxIdentity(userId: string): Promise<{ uid: number; gid: number } | null> {
+    const r = await (await import('../auth/services.js')).getAuthServices().identity.getUser(userId);
+    return r && r.state === 'active' ? { uid: r.uid, gid: r.gid } : null;
+  }
+
+  /** D79/D82: a member's `app.jump:<installationId>` grant (the owner needs none). */
+  private async mayJumpApp(userId: string, installationId: string): Promise<boolean> {
+    return !!(await (await import('../auth/services.js')).getAuthServices().grants.get({ kind: 'user', id: userId }, appJumpPermission(installationId)));
   }
 
   /** The home each running instance was started with (shell view; never in a public API). */

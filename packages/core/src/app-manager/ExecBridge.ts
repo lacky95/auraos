@@ -10,19 +10,35 @@
  *   logs         the instance's own output, optionally followed
  *                (GET /api/instances/:id/logs)
  *
- * 5-pre2 semantics (phase5-plan.md, stream X): an Engine exec into the
- * instance's existing app container as root (`User: "0"`, explicit, because
- * 5-apps containers run with `--user`), with the app's own home (its App Home). Never a
- * new container (D74). Stream J swaps the target for the in-environment
- * session broker; the transport and this API stay. Runtimes without an
- * engine container (PRoot) have no sessions here; their logs come from the
- * runner's output ring (outputLog.ts).
+ * Sessions (stream J, D74, phase5-plan.md J.2–J.5): a session enters the
+ * instance's RUNNING environment through its runtime (`SandboxRunner
+ * openSession`; the container runtime's session broker), never a new
+ * container. Only its mount namespace, identity and home differ:
+ *   --home private (default)  the user's uid/gid and Private Home
+ *   --home ephemeral          the user's uid/gid and a tmpfs home
+ *   --home app                the app's uid/gid and its App Home (D79)
+ * The kernel decides everything (`sessionContext`: the Home Resolver, the
+ * installation's runAs, the user's identity); the runtime only executes the
+ * spec. Gated on the instance runtime's `sessionExec`/`privateHomeSession`
+ * and, for private and ephemeral, a non-root target (J.5): a miss refuses
+ * (`capability-missing`), nothing falls back. A caller without a human user
+ * (the instance itself) gets only `app`. Runtimes without sessions (PRoot)
+ * refuse every mode; their logs come from the runner's output ring
+ * (outputLog.ts).
+ *
+ * A sidecar target stays an owner-only Engine exec in the actual sidecar with
+ * its image user, never with a Private Home (J.4).
  *
  * Who may call is the route and surface rules' (owner, or the instance
- * itself); this module trusts its caller and never reads a credential.
+ * itself, or a member with `app.jump`); this module trusts the caller it is
+ * handed and never reads a credential.
  */
+import { randomUUID } from 'node:crypto';
 import type { Duplex, Readable } from 'node:stream';
 import type { AccessPrincipal } from '../auth/types.js';
+import { homeRequirements } from '../homes/HomeResolver.js';
+import { HomeDeniedError, type JumpHomeMode } from '../homes/types.js';
+import { RuntimeCapabilityError, missingCapabilities } from '../runtimes/types.js';
 import type { AuditInput } from '../auth/AdminAudit.js';
 import { userAttribution } from '../auth/AdminAudit.js';
 import type { SidecarInfo } from '../types/instance.js';
@@ -49,9 +65,52 @@ export interface EngineContainer {
   env?: Record<string, string>;
 }
 
+/**
+ * One in-environment session as the kernel decided it (D74, ARI §9.6): what a
+ * runtime's `openSession` executes. Built only by the kernel from the verified
+ * caller and the session record; nothing in it comes from the client except
+ * argv, cwd, the terminal size and the TERM/LANG env.
+ */
+export interface SessionSpec {
+  sessionId: string;
+  instanceId: string;
+  /** `user`: the user's identity (private, ephemeral); `app`: the app's (D79); `root`: a root tab (J.6). */
+  kind: 'user' | 'app' | 'root';
+  home: { mode: JumpHomeMode; hostPath: string | null };
+  uid: number;
+  gid: number;
+  groups: number[];
+  env: Record<string, string>;
+  cwd?: string;
+  argv: string[];
+  tty: boolean;
+  cols: number;
+  rows: number;
+  /** The session's /etc/passwd and /etc/group, bound in its mount namespace only. */
+  passwd?: string;
+  group?: string;
+  /** A root tab only: the Docker socket and CLI in the session's namespace (J.6). */
+  dockerSocket?: boolean;
+  /** The human user the session acts for (audit, the session table). */
+  userId?: string;
+}
+
+/** The kernel's part of a session spec (AppManager `sessionContext`). */
+export type SessionContext = Omit<SessionSpec, 'sessionId' | 'instanceId' | 'argv' | 'tty' | 'cols' | 'rows'>;
+
+/** Who a session is for, as the shell verified it. */
+export interface SessionCaller {
+  /** The human user (D84: Private Homes are human-only). Absent: the instance itself, which gets `app` only. */
+  user?: { userId: string; role: 'owner' | 'member' };
+  /** A root tab: the shell checked an approved, live root grant for this user and instance (J.6). */
+  root?: boolean;
+}
+
 /** The validated first frame of a session. */
 export interface SessionOpen {
   kind: 'jump' | 'exec';
+  /** `aura jump --home` (D67); default `private` for a user, `app` for the instance itself. */
+  home?: JumpHomeMode;
   argv?: string[];
   tty: boolean;
   cols: number;
@@ -115,8 +174,10 @@ interface InstanceLike { appId: string; instanceId: string; state?: string }
 export interface ExecBridgeDeps {
   engine: EngineClient;
   instance(instanceId: string): InstanceLike | undefined;
-  runner(instanceId: string): Pick<SandboxRunner, 'isRunning' | 'engineContainer' | 'outputLog'>;
+  runner(instanceId: string): Pick<SandboxRunner, 'isRunning' | 'engineContainer' | 'outputLog' | 'openSession' | 'capabilities'>;
   sidecars(instanceId: string): SidecarInfo[];
+  /** The kernel's decision for a session (identity, home, env): throws HomeDeniedError / RuntimeCapabilityError. */
+  sessionContext(instanceId: string, req: { mode: JumpHomeMode; caller: SessionCaller }): Promise<SessionContext>;
 }
 
 const MAX_ARGV = 1024;
@@ -127,6 +188,9 @@ const MAX_TAIL = 5000;
 const SESSION_ENV = ['TERM', 'COLORTERM', 'LANG', 'LC_ALL'] as const;
 const ENV_VALUE = /^[A-Za-z0-9_.:@+-]{0,64}$/;
 const ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+/** Keys a caller never sets in a session: the kernel's. */
+const RESERVED_ENV = new Set(['HOME', 'USER', 'LOGNAME', 'TMPDIR', 'AURA_SESSION', 'PATH', 'SHELL']);
+const HOME_MODES: readonly JumpHomeMode[] = ['private', 'app', 'ephemeral'];
 /** An interactive jump without argv: bash if the image has it, else sh. */
 export const DEFAULT_JUMP_ARGV = ['sh', '-c', 'command -v bash >/dev/null 2>&1 && exec bash -i || exec sh -i'];
 const TTY_SIGNALS: Record<string, string> = { INT: '\x03', QUIT: '\x1c', TSTP: '\x1a' };
@@ -145,24 +209,19 @@ function checkArgv(argv: unknown, what: string): string[] {
 const dimension = (v: unknown, fallback: number): number =>
   Number.isInteger(v) && (v as number) >= 1 && (v as number) <= 1000 ? v as number : fallback;
 
-/**
- * Validate a session's first frame (`{op:'open', …}`). `home` is J's (D74):
- * until then a session sees the app's own App Home, so asking for one is refused
- * rather than silently ignored.
- */
+/** Validate a session's first frame (`{op:'open', …}`). */
 export function parseSessionOpen(frame: unknown): SessionOpen {
   if (!frame || typeof frame !== 'object' || (frame as { op?: unknown }).op !== 'open') throw bad('the first frame must be {op:"open", …}');
   const f = frame as Record<string, unknown>;
   if (f['kind'] !== 'jump' && f['kind'] !== 'exec') throw bad('kind must be jump or exec');
-  if (f['home'] !== undefined) {
-    throw new ExecBridgeError(409, 'capability-missing', 'home modes come with the in-environment session (privateHomeSession); this release enters with the app\'s own App Home');
-  }
+  if (f['home'] !== undefined && !HOME_MODES.includes(f['home'] as JumpHomeMode)) throw bad('home must be private, app or ephemeral');
   const argv = f['argv'] === undefined ? undefined : checkArgv(f['argv'], 'argv');
   if (f['kind'] === 'exec' && !argv) throw bad('exec needs argv');
   if (f['cwd'] !== undefined && (typeof f['cwd'] !== 'string' || !f['cwd'].startsWith('/') || f['cwd'].includes('\0') || f['cwd'].length > 4096)) {
     throw bad('cwd must be an absolute path');
   }
   if (f['sidecar'] !== undefined && (typeof f['sidecar'] !== 'string' || !/^[A-Za-z0-9_.-]{1,128}$/.test(f['sidecar']))) throw bad('bad sidecar name');
+  if (f['sidecar'] !== undefined && f['home'] !== undefined) throw bad('a sidecar session has the image\'s own user and home');
   const env: Record<string, string> = {};
   const rawEnv = (f['env'] && typeof f['env'] === 'object' ? f['env'] : {}) as Record<string, unknown>;
   for (const key of SESSION_ENV) {
@@ -171,6 +230,7 @@ export function parseSessionOpen(frame: unknown): SessionOpen {
   }
   return {
     kind: f['kind'], tty: f['tty'] === true,
+    ...(f['home'] !== undefined ? { home: f['home'] as JumpHomeMode } : {}),
     cols: dimension(f['cols'], 80), rows: dimension(f['rows'], 24),
     env,
     ...(argv ? { argv } : {}),
@@ -199,8 +259,16 @@ export function parseTail(raw: string | null | undefined): number | undefined {
   return Math.min(Math.max(Number(raw), 0), MAX_TAIL);
 }
 
-function engineError(err: unknown): ExecBridgeError {
+export function engineError(err: unknown): ExecBridgeError {
   if (err instanceof ExecBridgeError) return err;
+  if (err instanceof RuntimeCapabilityError) return new ExecBridgeError(409, 'capability-missing', err.message);
+  if (err instanceof HomeDeniedError) {
+    if (err.reason === 'not-authorized') return new ExecBridgeError(403, 'forbidden', err.message);
+    if (err.reason === 'root-instance') {
+      return new ExecBridgeError(409, 'capability-missing', `capability-missing: identity (instance runs as root, see the P5-3 report: aura admin apps privileges): ${err.message}`);
+    }
+    return new ExecBridgeError(409, 'home-denied', err.message);
+  }
   if (err instanceof DockerApiError) {
     if (err.status === 404) return new ExecBridgeError(404, 'not-found', err.message);
     if (err.status === 409) return new ExecBridgeError(409, 'not-running', err.message);
@@ -209,150 +277,213 @@ function engineError(err: unknown): ExecBridgeError {
   return new ExecBridgeError(500, 'internal', err instanceof Error ? err.message : String(err));
 }
 
-interface Target extends EngineContainer { user?: string; label: string }
+interface SidecarTarget { container: string; label: string }
+
+const TTY_SIGNAL = (sig: string): string | undefined => TTY_SIGNALS[String(sig).toUpperCase().replace(/^SIG/, '')];
+
+/** The exit code of an Engine exec once it finished; null if it still runs (a cut session). */
+export async function engineExitCode(engine: EngineClient, id: string): Promise<number | null> {
+  for (let i = 0; i < 20; i++) {
+    const r = await engine.execInspect(id);
+    if (!r.Running) return r.ExitCode;
+    await new Promise((res) => setTimeout(res, 100));
+  }
+  return null;
+}
+
+/**
+ * An `ExecSession` over a started Engine exec (its hijacked stream): the
+ * sidecar exec here and the container runtime's session broker share it.
+ * `onEnd` runs once when the session is closed by the caller (not when the
+ * process exits by itself): the broker ends the session's processes there.
+ */
+export function engineSession(
+  engine: EngineClient, id: string, sock: Duplex,
+  open: { tty: boolean; cols: number; rows: number },
+  onOutput: (channel: 1 | 2, data: Buffer) => void,
+  opts: { onEnd?: () => void; exitCode?: () => Promise<number | null> } = {},
+): ExecSession {
+  const resize = (cols: number, rows: number) => {
+    if (open.tty) void engine.execResize(id, dimension(cols, open.cols), dimension(rows, open.rows)).catch(() => undefined);
+  };
+  resize(open.cols, open.rows);
+  const demux = open.tty ? null : new EngineDemux(onOutput);
+  sock.on('data', (d: Buffer) => { if (demux) demux.push(d); else onOutput(1, d); });
+  const exited = new Promise<number | null>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      void (opts.exitCode ?? (() => engineExitCode(engine, id)))().then(resolve, () => resolve(null));
+    };
+    sock.once('end', finish);
+    sock.once('close', finish);
+    sock.once('error', finish);
+  });
+  let ended = false;
+  const close = () => {
+    if (!ended) { ended = true; try { opts.onEnd?.(); } catch { /* best effort */ } }
+    try { sock.destroy(); } catch { /* gone */ }
+  };
+  return {
+    input: (data) => { if (sock.writable) sock.write(data); },
+    endInput: () => { try { sock.end(); } catch { /* gone */ } },
+    resize,
+    signal: (sig) => {
+      const ch = open.tty ? TTY_SIGNAL(sig) : undefined;
+      if (ch && sock.writable) { sock.write(ch); return true; }
+      close();
+      return false;
+    },
+    close,
+    exited,
+  };
+}
 
 export class ExecBridge {
   constructor(private readonly deps: ExecBridgeDeps) {}
 
-  /** The engine container a session or exec enters: the app's own, or one of its sidecars. */
-  private target(instanceId: string, sidecar?: string): Target {
-    const inst = this.deps.instance(instanceId);
-    if (!inst) throw new ExecBridgeError(404, 'not-found', `Instance not found: ${instanceId}`);
-    if (sidecar) {
-      const sc = this.deps.sidecars(instanceId).find((s) => s.service === sidecar || s.id === sidecar);
-      if (!sc) throw new ExecBridgeError(404, 'not-found', `no sidecar '${sidecar}' in ${instanceId}`);
-      if (sc.backend !== 'container') throw new ExecBridgeError(409, 'runtime-unsupported', `sidecar ${sc.id} has no engine container`);
-      if (sc.state !== 'running') throw new ExecBridgeError(409, 'not-running', `sidecar ${sc.id} is ${sc.state}`);
-      // The image's own user: sidecars run foreign images.
-      return { container: sc.id, label: `${instanceId}/${sc.service}` };
-    }
-    const runner = this.deps.runner(instanceId);
-    if (!runner.isRunning(instanceId)) throw new ExecBridgeError(409, 'not-running', `${instanceId} is not running`);
-    const engine = runner.engineContainer?.(instanceId) ?? null;
-    if (!engine) {
-      throw new ExecBridgeError(409, 'runtime-unsupported', `${instanceId} runs in a runtime without an engine container; the exec bridge cannot enter it`);
-    }
-    return { ...engine, env: { AURA_HOSTNAME: inst.appId, ...engine.env }, user: '0', label: instanceId };
+  /** A sidecar of the instance: its engine container, entered with the image's own user. */
+  private sidecarTarget(instanceId: string, sidecar: string): SidecarTarget {
+    const sc = this.deps.sidecars(instanceId).find((s) => s.service === sidecar || s.id === sidecar);
+    if (!sc) throw new ExecBridgeError(404, 'not-found', `no sidecar '${sidecar}' in ${instanceId}`);
+    if (sc.backend !== 'container') throw new ExecBridgeError(409, 'runtime-unsupported', `sidecar ${sc.id} has no engine container`);
+    if (sc.state !== 'running') throw new ExecBridgeError(409, 'not-running', `sidecar ${sc.id} is ${sc.state}`);
+    return { container: sc.id, label: `${instanceId}/${sc.service}` };
   }
 
-  async openSession(instanceId: string, open: SessionOpen, onOutput: (channel: 1 | 2, data: Buffer) => void): Promise<ExecSession> {
-    const t = this.target(instanceId, open.sidecar);
-    const argv = open.argv ?? DEFAULT_JUMP_ARGV;
-    const env = Object.entries({ ...t.env, ...open.env }).map(([k, v]) => `${k}=${v}`);
-    const { engine } = this.deps;
-    let id: string;
-    let sock: Duplex;
+  private instanceOf(instanceId: string): InstanceLike {
+    const inst = this.deps.instance(instanceId);
+    if (!inst) throw new ExecBridgeError(404, 'not-found', `Instance not found: ${instanceId}`);
+    return inst;
+  }
+
+  /**
+   * The session spec of a jump or exec into the instance's own environment:
+   * the runtime's capabilities first (J.5), then the kernel's decision.
+   */
+  async sessionSpec(instanceId: string, open: SessionOpen, caller: SessionCaller): Promise<SessionSpec> {
+    this.instanceOf(instanceId);
+    const runner = this.deps.runner(instanceId);
+    if (!runner.isRunning(instanceId)) throw new ExecBridgeError(409, 'not-running', `${instanceId} is not running`);
+    const mode: JumpHomeMode = open.home ?? (caller.user ? 'private' : 'app');
+    if (!caller.user && (mode !== 'app' || caller.root)) {
+      throw new ExecBridgeError(403, 'forbidden', 'a session without a human user runs as the app only (--home app)');
+    }
+    if (caller.root && mode !== 'private') throw new ExecBridgeError(400, 'bad-request', 'a root tab has the user\'s Private Home');
+    const missing = missingCapabilities(runner.capabilities(), homeRequirements({ executionContext: 'jump', jumpHomeMode: mode }).capabilities);
+    if (missing.length || !runner.openSession) {
+      throw new ExecBridgeError(409, 'capability-missing',
+        `capability-missing: ${(missing.length ? missing : ['sessionExec']).join(', ')} (this runtime can't open a ${mode} session inside the running app; no weaker mapping is used)`);
+    }
+    let ctx: SessionContext;
     try {
-      id = await engine.execCreate(t.container, {
-        Cmd: argv, Tty: open.tty, Env: env,
-        ...(t.user !== undefined ? { User: t.user } : {}),
-        ...(open.cwd ?? t.workdir ? { WorkingDir: open.cwd ?? t.workdir } : {}),
-      });
-      sock = await engine.execStart(id, open.tty);
+      ctx = await this.deps.sessionContext(instanceId, { mode, caller });
     } catch (err) {
       throw engineError(err);
     }
-    const resize = (cols: number, rows: number) => {
-      if (open.tty) void engine.execResize(id, dimension(cols, open.cols), dimension(rows, open.rows)).catch(() => undefined);
-    };
-    resize(open.cols, open.rows);
-
-    const demux = open.tty ? null : new EngineDemux(onOutput);
-    sock.on('data', (d: Buffer) => { if (demux) demux.push(d); else onOutput(1, d); });
-    const exited = new Promise<number | null>((resolve) => {
-      let settled = false;
-      const finish = () => {
-        if (settled) return;
-        settled = true;
-        void this.exitCode(id).then(resolve, () => resolve(null));
-      };
-      sock.once('end', finish);
-      sock.once('close', finish);
-      sock.once('error', finish);
-    });
-    const close = () => { try { sock.destroy(); } catch { /* gone */ } };
+    const env = { ...ctx.env };
+    for (const [k, v] of Object.entries(open.env)) if (!RESERVED_ENV.has(k)) env[k] = v;
+    const cwd = open.cwd ?? ctx.cwd;
+    const sessionId = randomUUID();
+    env['AURA_SESSION'] = sessionId;
     return {
-      input: (data) => { if (sock.writable) sock.write(data); },
-      endInput: () => { try { sock.end(); } catch { /* gone */ } },
-      resize,
-      signal: (sig) => {
-        const ch = open.tty ? TTY_SIGNALS[String(sig).toUpperCase().replace(/^SIG/, '')] : undefined;
-        if (ch && sock.writable) { sock.write(ch); return true; }
-        close();
-        return false;
-      },
-      close,
-      exited,
+      ...ctx, env, sessionId, instanceId,
+      argv: open.argv ?? DEFAULT_JUMP_ARGV, tty: open.tty, cols: open.cols, rows: open.rows,
+      ...(cwd ? { cwd } : {}),
     };
   }
 
-  /** The exec's exit code once the engine reports it finished; null if it still runs (a cut session). */
-  private async exitCode(id: string): Promise<number | null> {
-    for (let i = 0; i < 20; i++) {
-      const r = await this.deps.engine.execInspect(id);
-      if (!r.Running) return r.ExitCode;
-      await new Promise((res) => setTimeout(res, 100));
+  async openSession(
+    instanceId: string, open: SessionOpen, onOutput: (channel: 1 | 2, data: Buffer) => void, caller: SessionCaller = {},
+  ): Promise<ExecSession> {
+    this.instanceOf(instanceId);
+    if (open.sidecar) {
+      const t = this.sidecarTarget(instanceId, open.sidecar);
+      const env = Object.entries(open.env).map(([k, v]) => `${k}=${v}`);
+      const { engine } = this.deps;
+      try {
+        const id = await engine.execCreate(t.container, {
+          Cmd: open.argv ?? DEFAULT_JUMP_ARGV, Tty: open.tty, Env: env, ...(open.cwd ? { WorkingDir: open.cwd } : {}),
+        });
+        return engineSession(engine, id, await engine.execStart(id, open.tty), open, onOutput);
+      } catch (err) {
+        throw engineError(err);
+      }
     }
-    return null;
+    const spec = await this.sessionSpec(instanceId, open, caller);
+    try {
+      return await this.deps.runner(instanceId).openSession!(instanceId, spec, onOutput);
+    } catch (err) {
+      throw engineError(err);
+    }
   }
 
   /**
    * A non-interactive command, as the sidecar exec contract
    * (`sidecars/[name]/exec.ts`): argv only, stdin ≤ 64 KiB, output capped at
-   * 4 MiB per stream, default timeout 30 s (max 10 min). A timeout cuts the
-   * connection; the Engine API cannot kill the process.
+   * 4 MiB per stream, default timeout 30 s (max 10 min). Into the instance it
+   * is a non-interactive session (`aura exec` = a jump without a TTY, J.4):
+   * the same identity and home rules; `user` is a sidecar's only. A timeout
+   * ends the session.
    */
-  async run(instanceId: string, req: RunRequest, opts: { sidecar?: string } = {}): Promise<RunResult> {
+  async run(instanceId: string, req: RunRequest, opts: { sidecar?: string; caller?: SessionCaller; home?: JumpHomeMode } = {}): Promise<RunResult> {
     const cmd = checkArgv(req?.cmd, 'cmd');
     if (req.stdin !== undefined && (typeof req.stdin !== 'string' || Buffer.byteLength(req.stdin) > MAX_STDIN)) {
       throw new ExecBridgeError(413, 'too-large', 'stdin is limited to 64 KiB');
     }
     if (req.workdir !== undefined && (typeof req.workdir !== 'string' || !req.workdir.startsWith('/'))) throw bad('workdir must be an absolute path');
     if (req.user !== undefined && (typeof req.user !== 'string' || !/^[A-Za-z0-9_.:-]{1,64}$/.test(req.user))) throw bad('bad user');
+    if (req.user !== undefined && !opts.sidecar) throw bad('user: a session\'s identity follows its home mode (--home); user is for a sidecar only');
+    if (opts.home !== undefined && !HOME_MODES.includes(opts.home)) throw bad('home must be private, app or ephemeral');
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(req.env ?? {})) {
       if (!ENV_KEY.test(k) || typeof v !== 'string' || v.includes('\0')) throw bad(`bad env ${k}`);
       env[k] = v;
     }
     const timeoutMs = Math.min(Math.max(Number(req.timeoutMs) || 30_000, 1_000), 10 * 60_000);
-    const t = this.target(instanceId, opts.sidecar);
-    const { engine } = this.deps;
-    let id: string;
-    let sock: Duplex;
-    try {
-      id = await engine.execCreate(t.container, {
-        Cmd: cmd, Tty: false, AttachStdin: req.stdin !== undefined,
-        Env: Object.entries({ ...t.env, ...env }).map(([k, v]) => `${k}=${v}`),
-        ...(req.user ?? t.user ? { User: req.user ?? t.user } : {}),
-        ...(req.workdir ?? t.workdir ? { WorkingDir: req.workdir ?? t.workdir } : {}),
-      });
-      sock = await engine.execStart(id, false);
-    } catch (err) {
-      throw engineError(err);
-    }
+    this.instanceOf(instanceId);
     const out = { 1: [] as Buffer[], 2: [] as Buffer[] };
     const size = { 1: 0, 2: 0 };
     let truncated = false;
-    const demux = new EngineDemux((ch, data) => {
+    const collect = (ch: 1 | 2, data: Buffer) => {
       const room = MAX_OUTPUT - size[ch];
       if (room <= 0) { truncated = true; return; }
       if (data.length > room) { truncated = true; data = data.subarray(0, room); }
       out[ch].push(data);
       size[ch] += data.length;
-    });
-    sock.on('data', (d: Buffer) => demux.push(d));
+    };
+    let session: ExecSession;
+    if (opts.sidecar) {
+      const t = this.sidecarTarget(instanceId, opts.sidecar);
+      const { engine } = this.deps;
+      try {
+        const id = await engine.execCreate(t.container, {
+          Cmd: cmd, Tty: false, AttachStdin: req.stdin !== undefined,
+          Env: Object.entries(env).map(([k, v]) => `${k}=${v}`),
+          ...(req.user ? { User: req.user } : {}),
+          ...(req.workdir ? { WorkingDir: req.workdir } : {}),
+        });
+        session = engineSession(engine, id, await engine.execStart(id, false), { tty: false, cols: 80, rows: 24 }, collect);
+      } catch (err) {
+        throw engineError(err);
+      }
+    } else {
+      const open: SessionOpen = {
+        kind: 'exec', argv: cmd, tty: false, cols: 80, rows: 24, env,
+        ...(opts.home ? { home: opts.home } : {}), ...(req.workdir ? { cwd: req.workdir } : {}),
+      };
+      session = await this.openSession(instanceId, open, collect, opts.caller ?? {});
+    }
     let timedOut = false;
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(() => { timedOut = true; sock.destroy(); }, timeoutMs);
-      const done = () => { clearTimeout(timer); resolve(); };
-      sock.once('close', done);
-      sock.once('end', done);
-      sock.once('error', done);
-      if (req.stdin !== undefined) sock.end(req.stdin);
-    });
-    const exitCode = timedOut ? null : await this.exitCode(id).catch(() => null);
+    const timer = setTimeout(() => { timedOut = true; session.close(); }, timeoutMs);
+    if (req.stdin !== undefined) session.input(Buffer.from(req.stdin));
+    // A session's stdin is always attached: EOF so a command that reads it ends.
+    if (req.stdin !== undefined || !opts.sidecar) session.endInput();
+    const code = await session.exited;
+    clearTimeout(timer);
     return {
-      exitCode,
+      exitCode: timedOut ? null : code,
       stdout: Buffer.concat(out[1]).toString('utf-8'),
       stderr: Buffer.concat(out[2]).toString('utf-8'),
       truncated, timedOut,
@@ -414,6 +545,24 @@ export class ExecBridge {
     });
     return { done, close: () => { try { stream.destroy(); } catch { /* gone */ } } };
   }
+}
+
+/**
+ * The session caller of a verified principal, by the level the shell's rule
+ * let it in at: `owner` (the owner's login, the host operator, or a trusted
+ * owner agent acting for the owner, D29), `member` (a member's own login; its
+ * `app.jump` grant is the kernel's check), `self` (the instance itself: the
+ * app identity only). Never from a header or the open frame.
+ */
+export function sessionCallerOf(principal: AccessPrincipal | null | undefined, level: 'owner' | 'member' | 'self', ownerId: string): SessionCaller {
+  if (level === 'self') return {};
+  if (principal?.kind === 'operator') return { user: { userId: ownerId, role: 'owner' } };
+  if (principal?.kind === 'user') {
+    if (level === 'owner' && principal.role !== 'owner') return {};
+    return { user: { userId: principal.userId, role: principal.role } };
+  }
+  if (principal?.kind === 'instance' && level === 'owner') return { user: { userId: principal.userId ?? ownerId, role: 'owner' } };
+  return {};
 }
 
 /**

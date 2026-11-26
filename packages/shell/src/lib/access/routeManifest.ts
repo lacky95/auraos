@@ -482,12 +482,12 @@ const routes: RouteAccessManifest['routes'] = {
   '/api/instances/[instanceId]/mounts/[mountId]': {
     methods: { DELETE: rule(INSTANCE, 'instance', { targetPermissions: ['apps.mount'], guard: 'target-permissions' }) },
   },
-  // Phase 5 stream X: `aura exec` and `aura logs` through the shell (the WS
-  // session is the `exec-bridge` surface). `guard: 'rule'`: refused in every
-  // mode, since exec runs as root in the app container.
+  // Phase 5 streams X and J: `aura exec` and `aura logs` through the shell (the
+  // WS session is the `exec-bridge` surface). `guard: 'rule'`: refused in every
+  // mode, since exec enters the running app environment.
   '/api/instances/[instanceId]/exec': {
     methods: { POST: rule(INSTANCE, 'instance', { guard: 'rule', ...why(
-      'The owner (the CLI through the trusted Terminal, D29, or the host operator) or the instance itself by its own token. Runs argv in the app\'s container as root (5-pre2, X); `sidecar` in the body is the owner\'s only (the handler). Audited as instance.exec.') }) },
+      'The owner (the CLI through the trusted Terminal, D29, or the host operator) or the instance itself by its own token. A non-interactive session in the running app environment (J, D74): `home` private|ephemeral as the user, app as the app identity (the instance itself: app only); `sidecar` in the body is the owner\'s only (the handler). Audited as instance.exec.') }) },
   },
   '/api/instances/[instanceId]/logs': {
     methods: { GET: rule(INSTANCE, 'instance', { guard: 'rule', ...why(

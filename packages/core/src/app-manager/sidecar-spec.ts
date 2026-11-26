@@ -213,8 +213,9 @@ export function resolveSidecarSpec(req: SidecarSpawnRequest, ctx: ResolveContext
   if ((privileged || capabilities.length || devices.length || publish.length) && !ctx.can('sidecars.privileged')) {
     throw new SpecError(403, `template '${tpl.name}' uses privileged/capabilities/devices/publish — ${ctx.appId} needs 'sidecars.privileged'`);
   }
-  if (tpl.inheritDockerSocket && !ctx.hasDockerTool) {
-    throw new SpecError(403, `template '${tpl.name}' sets inheritDockerSocket, but ${ctx.appId}'s tools[] does not grant docker — a sidecar never exceeds its app`);
+  if (tpl.inheritDockerSocket) {
+    // Stream J.7 (D54/D55): no sidecar gets the Docker socket; OS sidecars (sidecars.spawn) replace it.
+    throw new SpecError(403, `template '${tpl.name}' sets inheritDockerSocket: no sidecar gets the Docker socket any more (use OS sidecars, permission sidecars.spawn)`);
   }
 
   if (req.tools?.length && !tpl.tools) {
@@ -279,7 +280,7 @@ export function resolveSidecarSpec(req: SidecarSpawnRequest, ctx: ResolveContext
     inheritTools: tpl.inheritTools === true,
     ...(tpl.inheritHome ? { inheritHome: true as const } : {}),
     ...(tpl.tools ? { ownTools: true as const } : {}),
-    inheritDockerSocket: tpl.inheritDockerSocket === true,
+    inheritDockerSocket: false, // refused above (J.7); the field stays until SidecarManager (stream C) drops it
     mounts,
   };
 }
