@@ -14,7 +14,10 @@
  * does the same, so tapping the keyboard never takes focus from the app.
  */
 import * as React from 'react';
-import SimpleKeyboard from 'simple-keyboard';
+// Named import: simple-keyboard is CommonJS, and in this ESM package Vite 8
+// hands a default import the whole module.exports ({ SimpleKeyboard, default }),
+// not the class, so `new` threw and React unmounted the keyboard.
+import { SimpleKeyboard } from 'simple-keyboard';
 import 'simple-keyboard/build/css/index.css';
 import { Icon } from '@aura/ui';
 import { kbState, type KbMode } from '../../../lib/keyboard/kbState.ts';
