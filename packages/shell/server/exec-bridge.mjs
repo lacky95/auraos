@@ -60,7 +60,11 @@ export function attachExecBridge(httpServer, deps = liveExecDeps) {
   httpServer.on('upgrade', (req, socket, head) => {
     const m = EXEC_BRIDGE_PATH.exec(req.url ?? '');
     if (!m) return;
-    void upgrade(req, socket, head, m[1], wss, deps).catch(() => { try { socket.destroy(); } catch { /* gone */ } });
+    void upgrade(req, socket, head, m[1], wss, deps).catch((err) => {
+      // Never silent: a failed upgrade is otherwise only a closed socket at the caller.
+      console.warn('[exec-bridge] upgrade failed:', err instanceof Error ? err.message : String(err));
+      try { socket.destroy(); } catch { /* gone */ }
+    });
   });
   return wss;
 }
