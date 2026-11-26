@@ -1,5 +1,6 @@
 import type { Command } from 'commander';
 import { registerAdminHomes } from './admin-homes.js';
+import { registerAdminUsers } from './admin-users.js';
 import { registerAdminApps } from './admin-apps.js';
 import { api } from '../lib/client.js';
 import { shellFetch } from '../lib/identity.js';
@@ -197,6 +198,7 @@ export function registerAdmin(program: Command): void {
 
   registerAdminSecurity(admin);
   registerAdminHomes(admin);
+  registerAdminUsers(admin);
   registerAdminApps(admin);
 }
 

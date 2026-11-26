@@ -1,6 +1,6 @@
 import * as core from '@aura/core';
 import type { AccessPrincipal, InstancePrincipal, Principal } from '@aura/core';
-import { OWNER_AGENT_APPS, OWNER_AGENT_EXCLUDED_TARGETS } from './identify.ts';
+import { OWNER_AGENT_APPS, OWNER_AGENT_EXCLUDED_TARGETS, isOwnerPrincipal } from './identify.ts';
 import type {
   AccessReason, AccessRule, Decide, DecideInput, DecideResult, PolicyResource, PolicyTransport,
 } from './types.ts';
@@ -20,8 +20,10 @@ import type {
  *
  * D85 A1: before any of that, a principal whose `systemId` is set and is not
  * this system's is refused (`foreign-system`); its role is never read. A
- * member (I.2) satisfies no `owner` level; on an `app-permission` rule it
- * holds only its own `user` grants (core `Authorizer`).
+ * member (I.2) satisfies no `owner` level; it holds only its own `user`
+ * grants (core `Authorizer`), on a rule's `permissions` or, where the rule
+ * names them, its `memberPermissions` (D82: `app.use` / `app.jump` of the
+ * target app, on the member's own instances only).
  */
 
 export interface DecideDeps {
@@ -30,6 +32,14 @@ export interface DecideDeps {
   ownerAgent?(principal: InstancePrincipal): boolean;
   /** D63: the owner's switch (`freshAuthRequiresHttps`). Absent: its default, off. */
   freshAuthRequiresHttps?(): Promise<boolean>;
+  /**
+   * The user an instance belongs to (its `owner`); null for an unclaimed pool
+   * member or an unknown instance. Absent: a member reaches no named
+   * instance (fail closed).
+   */
+  instanceOwner?(instanceId: string): string | null;
+  /** I.2: the app's current installation id, for `app.use:<installationId>`. Absent or null: not held. */
+  installationOf?(appId: string): Promise<string | null>;
 }
 
 // ── fresh authentication and transport (D18, D63) ───────────────────────────
@@ -69,8 +79,36 @@ export async function freshAuthRequiresHttps(
 const allow = (reason: AccessReason): DecideResult => ({ outcome: 'allow', reason });
 const deny = (reason: AccessReason): DecideResult => ({ outcome: 'deny', reason });
 
-const isOwner = (p: AccessPrincipal): boolean =>
-  p.kind === 'operator' || (p.kind === 'user' && p.role === 'owner');
+/** The one owner test (identify.ts `isOwnerPrincipal`, A1 included). */
+const isOwner = (p: AccessPrincipal): boolean => isOwnerPrincipal(p);
+
+/** I.2: a local user whose record role is not `owner` (A1 already refused a foreign one). */
+const isMember = (p: AccessPrincipal): p is Extract<AccessPrincipal, { kind: 'user' }> =>
+  p.kind === 'user' && p.role !== 'owner';
+
+const INSTALLATION_PLACEHOLDER = '<installationId>';
+
+/**
+ * A member's `memberPermissions` on this resource (I.2, D82): the target
+ * instance, when named, is the member's own, and every listed grant is held,
+ * `<installationId>` filled from the target app. Null when allowed, else why not.
+ */
+async function memberHolds(
+  deps: DecideDeps, p: Extract<AccessPrincipal, { kind: 'user' }>, permissions: readonly string[], resource: PolicyResource,
+): Promise<AccessReason | null> {
+  if (resource.instanceId !== undefined) {
+    const owner = deps.instanceOwner?.(resource.instanceId) ?? null;
+    if (owner === null || owner !== p.userId) return 'wrong-target';
+  }
+  const concrete: string[] = [];
+  for (const permission of permissions) {
+    if (!permission.includes(INSTALLATION_PLACEHOLDER)) { concrete.push(permission); continue; }
+    const installationId = resource.appId ? await deps.installationOf?.(resource.appId) ?? null : null;
+    if (!installationId) return 'missing-permission';
+    concrete.push(permission.replace(INSTALLATION_PLACEHOLDER, installationId));
+  }
+  return (await checkPermissions(deps, p as Principal, concrete, true)).ok ? null : 'missing-permission';
+}
 
 /** Core's wording is the only signal of an MVP auto-grant; a test pins it. */
 const isAutoGrant = (reason: string): boolean => reason.includes('MVP auto-grant');
@@ -157,6 +195,14 @@ async function matchLevel(
     failure = 'wrong-target';
   }
 
+  // I.2 (D82): a member's own grants, on the rules that name them. Strict: an
+  // auto-grant never counts for a member, and only `user` grants exist for one.
+  if (rule.memberPermissions && isMember(p)) {
+    const why = await memberHolds(deps, p, rule.memberPermissions, input.resource);
+    if (why === null) return { granted: 'app-permission', failure };
+    failure = why;
+  }
+
   if (rule.allow.includes('app-permission')) {
     const permissions = rule.permissions ?? [];
     // A member holds its own `user` grants (I.2, C7); the owner matched above.
@@ -165,7 +211,7 @@ async function matchLevel(
     if (canHold) {
       const held = await checkPermissions(deps, p as Principal, permissions, input.strict);
       if (held.ok) return { granted: held.auto ? 'auto-granted' : 'app-permission', failure };
-      if (p.kind !== 'anonymous') failure = 'missing-permission';
+      if (p.kind !== 'anonymous' && failure !== 'wrong-target') failure = 'missing-permission';
     }
   }
   return { granted: null, failure };
@@ -225,4 +271,24 @@ export function createDecide(deps: DecideDeps): Decide {
 }
 
 /** The live decision, on the shell's `Authorizer`. */
-export const decide: Decide = (input) => createDecide({ authorizer: core.getAuthServices().authorizer, freshAuthRequiresHttps: () => freshAuthRequiresHttps() })(input);
+export const decide: Decide = (input) => createDecide({
+  authorizer: core.getAuthServices().authorizer,
+  freshAuthRequiresHttps: () => freshAuthRequiresHttps(),
+  instanceOwner: (id) => liveInstanceOwner(id),
+  installationOf: (appId) => liveInstallationOf(appId),
+})(input);
+
+/** The live owner of an instance: null for an unknown one or an unclaimed pool member. */
+export function liveInstanceOwner(instanceId: string): string | null {
+  try {
+    const inst = core.getAppManager().getInstance(instanceId) as { owner?: string; inPool?: boolean } | undefined;
+    return inst && !inst.inPool && typeof inst.owner === 'string' ? inst.owner : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The live installation id of an app (App Host registry); null when it can't be read. */
+export async function liveInstallationOf(appId: string): Promise<string | null> {
+  try { return await core.getAppManager().installationIdOf(appId); } catch { return null; }
+}

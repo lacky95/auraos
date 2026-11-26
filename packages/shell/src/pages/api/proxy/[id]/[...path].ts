@@ -32,18 +32,19 @@ export const ALL: APIRoute = async (ctx) => machineOnly(dropServiceWorkerScope(a
 const coldStarts = new Map<string, Promise<unknown>>();
 const COLD_START_TIMEOUT_MS = 30_000;
 
-function ensureInstance(mgr: ReturnType<typeof getAppManager>, appId: string): Promise<unknown> {
-  let p = coldStarts.get(appId);
+function ensureInstance(mgr: ReturnType<typeof getAppManager>, appId: string, userId?: string): Promise<unknown> {
+  const key = userId ? `${appId}|${userId}` : appId;
+  let p = coldStarts.get(key);
   if (!p) {
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const started = mgr.start(appId);
+    const started = mgr.start(appId, userId ? { userId } : {});
     const timeout = new Promise((_, reject) => {
       timer = setTimeout(() => reject(new Error(`timed out after ${COLD_START_TIMEOUT_MS}ms`)), COLD_START_TIMEOUT_MS);
     });
     p = Promise.race([started, timeout])
-      .finally(() => { clearTimeout(timer); coldStarts.delete(appId); });
+      .finally(() => { clearTimeout(timer); coldStarts.delete(key); });
     started.catch(() => {}); // the race surfaces the rejection; keep the loser from tripping unhandledRejection
-    coldStarts.set(appId, p);
+    coldStarts.set(key, p);
   }
   return p;
 }
@@ -122,10 +123,15 @@ const forward = async ({ params, request, locals }: APIContext): Promise<Respons
   //   - Bare appId match: pick a USER-OWNED live instance (skip inPool=true),
   //     never a pool member that hasn't been handed over yet, nor a preview
   //     (Track P: it is reached by its own instance id and App Host only).
+  //   - I.2 (D82): a member reaches only its own instances (the gate checked
+  //     a named one; a bare appId picks, or cold-starts, the member's own).
+  const principal = locals?.access?.principal;
+  const memberId = principal?.kind === 'user' && principal.role !== 'owner' ? principal.userId : null;
+  const mine = (i: { owner?: string }) => memberId === null || i.owner === memberId;
   const exact = mgr.getInstance(id);
-  let instance = exact && isLive(exact.state)
+  let instance = exact && isLive(exact.state) && mine(exact)
     ? exact
-    : mgr.getInstancesByApp(id).find((i) => !i.inPool && !i.preview && isLive(i.state) && i.port != null);
+    : mgr.getInstancesByApp(id).find((i) => !i.inPool && !i.preview && isLive(i.state) && i.port != null && mine(i));
 
   if (!instance?.port) {
     // Cold-start: a bare-appId request for a path the app's manifest declares
@@ -142,9 +148,9 @@ const forward = async ({ params, request, locals }: APIContext): Promise<Respons
       && (reqPath === p.address || reqPath.startsWith(p.address + '/')));
     if (servesPath) {
       try {
-        await ensureInstance(mgr, id);
+        await ensureInstance(mgr, id, memberId ?? undefined);
         instance = mgr.getInstancesByApp(id)
-          .find((i) => !i.inPool && !i.preview && isLive(i.state) && i.port != null);
+          .find((i) => !i.inPool && !i.preview && isLive(i.state) && i.port != null && mine(i));
       } catch (err) {
         console.error(`[proxy] cold-start of ${id} failed: ${(err as Error).message}`);
       }

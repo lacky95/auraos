@@ -117,7 +117,7 @@ export function registerIdentity(program: Command): void {
     .description('Host command: create a one-time owner setup code.')
     .action(() => printCode({ purpose: 'setup' }));
 
-  const user = program.command('user').description('Owner account recovery (host commands).');
+  const user = program.command('user').description('Account recovery (host commands): the owner and members.');
   user
     .command('reset-password <username>')
     .description('Host command: create a one-time password reset code.')

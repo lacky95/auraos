@@ -22,6 +22,7 @@ import { GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
 import { authenticate } from './auth.js';
 import type { CallerPrincipal } from './access/identify.js';
 import { isTrustedProxy } from '../../server/host-policy.mjs';
+import { membersAllowed } from '../../server/access-mode.mjs';
 
 export const COOKIE_HTTPS = '__Host-aura_session';
 export const COOKIE_HTTP = 'aura_session';
@@ -332,16 +333,19 @@ const identityKeyUsable = (svc: AuthSurfaceServices) => svc.users.identityKeySta
  * (C3: the session's own user, read by id; any role). The role is the
  * record's (C2): what that user may do is the access policy's question. The
  * one check behind the desktop's sign-in and the shell's principal resolver
- * (lib/access/identify.ts).
+ * (lib/access/identify.ts). A member's session counts only while members are
+ * allowed (`enforce`, access-mode.mjs `membersAllowed`, I.2).
  */
 export async function userSessionOf(
   token: string,
   svc: { loginSessions: Pick<LoginSessions, 'verify'>; users: Pick<UserStore, 'getUser'> },
+  members: () => boolean = membersAllowed,
 ): Promise<{ session: LoginSession; user: UserAccount } | null> {
   const session = await svc.loginSessions.verify(token);
   if (!session || session.method !== 'password' || !session.userId) return null;
   const user = await svc.users.getUser(session.userId);
   if (!user || user.disabled || user.id !== session.userId) return null;
+  if (user.role !== 'owner' && !members()) return null;
   return { session, user };
 }
 
@@ -364,11 +368,25 @@ export async function currentOwnerSession(
   ctx: AuthContext,
   deps: AuthSurfaceDeps = defaultDeps(),
 ): Promise<{ sessionId: string; userId: string; expiresAt: number } | null> {
+  const current = await currentUserSession(ctx, deps);
+  if (!current || current.role !== 'owner') return null;
+  return { sessionId: current.sessionId, userId: current.userId, expiresAt: current.expiresAt };
+}
+
+/**
+ * The verified session of this request, of any enabled user, with the
+ * record's role. Only the App Host handoff takes a member's (I.2, D82: into
+ * the member's own instance of an app it holds `app.use` for).
+ */
+export async function currentUserSession(
+  ctx: AuthContext,
+  deps: AuthSurfaceDeps = defaultDeps(),
+): Promise<{ sessionId: string; userId: string; expiresAt: number; role: core.UserRole } | null> {
   const svc = deps.services();
   if (!svc) return null;
   const current = await currentSession(ctx, svc, requestScheme(ctx, deps.env));
-  if (!current || current.user.role !== 'owner') return null;
-  return { sessionId: current.session.sessionId, userId: current.user.id, expiresAt: current.session.expiresAt };
+  if (!current) return null;
+  return { sessionId: current.session.sessionId, userId: current.user.id, expiresAt: current.session.expiresAt, role: current.user.role };
 }
 
 /**
@@ -475,6 +493,8 @@ export function authLogin(ctx: AuthContext, deps: AuthSurfaceDeps = defaultDeps(
     if (!check.ok) return check.reason === 'rate-limited' ? json({ error: 'rate-limited' }, 429) : badCredentials();
     // Any enabled account with a password (C3); what it may do is its role's (C2).
     if (check.user.disabled) return badCredentials();
+    // I.2: a member signs in only where the access policy is enforced (access-mode.mjs).
+    if (check.user.role !== 'owner' && !membersAllowed()) return json({ error: 'members-need-enforce' }, 403);
 
     const ttlMs = staySignedIn === true ? STAY_SIGNED_IN_TTL_MS : SESSION_TTL_MS;
     const { token, session } = await svc.loginSessions.issue({ method: 'password', userId: check.user.id, ttlMs });

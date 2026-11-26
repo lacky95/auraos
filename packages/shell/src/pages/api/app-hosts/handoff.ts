@@ -1,6 +1,6 @@
 import type { APIRoute } from 'astro';
 import * as core from '@aura/core';
-import { issueAppHostHandoff, shellOwner } from '../../../lib/appHostHandoff.ts';
+import { issueAppHostHandoff, shellUser } from '../../../lib/appHostHandoff.ts';
 import { loadAppHostServices, safeReturnPath } from '../../../../server/app-host-auth.mjs';
 import { classifyHost } from '../../../../server/host-policy.mjs';
 
@@ -42,10 +42,14 @@ async function readBody(request: Request): Promise<Record<string, unknown> | nul
  * The label and slot come from the registry, never from the body. `system`
  * says the frame shows the app's `system` installation (D45), which the
  * desktop requires before it trusts Settings' or Console's messages.
+ *
+ * I.2 (D82): a member's desktop gets a code only for an instance it owns, of
+ * an app it holds `app.use:<installationId>` for (its App Host session is
+ * decided again on the slot's instance at every request, app-hosts.mjs).
  */
 export const POST: APIRoute = async (ctx) => {
   const { request } = ctx;
-  const owner = await shellOwner(ctx);
+  const owner = await shellUser(ctx);
   if ('error' in owner && owner.error === 'forbidden-origin') return json({ error: owner.error }, owner.status);
   const shell = classifyHost(owner.edge.host);
   if (shell.kind !== 'shell' || shell.internal) return json({ error: 'no-app-hosts' }, 409);
@@ -74,6 +78,9 @@ export const POST: APIRoute = async (ctx) => {
       const activity = mgr.getActivity(activityId);
       if (!activity || activity.appId !== appId || activity.parentInstanceId !== instanceId) return json({ error: 'not-found' }, 404);
     }
+    if (identity.role !== 'owner' && !(await memberMayOpen(mgr, identity.userId, appId, instanceId))) {
+      return json({ error: 'not-granted' }, 403);
+    }
     const issued = await issueAppHostHandoff({
       services, mgr, appId, instanceId, returnPath, scheme: owner.edge.scheme, desktopHost: owner.edge.host, identity,
     });
@@ -84,3 +91,12 @@ export const POST: APIRoute = async (ctx) => {
     return json({ error: 'unavailable' }, 503);
   }
 };
+
+/** I.2 (D82): the member's own instance, and its `app.use` grant on the app's installation. */
+async function memberMayOpen(mgr: ReturnType<typeof core.getAppManager>, userId: string, appId: string, instanceId: string): Promise<boolean> {
+  const instance = mgr.getInstance(instanceId) as { appId: string; owner?: string; inPool?: boolean } | undefined;
+  if (!instance || instance.appId !== appId || instance.inPool || instance.owner !== userId) return false;
+  const installationId = await mgr.installationIdOf(appId);
+  if (!installationId) return false;
+  return !!(await core.getAuthServices().grants.get({ kind: 'user', id: userId }, core.appUsePermission(installationId)));
+}

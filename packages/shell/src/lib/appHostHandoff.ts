@@ -4,7 +4,7 @@ import type { APIContext } from 'astro';
 import { appHostAuth, type AppHostServices } from '../../server/app-host-auth.mjs';
 import { isSystemInstallation } from '../../server/gateway-identity.mjs';
 import { edgeView, originOf } from '../../server/host-policy.mjs';
-import { currentOwnerSession } from './authSurface.js';
+import { currentUserSession } from './authSurface.js';
 
 /**
  * A one-time code that signs a browser in to one running instance's App Host:
@@ -22,6 +22,8 @@ export interface HandoffIdentity {
   sid: string;
   userId: string;
   sessionExpiresAt: number | null;
+  /** The record's role (I.2): a member's handoff is to its own instance only. */
+  role?: core.UserRole;
 }
 
 /**
@@ -33,6 +35,20 @@ export async function shellOwner(ctx: Pick<APIContext, 'request' | 'cookies'> & 
   | { edge: ReturnType<typeof edgeView>; identity: HandoffIdentity }
   | { edge: ReturnType<typeof edgeView>; error: string; status: number }
 > {
+  const user = await shellUser(ctx);
+  if ('error' in user || user.identity.role === 'owner') return user;
+  return { edge: user.edge, error: 'login-required', status: 401 };
+}
+
+/**
+ * The signed-in user behind a request from the Shell's own page, any role
+ * (the same Origin rule as `shellOwner`). Only the App Host handoff takes a
+ * member (I.2, D82), and only into the member's own instance.
+ */
+export async function shellUser(ctx: Pick<APIContext, 'request' | 'cookies'> & { clientAddress?: string }): Promise<
+  | { edge: ReturnType<typeof edgeView>; identity: HandoffIdentity }
+  | { edge: ReturnType<typeof edgeView>; error: string; status: number }
+> {
   const { request } = ctx;
   let peer: string | undefined;
   try { peer = ctx.clientAddress; } catch { peer = undefined; }
@@ -41,10 +57,10 @@ export async function shellOwner(ctx: Pick<APIContext, 'request' | 'cookies'> & 
   if ((site !== null && site !== 'same-origin') || request.headers.get('origin') !== edge.origin) {
     return { edge, error: 'forbidden-origin', status: 403 };
   }
-  let current: Awaited<ReturnType<typeof currentOwnerSession>>;
-  try { current = await currentOwnerSession(ctx as never); } catch { return { edge, error: 'unavailable', status: 503 }; }
+  let current: Awaited<ReturnType<typeof currentUserSession>>;
+  try { current = await currentUserSession(ctx as never); } catch { return { edge, error: 'unavailable', status: 503 }; }
   if (!current) return { edge, error: 'login-required', status: 401 };
-  return { edge, identity: { sid: current.sessionId, userId: current.userId, sessionExpiresAt: current.expiresAt } };
+  return { edge, identity: { sid: current.sessionId, userId: current.userId, sessionExpiresAt: current.expiresAt, role: current.role } };
 }
 
 /** `system`: the frame shows the app's `system` installation, so the desktop may trust its messages (D45). */

@@ -127,6 +127,7 @@ export const HELP_SECTIONS: Array<{ title: string; lines: Array<[string, string]
     ['aura whoami', 'Server-verified identity, and local hints'],
     ['aura setup-code', 'Host: one-time owner setup code'],
     ['aura user reset-password <username>', 'Host: one-time password reset code'],
+    ['aura admin user ...', 'Host: member accounts (D82): add · ls · disable|enable · reset-password · grant|revoke use|jump'],
     ['aura system reidentify', 'Host: new systemId and key for a copied /data'],
     ['aura approve <id>', 'Host: approve (--deny) a pending owner approval as the operator'],
     ['aura secret ask <name>', 'Ask the owner to type a secret for an app (--for <app>) in the desktop dialog'],

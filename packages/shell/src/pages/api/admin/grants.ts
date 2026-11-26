@@ -18,7 +18,9 @@ import { ownerUiApp } from '../../../../server/gateway-identity.mjs';
  *            `asOwner`: what a trusted system UI declares but needs no grant
  *            for, because the owner acts through it (D45: Settings writes
  *            `os` KV topics as the owner). Never in `requested`.
- *   POST   {subjectKind:'app'|'apiKey', subjectId, permission} → grant
+ *   POST   {subjectKind:'app'|'apiKey'|'user', subjectId, permission} → grant
+ *            (a `user` subject, I.2: a member's app.use:<installationId> or
+ *            app.jump:<installationId> only; `aura admin user grant` on the host)
  *            (app grants are pinned to the app's current install scope)
  *            `notifications.read` (phase 5) also needs `readScope`:
  *            "all" | "app:<id>,sender:<key>" | {apps:[…]} | {senders:[…]},
@@ -117,6 +119,11 @@ export const POST: APIRoute = async (ctx) => {
     const k = await apiKeys.get(a.id);
     if (!k) return jsonResponse({ error: `unknown API key ${a.id}` }, 404);
     if (k.revokedAt) return jsonResponse({ error: `API key ${a.id} is revoked` }, 409);
+  } else if (a.kind === 'user') {
+    // I.2 (C7): a member's app.use / app.jump; the owner holds every app already.
+    const u = await core.getAuthServices().users.getUser(a.id);
+    if (!u) return jsonResponse({ error: `unknown user ${a.id}` }, 404);
+    if (u.role === 'owner') return jsonResponse({ error: 'the owner holds every app already; grants are for members' }, 409);
   }
   const readArg = a.src['readScope'] ?? (a.permission === 'notifications.read' ? a.src['scope'] : undefined);
   const read = a.permission === 'notifications.read' && readArg !== undefined
@@ -134,7 +141,7 @@ export const POST: APIRoute = async (ctx) => {
   });
   if (actor instanceof Response) return actor;
   try {
-    const r = await grants.grant({ kind: a.kind as 'app' | 'apiKey', id: a.id }, a.permission, { by: actor.by, appScope, ...(read ? { read } : {}) });
+    const r = await grants.grant({ kind: a.kind as 'app' | 'apiKey' | 'user', id: a.id }, a.permission, { by: actor.by, appScope, ...(read ? { read } : {}) });
     await auditOwner(actor, 'grant', { target: `${a.kind}:${a.id}`, detail: { permission: a.permission, appScope: appScope ?? null, changed: r.changed, ...(r.record.read ? { read: core.GrantStore.describeRead(r.record) } : {}) } });
     return jsonResponse({ ok: true, ...r, warnings });
   } catch (err) {
@@ -152,7 +159,7 @@ export const DELETE: APIRoute = async (ctx) => {
   });
   if (actor instanceof Response) return actor;
   try {
-    const removed = await core.getAuthServices().grants.revoke({ kind: a.kind as 'app' | 'apiKey', id: a.id }, a.permission);
+    const removed = await core.getAuthServices().grants.revoke({ kind: a.kind as 'app' | 'apiKey' | 'user', id: a.id }, a.permission);
     await auditOwner(actor, 'revoke', { target: `${a.kind}:${a.id}`, detail: { permission: a.permission, changed: !!removed } });
     return jsonResponse({ ok: true, changed: !!removed, removed });
   } catch (err) {

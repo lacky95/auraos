@@ -1,6 +1,6 @@
 import { getAppManager, type AccessPrincipal, type ExecBridgeError } from '@aura/core';
 import { errorResponse, jsonResponse } from './appResponse.js';
-import { isTrustedOwnerAgent } from './access/identify.ts';
+import { isOwnerPrincipal, isTrustedOwnerAgent } from './access/identify.ts';
 
 /**
  * The OS-managed sidecar routes' target and caller.
@@ -90,7 +90,7 @@ export function execCaller(
   const v = locals?.access;
   const p = v?.principal;
   if (!p || p.kind === 'anonymous') return errorResponse('authentication required', 401);
-  if (p.kind === 'operator' || (p.kind === 'user' && p.role === 'owner')) return { principal: p, level: 'owner' };
+  if (isOwnerPrincipal(p)) return { principal: p, level: 'owner' };
   if (p.kind === 'instance' && v?.via === 'instance-token') {
     if (isTrustedOwnerAgent(p, mgr)) return { principal: p, level: 'owner' };
     if (p.instanceId === instanceId && !p.sidecar) return { principal: p, level: 'self' };

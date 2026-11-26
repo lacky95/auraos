@@ -14,6 +14,8 @@ export type SessionLiveness = false | { role: import('@aura/core').UserRole };
 export function createSessionLive(deps: {
   sessions: { isLive(sessionId: string, userId: string): Promise<boolean> };
   users: { getUser(userId: string): Promise<{ id: string; role: import('@aura/core').UserRole; disabled?: boolean } | null> };
+  /** Whether members may act (default: access-mode.mjs `membersAllowed`). */
+  members?: () => boolean;
 }): AppHostServices['sessionLive'];
 export interface HandoffInput {
   aud: string; label: string; installationId: string; appId: string; slot: number;

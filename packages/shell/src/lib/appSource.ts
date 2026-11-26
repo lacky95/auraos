@@ -26,6 +26,7 @@ import type {
   AccessPrincipal, AppManifest, AuraMount, InstallRecord, NexusManager, ScopeDefinition, SourceModeInfo,
 } from '@aura/core';
 import type { CallerPrincipal } from './access/identify.ts';
+import { isOwnerPrincipal } from './access/identify.ts';
 import { ownerAction, type OwnerActionDeps } from './approvals/admin.ts';
 import { patchLevel, sourceOpenDetails, sourceOpenLevel } from './approvals/display.ts';
 import { installGate, runInstall } from './approvals/nexus.ts';
@@ -158,7 +159,8 @@ function consumer(deps: AppSourceDeps, instanceId: string | undefined): string |
  * same-id copy is not it.
  */
 function mayWrite(principal: AccessPrincipal, deps: AppSourceDeps): boolean {
-  if (principal.kind === 'user' || principal.kind === 'operator') return true;
+  // I.2 audit: the owner, never any verified user (a member is not the owner).
+  if (isOwnerPrincipal(principal)) return true;
   return principal.kind === 'instance' && principal.appId === 'com.aura.terminal'
     && deps.apps.trustedSystemCopy('com.aura.terminal');
 }
@@ -173,8 +175,7 @@ function workspaceOwner(principal: AccessPrincipal, requested: unknown): string 
   const own = actingUser(principal);
   if (requested === undefined || requested === own) return own;
   if (typeof requested !== 'string' || !requested) return json({ error: 'invalid-user', message: 'user must be a user id' }, 400);
-  const owner = principal.kind === 'operator' || (principal.kind === 'user' && principal.role === 'owner');
-  if (!owner) return json({ error: 'forbidden', message: 'only the owner acts on another user\'s workspace' }, 403);
+  if (!isOwnerPrincipal(principal)) return json({ error: 'forbidden', message: 'only the owner acts on another user\'s workspace' }, 403);
   return requested;
 }
 

@@ -1,5 +1,5 @@
 import { effectiveSourceMode, type SourceModeInfo } from '../nexus/AppSource.js';
-import { DEFAULT_OWNER_ID } from '../auth/identityContracts.js';
+import { DEFAULT_OWNER_ID, type UserSessionsEnded } from '../auth/identityContracts.js';
 import { adoptedInstanceOwner } from './instanceOwner.js';
 
 /** The verified user a launch or hook call is for (D46). Absent: the OS itself, which acts for the local owner. */
@@ -1426,15 +1426,17 @@ export class AppManager {
       // up via single-instance reuse without going through claimFromPool.
       // (Single-instance apps shouldn't have warmPool > 0 in practice, but
       // defending the invariant keeps the code obviously correct.)
-      const existing = this.getInstancesByApp(appId).find(
-        (i) => !i.inPool && !i.preview && (i.state === 'resumed' || i.state === 'resuming' || i.state === 'started'),
-      );
+      // I.2 (D82): the one instance is its owner's. Another user's start never
+      // gets it (an instance shared between users is beta M2, D86).
+      const user = userId ?? DEFAULT_OWNER_ID;
+      const singles = this.getInstancesByApp(appId).filter((i) => !i.inPool && !i.preview && i.state !== 'destroyed' && i.state !== 'error');
+      const foreign = singles.find((i) => (i.owner ?? DEFAULT_OWNER_ID) !== user);
+      if (foreign) throw new Error(`App ${appId} runs one instance, and it is another user's. Instances shared between users come later (D86 M2).`);
+      const existing = singles.find((i) => i.state === 'resumed' || i.state === 'resuming' || i.state === 'started');
       if (existing) return existing.instanceId;
 
       // If a single-instance app is paused/stopped, resume it
-      const paused = this.getInstancesByApp(appId).find(
-        (i) => !i.inPool && !i.preview && (i.state === 'paused' || i.state === 'stopped'),
-      );
+      const paused = singles.find((i) => i.state === 'paused' || i.state === 'stopped');
       if (paused) {
         await this.resume(paused.instanceId);
         return paused.instanceId;
@@ -2139,6 +2141,38 @@ export class AppManager {
       if (i.appId === appId && i.inPool) n++;
     }
     return n;
+  }
+
+  /**
+   * D82 disable (I.2): end what a user still runs as an interactive session,
+   * outside the login store: their System Terminal instances (and pool
+   * members warmed for them, stream T) and their jump sessions (stream J).
+   * Their other app instances keep running and nothing is deleted (D83 §4,
+   * D86 M-Q1); with the login revoked nobody reaches them. Contract:
+   * `UserSessionEnders` (auth/identityContracts.ts).
+   */
+  async endUserSessions(userId: string): Promise<UserSessionsEnded> {
+    const terminals = [...this.instances.values()].filter((i) => TERMINAL_SESSION_APPS.has(i.appId)
+      && (i.owner === userId || (i.inPool && this.poolHomes.get(i.instanceId) === userId)));
+    let stopped = 0;
+    for (const inst of terminals) {
+      try {
+        await this.stop(inst.instanceId);
+        stopped++;
+      } catch (err) {
+        console.warn(`[AppManager] could not stop ${inst.instanceId} of a disabled user: ${(err as Error).message}`);
+      }
+    }
+    return { terminals: stopped, terminalsFailed: terminals.length - stopped, jumpSessions: await this.endJumpSessionsOf(userId) };
+  }
+
+  /**
+   * The user's open jump sessions, ended (stream J's session broker). Null:
+   * this kernel has no session broker (before 5-main stream J), so there is
+   * nothing of the user's to end.
+   */
+  private async endJumpSessionsOf(_userId: string): Promise<number | null> {
+    return null;
   }
 
   /**

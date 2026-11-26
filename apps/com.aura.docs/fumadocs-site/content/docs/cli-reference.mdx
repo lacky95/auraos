@@ -283,6 +283,11 @@ login and no shared admin credential (`aura admin login`, `--save`,
 - **Other apps** are refused: they never manage AuraOS.
 - **Recovery** stays on the host: `aura user reset-password <username>` and
   `aura setup-code`.
+- **Member accounts** (D82) are the host operator's alone: `aura admin user …`
+  runs only on the host, and its routes take nothing but the host operator's
+  one-time ticket, not your login, not the System Terminal. A member is never
+  the owner: it reaches only its own instances of the apps you granted it
+  (`use`), and jumps only with `jump`; every owner route refuses it.
 
 ### Capabilities — `aura cap …`
 
@@ -366,7 +371,12 @@ aura dev validate --all
 | `aura completion bash\|zsh` | Print a completion script: commands, resource types, and live names (apps, instances). | — |
 | `aura api-resources` | All resource types, short names, verbs. | — |
 | `aura setup-code` | Host command: a one-time code for creating the owner account at `/setup` (expires after 10 minutes). Run it as `docker exec -it aura-shell aura setup-code`. | — |
-| `aura user reset-password <username>` | Host command: a one-time code for resetting the owner's password at `/setup`. Signs out every browser. | — |
+| `aura user reset-password <username>` | Host command: a one-time code for resetting an account's password at `/setup`. Signs that account out in every browser. | — |
+| `aura admin user add <username>` | Host command: a **member** account (D82) with no password yet, and its one-time enrolment code: the member enters it with a new password at `/setup`. There is one owner; `--role owner` is refused. Needs `AURA_ACCESS_ENFORCE=enforce` (members never act in `report` or `off`). A new member holds no app. | — |
+| `aura admin user ls` | Host command: every account by id, username, role, status, uid and app grants. Never a password hash. | `-o json` |
+| `aura admin user grant\|revoke <user> use\|jump <app>` | Host command: let a member open and start **its own** instance of an app (`use`, `app.use:<installation>`), or jump into it (`jump`, `app.jump:<installation>`). Nothing is granted implicitly; the owner's management UIs (Settings, Nexus) are not granted to members. | — |
+| `aura admin user disable\|enable <user>` | Host command: `disable` refuses sign-in, signs the user out everywhere (logins, App Host sign-ins, screens), stops its Terminal instances and ends its jump sessions. Nothing is deleted: `enable` restores the same id, uid, Private Home and grants. The owner is never disabled. | — |
+| `aura admin user reset-password <user>` | Host command: a one-time reset code bound to that account (by id or username). | — |
 | `aura admin security [list\|options]` | Every [security option](/docs/security-options): its value, where it comes from (default, policy, `env AURA_…`) and how to change it. | `-o json` |
 | `aura runtime ls\|show <id>` | The runtimes apps run in (container, PRoot): enabled, default, health, capabilities, settings and the apps on each. | `-o json` |
 | `aura runtime default [<id>]` · `set <id> <key>=<value>` · `enable\|disable <id>` | Change the default runtime, a runtime's settings (e.g. `set proot placement=master`) or whether it is enabled. Needs your password; applies to the next start of an app. | `disable --stop-instances` |

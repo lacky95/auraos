@@ -12,6 +12,13 @@ import type { AccessSurface } from './types.ts';
 
 const decide = (phase: number, note: string) => ({ ambiguous: true, decision: { phase, note } }) as const;
 
+/**
+ * I.2 (D82): a member's own instance of an app it holds `app.use` for
+ * (decide.ts `memberPermissions`). The surface names the instance once it is
+ * known, so a member never reaches another user's.
+ */
+const MEMBER_USES_APP = ['app.use:<installationId>'] as const;
+
 export const SURFACE_MANIFEST: readonly AccessSurface[] = [
   {
     id: 'shell-listener',
@@ -33,7 +40,8 @@ export const SURFACE_MANIFEST: readonly AccessSurface[] = [
     rule: {
       allow: ['owner'],
       target: 'proxy-upstream',
-      ...decide(2, 'Claims the request before Astro and streams it to the app with no check. Needs the login handoff, then per-host enforcement.'),
+      memberPermissions: MEMBER_USES_APP,
+      ...decide(2, 'Claims the request before Astro and streams it to the app with no check. Needs the login handoff, then per-host enforcement. I.2: a member\'s session only to its own instance, decided again on the slot\'s instance.'),
     },
   },
   {
@@ -46,7 +54,8 @@ export const SURFACE_MANIFEST: readonly AccessSurface[] = [
       allow: ['owner'],
       target: 'proxy-upstream',
       networkCaller: true,
-      note: 'As /api/proxy (D28): the owner, and a tokenless app container by its network address. Upgrades skip the middleware, so surfaceGate checks them; the target lookup carries the internal label.',
+      memberPermissions: MEMBER_USES_APP,
+      note: 'As /api/proxy (D28): the owner, a member to its own instance with app.use (I.2), and a tokenless app container by its network address. Upgrades skip the middleware, so surfaceGate checks them on the chosen instance; the target lookup carries the internal label.',
     },
   },
   {
@@ -71,6 +80,7 @@ export const SURFACE_MANIFEST: readonly AccessSurface[] = [
     rule: {
       allow: ['owner'],
       target: 'proxy-upstream',
+      memberPermissions: MEMBER_USES_APP,
       note: 'The owner, through the app whose App Host session the router verified (surfaceGate at the upgrade). Each stream is then a gateway call checked on its own, and the event streams end when the sign-in is revoked (lib/streamSession.ts).',
     },
   },
@@ -106,6 +116,7 @@ export const SURFACE_MANIFEST: readonly AccessSurface[] = [
     rule: {
       allow: ['owner'],
       target: 'proxy-upstream',
+      memberPermissions: MEMBER_USES_APP,
       ...decide(5, 'A shell on the owner\'s home, and every /ws connection creates state. The D29 table applies: System Terminal full, TerminalX embed only, other apps none until granted.'),
     },
   },
@@ -117,6 +128,7 @@ export const SURFACE_MANIFEST: readonly AccessSurface[] = [
     rule: {
       allow: ['owner'],
       target: 'proxy-upstream',
+      memberPermissions: MEMBER_USES_APP,
       networkCaller: true,
       note: 'The /api/proxy route rule decides (C6: the same rule): the owner, and an app container by its network address (D28), except to an owner agent\'s MCP (the Terminal, aurashelld), which only the owner and the System Terminal reach (H2). Caller-scoped grants and the private Terminal ingress are Phase 5.',
     },

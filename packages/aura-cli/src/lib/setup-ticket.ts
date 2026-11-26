@@ -8,7 +8,7 @@ import { createSetupTicket } from '@aura/core/setup-tickets';
 import { inSandbox } from './identity.js';
 
 export type SetupTicketInput =
-  | { purpose: 'setup' | 'reset'; username?: string }
+  | { purpose: 'setup' | 'reset'; username?: string; userId?: string }
   /** The host operator's word on one exact `subject` (D18): `approve:<id>`, `<action>:<payloadHash>`, … */
   | { purpose: 'operator'; subject: string };
 export type CreateSetupTicket = (

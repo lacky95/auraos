@@ -16,7 +16,7 @@ import { terminalEmbedAncestors, watchTerminalInstances } from './terminal-embed
 import { buildAppHost } from '@aura/core/host-rules';
 import { originOf, plainProxyPath } from './host-policy.mjs';
 import {
-  countSurfaceEvent, followIdentity, internalServiceHeaders, relayClaimOf, reportSurface, requestIdentity, surfaceGate, surfaceIdentity,
+  countSurfaceEvent, followIdentity, instanceOwnerOf, internalServiceHeaders, relayClaimOf, reportSurface, requestIdentity, surfaceGate, surfaceIdentity,
 } from './access-bridge.mjs';
 import { stripShellCredentials } from './shell-credentials.mjs';
 import { RELAY_CLAIM_HEADER } from '@aura/core/relay-claim';
@@ -185,18 +185,23 @@ export function attachWsProxy(httpServer) {
       reported = true;
       reportSurface({ subject: subject(), method: 'UPGRADE', appId: chosenAppId, status, identity });
     };
+    // I.2 (D82): a member's upgrade goes to its own instance only (the gate
+    // below decides on the chosen instance; a bare app id picks the member's).
+    const caller = await Promise.resolve(identity?.verified ?? null).catch(() => null);
+    const memberId = caller?.principal?.kind === 'user' && caller.principal.role !== 'owner' ? caller.principal.userId : null;
+    const mine = (i) => memberId === null || instanceOwnerOf(i.instanceId) === memberId;
     // Pick the live instance for `instanceId` (an instance id, or an app id).
     const resolve = (apps) => {
       let chosen = null;
       // Pass 1: direct instanceId match.
       for (const a of apps) {
-        chosen = a.instances.find((i) => i.instanceId === instanceId);
+        chosen = a.instances.find((i) => i.instanceId === instanceId && mine(i));
         if (chosen) break;
       }
       // Pass 2: appId match → prefer non-pool, resumed/started.
       if (!chosen) {
         const app = apps.find((a) => a.manifest.id === instanceId);
-        const candidates = app?.instances ?? [];
+        const candidates = (app?.instances ?? []).filter(mine);
         dbg('WS-PROXY', 'candidates', JSON.stringify(candidates.map((i) => ({ id: i.instanceId, port: i.port, state: i.state, inPool: i.inPool, sandbox: i.sandbox }))));
         chosen = candidates.find((i) => !i.inPool && !i.preview && (i.state === 'resumed' || i.state === 'started'))
               ?? candidates.find((i) => !i.preview && (i.state === 'resumed' || i.state === 'started'))
@@ -223,7 +228,7 @@ export function attachWsProxy(httpServer) {
 
     if (!port) { reportWs(0); dbg('WS-PROXY', 'no-port → destroy', instanceId, `t=${Date.now() - t0}ms`); socket.destroy(); return; }
     // Upgrades never reach Astro's middleware: the surface's own rule decides (enforce only).
-    if (!(await surfaceGate({ subject: subject(), method: 'UPGRADE', appId: chosenAppId, identity }))) {
+    if (!(await surfaceGate({ subject: subject(), method: 'UPGRADE', appId: chosenAppId, ...(memberId ? { instanceId: chosenInstanceId } : {}), identity }))) {
       reportWs(403);
       try { socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n'); } catch { /* gone */ }
       return;

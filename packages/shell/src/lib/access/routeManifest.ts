@@ -77,6 +77,16 @@ const CONTEXT_Q31 = decide(5,
 const PROXY_ACCESS = why(
   'D28: the owner, and a tokenless call from an app container (Claude Code\'s MCP URLs, the Terminal\'s session calls, the agent hooks), known by its network address. The SDK never sends a token on this path, and a gateway call stays refused. Caller-scoped grants are Phase 5.');
 
+/** I.2 (D82): a member opens and uses its own instance of an app the owner granted it (`app.use`). */
+const MEMBER_USES_APP = ['app.use:<installationId>'] as const;
+
+/**
+ * I.2 (D82): the accounts of this Aura are the host operator's, from the host
+ * CLI only (`aura admin user …`, a one-time operator ticket per request). Not
+ * the desktop, not an app, not an approval: decided in every access mode.
+ */
+const HOST_OPERATOR_ONLY = (note: string) => rule(OWNER, 'system', { credentials: ['operator-ticket'], guard: 'rule', ...why(note) });
+
 const STORAGE_ACCESS = why(
   'Only app <id> (and the owner), and only while the app declares storage.read / storage.write. The value is the caller\'s user\'s (D46), from the verified principal.');
 
@@ -272,17 +282,20 @@ const routes: RouteAccessManifest['routes'] = {
 
   // Owner login (D6, D37), always on.
   // `setup` also takes the reset path: both need a one-time host code (D8).
-  '/api/app-hosts/handoff': { methods: { POST: rule(OWNER, 'session') } },
+  '/api/app-hosts/handoff': {
+    methods: { POST: rule(OWNER, 'session', { memberPermissions: [], ...why(
+      'The owner\'s desktop; a member\'s (I.2, D82) only into an instance of its own whose app it holds app.use:<installationId> for, which the handler checks (the body names the instance).') }) },
+  },
   '/api/auth/status': { methods: { GET: rule(['public'], 'system') } },
   '/api/auth/setup': { methods: { POST: rule(['public'], 'system') } },
   '/api/auth/login': { methods: { POST: rule(['public'], 'session') } },
   '/api/auth/logout': {
-    methods: { POST: rule(OWNER, 'session', why(
-      'The signed-in owner. An expired session needs no logout: its cookie is worthless, and the next sign-in replaces it.')) },
+    methods: { POST: rule(OWNER, 'session', { memberPermissions: [], ...why(
+      'The signed-in user (a member too, I.2): it ends the caller\'s own session. An expired session needs no logout: its cookie is worthless, and the next sign-in replaces it.') }) },
   },
   '/api/auth/session': {
-    methods: { GET: rule(OWNER, 'session', why(
-      'The signed-in owner. A visitor without a session gets 401 in enforce, which says the same as authenticated:false.')) },
+    methods: { GET: rule(OWNER, 'session', { memberPermissions: [], ...why(
+      'The signed-in user (a member too, I.2): its own session only. A visitor without a session gets 401 in enforce, which says the same as authenticated:false.') }) },
   },
   // Settings → Users & Identities. A password is typed only into the shell's
   // own dialog, so those two stay on target `session`, which no app reaches
@@ -295,8 +308,8 @@ const routes: RouteAccessManifest['routes'] = {
   '/api/auth/account': { methods: { GET: rule(OWNER, 'system') } },
   '/api/auth/sessions/revoke-others': { methods: { POST: rule(OWNER, 'system') } },
   '/api/auth/whoami': {
-    methods: { GET: rule(['own-instance', 'app-permission', 'owner'], 'session', why(
-      'Reflects only the caller: any verified one, API keys too. An anonymous caller gets 401 in enforce, which `aura whoami` reports as rejected.')) },
+    methods: { GET: rule(['own-instance', 'app-permission', 'owner'], 'session', { memberPermissions: [], ...why(
+      'Reflects only the caller: any verified one, API keys and members too. An anonymous caller gets 401 in enforce, which `aura whoami` reports as rejected.') }) },
   },
 
   // D46: who the caller acts for. Reflects only the caller, like whoami, but
@@ -410,6 +423,19 @@ const routes: RouteAccessManifest['routes'] = {
   },
   '/api/admin/homes/reset': {
     methods: { POST: ownerManages('Resets an App Home (D65): the owner decides with the password (fresh).') },
+  },
+  // Stream I.2 part 2 (D82): member accounts, host only.
+  '/api/admin/users': {
+    methods: {
+      GET: HOST_OPERATOR_ONLY('`aura admin user ls`: id, username, role, status, uid, created; never a hash.'),
+      POST: HOST_OPERATOR_ONLY('`aura admin user add`: a member account without a password; the CLI prints its one-time enrolment code.'),
+    },
+  },
+  '/api/admin/users/[id]': {
+    methods: { POST: HOST_OPERATOR_ONLY('`aura admin user disable|enable`: status, sign-out everywhere, the user\'s Terminals and jump sessions end; nothing is deleted.') },
+  },
+  '/api/admin/users/[id]/grants': {
+    methods: { POST: HOST_OPERATOR_ONLY('`aura admin user grant|revoke <user> use|jump <app>`: a member\'s app.use / app.jump grant, audited.') },
   },
   '/api/admin/credentials': { methods: { GET: ownerManages('The owner\'s personal vault (D56): names, consumers, last use; never a value.') } },
   '/api/admin/credentials/[name]': { methods: { DELETE: ownerManages('Revoking a secret or one app\'s access to it (D56), through the owner\'s approval.') } },
@@ -615,6 +641,11 @@ const routes: RouteAccessManifest['routes'] = {
   // Track P: installing a patched tree and opening an app's source are the
   // owner's decision (D9); the System Terminal asks for each.
   '/api/apps/[id]/activate': { methods: { POST: TERMINAL_ASKS } },
+  // I.2 (D82): a member starts (or gets) its own instance of an app it holds app.use for.
+  '/api/apps/[id]/start': {
+    methods: { POST: rule(OWNER, 'app', { memberPermissions: MEMBER_USES_APP, ...why(
+      'The owner (the desktop, the CLI through the trusted Terminal, D29); a member only with app.use:<installationId> of that app, for an instance of its own (the route starts it for the verified user; D82).') }) },
+  },
   // Track P: a preview runs the caller's own workspace as a separate instance
   // (nothing installed, no approval); the owner or the System Terminal.
   '/api/apps/[id]/preview': { methods: { POST: TERMINAL_ASKS, DELETE: TERMINAL_ASKS } },
@@ -706,7 +737,7 @@ const routes: RouteAccessManifest['routes'] = {
     },
   },
   '/api/proxy/[id]/[...path]': {
-    methods: on(ROUTE_METHODS, rule(OWNER, 'proxy-upstream', { networkCaller: true, ...PROXY_ACCESS })),
+    methods: on(ROUTE_METHODS, rule(OWNER, 'proxy-upstream', { networkCaller: true, memberPermissions: MEMBER_USES_APP, ...PROXY_ACCESS })),
   },
 };
 

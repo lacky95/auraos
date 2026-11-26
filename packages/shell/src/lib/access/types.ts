@@ -52,6 +52,18 @@ export interface AccessRule {
   permissions?: readonly string[];
   /** Held by the TARGET instance's app (all of them), whoever is calling. */
   targetPermissions?: readonly string[];
+  /**
+   * I.2 (D82, C7): a member's way in, at the `app-permission` level (no level
+   * of its own). A member (a `user` whose record role is not `owner`, also
+   * through an App Host it signed in to) satisfies this rule only by holding
+   * every listed `user` grant: `app.use:<installationId>` and
+   * `app.jump:<installationId>`, the placeholder filled from the target app
+   * (decide.ts). A named target instance must be the member's own. An empty
+   * list lets a member reach a route that acts only on the caller's own
+   * session or checks the grant itself (its handler says how). Absent: a
+   * member holds nothing on this rule.
+   */
+  memberPermissions?: readonly string[];
   /** The right rule isn't settled yet. Requires `decision`. */
   ambiguous?: true;
   decision?: AccessDecision;
@@ -273,6 +285,8 @@ export interface AccessBridge {
   observeSurface(observation: SurfaceObservation): void;
   /** The decision for a surface about to proceed, as `enforce` applies it. Never counted, never throws. */
   decideSurface(observation: SurfaceObservation): Promise<SurfaceDecision>;
+  /** I.2 (D82): the user an instance belongs to; null for an unknown one or an unclaimed pool member. */
+  instanceOwner(instanceId: string): string | null;
   /** M4: end a socket with the session its verdict rides on (lib/streamSession.ts `followSocket`). */
   followSession(principal: AccessPrincipal | null, end: () => void): { stop(): void } | null;
   /** A high-frequency event on a surface: a counter only. */

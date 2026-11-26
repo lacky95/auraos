@@ -1,7 +1,7 @@
 import type {
   AccessPrincipal, AppInstance, AppManager, InstancePrincipal, OperatorPrincipal, Principal, UserPrincipal, UserRole,
 } from '@aura/core';
-import { DEFAULT_OWNER_ID } from '@aura/core';
+import { DEFAULT_OWNER_ID, isForeignPrincipal } from '@aura/core';
 // The file-only entry, as the CLI uses it: one subject rule on both sides.
 import { operatorRequestSubject } from '@aura/core/setup-tickets';
 import { localSystemId } from '@aura/core/system-identity';
@@ -227,6 +227,19 @@ export function bearerToken(request: Request): string | null {
  */
 export function systemOf(): { systemId?: string } {
   try { return { systemId: localSystemId() }; } catch { return {}; }
+}
+
+/**
+ * The one "is this the owner" test for a handler (I.2 audit, D85 A1): the
+ * host operator, or a LOCAL user whose record role is `owner`. A principal
+ * of another Aura is never the owner, whatever its role; a member never is.
+ * An app instance is not: a trusted owner agent (D29) is decided by the
+ * access policy (decide.ts), never assumed by a handler.
+ */
+export function isOwnerPrincipal(p: { kind: string; role?: unknown; systemId?: unknown } | null | undefined): boolean {
+  if (!p) return false;
+  if (p.kind === 'operator') return true;
+  return p.kind === 'user' && p.role === 'owner' && !isForeignPrincipal(p);
 }
 
 /**
