@@ -126,7 +126,7 @@ export interface UserSessionsEnded {
   terminals: number;
   /** Terminal instances of the user that could not be stopped (the disable is reported failed). */
   terminalsFailed: number;
-  /** Jump sessions ended; null when this kernel has no session broker (nothing of the user's can be open). */
+  /** Jump sessions ended (stream J's session broker); null only from a kernel without one. */
   jumpSessions: number | null;
 }
 

@@ -2498,12 +2498,19 @@ export class AppManager {
   }
 
   /**
-   * The user's open jump sessions, ended (stream J's session broker). Null:
-   * this kernel has no session broker (before 5-main stream J), so there is
-   * nothing of the user's to end.
+   * The user's open jump sessions (stream J's session broker), ended: every
+   * session opened as that user, in any instance and home mode. The count of
+   * those the broker ended; one it could not end is logged (its instance's
+   * stop or the broker's reaper still ends it).
    */
-  private async endJumpSessionsOf(_userId: string): Promise<number | null> {
-    return null;
+  private async endJumpSessionsOf(userId: string): Promise<number | null> {
+    let ended = 0;
+    for (const r of this.container.openSessions()) {
+      if (r.userId !== userId) continue;
+      if (await this.container.endSession(r.sessionId).catch(() => false)) ended++;
+      else console.warn(`[AppManager] could not end jump session ${r.sessionId} of a disabled user`);
+    }
+    return ended;
   }
 
   /**

@@ -9,13 +9,19 @@ import { AppManager } from '../dist/app-manager/AppManager.js';
 
 const MEMBER = 'uaaaaaaaaaaaaaaa';
 
-function fake(manifests, instances = []) {
+function fake(manifests, instances = [], sessions = []) {
   const byId = new Map(manifests.map((m) => [m.id, m]));
   const f = {
     spawned: [], resumed: [], stopped: [],
     registry: { getById: (id) => byId.get(id) },
     instances: new Map(instances.map((i) => [i.instanceId, { inPool: false, state: 'resumed', ...i }])),
     poolHomes: new Map(),
+    endedSessions: [],
+    // Stream J's session broker through the container runner (openSessions / endSession).
+    container: {
+      openSessions: () => sessions,
+      async endSession(id) { if (id.endsWith('-stuck')) return false; f.endedSessions.push(id); return true; },
+    },
     isEnabled: () => true,
     getInstancesByApp: (appId) => [...f.instances.values()].filter((i) => i.appId === appId),
     async spawnInstance(appId, opts) { f.spawned.push([appId, opts]); return `${appId}-new`; },
@@ -65,5 +71,18 @@ test('D82 disable: the user\'s Terminal instances and pool members warmed for it
   m.poolHomes.set('com.aura.terminal-4', 'default');
   const ended = await m.endUserSessions(MEMBER);
   assert.deepEqual(m.stopped.sort(), ['com.aura.terminal-2', 'com.aura.terminal-3']);
-  assert.deepEqual(ended, { terminals: 2, terminalsFailed: 1, jumpSessions: null });
+  assert.deepEqual(ended, { terminals: 2, terminalsFailed: 1, jumpSessions: 0 });
+});
+
+test('5-main integration (I.2 + J): disabling a user ends that user\'s jump sessions only, through the session broker', async () => {
+  const m = fake([], [], [
+    { sessionId: 's-member-1', instanceId: 'io.ex.notes-1', userId: MEMBER, kind: 'jump', home: 'private' },
+    { sessionId: 's-member-2', instanceId: 'com.aura.counter-1', userId: MEMBER, kind: 'jump', home: 'app' },
+    { sessionId: 's-member-stuck', instanceId: 'io.ex.notes-1', userId: MEMBER, kind: 'jump', home: 'ephemeral' },
+    { sessionId: 's-owner', instanceId: 'io.ex.notes-1', userId: 'default', kind: 'jump', home: 'private' },
+    { sessionId: 's-app', instanceId: 'io.ex.notes-1', kind: 'jump', home: 'app' },
+  ]);
+  const ended = await m.endUserSessions(MEMBER);
+  assert.deepEqual(m.endedSessions, ['s-member-1', 's-member-2']);
+  assert.deepEqual(ended, { terminals: 0, terminalsFailed: 0, jumpSessions: 2 });
 });
