@@ -75,7 +75,7 @@ test('user edits are never overwritten: an edited ~/CLAUDE.md stays, an own ~/.c
 
 test('the shipped seed: AGENTS.md has the marked "Working on Aura apps" section, ~/.claude/CLAUDE.md imports it, no ~/CLAUDE.md', () => {
   const sections = seedSections(readFileSync(join(REAL_SEED, 'AGENTS.md'), 'utf-8'));
-  assert.deepEqual(sections.map((s) => s.name), ['working-on-aura-apps']);
+  assert.deepEqual(sections.map((s) => s.name), ['working-on-aura-apps', 'mcp-token-by-reference']);
   assert.match(sections[0].text, /^<!-- aura:section working-on-aura-apps -->\n## Working on Aura apps\n/);
   assert.match(sections[0].text, /aura dev status <app>/);
   assert.match(readFileSync(join(REAL_SEED, '.claude', 'CLAUDE.md'), 'utf-8'), /^@~\/AGENTS\.md$/m);

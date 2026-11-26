@@ -28,6 +28,9 @@ function fake(manifests, instances = []) {
     nextActivityNum: new Map(),
     isEnabled: () => true,
     savePoolIds() {},
+    // D65: each member's home was recorded at its spawn ('' = a global App Home).
+    poolHomes: new Map(instances.filter((i) => i.inPool).map((i) => [i.instanceId, ''])),
+    recycling: new Set(),
     scheduleRefill() {},
     providers: { registerInstance() {} },
     interfaces: { registerInstance() {} },

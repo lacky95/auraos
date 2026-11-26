@@ -401,6 +401,16 @@ const routes: RouteAccessManifest['routes'] = {
   },
   '/api/admin/homes/plan': { methods: { GET: ownerManages('The Home Resolver in report mode: each instance\'s home today against the Phase 5 target; an owner view.') } },
   '/api/admin/homes/import-report': { methods: { GET: ownerManages('The home import report (Q15): which dot-dirs each app may want; paths and sizes only, an owner view.') } },
+  // Phase 5 stream H: the home operations. Every change is the owner's at `fresh` (lib/homesAdmin.ts).
+  '/api/admin/identity/ownership-apply': {
+    methods: { POST: ownerManages('Applies the reviewed dry-run ownership report (P5-2, D70) for its digest, journaled: the owner decides with the password (fresh).') },
+  },
+  '/api/admin/homes/import': {
+    methods: { POST: ownerManages('Copies named paths from the owner\'s Private Home into an App Home (Q15): a dry run is an owner view, the copy the owner\'s decision (fresh).') },
+  },
+  '/api/admin/homes/reset': {
+    methods: { POST: ownerManages('Resets an App Home (D65): the owner decides with the password (fresh).') },
+  },
   '/api/admin/credentials': { methods: { GET: ownerManages('The owner\'s personal vault (D56): names, consumers, last use; never a value.') } },
   '/api/admin/credentials/[name]': { methods: { DELETE: ownerManages('Revoking a secret or one app\'s access to it (D56), through the owner\'s approval.') } },
 
@@ -708,10 +718,6 @@ const notYet = (stream: string, target: AccessTarget, methods: readonly RouteMet
 
 /** Stage 1 (phase5-plan.md §4 item 5): each stream adds its file and moves its row into `routes`. */
 const reserved: RouteAccessManifest['reserved'] = {
-  // I: identities and the read-only reports; H applies them.
-  '/api/admin/identity/ownership-apply': notYet('H', 'system', ['POST']),
-  '/api/admin/homes/import': notYet('H', 'system', ['POST']),
-  '/api/admin/homes/reset': notYet('H', 'system', ['POST']),
   // J: the root tab (`aura root`, P5-4).
   '/api/admin/root': notYet('J', 'system', ['GET', 'POST']),
 };

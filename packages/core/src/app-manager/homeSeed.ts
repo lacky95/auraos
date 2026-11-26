@@ -1,6 +1,7 @@
 /**
- * The onboarding files AuraOS ships for the user home (os/home-seed): what
- * `AppManager.seedUserHome` does at boot.
+ * The onboarding files AuraOS ships for a Private Home (os/home-seed): what
+ * `AppManager.seedPrivateHome` does at boot and when a Private Home is
+ * resolved. App Homes are never seeded: they start empty (D65, Q15).
  *
  *   1. Every seed file the home lacks is copied (subdirectories mirrored).
  *      An existing file is the user's and is never overwritten.
@@ -15,8 +16,10 @@
  *      the user memory in every directory, `~` included, so the home pointer
  *      only repeated it. Edited, it stays. Codex reads `~/AGENTS.md` itself.
  */
+import { execFileSync } from 'node:child_process';
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /** `~/CLAUDE.md` as the seed shipped it before `~/.claude/CLAUDE.md` existed. */
 export const LEGACY_HOME_CLAUDE_MD =
@@ -82,4 +85,36 @@ export function seedHome(seedDir: string, home: string, warn: (msg: string) => v
     }
   } catch { /* one of them is missing: nothing to tidy */ }
   return result;
+}
+
+/**
+ * Seed a home as its owner (D65, P5-2). A home owned by a user is the user's
+ * to change, links included, so the shell never writes into it as root: a
+ * planted symlink could aim a root write anywhere. The seed then runs in a
+ * child process with the home's uid/gid (no capabilities beyond theirs), and
+ * every file it creates is theirs. A root-owned home (before the ownership
+ * apply) is seeded in-process, as before.
+ */
+export function seedHomeAs(seedDir: string, home: string, warn: (msg: string) => void = () => undefined): HomeSeedResult {
+  let st;
+  try { st = lstatSync(home); } catch { return { copied: [], appended: [], removedLegacyClaudeMd: false }; }
+  if (st.isSymbolicLink() || !st.isDirectory()) {
+    warn(`${home} is not a directory; not seeded`);
+    return { copied: [], appended: [], removedLegacyClaudeMd: false };
+  }
+  if (st.uid === 0) return seedHome(seedDir, home, warn);
+  try {
+    // Resolved at the call: core is also bundled as CommonJS (the CLI), which never seeds.
+    const worker = fileURLToPath(new URL('./homeSeedWorker.js', import.meta.url));
+    const out = execFileSync(process.execPath, [worker, seedDir, home], {
+      uid: st.uid, gid: st.gid, cwd: '/', env: { HOME: home, PATH: '/usr/bin:/bin' }, encoding: 'utf-8', timeout: 30_000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const r = JSON.parse(out) as HomeSeedResult & { warnings?: string[] };
+    for (const w of r.warnings ?? []) warn(w);
+    return { copied: r.copied, appended: r.appended, removedLegacyClaudeMd: r.removedLegacyClaudeMd };
+  } catch (err) {
+    warn(`could not seed ${home} as its owner: ${(err as Error).message.split('\n')[0]}`);
+    return { copied: [], appended: [], removedLegacyClaudeMd: false };
+  }
 }

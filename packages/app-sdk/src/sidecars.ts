@@ -37,7 +37,7 @@ import { LIFECYCLE_REFUSAL, LIFECYCLE_TOKEN_HEADER, lifecycleRequestRefused } fr
 export * from './os-sidecars.js';
 
 const DOCKER_SOCK = '/var/run/docker.sock';
-/** The user's shared home in every AuraOS app container (core's SHARED_HOME_PATH). */
+/** The app's own home in every AuraOS app container: its App Home (core's SHARED_HOME_PATH, D65). */
 const HOME_PATH = '/home/aura';
 
 /**
@@ -239,9 +239,9 @@ export interface ServiceSpec {
   tools?: string[];
 
   /**
-   * The user's shared HOME at `/home/aura` (logins of claude / codex / gh, …)
-   * plus `HOME=/home/aura` — the same home every AuraOS container app gets, so
-   * no extra permission. OS path: the OS mounts it. Docker path: the SDK
+   * The app's own App Home at `/home/aura` (D65; never a user's Private Home)
+   * plus `HOME=/home/aura` — the home the app process itself has, so no
+   * extra permission. OS path: the OS mounts it. Docker path: the SDK
    * mounts whatever volume + subpath its own container has at `/home/aura`
    * (skipped with a warning when it can't tell). Default false.
    */

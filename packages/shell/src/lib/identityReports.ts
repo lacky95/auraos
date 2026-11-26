@@ -6,8 +6,8 @@
  *
  *   ownershipReport()  the dry-run ownership report (P5-2, D70): what stream
  *                      H would chown, per row, with counts and a digest
- *   homesPlan()        the Home Resolver in report mode: today's `/home/aura`
- *                      source against the Phase 5 target, per instance
+ *   homesPlan()        each instance's `/home/aura` against the Home
+ *                      Resolver's target, per instance
  *   importReport()     the home import report (Q15): what each app may want
  *                      from today's shared home
  *   identityCheck()    the registry and account invariants, for
@@ -111,7 +111,6 @@ export async function ownershipReport(): Promise<core.OwnershipReport> {
 
 export async function homesPlan(): Promise<core.HomePlanReport> {
   const mgr = core.getAppManager();
-  const current = await core.legacyHomeResolver(dataDir()).resolve({} as never);
   const rows: core.HomePlanInstance[] = [];
   for (const inst of mgr.getAllInstances()) {
     if (inst.inPool) continue;
@@ -122,7 +121,7 @@ export async function homesPlan(): Promise<core.HomePlanReport> {
       installationId: await installationOf(inst.appId, m.scopeId),
       environmentScope: m.environmentScope ?? 'global',
       ...((inst as { owner?: string }).owner ? { owner: (inst as { owner?: string }).owner } : {}),
-      currentHostPath: current.hostPath,
+      currentHostPath: (await mgr.appHomeOf(inst.instanceId))?.hostPath ?? null,
     });
   }
   return core.homePlan(dataDir(), rows);

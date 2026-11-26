@@ -3,8 +3,8 @@
  *
  * App Homes start empty (Q15). This report lists, per installation, what in
  * today's shared home the app is likely to want, so the owner can copy it
- * selectively later (`aura admin homes import`, stream H, 5-main: it copies,
- * never moves, and leaves the Private Home untouched). It combines:
+ * selectively (`aura admin homes import`, appHomeAdmin.ts: it copies, never
+ * moves, and leaves the Private Home untouched). It combines:
  *
  *   - a static table of known apps (Board, dev.box, TerminalX);
  *   - a heuristic: the dot-dirs the app's granted tools are known to use.
@@ -36,7 +36,7 @@ export const IMPORT_TOOL_PATHS: Readonly<Record<string, readonly string[]>> = Ob
 });
 
 /** Paths whose contents are a personal login (prefix match on the relative path). */
-const PERSONAL = ['.claude/.credentials.json', '.ssh', '.config/gh/hosts.yml', '.config/glab-cli/config.yml', '.npmrc'];
+const PERSONAL = ['.claude/.credentials.json', '.ssh', '.config/gh/hosts.yml', '.config/glab-cli/config.yml', '.npmrc', '.codex/auth.json'];
 export const PERSONAL_NOTE = 'personal: copying shares your login with the app (D66: prefer a fresh login)';
 
 export interface ImportReportInstallation {
@@ -70,7 +70,9 @@ export interface ImportReport {
 
 const MAX_WALK = 50_000;
 
-const isPersonal = (rel: string) => PERSONAL.some((p) => rel === p || rel.startsWith(`${p}/`));
+/** Whether a home-relative path is (inside) a personal login. */
+export const isPersonalHomePath = (rel: string): boolean => PERSONAL.some((p) => rel === p || rel.startsWith(`${p}/`));
+const isPersonal = isPersonalHomePath;
 
 async function measure(home: string, rel: string): Promise<Omit<ImportCandidate, 'path' | 'source' | 'tool'> | null> {
   let st;

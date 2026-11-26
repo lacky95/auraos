@@ -14,7 +14,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SidecarManager } from '../dist/app-manager/SidecarManager.js';
 import { InstanceTokens } from '../dist/app-manager/InstanceTokens.js';
-import { userHomeSubpath } from '../dist/scopes/home.js';
 
 const APP = 'io.test.app';
 const INST = 'io.test.app-2';
@@ -115,6 +114,11 @@ function fixture(t, opts = {}) {
       forgetConsumer: (k) => mountCalls.push(['forget', k]),
     },
     instance: (id) => (id === INST ? { appId: APP, instanceDataDir: join(dataDir, 'scopes/users/default/apps', APP, INST) } : null),
+    // D65: the parent's App Home (AppManager.appHomeOf).
+    appHome: async (id) => (opts.appHome !== undefined ? opts.appHome : id === INST ? {
+      kind: 'app-global', hostPath: join(dataDir, 'aura/apphomes/inst-1/global'), volumeSubpath: 'aura/apphomes/inst-1/global',
+      logicalPath: '/home/aura', uid: 200001, gid: 200001, mode: 0o700,
+    } : null),
   });
   return { mgr, tokens, mountCalls, dataDir, perms };
 }
@@ -358,19 +362,29 @@ test('spawn and remove notify `changed` (AppManager refreshes its sidecar cache 
   assert.equal(n, 2);
 });
 
-test('inheritHome mounts the shared user home and sets HOME after the template env', async (t) => {
+test('inheritHome mounts the parent\'s App Home (D65) and sets HOME after the template env', async (t) => {
   const d = fakeDocker(t);
   const svc = [{ name: 'home', image: 'alpine:3', command: ['sleep', 'infinity'], env: { HOME: '/elsewhere' }, volumes: [], inheritHome: true }];
   await fixture(t, { services: svc }).mgr.spawn(INST, { template: 'home' }, { instanceId: INST });
   const c = d.containers.get(`aura-${INST}--home`);
-  assert.ok(flag(c.args, '--mount').some((m) => m === `type=volume,source=appvol,target=/home/aura,volume-subpath=${userHomeSubpath()}`),
-    flag(c.args, '--mount').join(' | '));
+  const mounts = flag(c.args, '--mount');
+  assert.ok(mounts.some((m) => m === 'type=volume,source=appvol,target=/home/aura,volume-subpath=aura/apphomes/inst-1/global'), mounts.join(' | '));
+  assert.ok(!mounts.some((m) => m.includes('aura/home/')), 'never a Private Home');
   const homes = flag(c.args, '-e').filter((kv) => kv.startsWith('HOME='));
   assert.equal(homes.at(-1), 'HOME=/home/aura', 'last -e HOME wins in docker');
   const plain = d.containers.get(`aura-${INST}--box`);
   assert.equal(plain, undefined);
   await fixture(t).mgr.spawn(INST, { template: 'box' }, { instanceId: INST });
   assert.ok(!flag(d.containers.get(`aura-${INST}--box`).args, '--mount').some((m) => m.includes('target=/home/aura')), 'no home without the flag');
+});
+
+test('inheritHome fails closed: no resolvable App Home, or a Private Home, creates no sidecar', async (t) => {
+  const d = fakeDocker(t);
+  const svc = [{ name: 'home', image: 'alpine:3', command: ['sleep', 'infinity'], volumes: [], inheritHome: true }];
+  await assert.rejects(fixture(t, { services: svc, appHome: null }).mgr.spawn(INST, { template: 'home' }, { instanceId: INST }), /inheritHome has nothing to mount/);
+  const priv = { kind: 'private', hostPath: '/data/aura/home/default', volumeSubpath: 'aura/home/default', logicalPath: '/home/aura', uid: 1000, gid: 1000, mode: 0o700 };
+  await assert.rejects(fixture(t, { services: svc, appHome: priv }).mgr.spawn(INST, { template: 'home' }, { instanceId: INST }), /inheritHome has nothing to mount/);
+  assert.equal(d.containers.get(`aura-${INST}--home`), undefined);
 });
 
 // ─── Tools of a sidecar ──────────────────────────────────────────────────

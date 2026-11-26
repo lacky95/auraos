@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import { lifecyclePath } from '../types/manifest.js';
 import { ALL_TOOLS_PATH, MY_TOOLS_PATH, currentToolsMode, provisionAllowlist } from './tool-provision.js';
-import { PROOT_HOME_ENV, prootHomeBind } from './spawn/homeArgs.js';
+import { prootHomeBind, prootHomeEnv } from './spawn/homeArgs.js';
+import type { ResolvedHome } from '../homes/types.js';
 import { prootContextBinds } from './spawn/contextArgs.js';
 import { prootSocketBinds } from './spawn/socketArgs.js';
 import type { RuntimeCapabilities } from '../runtimes/types.js';
@@ -100,13 +101,11 @@ export function prootBinds(spec: ProotBindSpec): string[] {
     // Bring the master container's Node 22 into the sandbox — Debian-bookworm
     // ships Node 18 in its package archive, which is too old for our apps.
     '--bind=/usr/local/bin/node:/usr/local/bin/node',
-    // The user's HOME — the SAME `aura/home/<userId>` dir ContainerRunner
-    // mounts at /home/aura in every app container (spawn/homeArgs.ts). (The
-    // master container's own home is deliberately elsewhere — see
-    // scopes/home.ts.) Without this bind a PRoot's HOME resolves inside the
+    // The App Home the kernel resolved (spawn/homeArgs.ts, D65), never the
+    // user's Private Home. Without this bind a PRoot's HOME resolves inside the
     // base-rootfs (/os/base-rootfs/root), which is an IMAGE LAYER: every
-    // `claude` login, `gh auth`, ssh key and tool dotfile written there is
-    // destroyed by the next `compose up --build` or container recreate.
+    // tool dotfile written there is destroyed by the next `compose up
+    // --build` or container recreate.
     spec.homeBind,
     // OS Context: /run/context and the shared Context Volumes (spawn/contextArgs.ts).
     ...spec.contextBinds,
@@ -271,7 +270,9 @@ export class ProotRunner implements SandboxRunner {
     // enforce read-only, so RO volumes are effectively RW here).
     await this.volumeStore.ensureAll();
     const contextVolumes = await this.volumeStore.resolveMounts();
-    const args = this.buildProotArgs(instanceId, port, manifest, appDir, dataDir, prooted, entrypointArgv, contextVolumes);
+    // D65: the resolved App Home, or no start (an unwrapped process gets its path, never the master's home).
+    const home = prootHomeEnv({ home: ctx.home, prooted });
+    const args = this.buildProotArgs(instanceId, port, manifest, appDir, dataDir, prooted, entrypointArgv, contextVolumes, ctx.home);
 
     // Prepend the per-instance allowlist to PATH so non-interactive children
     // (which don't source .bashrc) still find granted tools. Interactive
@@ -290,12 +291,10 @@ export class ProotRunner implements SandboxRunner {
       // key can't clobber PATH/APP_ID/OS_API_BASE etc.
       ...contextEnv,
       PATH: path,
-      // Apps get the USER's home, never the master's. Prooted apps reach it
-      // through the bind in buildProotArgs; non-prooted apps run inside the
-      // master container, where /home/aura is a symlink to the same dir (see
-      // Dockerfile). Set unconditionally — inheriting the master's $HOME here
-      // would leak OS-operator state into an app and write app state into it.
-      HOME: PROOT_HOME_ENV,
+      // The App Home, through the bind in buildProotArgs (never the master's
+      // home). Set unconditionally — inheriting the master's $HOME here would
+      // leak OS-operator state into an app and write app state into it.
+      HOME: home,
       APP_ID: appId,
       APP_INSTANCE_ID: instanceId,
       APP_PORT: String(port),
@@ -448,6 +447,7 @@ export class ProotRunner implements SandboxRunner {
     useProot: boolean,
     entrypointArgv: string[],
     contextVolumes: VolumeEntry[] = [],
+    home?: ResolvedHome,
   ): string[] {
     if (!useProot) return entrypointArgv;
 
@@ -460,7 +460,7 @@ export class ProotRunner implements SandboxRunner {
       rootfs: this.baseRootfs,
       instanceDataDir: dataDir,
       appDir,
-      homeBind: prootHomeBind({ dataDir: this.dataDir }),
+      homeBind: prootHomeBind({ home }),
       contextBinds: prootContextBinds({ systemDir: this.contextStore.systemDir, volumesDir: this.volumeStore.volumesDir, volumes: contextVolumes }),
       tools: hasTools ? { myTools, allTools: currentToolsMode(this.dataDir) === 'symlink' ? toolBinDir : null } : null,
       socketBinds: prootSocketBinds(manifest.tools),

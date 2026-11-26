@@ -7,6 +7,11 @@
 // Missing golden file: the test writes it from the current code and fails, so
 // a first run records the baseline and the next run compares against it.
 //
+// Stream H (owner-approved difference, D65): the home source. Every fixture
+// mounts the App Home the Home Resolver decided (`aura/apphomes/<inst>/…`),
+// the System Terminal its owner's Private Home; an unwrapped PRoot spawn
+// (`direct`) is refused, since it has no home of its own.
+//
 // Run via: node tools/run-tests.mjs --only=core
 
 import { test } from 'node:test';
@@ -54,13 +59,22 @@ function userApp(id, files = {}) {
   return dir;
 }
 
+/** A resolved App Home (homes/HomeResolver.ts) as the spawn seam hands it over. */
+const appHome = (inst, scope = 'global', user = 'default') => {
+  const sub = scope === 'global' ? `aura/apphomes/${inst}/global` : `aura/apphomes/${inst}/users/${user}`;
+  return { kind: scope === 'global' ? 'app-global' : 'app-user', hostPath: join(dataDir, sub), volumeSubpath: sub, logicalPath: '/home/aura', uid: 0, gid: 0, mode: 0o700 };
+};
+const privateHome = (user) => ({
+  kind: 'private', hostPath: join(dataDir, 'aura', 'home', user), volumeSubpath: `aura/home/${user}`, logicalPath: '/home/aura', uid: 1000, gid: 1000, mode: 0o700,
+});
+
 /** The fixture apps. Each runs through both runners. */
 const FIXTURES = [
   {
     name: 'system-default',
     manifest: { id: 'org.golden.system' },
     appDir: '/workspace/apps/org.golden.system',
-    ctx: {},
+    ctx: { home: appHome('inst-system') },
     contextEnv: {},
     volumes: [],
   },
@@ -68,7 +82,7 @@ const FIXTURES = [
     name: 'user-tools-token-owner-preview',
     manifest: { id: 'org.golden.user', tools: ['git', 'ripgrep'] },
     appDir: () => userApp('org.golden.user', { 'entrypoint.sh': '#!/bin/sh\n' }),
-    ctx: { instanceToken: { token: 'tok-1', nonce: 'nonce-1' }, owner: 'default', preview: 'ws/preview-1', sourceMode: 'open' },
+    ctx: { instanceToken: { token: 'tok-1', nonce: 'nonce-1' }, owner: 'default', preview: 'ws/preview-1', sourceMode: 'open', home: appHome('inst-user', 'user') },
     contextEnv: { FOO: 'bar', APP_ID: 'clobber-attempt' },
     volumes: [{ name: 'shared', mountPath: '/mnt/shared', mode: 'rw' }, { name: 'ro', mountPath: '/mnt/ro', mode: 'ro' }],
   },
@@ -76,7 +90,7 @@ const FIXTURES = [
     name: 'wildcard-closed-raw',
     manifest: { id: 'org.golden.raw', tools: ['*'], runtime: 'raw', entrypoint: 'start.sh', sandbox: 'container' },
     appDir: () => userApp('org.golden.raw', { 'start.sh': '#!/bin/sh\n' }),
-    ctx: { sourceMode: 'closed', owner: 'u-2' },
+    ctx: { sourceMode: 'closed', owner: 'u-2', home: appHome('inst-raw') },
     contextEnv: { SECRET_KEY: 'v' },
     volumes: [],
   },
@@ -86,7 +100,7 @@ const FIXTURES = [
     name: 'system-terminal-private-network',
     manifest: { id: 'com.aura.terminal', tools: ['*'], sandbox: 'container' },
     appDir: '/workspace/apps/com.aura.terminal',
-    ctx: { owner: 'default' },
+    ctx: { owner: 'default', home: privateHome('default') },
     contextEnv: { AURA_LISTEN_SUBNET: '0.0.0.0/0' },
     volumes: [],
     term: { name: 'aura-term-default', subnet: '172.30.0.0/16' },
@@ -98,7 +112,7 @@ const FIXTURES = [
     name: 'app-identity',
     manifest: { id: 'org.golden.appid', sandbox: 'container' },
     appDir: () => userApp('org.golden.appid'),
-    ctx: { owner: 'default', identity: { uid: 200001, gid: 200001, range: 'app' }, installationId: '3f1c2e7a-0000-4000-8000-000000000001' },
+    ctx: { owner: 'default', identity: { uid: 200001, gid: 200001, range: 'app' }, installationId: '3f1c2e7a-0000-4000-8000-000000000001', home: { ...appHome('3f1c2e7a-0000-4000-8000-000000000001'), uid: 200001, gid: 200001 } },
     contextEnv: {},
     volumes: [],
   },
@@ -106,7 +120,7 @@ const FIXTURES = [
     name: 'docker-tool',
     manifest: { id: 'org.golden.docker', tools: ['docker'] },
     appDir: () => userApp('org.golden.docker'),
-    ctx: {},
+    ctx: { home: appHome('inst-docker') },
     contextEnv: {},
     volumes: [],
   },
@@ -155,7 +169,12 @@ async function prootLaunch(fx, useProot) {
     const appDir = typeof fx.appDir === 'function' ? fx.appDir() : fx.appDir;
     const m = manifest(fx.manifest);
     const instanceId = `${m.id}-1`;
-    await runner.spawn(instanceId, m.id, 4321, m, { appDir, instanceDataDir: join(dataDir, 'inst', instanceId), ...fx.ctx });
+    try {
+      await runner.spawn(instanceId, m.id, 4321, m, { appDir, instanceDataDir: join(dataDir, 'inst', instanceId), ...fx.ctx });
+    } catch (err) {
+      if (useProot) throw err;
+      return { refused: err.message };
+    }
     const granted = (m.tools ?? []).some((t) => t === '*' || t === 'docker');
     // The env carries the shell's whole environment (ProotRunner.ts, R2
     // narrows it): keep only what the runner sets or overrides.
@@ -197,4 +216,12 @@ test('spawn args match the golden file (container argv; proot argv and env)', as
     assert.deepEqual(actual[name], golden[name], `fixture ${name}`);
   }
   assert.deepEqual(Object.keys(actual).sort(), Object.keys(golden).sort(), 'fixture set');
+});
+
+test('no resolved home: both runners refuse the spawn (no shared-home fallback)', async () => {
+  const fx = { ...FIXTURES[0], ctx: {} };
+  await assert.rejects(containerArgv(fx), /no home was resolved/);
+  await assert.rejects(prootLaunch(fx, true), /no home was resolved/);
+  const tmpfs = { ...FIXTURES[0], ctx: { home: { kind: 'ephemeral', hostPath: null, volumeSubpath: null, logicalPath: '/home/aura', uid: 1000, gid: 1000, mode: 0o700 } } };
+  await assert.rejects(containerArgv(tmpfs), /can't be an app process's home/);
 });

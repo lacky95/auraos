@@ -1,12 +1,14 @@
 import type { APIRoute } from 'astro';
 import { getAppManager, getNexusManager } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
+import { deleteHomesAfterRemove, installationBeforeRemove } from '../../../../lib/homesAdmin.ts';
 
 /**
  * Uninstall an app. Stops every running instance first so the runner
  * doesn't get confused by `apps/<id>/` vanishing under it, then moves
  * the dir to trash. Per-app data at `data/apps/<id>/` is preserved by
- * default; `?purge=1` removes it too.
+ * default; `?purge=1` removes it too. The App Homes are kept unless
+ * `?deleteHome=1` (D65 §13: explicit keep or delete).
  */
 export const POST: APIRoute = async ({ params, url }) => {
   const id = params['id'];
@@ -17,6 +19,8 @@ export const POST: APIRoute = async ({ params, url }) => {
     return errorResponse(`app '${id}' is not installed`, 404);
   }
   const purge = url.searchParams.get('purge') === '1';
+  const deleteHome = url.searchParams.get('deleteHome') === '1';
+  const installationId = deleteHome ? await installationBeforeRemove(id) : null;
 
   // Suppress warm-pool refill for this app so the reconciler can't respawn
   // instances while we're killing them, then kill EVERY instance + sweep any
@@ -25,7 +29,8 @@ export const POST: APIRoute = async ({ params, url }) => {
   try {
     await mgr.killAllForApp(id);
     await nexus.uninstall(id, { purge });   // move files to trash + deregister
-    return jsonResponse({ ok: true, id, purged: purge });
+    const homeDeleted = deleteHome ? await deleteHomesAfterRemove(id, installationId) : false;
+    return jsonResponse({ ok: true, id, purged: purge, homeDeleted });
   } catch (err) {
     return errorResponse((err as Error).message, 500);
   } finally {

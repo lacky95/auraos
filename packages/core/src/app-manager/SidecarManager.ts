@@ -20,7 +20,8 @@ import {
   MY_TOOLS_PATH, SHARED_HOME_PATH, listToolchainBinaries, provisionAllowlist, readSidecarMap, toolchainMirrorBin,
 } from './tool-provision.js';
 import { SIDECAR_TOOL_RE, effectiveSidecarTools } from './sidecar-tools.js';
-import { userHomeSubpath } from '../scopes/home.js';
+import { containerHomeMount } from './spawn/homeArgs.js';
+import type { ResolvedHome } from '../homes/types.js';
 import {
   SpecError, resolveSidecarSpec, specHash,
   type ResolvedSidecarSpec, type SidecarSpawnRequest,
@@ -139,6 +140,11 @@ interface SidecarManagerOpts {
   mounts: MountManager;
   /** Live instance → app + its shell-side data dir. */
   instance(instanceId: string): { appId: string; instanceDataDir: string; owner?: string; identity?: SpawnIdentity } | null;
+  /**
+   * D65: the parent instance's App Home (what `inheritHome` mounts); null
+   * when it can't be resolved, and the sidecar is then not created.
+   */
+  appHome(instanceId: string): Promise<ResolvedHome | null>;
   /**
    * A sidecar was created or removed — lets AppManager refresh its sidecar
    * cache now instead of at the next reconciler tick (else `GET sidecars`
@@ -598,6 +604,13 @@ export class SidecarManager {
       ...(token ? { AURA_INSTANCE_TOKEN: token } : {}),
     } : {};
     const manifest = this.opts.registry.getById(appId);
+    // inheritHome: the parent's App Home (D65), the one its app process has; never a Private Home.
+    let homeMount: string[] = [];
+    if (spec.inheritHome) {
+      const home = await this.opts.appHome(instanceId);
+      if (!home || home.kind === 'private') throw new Error(`sidecar ${spec.name}: the app's home can't be resolved, so inheritHome has nothing to mount; not created`);
+      homeMount = containerHomeMount({ appDataVolume: rt.appDataVolume, home });
+    }
     const a: string[] = [
       'create', '--name', container, '--network', rt.network, '--restart', spec.restart,
       // No raw sockets unless the template's reviewed privileged/NET_RAW asks (spawn/networkArgs.ts, D88 S1).
@@ -612,11 +625,8 @@ export class SidecarManager {
       ...spec.dns.flatMap((d) => ['--dns', d]),
       ...spec.publish.flatMap((p) => ['-p', `${p.host}:${p.container}`]),
       ...this.volumeArgs(spec),
-      // inheritHome: the user's shared HOME, the same mount every container
-      // app gets (ContainerRunner) — the sidecar doesn't exceed its app.
-      ...(spec.inheritHome
-        ? ['--mount', `type=volume,source=${rt.appDataVolume},target=${SHARED_HOME_PATH},volume-subpath=${userHomeSubpath()}`]
-        : []),
+      // inheritHome: the app's own App Home (spawn/homeArgs.ts): the sidecar doesn't exceed its app.
+      ...homeMount,
       // HOME after the template env (a template can't point it elsewhere while
       // the mount is there); identity last: a template env key can't replace
       // the OS's own values.

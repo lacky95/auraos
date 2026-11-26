@@ -12,7 +12,7 @@
  *   /etc/passwd, /etc/group read-only     rendered per instance (`app-<id>`, `pw_dir=/home/aura`), so
  *                                         git, ssh and `id` know the account
  *   AURA_RUN_AS=app                       for the start shell's messages only; it decides by `id -u`
- *   ASTRO_TELEMETRY_DISABLED=1            the shared home is read-only for the app uid until App Homes (5-main)
+ *   ASTRO_TELEMETRY_DISABLED=1            no telemetry state in the App Home, and no first-run prompt
  *
  * There is no fallback: the runner never retries a failed non-root start as
  * root (P5-3). Sidecars keep their image user, except an `aura-base` sidecar

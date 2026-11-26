@@ -11,8 +11,15 @@
  *   aura admin identity check                the uid registry and account invariants (by id only)
  *
  * They change nothing. Like every `aura admin` read, the System Terminal asks
- * the owner; on the host the operator reads directly. Stream H adds `apply`,
- * `import` and `reset` (5-main).
+ * the owner; on the host the operator reads directly.
+ *
+ * Stream H (5-main) adds the owner's changes, each approved with the password
+ * (fresh) and audited:
+ *
+ *   aura admin homes ownership --apply <digest>      the reviewed dry run, journaled
+ *   aura admin homes import <app> <path...> [--apply] [--personal] [--user <id>]
+ *                                            copy from your Private Home into the App Home (dry run first)
+ *   aura admin homes reset <app> [--user <id>]       the App Home starts empty at the next start
  */
 import type { Command } from 'commander';
 import { api } from '../lib/client.js';
@@ -24,6 +31,16 @@ async function read<T>(path: string): Promise<T> {
   } catch (err) {
     const e = err as Error & { status?: number };
     if (e.status === 404) fail('this shell has no Phase 5 identity reports yet.');
+    fail(e.message);
+  }
+}
+
+async function change<T>(path: string, body: unknown): Promise<T> {
+  try {
+    return await api.post<T>(path, body);
+  } catch (err) {
+    const e = err as Error & { status?: number };
+    if (e.status === 404 && /\/api\/admin\/(homes|identity)/.test(path)) fail(e.message || 'this shell has no Phase 5 home operations yet.');
     fail(e.message);
   }
 }
@@ -57,7 +74,7 @@ function printOwnership(r: OwnershipReport): void {
 }
 
 export function registerAdminHomes(admin: Command): void {
-  const homes = admin.command('homes').description('Private Homes and App Homes (Phase 5): read-only reports in this release.');
+  const homes = admin.command('homes').description('Private Homes and App Homes (Phase 5): reports, the ownership apply, import and reset.');
 
   homes
     .command('plan')
@@ -75,11 +92,22 @@ export function registerAdminHomes(admin: Command): void {
 
   homes
     .command('ownership')
-    .description('The dry-run ownership report (P5-2): what would be chowned, row by row. Never a blanket chown; never changes anything.')
-    .option('--dry-run', 'required in this release: the report only')
+    .description('The ownership report (P5-2): --dry-run shows what would be chowned, row by row; --apply <digest> applies exactly that report. Never a blanket chown.')
+    .option('--dry-run', 'the report only; changes nothing')
+    .option('--apply <digest>', 'apply the report you reviewed (its digest), journaled; asks for your password')
     .option('-o, --output <format>', 'json')
-    .action(async (opts: { dryRun?: boolean; output?: string }) => {
-      if (!opts.dryRun) fail('only the dry run exists in this release: aura admin homes ownership --dry-run');
+    .action(async (opts: { dryRun?: boolean; apply?: string; output?: string }) => {
+      if (!!opts.dryRun === !!opts.apply) fail('say which: aura admin homes ownership --dry-run, or --apply <digest> after reviewing it');
+      if (opts.apply) {
+        const r = await change<{ changed: boolean; journal?: string; rows: Array<{ path: string; kind: string; changed: number; skipped: number }>; notApplied: Array<{ path: string; reason: string }> }>(
+          '/api/admin/identity/ownership-apply', { digest: opts.apply });
+        if (opts.output === 'json') { json(r); return; }
+        if (r.rows.length) console.log(table(r.rows.map((x) => ({ PATH: x.path, KIND: x.kind, CHANGED: x.changed, SKIPPED: x.skipped }))));
+        for (const x of r.notApplied) info(`not applied: ${x.path}: ${x.reason}`);
+        if (r.journal) ok(`applied; journal ${r.journal}`);
+        else ok('nothing to change');
+        return;
+      }
       const r = await read<OwnershipReport>('/api/admin/identity/ownership-report');
       if (opts.output === 'json') { json(r); return; }
       printOwnership(r);
@@ -101,6 +129,33 @@ export function registerAdminHomes(admin: Command): void {
         }))));
         for (const c of inst.candidates) if (c.note) warn(`${c.path}: ${c.note}`);
       }
+    });
+
+  homes
+    .command('import <appId> <paths...>')
+    .description('Copy paths (relative to your home, e.g. .claude.json) from your Private Home into the app\'s App Home (Q15). A dry run unless --apply. Copies, never moves; never overwrites.')
+    .option('--apply', 'copy (asks for your password; the app must be stopped)')
+    .option('--personal', 'include personal logins (ssh keys, Claude/gh/glab credentials): the app can then act with them; a fresh login in the app is preferred (D66)')
+    .option('--user <userId>', 'the user whose App Home (a user-scope app); default: you')
+    .option('-o, --output <format>', 'json')
+    .action(async (appId: string, paths: string[], opts: { apply?: boolean; personal?: boolean; user?: string; output?: string }) => {
+      const r = await change<{ apply: boolean; kind: string; target: string; items: Array<{ path: string; action: string; files: number; bytes: number; skipped: string[] }>; copiedFiles: number; copiedBytes: number }>(
+        '/api/admin/homes/import', { appId, paths, apply: !!opts.apply, includePersonal: !!opts.personal, ...(opts.user ? { userId: opts.user } : {}) });
+      if (opts.output === 'json') { json(r); return; }
+      console.log(table(r.items.map((i) => ({ PATH: i.path, ACTION: i.action, FILES: i.files, SIZE: size(i.bytes), 'LEFT OUT': i.skipped.length || '' }))));
+      for (const i of r.items) for (const x of i.skipped.slice(0, 10)) warn(x);
+      if (r.items.some((i) => i.action === 'personal')) info('personal logins are left out; --personal copies them (prefer a fresh login in the app)');
+      if (r.apply) ok(`copied ${r.copiedFiles} file(s), ${size(r.copiedBytes)} into the ${r.kind} App Home`);
+      else info(`dry run: ${r.copiedFiles} file(s), ${size(r.copiedBytes)} would be copied; add --apply to copy`);
+    });
+
+  homes
+    .command('reset <appId>')
+    .description('Delete the app\'s App Home: it starts empty at the next start. The app must be stopped. Your Private Home and the app data are not touched.')
+    .option('--user <userId>', 'the user whose App Home (a user-scope app); default: you')
+    .action(async (appId: string, opts: { user?: string }) => {
+      const r = await change<{ kind: string; removed: boolean }>('/api/admin/homes/reset', { appId, ...(opts.user ? { userId: opts.user } : {}) });
+      ok(r.removed ? `reset the ${r.kind} App Home of ${appId}` : `${appId} had no ${r.kind} App Home yet`);
     });
 
   const identity = admin.command('identity').description('Linux identities and accounts (Phase 5): read-only checks in this release.');

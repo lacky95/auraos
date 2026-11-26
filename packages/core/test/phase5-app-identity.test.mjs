@@ -108,7 +108,8 @@ test('identity provider: root stays root; app gets its registry uid; failures ne
 test('spawnContext: an app identity on a runtime without an enforced identity is refused (capability-missing)', async () => {
   const dataDir = mkdtempSync(join(TMP, 'mgr-'));
   const ident = { identityFor: async (req) => (req.runAs === 'app' ? { ...APP } : { uid: 0, gid: 0, range: 'root' }) };
-  const mgr = new AppManager({ appsDir: join(dataDir, 'apps'), dataDir, baseRootfs: dataDir, toolchainDir: join(dataDir, 'tc'), identities: ident });
+  const homes = { resolve: async () => ({ kind: 'app-global', hostPath: '/h', volumeSubpath: 'h', logicalPath: '/home/aura', uid: 0, gid: 0, mode: 0o700 }) };
+  const mgr = new AppManager({ appsDir: join(dataDir, 'apps'), dataDir, baseRootfs: dataDir, toolchainDir: join(dataDir, 'tc'), identities: ident, homes });
   const manifest = { id: 'org.a.x', environmentScope: 'global' };
   const ctx = (identity, runAs) => mgr['spawnContext']('org.a.x', 'org.a.x', {
     manifest, runtime: { runtime: 'proot', capabilities: { identity } }, installation: { installationId: 'i-1', runAs },

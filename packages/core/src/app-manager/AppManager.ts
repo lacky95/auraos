@@ -45,8 +45,10 @@ import { migrateLegacyRuntimes, processLegacyEnv, type MigrationApp } from '../r
 import { defaultRedis } from '@aura/kv-store';
 import { AdminAudit } from '../auth/AdminAudit.js';
 import { defaultIdentityKeyFile } from '../auth/identityKey.js';
-import type { HomeResolver } from '../homes/types.js';
-import { legacyHomeResolver } from '../homes/legacyResolver.js';
+import { HomeDeniedError, type HomeResolver, type ResolvedHome } from '../homes/types.js';
+import { kernelHomeResolver } from '../homes/HomeResolver.js';
+import { TERMINAL_SESSION_APPS } from '../homes/plan.js';
+import { appJumpPermission } from '../auth/GrantStore.js';
 import type { AppRunAs, SpawnIdentity, SpawnIdentityProvider } from '../identity/types.js';
 import { appIdentityProvider } from '../identity/appIdentityProvider.js';
 import { appOwnershipSpecs, applyAppOwnership } from '../identity/appOwnership.js';
@@ -68,7 +70,7 @@ import { ScopeRegistry } from '../scopes/ScopeRegistry.js';
 import type { ScopeDefinition, ScopeId } from '../scopes/types.js';
 import { getAppHostServices } from '../app-hosts/services.js';
 import { appSourceFingerprint } from '../app-hosts/lifecycle.js';
-import { seedHome } from './homeSeed.js';
+import { seedHomeAs } from './homeSeed.js';
 import { PREVIEW_IDLE_MS, previewTitle } from './preview.js';
 import { MOUNT_DIR_NAME } from './MountManager.js';
 import { ExecBridge } from './ExecBridge.js';
@@ -218,7 +220,14 @@ export class AppManager {
           .catch(() => undefined);
       },
     });
-    this.homes      = opts.homes ?? legacyHomeResolver(opts.dataDir);
+    // D65: the kernel Home Resolver. App Homes for app processes, a Private Home only for a user's own session.
+    this.homes      = opts.homes ?? kernelHomeResolver({
+      dataDir: opts.dataDir,
+      userIdentity: async (userId) => (await import('../auth/services.js')).getAuthServices().identity.getUser(userId)
+        .then((r) => (r && r.state === 'active' ? { uid: r.uid, gid: r.gid } : null)),
+      mayJumpApp: async (p, installationId) => !!(await (await import('../auth/services.js')).getAuthServices().grants
+        .get({ kind: 'user', id: p.userId }, appJumpPermission(installationId))),
+    });
     // The installation's runAs decides (P5-3): root as today, or its app identity from the one registry.
     this.identities = opts.identities ?? appIdentityProvider(async () => (await import('../auth/services.js')).getAuthServices().identity);
     this.permissions = new PermissionManager(this.registry);
@@ -286,6 +295,7 @@ export class AppManager {
           ...(inst.runAs === 'app' && inst.uid && inst.gid ? { identity: { uid: inst.uid, gid: inst.gid, range: 'app' as const } } : {}),
         };
       },
+      appHome: (instanceId) => this.appHomeOf(instanceId),
       changed: () => { void this.syncSidecars(2).catch(() => undefined); },
     });
     // services[].prePull: fetch template images as soon as an app is
@@ -633,22 +643,16 @@ export class AppManager {
       }
     }
 
-    // Pre-create the two homes inside the app-data named volume: the user's
-    // (mounted at /home/aura in every app sandbox) and the master's (the OS's
-    // own — see scopes/home.ts for why they are separate). Both must exist
-    // before a spawn: docker's volume-subpath mount fails outright on a
-    // missing subpath ("subpath … does not exist in the volume"), and a PRoot
-    // bind from a missing source is silently dropped, which would send the
-    // app's tool state back to the throwaway base-rootfs.
-    for (const home of [userHomeDir(this.dataDir), masterHomeDir(this.dataDir)]) {
-      try {
-        mkdirSync(home, { recursive: true });
-      } catch (err) {
-        console.warn(`[AppManager] could not pre-create home ${home}: ${(err as Error).message}`);
-      }
+    // Pre-create the master's home (the OS's own, see scopes/home.ts). Private
+    // Homes and App Homes are created lazily by the Home Resolver, owned by
+    // their identity (D65): never pre-created here as root.
+    try {
+      mkdirSync(masterHomeDir(this.dataDir), { recursive: true });
+    } catch (err) {
+      console.warn(`[AppManager] could not pre-create the master home: ${(err as Error).message}`);
     }
     this.migrateLegacySharedHome();
-    this.seedUserHome();
+    this.seedPrivateHome();
 
     // Pre-create /aura/{all-tools,my-tools} as empty directories in the
     // base-rootfs so PRoot's --bind has guaranteed mount points. PRoot can
@@ -720,21 +724,20 @@ export class AppManager {
   }
 
   /**
-   * Seed the user home (/home/aura) from os/home-seed (homeSeed.ts): the
-   * onboarding AGENTS.md and ~/.claude/CLAUDE.md, so `claude` / `codex`
-   * started in any directory know what AuraOS is, and ~/.claude.json +
-   * ~/.codex/config.toml, which preconfigure the docs and interface-registry
-   * MCP servers. Only missing files are copied; an existing ~/AGENTS.md gets
-   * new marked sections appended once. The master home is left alone — it is
-   * the OS's own.
+   * Seed a Private Home from os/home-seed (homeSeed.ts): the onboarding
+   * AGENTS.md and ~/.claude/CLAUDE.md, so `claude` / `codex` started in any
+   * directory know what AuraOS is, and ~/.claude.json + ~/.codex/config.toml,
+   * which preconfigure the docs and interface-registry MCP servers. Only
+   * missing files are copied, as the home's owner (`seedHomeAs`). Only
+   * Private Homes are seeded (D65): App Homes start empty (Q15), and the
+   * master home is the OS's own.
    */
-  private seedUserHome(): void {
+  private seedPrivateHome(target: string = userHomeDir(this.dataDir)): void {
     const seedDir = [process.env.AURA_HOME_SEED_DIR, '/os/home-seed', '/workspace/os/home-seed']
       .find((dir): dir is string => !!dir && existsSync(dir));
     if (!seedDir) return;
-    const target = userHomeDir(this.dataDir);
-    const r = seedHome(seedDir, target, (msg) => console.warn(`[AppManager] ${msg}`));
-    if (r.copied.length) console.log(`[AppManager] seeded user home ${target} (${r.copied.join(', ')})`);
+    const r = seedHomeAs(seedDir, target, (msg) => console.warn(`[AppManager] ${msg}`));
+    if (r.copied.length) console.log(`[AppManager] seeded Private Home ${target} (${r.copied.join(', ')})`);
     if (r.appended.length) console.log(`[AppManager] ${target}/AGENTS.md: added section(s) ${r.appended.join(', ')}`);
     if (r.removedLegacyClaudeMd) console.log(`[AppManager] removed ${target}/CLAUDE.md: ~/.claude/CLAUDE.md loads AGENTS.md in every directory`);
   }
@@ -1229,6 +1232,7 @@ export class AppManager {
       // instances, every restart left one more window-less container behind
       // while the pool spawned a fresh one.
       const pooled = this.loadPoolIds();
+      this.loadPoolHomes();
       for (const o of orphans) {
         // Known already, or still the runner's (a late pass: mid-stop).
         if (this.instances.has(o.instanceId) || runner.isRunning(o.instanceId)) continue;
@@ -1695,43 +1699,129 @@ export class AppManager {
    * (pool members don't claim them — see comment below).
    */
   /**
-   * What the kernel decides for a spawn (Phase 5 Stage 1 seam): the home and
-   * the identity, through the injected `homes` and `identities`. Streams H,
-   * I and A replace those implementations here, never `spawnInstance`. The
-   * defaults reproduce today (the user home, root), and the runners ignore
-   * the fields until their stream lands (ARI §9.4). `env` stays the runner's
-   * own until the kernel builds it (ARI dup #2).
+   * What the kernel decides for a spawn (the Phase 5 seam): the identity
+   * (P5-3, stream A) and the home (D65, stream H), through the injected
+   * `identities` and `homes`. `env` stays the runner's own until the kernel
+   * builds it (ARI dup #2).
+   *
+   * The home: the installation's App Home for every app process, owned by
+   * the identity it runs as; the System Terminal's instance is its owner's
+   * session context (D69) and gets the owner's Private Home. Fail closed: no
+   * recorded installation, no identity or no home means no start, never the
+   * shared home.
    */
   private async spawnContext(
     appId: string, instanceId: string,
-    opts: { manifest: AppManifest; runtime: ResolvedRuntime; owner?: string; installation: { installationId: string; runAs?: AppRunAs } | null },
+    opts: {
+      manifest: AppManifest; runtime: ResolvedRuntime; owner?: string; inPool?: boolean; preview?: boolean;
+      installation: { installationId: string; runAs?: AppRunAs } | null;
+    },
   ): Promise<Pick<InstanceSpawnContext, 'home' | 'identity'>> {
     void instanceId; // a runtime handle only: never a durable reference (D85 A7)
-    // Not resolved yet: stream H resolves it here and fails closed without it.
-    const home = await this.homes.resolve({
-      installationId: null,
-      environmentScope: opts.manifest.environmentScope,
-      executionContext: 'application',
-      ...(opts.owner ? { userId: opts.owner } : {}),
-      runtime: opts.runtime.capabilities,
-    });
+    if (!opts.installation) {
+      throw new HomeDeniedError('installation-unresolved', `${appId}: its installation identity is unavailable, so it has no App Home; not started`);
+    }
     // Stream A (P5-3): the installation's runAs. Never a root fallback.
     const identity = await this.identities.identityFor({
-      appId, installationId: opts.installation?.installationId ?? null, runAs: opts.installation?.runAs ?? 'root',
+      appId, installationId: opts.installation.installationId, runAs: opts.installation.runAs ?? 'root',
       ...(opts.owner ? { userId: opts.owner } : {}),
     });
     if (isNonRootIdentity(identity) && opts.runtime.capabilities.identity === 'none') {
       throw new RuntimeCapabilityError(opts.runtime.runtime, ['identity'],
         `${appId} runs as its app identity, and runtime ${opts.runtime.runtime} can't enforce one: not started (no root fallback)`);
     }
+    const home = await this.homes.resolve(this.homeRequest(appId, opts.manifest, opts.installation.installationId, identity, opts.runtime.capabilities, opts.owner ?? (opts.inPool ? this.poolHomeUser(appId, opts.manifest) : undefined), !!opts.preview));
     return { home, identity };
   }
 
+  /** The Home Resolver request of an app process (spawn, sidecars, the report). */
+  private homeRequest(
+    appId: string, manifest: AppManifest, installationId: string, identity: { uid: number; gid: number } | undefined,
+    runtime: ResolvedRuntime['capabilities'], user: string | undefined, preview = false,
+  ): Parameters<HomeResolver['resolve']>[0] {
+    const terminal = TERMINAL_SESSION_APPS.has(appId);
+    return {
+      installationId, environmentScope: manifest.environmentScope ?? 'global',
+      executionContext: terminal ? 'terminal-session' : 'application',
+      ...(user ? { userId: user } : {}),
+      // D69: the Terminal's session user is its owner; the role does not choose the home.
+      ...(terminal && user ? { principal: { userId: user, role: user === DEFAULT_OWNER_ID ? 'owner' as const : 'member' as const } } : {}),
+      appIdentity: identity ? { uid: identity.uid, gid: identity.gid } : null,
+      runtime,
+      ...(preview ? { preview: true } : {}),
+    };
+  }
+
   /**
-   * The installation record a start reads its runAs from (P5-3). Null when
-   * the app has none yet (a record from before 5-apps, or not migrated): it
-   * runs as root, as before. A record that can't be READ fails the start: an
-   * `app` installation must never start as root because Valkey hiccuped.
+   * A warm-pool member's home is fixed at spawn. For a per-user home (the
+   * System Terminal, a `user`-scope app) it is warmed for the owner (D78: the
+   * owner's Terminal is pre-warmed at boot) and only ever claimed by the owner
+   * (`claimFromPool`); stream T keys the pool per user. A global App Home
+   * needs no user.
+   */
+  private poolHomeUser(appId: string, manifest: AppManifest): string | undefined {
+    return TERMINAL_SESSION_APPS.has(appId) || manifest.environmentScope === 'user' ? DEFAULT_OWNER_ID : undefined;
+  }
+
+  /**
+   * The App Home of an installed app (the owner's admin operations: import,
+   * reset): `global`, or `userId`'s for a `user`-scope app. Resolved (and
+   * created, empty) like a start would; throws when it can't be (fail closed).
+   */
+  async resolveAppHome(appId: string, opts: { userId?: string } = {}): Promise<{ installationId: string; home: ResolvedHome; running: string[] }> {
+    const manifest = this.registry.getById(appId);
+    if (!manifest) throw new Error(`unknown app: ${appId}`);
+    if (TERMINAL_SESSION_APPS.has(appId)) throw new HomeDeniedError('private-home-not-allowed', `${appId} has no App Home: its instances are user sessions (D69)`);
+    const installation = await this.installationRunAs(appId);
+    if (!installation) throw new HomeDeniedError('installation-unresolved', `${appId} has no recorded installation`);
+    const identity = await this.identities.identityFor({ appId, installationId: installation.installationId, runAs: installation.runAs ?? 'root' });
+    const runtime = await this.resolveRuntime(appId, manifest, { sourceMode: this.sourceModeOf(appId)?.mode ?? 'closed' });
+    const user = manifest.environmentScope === 'user' ? opts.userId ?? DEFAULT_OWNER_ID : undefined;
+    const home = await this.homes.resolve(this.homeRequest(appId, manifest, installation.installationId, identity, runtime.capabilities, user));
+    const running: string[] = [];
+    for (const inst of this.instances.values()) {
+      if (inst.appId !== appId) continue;
+      const h = this.instanceHomes.get(inst.instanceId) ?? await this.appHomeOf(inst.instanceId);
+      if (!h || h.hostPath === home.hostPath) running.push(inst.instanceId);
+    }
+    return { installationId: installation.installationId, home, running };
+  }
+
+  /** The home each running instance was started with (shell view; never in a public API). */
+  private readonly instanceHomes = new Map<string, ResolvedHome>();
+
+  /**
+   * The App Home of a running instance: what it was started with, or (adopted
+   * after a shell restart) what the resolver decides for it again. Null when
+   * it can't be resolved: callers fail closed.
+   */
+  async appHomeOf(instanceId: string): Promise<ResolvedHome | null> {
+    const known = this.instanceHomes.get(instanceId);
+    if (known) return known;
+    const inst = this.instances.get(instanceId);
+    const manifest = inst ? this.registry.getById(inst.appId) : undefined;
+    if (!inst || !manifest) return null;
+    try {
+      const installation = await this.installationRunAs(inst.appId);
+      if (!installation) return null;
+      const runtime = await this.resolveRuntime(inst.appId, manifest, { sourceMode: this.sourceModeOf(inst.appId)?.mode ?? 'closed' });
+      const identity = { uid: inst.uid ?? 0, gid: inst.gid ?? 0 };
+      const user = inst.owner ?? (inst.inPool ? this.poolHomes.get(instanceId) || undefined : undefined);
+      const home = await this.homes.resolve(this.homeRequest(inst.appId, manifest, installation.installationId, identity, runtime.capabilities, user, !!inst.preview));
+      this.instanceHomes.set(instanceId, home);
+      return home;
+    } catch (err) {
+      console.warn(`[AppManager] ${instanceId}: its home can't be resolved: ${(err as Error).message}`);
+      return null;
+    }
+  }
+
+  /**
+   * The installation record a start reads its runAs (P5-3) and its App Home
+   * (D65) from. Null when the app has none (not migrated yet): the start then
+   * fails closed in `spawnContext`. A record that can't be READ fails the
+   * start too: an `app` installation must never start as root because Valkey
+   * hiccuped.
    */
   async installationRunAs(appId: string): Promise<{ installationId: string; runAs?: AppRunAs } | null> {
     const scope = this.registry.getScopeId(appId);
@@ -1740,6 +1830,12 @@ export class AppManager {
     try { inst = await getAppHostServices().registry.findInstallation(appId, scope); }
     catch (err) {
       throw new Error(`${appId}: its installation record can't be read (${(err as Error).message}); not started, since how it runs is unknown`);
+    }
+    if (!inst && this.appHostsReady) {
+      // An app discovered moments ago (scaffold, clone) gets its record from the
+      // background sync; record it now rather than fail the first start (D65).
+      await this.syncAppHost(appId);
+      try { inst = await getAppHostServices().registry.findInstallation(appId, scope); } catch { inst = null; }
     }
     return inst ? { installationId: inst.installationId, ...(inst.runAs ? { runAs: inst.runAs } : {}) } : null;
   }
@@ -1757,6 +1853,7 @@ export class AppManager {
    */
   private async prepareNonRootStart(
     appId: string, manifest: AppManifest, appDir: string, instanceDataDir: string, identity: SpawnIdentity, installationId: string | null,
+    home: ResolvedHome | undefined,
   ): Promise<void> {
     if (needsProvisioning(appDir, manifest.runtime === 'raw' ? 'raw' : 'astro')) {
       const r = await this.provisionApp(appId, { appDir });
@@ -1766,6 +1863,7 @@ export class AppManager {
       appId, installationId, appDataRoot: dirname(instanceDataDir), instanceDirs: [basename(instanceDataDir)], appDir,
       devServed: manifest.runtime !== 'raw' && serveState(appDir, manifest).mode !== 'prod',
       identity: { uid: identity.uid, gid: identity.gid },
+      ...(home?.hostPath && home.kind !== 'private' ? { appHomes: [home.hostPath] } : {}),
     });
     const r = applyAppOwnership(rows, identity);
     if (r.changed || r.created.length) console.log(`[AppManager] ${appId}: ownership for uid ${identity.uid}: ${r.changed} changed, ${r.created.length} created`);
@@ -1811,11 +1909,14 @@ export class AppManager {
     try {
       const runner = runtime.module.runner;
       const installation = await this.installationRunAs(appId);
-      const spawnCtx = await this.spawnContext(appId, instanceId, { manifest, runtime, owner, installation });
+      const spawnCtx = await this.spawnContext(appId, instanceId, { manifest, runtime, owner, inPool: opts.inPool, preview: !!opts.preview, installation });
+      if (spawnCtx.home) this.instanceHomes.set(instanceId, spawnCtx.home);
+      if (spawnCtx.home?.kind === 'private' && spawnCtx.home.hostPath) this.seedPrivateHome(spawnCtx.home.hostPath);
+      if (opts.inPool) this.poolHomes.set(instanceId, this.poolHomeUser(appId, manifest) ?? '');
       const appDir = opts.preview?.appDir ?? manifest.appDir;
       if (isNonRootIdentity(spawnCtx.identity)) {
         nonRoot = spawnCtx.identity;
-        await this.prepareNonRootStart(appId, manifest, appDir, instanceDataDir, nonRoot, installation?.installationId ?? null);
+        await this.prepareNonRootStart(appId, manifest, appDir, instanceDataDir, nonRoot, installation?.installationId ?? null, spawnCtx.home);
       }
       const ident = spawnCtx.identity ?? { uid: 0, gid: 0 };
       this.upsertInstance(instanceId, appId, { runAs: nonRoot ? 'app' : 'root', uid: ident.uid, gid: ident.gid });
@@ -1930,6 +2031,12 @@ export class AppManager {
         // Reconciler will tidy this up on its next tick; just skip for now.
         continue;
       }
+      // D65: a member's home was fixed at its spawn. One from before App Homes
+      // (no record) has the shared home: never handed out, replaced instead.
+      // One warmed for a user is that user's only ('' = a global App Home).
+      const homeUser = this.poolHomes.get(inst.instanceId);
+      if (homeUser === undefined) { this.recycleStalePoolMember(inst.instanceId); continue; }
+      if (homeUser !== '' && homeUser !== (userId ?? DEFAULT_OWNER_ID)) continue;
       // Hand-off — keep the existing instanceId (its env was baked at spawn
       // time with this id, so renaming would break identity invariants).
       inst.inPool = false;
@@ -1990,12 +2097,33 @@ export class AppManager {
    * that are adopted again are looked up).
    */
   private poolFile(): string { return join(this.dataDir, 'aura', 'warm-pool.json'); }
+  /** Pool member → the user its home was resolved for ('' = a global App Home); a sibling file, so an older shell still reads warm-pool.json. */
+  private poolHomesFile(): string { return join(this.dataDir, 'aura', 'warm-pool-homes.json'); }
+  private readonly poolHomes = new Map<string, string>();
+  private readonly recycling = new Set<string>();
   private savePoolIds(): void {
     const ids = [...this.instances.values()].filter((i) => i.inPool).map((i) => i.instanceId);
+    for (const id of [...this.poolHomes.keys()]) if (!ids.includes(id)) this.poolHomes.delete(id);
     try {
       mkdirSync(join(this.dataDir, 'aura'), { recursive: true });
       writeFileSync(this.poolFile(), JSON.stringify(ids));
+      writeFileSync(this.poolHomesFile(), JSON.stringify(Object.fromEntries(this.poolHomes)));
     } catch (err) { console.warn(`[AppManager] pool: cannot save ${this.poolFile()}: ${(err as Error).message}`); }
+  }
+  private loadPoolHomes(): void {
+    try {
+      const m = JSON.parse(readFileSync(this.poolHomesFile(), 'utf-8')) as unknown;
+      if (m && typeof m === 'object' && !Array.isArray(m)) {
+        for (const [id, user] of Object.entries(m)) if (typeof user === 'string') this.poolHomes.set(id, user);
+      }
+    } catch { /* none yet */ }
+  }
+  /** A pool member started before App Homes: stopped, so the refill warms one with its App Home. */
+  private recycleStalePoolMember(instanceId: string): void {
+    if (this.recycling.has(instanceId)) return;
+    this.recycling.add(instanceId);
+    console.log(`[AppManager] pool: ${instanceId} predates App Homes; replacing it`);
+    void this.stop(instanceId).catch(() => undefined).finally(() => this.recycling.delete(instanceId));
   }
   private loadPoolIds(): Set<string> {
     try {
@@ -2061,6 +2189,7 @@ export class AppManager {
     this.container.clearMountRoot?.(instanceId);
     this.releaseHostSlot(appId, instanceId);
     this.instances.delete(instanceId);
+    this.instanceHomes.delete(instanceId);
     this.fsm.delete(instanceId);
     this.nextActivityNum.delete(instanceId);
   }
@@ -2108,6 +2237,7 @@ export class AppManager {
     if (!inst.sandbox) {
       // Refused before it had a runtime (resolveRuntime): nothing runs, only the record goes.
       this.instances.delete(instanceId);
+      this.instanceHomes.delete(instanceId);
       this.fsm.delete(instanceId);
       return;
     }
@@ -2133,6 +2263,7 @@ export class AppManager {
     this.container.clearMountRoot?.(instanceId);
     this.releaseHostSlot(appId, instanceId);
     this.instances.delete(instanceId);
+    this.instanceHomes.delete(instanceId);
     this.fsm.delete(instanceId);
     this.nextActivityNum.delete(instanceId);
   }
@@ -3029,6 +3160,7 @@ export class AppManager {
         this.interfaces.unregisterInstance(inst);
         this.releaseHostSlot(inst.appId, inst.instanceId);
         this.instances.delete(inst.instanceId);
+        this.instanceHomes.delete(inst.instanceId);
         this.fsm.delete(inst.instanceId);
         this.nextActivityNum.delete(inst.instanceId);
       }

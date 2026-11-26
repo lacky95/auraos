@@ -105,6 +105,7 @@ function fakeManager(records, { pooled = [], running = [] } = {}) {
       onExit: (id) => calls.exits.push(id),
     },
     loadPoolIds: () => new Set(pooled),
+    loadPoolHomes() {},
     handleUnexpectedExit: () => {},
     measureAdopted: async (id) => { calls.measured.push(id); },
   };

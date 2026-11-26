@@ -510,8 +510,9 @@ export const AppManifestSchema = z.object({
   }).optional(),
   /**
    * Where the app's App Home lives (D65, Q21/D72): `global`, one App Home
-   * for every user of the installation, or `user`, one per user. Phase 5
-   * stream H uses it; until then every app gets the user home.
+   * for every user of the installation, or `user`, one per user. The kernel
+   * Home Resolver mounts it at /home/aura (homes/HomeResolver.ts). Changing
+   * it never merges, copies or deletes a home: both can coexist (D65 §14).
    */
   environmentScope: z.enum(['global', 'user']).default('global'),
   /**
@@ -811,9 +812,10 @@ export const AppManifestSchema = z.object({
      */
     tools: z.array(z.string()).optional(),
     /**
-     * The user's shared HOME at /home/aura (logins of claude / codex / gh, …)
-     * plus `HOME=/home/aura`. Every container app already has it, so a sidecar
-     * inheriting it doesn't exceed its app — no extra permission.
+     * The app's own App Home at /home/aura (D65: the installation's, never a
+     * user's Private Home) plus `HOME=/home/aura`. The app process already
+     * has it, so a sidecar inheriting it doesn't exceed its app — no extra
+     * permission.
      */
     inheritHome: z.boolean().optional(),
     /** The app's cross-app mounts at /mnt/aura (live). */

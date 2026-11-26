@@ -1,15 +1,31 @@
 /**
- * `/home/aura` of an app process (Phase 5 Stage 1 extraction; stream H owns
- * this file). Today every app gets the one user home: the runners take the
- * mount from here and no longer compute a home path themselves (ARI §9.4).
- * Stream H mounts the `ResolvedHome` of the spawn context instead.
+ * `/home/aura` of an app process (Phase 5 stream H). The runners mount the
+ * `ResolvedHome` the kernel Home Resolver decided at spawn (homes/HomeResolver.ts)
+ * and never compute a home path themselves (ARI §9.4). An app process gets its
+ * App Home; a Private Home only reaches a user's own session context (D65 §8).
+ *
+ * Fail closed: a spawn without a resolved home, or with a home the runtime
+ * can't mount (a tmpfs `ephemeral` home is a session's, never an app's), is
+ * refused. Nothing falls back to the shared home.
  */
 import { SHARED_HOME_PATH } from '../tool-provision.js';
-import { userHomeDir, userHomeSubpath } from '../../scopes/home.js';
+import type { ResolvedHome } from '../../homes/types.js';
 
-/** `--mount` of the home, a subpath of the app-data volume. */
-export function containerHomeMount(o: { appDataVolume: string }): string[] {
-  return ['--mount', `type=volume,source=${o.appDataVolume},target=${SHARED_HOME_PATH},volume-subpath=${userHomeSubpath()}`];
+export class HomeMountError extends Error {
+  override readonly name = 'HomeMountError';
+}
+
+function volumeHome(home: ResolvedHome | undefined): ResolvedHome & { hostPath: string; volumeSubpath: string } {
+  if (!home) throw new HomeMountError('no home was resolved for this process: not started (no shared-home fallback)');
+  if (!home.hostPath || !home.volumeSubpath) throw new HomeMountError(`a ${home.kind} home can't be an app process's home`);
+  if (home.volumeSubpath.split('/').some((s) => s === '' || s === '.' || s === '..')) throw new HomeMountError('invalid home subpath');
+  return home as ResolvedHome & { hostPath: string; volumeSubpath: string };
+}
+
+/** `--mount` of the resolved home, a subpath of the app-data volume. */
+export function containerHomeMount(o: { appDataVolume: string; home: ResolvedHome | undefined }): string[] {
+  const h = volumeHome(o.home);
+  return ['--mount', `type=volume,source=${o.appDataVolume},target=${SHARED_HOME_PATH},volume-subpath=${h.volumeSubpath}`];
 }
 
 /** `-e HOME=…`, after the context env so a context key can't move it. */
@@ -17,10 +33,18 @@ export function containerHomeEnv(): string[] {
   return ['-e', `HOME=${SHARED_HOME_PATH}`];
 }
 
-/** PRoot bind of the home. */
-export function prootHomeBind(o: { dataDir: string }): string {
-  return `--bind=${userHomeDir(o.dataDir)}:${SHARED_HOME_PATH}`;
+/** PRoot bind of the resolved home. */
+export function prootHomeBind(o: { home: ResolvedHome | undefined }): string {
+  return `--bind=${volumeHome(o.home).hostPath}:${SHARED_HOME_PATH}`;
 }
 
-/** The `HOME` a PRoot (or master-direct) app process gets. */
-export const PROOT_HOME_ENV = SHARED_HOME_PATH;
+/**
+ * The `HOME` of a PRoot app process: the bound `/home/aura`. An unwrapped
+ * (master-direct) process sees the shell's filesystem, where `/home/aura` is
+ * the master's: it gets its App Home's own path instead (R2 removes the
+ * unwrapped path; the `proot` runtime already refuses it, D75).
+ */
+export function prootHomeEnv(o: { home: ResolvedHome | undefined; prooted: boolean }): string {
+  const h = volumeHome(o.home);
+  return o.prooted ? SHARED_HOME_PATH : h.hostPath;
+}

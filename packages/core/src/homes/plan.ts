@@ -1,11 +1,10 @@
 /**
- * The Home Resolver in `report` mode (Phase 5 stream I; D65, D67, D72, D74).
+ * The Home Resolver's rule set (Phase 5 streams I and H; D65, D67, D72, D74).
  *
- * `planHomeTarget` is the Phase 5 rule set as a pure function: which
- * directory a process WILL see as `/home/aura` once stream H switches the
- * spawn seam over. Nothing mounts it yet: `homePlan` sets it against today's
- * source (`legacyHomeResolver`, the one shared home) per running instance,
- * for `GET /api/admin/homes/plan` and `diagnose/homes` in report form.
+ * `planHomeTarget` is the rule set as a pure function: which directory a
+ * process sees as `/home/aura`. The kernel resolver (HomeResolver.ts) applies
+ * it at every spawn and session; `homePlan` sets it against the home each
+ * running instance actually has, for `GET /api/admin/homes/plan`.
  *
  *   application, sidecar   the App Home: `apphomes/<installationId>/global`, or
  *                          `…/users/<userId>` for `environmentScope: user`;
@@ -27,8 +26,13 @@ export const APP_HOMES_SUBPATH = 'aura/apphomes';
 
 const SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
-export function appHomeSubpath(installationId: string, scope: EnvironmentScope, userId?: string): string {
+export function appHomeSubpath(installationId: string, scope: EnvironmentScope, userId?: string, preview = false): string {
   if (!SEGMENT.test(installationId)) throw new HomeDeniedError('installation-unresolved', 'invalid installation id');
+  if (preview) {
+    // A preview (Track P) runs the user's workspace on a copy of the data: never in the installed app's home.
+    if (!userId || !SEGMENT.test(userId)) throw new HomeDeniedError('user-required', 'a preview\'s App Home needs its user');
+    return `${APP_HOMES_SUBPATH}/${installationId}/previews/${userId}`;
+  }
   if (scope === 'global') return `${APP_HOMES_SUBPATH}/${installationId}/global`;
   if (!userId || !SEGMENT.test(userId)) throw new HomeDeniedError('user-required', 'a per-user App Home needs its user');
   return `${APP_HOMES_SUBPATH}/${installationId}/users/${userId}`;
@@ -43,6 +47,8 @@ export interface HomeTargetRequest {
   jumpHomeMode?: JumpHomeMode;
   /** Only `jump` and `terminal-session` carry one (D84: no Private Home without a human user). */
   principal?: { userId: string; role: 'owner' | 'member' };
+  /** A preview instance (Track P): its own App Home per user, beside the installation's. */
+  preview?: boolean;
 }
 
 /** Where `/home/aura` will come from, and whose identity owns it. */
@@ -58,7 +64,7 @@ export interface HomeTarget {
 export function planHomeTarget(dataDir: string, req: HomeTargetRequest): HomeTarget {
   const appHome = (): HomeTarget => {
     if (!req.installationId) throw new HomeDeniedError('installation-unresolved', 'the installation is not known');
-    const sub = appHomeSubpath(req.installationId, req.environmentScope, req.userId);
+    const sub = appHomeSubpath(req.installationId, req.environmentScope, req.userId, req.preview && req.executionContext !== 'jump');
     return {
       kind: req.environmentScope === 'global' ? 'app-global' : 'app-user',
       hostPath: join(dataDir, ...sub.split('/')), volumeSubpath: sub,
@@ -100,8 +106,8 @@ export interface HomePlanInstance {
   environmentScope: EnvironmentScope;
   /** The instance's server-side owner. */
   owner?: string;
-  /** Today's `/home/aura` source (the legacy resolver's `hostPath`). */
-  currentHostPath: string;
+  /** The `/home/aura` source the instance runs with; null when unknown (started by an earlier release). */
+  currentHostPath: string | null;
 }
 
 export interface HomePlanRow {
@@ -109,7 +115,7 @@ export interface HomePlanRow {
   appId: string;
   installationId: string | null;
   executionContext: ExecutionContext;
-  current: string;
+  current: string | null;
   target: HomeTarget | null;
   /** `same`, `moves` (H will mount another directory) or `denied` (fails closed under H). */
   change: 'same' | 'moves' | 'denied';
@@ -124,7 +130,7 @@ export interface HomePlanReport {
   summary: { same: number; moves: number; denied: number };
 }
 
-/** Today's source against the Phase 5 target, per instance. Reads nothing on disk. */
+/** Each instance's home against the rule set's target, per instance. Reads nothing on disk. */
 export function homePlan(dataDir: string, instances: readonly HomePlanInstance[], opts: { now?: () => number } = {}): HomePlanReport {
   const rows: HomePlanRow[] = [];
   for (const inst of [...instances].sort((a, b) => a.appId.localeCompare(b.appId) || a.instanceId.localeCompare(b.instanceId))) {

@@ -136,8 +136,11 @@ export function registerApp(program: Command): void {
     .command('remove <appId>')
     .alias('rm')
     .option('-y, --yes', 'Skip the confirmation prompt (for scripts).')
-    .description(`${DELETE_APP_DATA}: ${DELETE_APP_DATA_EFFECT} Prompts unless --yes is passed.`)
-    .action(async (appId: string, opts: { yes?: boolean }) => {
+    .option('--delete-home', 'Also delete its App Homes (the logins and settings it keeps in /home/aura). Default: kept. Your Private Home is never touched.')
+    .option('--keep-home', 'Keep its App Homes (the default).')
+    .description(`${DELETE_APP_DATA}: ${DELETE_APP_DATA_EFFECT} Its App Homes are kept unless --delete-home. Prompts unless --yes is passed.`)
+    .action(async (appId: string, opts: { yes?: boolean; deleteHome?: boolean; keepHome?: boolean }) => {
+      if (opts.deleteHome && opts.keepHome) fail('--delete-home and --keep-home exclude each other');
       // Double-check unless explicitly skipped. Default is "no" — the user
       // has to type 'y' to confirm so muscle-memory Enter doesn't blow away
       // an app. On a non-TTY stdin (`echo … | aura …`, CI pipelines) we
@@ -160,11 +163,13 @@ export function registerApp(program: Command): void {
           throw err;
         }
       }
-      const res = await api.post<{ ok?: boolean; removed?: boolean; dest?: string; error?: string }>(
-        `/api/apps/${encodeURIComponent(appId)}/remove`,
+      const res = await api.post<{ ok?: boolean; removed?: boolean; dest?: string; error?: string; homeDeleted?: boolean }>(
+        `/api/apps/${encodeURIComponent(appId)}/remove${opts.deleteHome ? '?deleteHome=1' : ''}`,
       );
       if (!res?.ok) fail(`remove failed: ${res?.error ?? 'unknown error'}`);
       ok(`deleted ${color.bold(appId)} and its data${res.dest ? color.dim(` (${res.dest})`) : ''}`);
+      if (opts.deleteHome) info(res.homeDeleted ? 'its App Homes were deleted' : 'it had no App Home');
+      else info('its App Homes were kept (aura app remove --delete-home deletes them)');
     });
 
   app

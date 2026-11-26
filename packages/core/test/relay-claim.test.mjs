@@ -89,7 +89,7 @@ test('a container start carries AURA_RELAY_STRICT only in strict mode', () => {
     Object.assign(runner, { appDataVolume: 'aura_aura-app-data', nodeModulesVolume: 'aura_aura-node-modules' });
     const manifest = { id: 'com.aura.terminal', entrypoint: 'server.mjs', tools: ['*'], sandbox: 'container' };
     const args = () => runner.buildDockerArgs('com.aura.terminal-1', 'com.aura.terminal', 4000, manifest, 'aura-com.aura.terminal-1',
-      { appDir, instanceDataDir: instDir }, {}, []);
+      { appDir, instanceDataDir: instDir, home: { kind: 'private', hostPath: '/x', volumeSubpath: 'aura/home/default', logicalPath: '/home/aura', uid: 1000, gid: 1000, mode: 0o700 } }, {}, []);
     delete process.env.AURA_RELAY_STRICT;
     assert.ok(!args().some((a) => a.startsWith('AURA_RELAY_STRICT')), 'warn: nothing added');
     process.env.AURA_RELAY_STRICT = 'strict';
