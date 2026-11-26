@@ -36,7 +36,6 @@
  */
 import { WebSocketServer } from 'ws';
 import { followIdentity, reportSurface, requestIdentity, surfaceDecision } from './access-bridge.mjs';
-import { SESSION_HOST_APPS } from './terminal-embed.mjs';
 
 /** `/api/instances/<id>/session`, query allowed. */
 export const EXEC_BRIDGE_PATH = /^\/api\/instances\/([^/?]+)\/session(?:\?.*)?$/;
@@ -62,6 +61,9 @@ export const liveExecDeps = {
   },
   report: (observation) => reportSurface(observation),
   follow: (identity, end) => followIdentity(identity, end),
+  // D69: whether an app is a session host (the System Terminal). Lazy, like core: this module loads without
+  // the workspace packages (the security gate's route audit imports it from a bare checkout).
+  sessionHostApp: async (appId) => (await import('./terminal-embed.mjs')).SESSION_HOST_APPS.has(appId),
 };
 
 function refuse(socket, status, text) {
@@ -107,7 +109,7 @@ async function upgrade(req, socket, head, rawId, wss, deps) {
   // that the rule did not let in as the owner: the user's member level, never the owner's.
   const member = !ruled && appId !== null && principal?.verification === 'verified'
     && ((principal.kind === 'user' && principal.role === 'member')
-      || (principal.kind === 'instance' && !principal.sidecar && SESSION_HOST_APPS.has(principal.appId)
+      || (principal.kind === 'instance' && !principal.sidecar && await (deps.sessionHostApp ?? liveExecDeps.sessionHostApp)(principal.appId)
         && typeof principal.userId === 'string' && principal.userId !== ''));
   const allowed = ruled || member;
   if (!allowed) {
