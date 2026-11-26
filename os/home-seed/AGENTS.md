@@ -20,7 +20,7 @@ AuraOS is a WebOS for humans and their agents. It is a desktop that runs in the 
    - `aura get apps`: installed apps
    - `aura ps`: what is running
    - `aura get caps`: tools that can be shared
-   - `curl -s "$OS_API_BASE/api/interfaces?kind=mcp&consumers=0"`: MCP servers apps provide
+   - `curl -s -H "Authorization: Bearer $AURA_INSTANCE_TOKEN" "$OS_API_BASE/api/interfaces?kind=mcp&consumers=0"`: MCP servers apps provide
 3. Offer next steps from **Things you can do** below. Building their first app with `aura dev new` is the usual favourite.
 
 ## Concepts
@@ -114,16 +114,23 @@ The grammar is kubectl-style: `aura <verb> <resource> [name]`. Short resource na
 - **`description`:** what it offers.
 
 You can read it two ways:
-- **Over HTTP.** Every MCP server: `curl -s "$OS_API_BASE/api/interfaces?kind=mcp&consumers=0"`. Everything: drop `kind`. Filters are `kind`, `appId`, `name` and `live=1`. Leave out `consumers=0` to also get the dependency report (`live` / `installed` / `unmet`).
+- **Over HTTP.** Every MCP server: `curl -s -H "Authorization: Bearer $AURA_INSTANCE_TOKEN" "$OS_API_BASE/api/interfaces?kind=mcp&consumers=0"`. Everything: drop `kind`. Filters are `kind`, `appId`, `name` and `live=1`. Leave out `consumers=0` to also get the dependency report (`live` / `installed` / `unmet`).
 - **Over MCP.** `com.aura.settings` provides an MCP server for the registry itself at `$OS_API_BASE/api/proxy/com.aura.settings/mcp/interfaces`. Its tools are `list_interfaces`, `resolve_interface`, `get_interface` and `list_consumers`.
 
 Humans browse the same registry in Settings → Interfaces.
 
 **These two come preconfigured.** New installs register both, as `aura-docs` and `aura-interfaces`, for Claude Code (`~/.claude.json`) and Codex (`~/.codex/config.toml`). On an older install, or if they're missing, add them the same way you would any other server.
 
-**Connect an MCP server you found.** The full address is `$OS_API_BASE` + the entry's `url`. Offer to add it, e.g. the docs server:
-- Claude Code: `claude mcp add --scope user --transport http aura-docs "$OS_API_BASE/api/proxy/com.aura.docs/mcp"`
-- Codex: `codex mcp add aura-docs --url "$OS_API_BASE/api/proxy/com.aura.docs/mcp"`
+**Connect an MCP server you found.** The full address is `$OS_API_BASE` + the entry's `url`. Offer to add it, e.g. the docs server, with `aura mcp add aura-docs com.aura.docs` (both clients; see below).
+
+<!-- aura:section mcp-token-by-reference -->
+**Aura MCP servers carry your instance token by reference, never by value.** Every call through the shell (`$OS_API_BASE/api/proxy/…`) should send `Authorization: Bearer $AURA_INSTANCE_TOKEN`. Write the *reference* into a config, never the token itself: `~` is shared by every app, so a literal token there would let all of them act as you, and the reference gives each app its own identity.
+- `aura mcp ls` shows every Aura MCP entry in `~/.claude.json` and `~/.codex/config.toml` and how it authenticates (never a value). `aura mcp fix` rewrites tokenless or literal-token entries to the reference, with a backup and the owner's confirmation at the terminal. `aura mcp add <name> <app>[/<interface>]` adds one to both clients.
+- By hand, Claude Code (single quotes, so the shell does not expand it): `claude mcp add --scope user --transport http aura-docs '${OS_API_BASE}/api/proxy/com.aura.docs/mcp' -H 'Authorization: Bearer ${AURA_INSTANCE_TOKEN}'`.
+- By hand, Codex: `codex mcp add aura-docs --url "$OS_API_BASE/api/proxy/com.aura.docs/mcp" --bearer-token-env-var AURA_INSTANCE_TOKEN` (in `config.toml`: `bearer_token_env_var = "AURA_INSTANCE_TOKEN"`).
+- `curl` to the shell: add `-H "Authorization: Bearer $AURA_INSTANCE_TOKEN"` (double quotes: expanded in your shell, never stored). Never print the token or paste it into a file.
+- Entries without a token still work for ordinary apps for now (the shell names a caller by its network address, D28); that ends with release 5-main, so fix them now.
+<!-- /aura:section mcp-token-by-reference -->
 
 Your own app can show up in the registry too: add `provides[]` to its manifest (see the docs page "Interfaces").
 

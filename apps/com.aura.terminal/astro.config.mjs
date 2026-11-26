@@ -3,12 +3,17 @@ import node from '@astrojs/node';
 import { auraAppIntegration , resolveAppPort } from '@aura/app-sdk/integration';
 import { fileURLToPath } from 'node:url';
 import { shellWriteIgnore } from './watch-ignore.mjs';
-import { fromShell } from '@aura/app-sdk/shell-peer';
+import { RELAY_CLAIM_HEADER, checkShellRelay } from '@aura/app-sdk/shell-peer';
 
 // APP_PORT when the OS assigned one, otherwise a free port picked at
 // startup — so running this app by hand (or `astro check`) never fights
 // whatever already holds 4001.
 const port = await resolveAppPort();
+
+/** The PTY upgrade came through the shell (app-sdk shell-peer, D89 B4 relay claim). */
+const shellRelayed = async (req) => (await checkShellRelay({
+  peer: req.socket.remoteAddress, header: req.headers[RELAY_CLAIM_HEADER], method: req.method ?? 'GET', path: req.url ?? '/',
+})).ok;
 
 function ptyWsIntegration() {
   return {
@@ -22,7 +27,8 @@ function ptyWsIntegration() {
           const pathname = new URL(req.url ?? '/', 'http://localhost').pathname;
           if (pathname === '/ws') {
             // Only the shell relays a PTY socket (src/middleware.ts, H4 stopgap).
-            if (!(await fromShell(req.socket.remoteAddress))) { socket.destroy(); return; }
+            // D89 B4: and carries its relay claim (warn: reported; strict: required).
+            if (!(await shellRelayed(req))) { socket.destroy(); return; }
             ptyWss.handleUpgrade(req, socket, head, (client) => {
               ptyWss.emit('connection', client, req);
             });

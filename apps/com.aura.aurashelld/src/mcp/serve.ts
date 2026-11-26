@@ -28,7 +28,10 @@
 import type { APIRoute } from 'astro';
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
-import { fromShell as liveFromShell, shellOnlyResponse } from '@aura/app-sdk/shell-peer';
+import { RELAY_CLAIM_HEADER, checkShellRelay as liveCheck, shellOnlyResponse, type ShellRelayResult } from '@aura/app-sdk/shell-peer';
+
+/** The shell-relay check (app-sdk shell-peer): the peer address plus the shell's relay claim (D89 B4). */
+export type RelayCheck = (call: { peer: string | undefined; header: string | null; method: string; path: string }) => Promise<Pick<ShellRelayResult, 'ok'>>;
 
 /**
  * Turn a server factory into an Astro route. Export the result as `ALL` so
@@ -42,14 +45,17 @@ import { fromShell as liveFromShell, shellOnlyResponse } from '@aura/app-sdk/she
  * take as final.
  */
 export function createMcpRoute(
-  build: () => Server, fromShell: (peer: string | undefined) => Promise<boolean> = liveFromShell,
+  build: () => Server, check: RelayCheck = liveCheck,
 ): APIRoute {
   return async (ctx) => {
     const { request } = ctx;
     // H3: only a call the shell relays (@aura/app-sdk/shell-peer); the shell decides who that may be.
+    // D89 B4: from the shell's address, with its relay claim (warn: reported; strict: required).
     let peer: string | undefined;
     try { peer = ctx.clientAddress; } catch { peer = undefined; }
-    if (!(await fromShell(peer))) {
+    const url = new URL(request.url);
+    const relay = await check({ peer, header: request.headers.get(RELAY_CLAIM_HEADER), method: request.method, path: `${url.pathname}${url.search}` });
+    if (!relay.ok) {
       return shellOnlyResponse('/api/mcp/shell');
     }
     if (request.method === 'GET') return new Response(null, { status: 405, headers: { allow: 'POST, DELETE' } });

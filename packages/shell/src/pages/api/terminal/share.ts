@@ -2,7 +2,7 @@ import type { APIRoute } from 'astro';
 import * as core from '@aura/core';
 import { shellOwner } from '../../../lib/appHostHandoff.ts';
 import { jsonResponse } from '../../../lib/appResponse.js';
-import { holdsEmbedGrant, isSystemTerminal, shareSession, TERMINAL_APP_ID, terminalSessionInstance } from '../../../../server/terminal-embed.mjs';
+import { holdsEmbedGrant, isSystemTerminal, shareSession, shellRelayHeader, TERMINAL_APP_ID, terminalSessionInstance } from '../../../../server/terminal-embed.mjs';
 
 /**
  * The owner shows an existing Terminal session in an app (D25), from the
@@ -23,7 +23,7 @@ async function sessionExists(sessionId: string): Promise<boolean> {
   const up = mgr.getUpstreamUrl?.(inst.instanceId);
   try {
     const res = await fetch(`http://${up?.host ?? 'localhost'}:${up?.port ?? inst.port}/api/sessions`, {
-      headers: { 'x-aura-app-id': inst.appId, 'x-aura-instance-id': inst.instanceId },
+      headers: { 'x-aura-app-id': inst.appId, 'x-aura-instance-id': inst.instanceId, ...shellRelayHeader(mgr, inst.instanceId, 'GET', '/api/sessions') },
       signal: AbortSignal.timeout(5_000),
     });
     const body = await res.json().catch(() => null) as { sessions?: Array<{ id?: unknown }> } | null;

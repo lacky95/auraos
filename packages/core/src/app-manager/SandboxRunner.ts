@@ -83,6 +83,12 @@ export interface SandboxRunner {
    * with it (D28). Runners without addresses of their own omit it.
    */
   addresses?(instanceId: string): string[];
+  /**
+   * D89 B4: the key of this start's relay claim (app-hosts/relayClaim.ts),
+   * derived from its lifecycle token; null when the start has none. The
+   * token itself never leaves the runner.
+   */
+  relayKey?(instanceId: string): Buffer | null;
   /** True if the runner still tracks the instance as alive. */
   isRunning(instanceId: string): boolean;
   /** Every pid the runner currently owns (used by the reconciler's orphan reaper). */

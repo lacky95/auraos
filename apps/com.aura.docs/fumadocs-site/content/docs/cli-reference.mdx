@@ -225,6 +225,26 @@ aura port expose at.oebb.opsconsole:5173 --host --sticky
 | `aura data write <authority>/<path> [body]` | Write to a provider; body `-` reads stdin. | `-m, --method PUT\|POST\|PATCH\|DELETE` (default PUT) |
 | `aura data watch <authority>/<path>` | Follow an SSE-capable provider endpoint (adds `?watch=1` if missing). | — |
 
+### MCP servers — `aura mcp …`
+
+Aura MCP servers (URLs through `$OS_API_BASE/api/proxy/…`) in Claude Code's
+`~/.claude.json` and Codex's `~/.codex/config.toml`, with the caller's
+instance token **by reference** (`${AURA_INSTANCE_TOKEN}` in Claude Code,
+`bearer_token_env_var = "AURA_INSTANCE_TOKEN"` in Codex), never by value: the
+home is shared by every app, and the reference gives each app its own
+identity (D89 B5). No command prints or writes a token value.
+
+| Command | What it does | Key flags |
+|---|---|---|
+| `aura mcp ls` | Every Aura MCP entry and how it authenticates: token by reference, `headersHelper`, no token, or a literal AuraOS token (fix it). | `-o json` |
+| `aura mcp add <name> <app>[/<interface>]` | Look the app's MCP interface up in the Interface Registry and add it to both clients, token by reference. | `--client claude\|codex`, `-n, --dry-run` |
+| `aura mcp fix` | Rewrite tokenless and literal-token entries to the reference. The old file is kept as `<file>.bak-aura-mcp`, with any AuraOS credential removed. | `-n, --dry-run` |
+
+`add` and `fix` write only after the owner confirms at an interactive
+terminal; without one (an agent's command), they show the plan and write
+nothing. Running Claude Code or Codex sessions pick the change up after a
+restart.
+
 ## Access
 
 | Command | What it does | Key flags |
