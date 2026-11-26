@@ -642,9 +642,16 @@ static void mask(const char *path, int dir) {
   else bind_ro("/dev/null", path, 0);
 }
 
-static void own_procfs(void) {
+/*
+ * The session's own procfs. A user session sees the app's processes (D74: the
+ * real context; it can't read or signal them, other uid). An app session runs
+ * as the app's uid, so it gets hidepid=invisible like the app's own /proc: it
+ * sees the app, never a user's session (J.3).
+ */
+static void own_procfs(int hide) {
   int fs = sys_fsopen("proc", FSOPEN_CLOEXEC);
   if (fs < 0) die("procfs");
+  if (hide && sys_fsconfig(fs, FSCONFIG_SET_STRING, "hidepid", "invisible", 0) < 0) die("procfs hidepid");
   if (sys_fsconfig(fs, FSCONFIG_CMD_CREATE, NULL, NULL, 0) < 0) die("procfs create");
   int mfd = sys_fsmount(fs, FSMOUNT_CLOEXEC, MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV | MOUNT_ATTR_NOEXEC);
   if (mfd < 0) die("procfs mount");
@@ -801,7 +808,7 @@ static int cmd_enter(const char *json) {
   }
   close(alive[1]);
   close(pn.pidfd);
-  own_procfs();
+  own_procfs(sp.kind == KIND_APP);
   if (write(pn.cgroup_procs, "0", 1) != 1) die("join the app's cgroup");
   close(pn.cgroup_procs);
 

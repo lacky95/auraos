@@ -5,6 +5,7 @@
  *                           the desktop, or `aura approve` on the host), then a
  *                           root session in THIS Terminal instance with the
  *                           Docker socket in that session only; `exit` ends it
+ *   aura root -- <cmd…>     the same root session for one command, without a TTY
  *   aura root ls            the open root tabs
  *   aura root end [inst]    End them (one Terminal instance, or all)
  *
@@ -23,16 +24,22 @@ interface RootTabDto { sessionId: string; instanceId: string; userId: string | n
 
 export function registerRoot(program: Command): void {
   const root = program
-    .command('root')
+    .command('root [cmd...]')
     .summary('Open a root tab with the Docker socket in your Terminal (password approval).')
     .description('Open a dedicated root session in your own System Terminal: root with Docker\'s default capabilities, your home, and the Docker socket in that session only. Needs your approval with the password (or `aura approve` on the host). `exit` ends it.')
-    .action(async () => {
+    .action(async (cmd: string[]) => {
       const instanceId = procEnv['APP_INSTANCE_ID'];
       if (!instanceId || procEnv['APP_ID'] !== 'com.aura.terminal') fail('aura root runs in your System Terminal (it opens a root tab in that Terminal)');
       if (procEnv['AURA_ROOT_SESSION'] === '1') fail('this already is a root tab');
-      if (!stdin.isTTY || !stdout.isTTY) fail('aura root needs a TTY');
+      const oneShot = cmd.length > 0;
+      if (!oneShot && (!stdin.isTTY || !stdout.isTTY)) fail('aura root needs a TTY (or a command: aura root -- <cmd…>)');
       const r = await api.post<{ grant?: string; error?: string; message?: string }>('/api/admin/root', { instanceId });
       if (!r.grant) fail(`aura root: ${r.message ?? r.error ?? 'refused'}`);
+      if (oneShot) {
+        const s = await runSession({ instanceId, kind: 'exec', tty: false, argv: cmd, home: 'private', root: r.grant! });
+        if (!s.opened) fail(`root session refused: ${s.reason}`);
+        process.exit(s.code ?? 1);
+      }
       warn(`${color.bold('ROOT TAB')}: root in ${instanceId} with the Docker socket (full control of the host). \`exit\` ends it.`);
       const restore = callerHostLabel();
       setTerminalHost(`ROOT ${instanceId}`);
