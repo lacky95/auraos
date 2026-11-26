@@ -1800,7 +1800,8 @@ export class AppManager {
    * runtime only executes it (SandboxRunner `openSession`).
    *
    *   no user (the instance itself)   `app` only, as the app's identity
-   *   private, ephemeral              the user's D70 uid/gid; the Home Resolver
+   *   private, ephemeral              the user's D70 uid/gid and only their own group
+ *                                   (no app group, owner answer 2); the Home Resolver
    *                                   checks the runtime, the user and a
    *                                   non-root target (J.5); a member needs
    *                                   `app.jump:<installationId>`
@@ -1847,6 +1848,11 @@ export class AppManager {
       userId: user.userId, principal, appIdentity: app, runtime,
     } as const;
 
+    // A Terminal instance is its owner's session host (D69, P5-4): nobody else enters it, in any mode,
+    // whatever app.jump they hold (another user's sessions and Private Home live there).
+    if (TERMINAL_SESSION_APPS.has(inst.appId) && inst.owner !== user.userId) {
+      throw new HomeDeniedError('not-authorized', 'a Terminal instance is entered only by its own user');
+    }
     if (req.caller.root) {
       // J.6: only into the user's own Terminal instance, its session context (P5-4).
       if (!TERMINAL_SESSION_APPS.has(inst.appId) || inst.owner !== user.userId || inst.inPool) {
@@ -1878,6 +1884,8 @@ export class AppManager {
     const accounts: PasswdEntry[] = [...appAccount.filter((a) => a.uid !== id.uid), { name, uid: id.uid, gid: id.gid, gecos: 'AuraOS user' }];
     return {
       kind: 'user', home: { mode: req.mode, hostPath: req.mode === 'private' ? home.hostPath : null },
+      // Owner answer 2: only the user's own group. Jump authorization never implies the app's group;
+      // --home app is the way to act as the app, and authorized access to app files is a mount (D80, 5b).
       uid: id.uid, gid: id.gid, groups: [id.gid],
       env: { ...base, USER: name, LOGNAME: name }, ...files(accounts), userId: user.userId,
     };

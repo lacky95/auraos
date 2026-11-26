@@ -83,12 +83,14 @@ test('the launcher compiles warning-free and accepts what enterSpec builds', () 
   assert.equal(spawnSync(helper, ['version'], { encoding: 'utf-8' }).stdout.trim(), '1');
   const ok = check(enterSpec(spec(), { containerId: CID, pid: 4321 }));
   assert.equal(ok.status, 0, ok.stderr);
-  assert.match(ok.stdout, /^kind=user home=private uid=1000 gid=1000 groups=1 tty=1 argv0=bash socket=0$/m);
+  assert.match(ok.stdout, /^kind=user home=private uid=1000 gid=1000 groups=1 tty=1 argv0=bash socket=0 procfs=invisible$/m,
+    'a user session\'s procfs lists its own processes only: no other user\'s session (owner answer 1)');
   const root = check(enterSpec(spec({ kind: 'root', uid: 0, gid: 0, groups: [], dockerSocket: true }), { containerId: CID, pid: 4321 }));
   assert.equal(root.status, 0, root.stderr);
-  assert.match(root.stdout, /kind=root .* socket=1/);
+  assert.match(root.stdout, /kind=root .* socket=1 procfs=full$/m, 'a root tab sees its own Terminal');
   const app = check(enterSpec(spec({ kind: 'app', home: { mode: 'app', hostPath: null }, uid: 200001, gid: 200001, groups: [] }), { containerId: CID, pid: 4321 }));
   assert.equal(app.status, 0, app.stderr);
+  assert.match(app.stdout, /procfs=invisible$/m, 'an app session sees the app, never a user\'s session');
 });
 
 test('the launcher refuses every spec outside its rules (exit 125, nothing touched)', () => {
@@ -192,6 +194,23 @@ test('D82: a member needs app.jump for every mode; with it, their own uid and Pr
   const m = manager({ grants: ['u-bob:inst-1'] });
   const c = await m.ctx('private', BOB);
   assert.deepEqual([c.uid, c.gid, c.home.hostPath], [100000, 100000, join(m.dataDir, 'aura/home/u-bob')]);
+});
+
+test('owner answer 2: a private or ephemeral session has only its user\'s group, never the app\'s (jump authorization implies none)', async () => {
+  const m = manager({ grants: ['u-bob:inst-1'] });
+  for (const [mode, caller, gid] of [['private', OWNER, 1000], ['ephemeral', OWNER, 1000], ['private', BOB, 100000], ['ephemeral', BOB, 100000]]) {
+    const c = await m.ctx(mode, caller);
+    assert.deepEqual(c.groups, [gid], `${mode} ${caller.user.userId}`);
+    assert.ok(!c.groups.includes(200001));
+  }
+});
+
+test('a Terminal instance is entered only by its own user, in any mode, whatever app.jump they hold (D69)', async () => {
+  const m = manager({ appId: 'com.aura.terminal', grants: ['u-bob:inst-1'] });
+  for (const mode of ['private', 'app', 'ephemeral']) {
+    await assert.rejects(m.ctx(mode, BOB), (e) => e.reason === 'not-authorized', mode);
+  }
+  assert.equal((await m.ctx('private', OWNER)).uid, 1000);
 });
 
 test('the instance itself: the app identity only; never a Private Home', async () => {

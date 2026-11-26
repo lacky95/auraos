@@ -643,11 +643,21 @@ static void mask(const char *path, int dir) {
 }
 
 /*
- * The session's own procfs. A user session sees the app's processes (D74: the
- * real context; it can't read or signal them, other uid). An app session runs
- * as the app's uid, so it gets hidepid=invisible like the app's own /proc: it
- * sees the app, never a user's session (J.3).
+ * The session's own procfs, in the app's PID namespace (D74), hidepid=invisible
+ * for user and app sessions: a process is listed only when the reader may
+ * ptrace-read it, i.e. its own uid. A user session sees its own session
+ * processes and nothing of other users' sessions (no cmdline, status,
+ * mountinfo, environ; no signal, ptrace or setns: other uid, no capability).
+ * An app session (--home app, the app's uid) sees the app's processes and no
+ * user's session. No `gid=` exemption: procfs exempts by the READER's group, so
+ * any group that showed a user the app's processes would show them every other
+ * user's sessions too (owner answer 1: no shared group that weakens cross-user
+ * isolation). The app's processes are inspected with --home app (explicit,
+ * authorized, audited). A root tab (its user's own Terminal only) keeps a full
+ * procfs: root without CAP_SYS_PTRACE would see nothing of its own Terminal.
  */
+static int procfs_hidden(int kind) { return kind != KIND_ROOT; }
+
 static void own_procfs(int hide) {
   int fs = sys_fsopen("proc", FSOPEN_CLOEXEC);
   if (fs < 0) die("procfs");
@@ -808,7 +818,7 @@ static int cmd_enter(const char *json) {
   }
   close(alive[1]);
   close(pn.pidfd);
-  own_procfs(sp.kind == KIND_APP);
+  own_procfs(procfs_hidden(sp.kind));
   if (write(pn.cgroup_procs, "0", 1) != 1) die("join the app's cgroup");
   close(pn.cgroup_procs);
 
@@ -906,10 +916,11 @@ int main(int argc, char **argv) {
     /* Validate a spec without touching anything (tests, diagnose). */
     struct spec sp;
     read_spec(argv[2], &sp);
-    printf("kind=%s home=%s uid=%u gid=%u groups=%d tty=%d argv0=%s socket=%d\n",
+    printf("kind=%s home=%s uid=%u gid=%u groups=%d tty=%d argv0=%s socket=%d procfs=%s\n",
       sp.kind == KIND_USER ? "user" : sp.kind == KIND_APP ? "app" : "root",
       sp.home == HOME_PRIVATE ? "private" : sp.home == HOME_APP ? "app" : "ephemeral",
-      (unsigned)sp.uid, (unsigned)sp.gid, sp.ngroups, sp.tty, sp.argv[0], sp.socket != NULL);
+      (unsigned)sp.uid, (unsigned)sp.gid, sp.ngroups, sp.tty, sp.argv[0], sp.socket != NULL,
+      procfs_hidden(sp.kind) ? "invisible" : "full");
     return 0;
   }
   if (argc >= 2 && !strcmp(argv[1], "end")) return cmd_end(argc - 2, argv + 2, 0);

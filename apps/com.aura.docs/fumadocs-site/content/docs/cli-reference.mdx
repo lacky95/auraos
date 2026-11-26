@@ -57,9 +57,12 @@ and asks you to pick one.
 | `aura status` | Health summary: shell, apps, capabilities, services, paths. | — |
 | `aura info` | Where am I? Execution context: layers (host / aura-shell / proot / container), OS, CPU, memory, namespaces, AuraOS env, mounts, tools. | `--json` |
 
-A jump enters the app's running container itself (its processes, files, network
-and `/tmp`); only your session's home and identity differ, and the app can't see
-your session. It goes through AuraOS, so no Docker access is needed anywhere: apps
+A jump enters the app's running container itself (its files, network and
+`/tmp`); only your session's home and identity differ. Nobody else sees your
+session: not the app, not other users. In return, a session as yourself lists
+only your own processes; to inspect the app's processes, jump with `--home app`
+(as the app). Jumping never adds you to the app's group: access to an app's
+files as yourself goes through an authorized mount. It goes through AuraOS, so no Docker access is needed anywhere: apps
 and Terminals have no Docker socket. A session with your private home runs the
 app's own code with your home: use `--home ephemeral` for apps you don't trust.
 Apps that still run as root, and PRoot apps, refuse `private` and `ephemeral`.
