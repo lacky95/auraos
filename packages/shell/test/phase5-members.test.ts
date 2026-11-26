@@ -185,6 +185,47 @@ test('D82 (C8): the desktop page lists only the signed-in user\'s windows; the h
   assert.match(handoff, /grants\.get\(\{ kind: 'user', id: userId \}, core\.appUsePermission\(installationId\)\)/);
 });
 
+test('owner decision (5-main): a member\'s Terminal acts with the member\'s own grants, never its app\'s; no implicit other app or owner operation', async () => {
+  const held = new Set<string>();
+  const grants = { get: async (s: { kind: string; id: string }, p: string) => (held.has(`${s.kind}:${s.id}|${p}`) ? { permission: p } : null) } as unknown as GrantStore;
+  const instances: Record<string, string | null> = { ...INSTANCES, 'io.ex.notes-1': 'default', 'io.ex.notes-2': MEMBER };
+  const d = createDecide({
+    // The Terminal app holds its declared app grants (the owner's); a member's Terminal must not inherit them.
+    authorizer: new Authorizer({ grants, declared: (id: string) => (id === 'com.aura.terminal' ? ['apps.mount'] : []), appScope: () => 'system' }),
+    instanceOwner: (id) => instances[id] ?? null,
+    installationOf: async (appId) => ({ 'com.aura.terminal': 'inst-term', 'io.ex.notes': 'inst-notes' } as Record<string, string>)[appId] ?? null,
+    ownerAgent: (p) => p.appId === 'com.aura.terminal' && INSTANCES[p.instanceId] === 'default',
+  });
+  const memberTerm = inst('com.aura.terminal', { instanceId: 'com.aura.terminal-2', userId: MEMBER });
+  const ownerTerm = inst('com.aura.terminal', { userId: 'default' });
+  const mount: AccessRule = { allow: ['app-permission'], target: 'app', permissions: ['apps.mount'] };
+  const proxy = route('/api/proxy/[id]/[...path]', 'GET');
+  const start = route('/api/apps/[id]/start');
+  const tok = 'instance-token' as AccessVia;
+  // The Terminal app's own grant: the owner's Terminal holds it, a member's Terminal does not.
+  assert.equal((await d(input(ownerTerm, mount, { appId: 'com.aura.terminal' }, tok))).outcome, 'allow');
+  assert.equal((await d(input(memberTerm, mount, { appId: 'com.aura.terminal' }, tok))).outcome, 'deny');
+  // (What a user may hold is core's Authorizer's rule: apps.mount is an app permission, so a member never holds it either.)
+  held.add(`user:${MEMBER}|apps.mount`);
+  assert.equal((await d(input(memberTerm, mount, { appId: 'com.aura.terminal' }, tok))).outcome, 'deny');
+  // Other apps' upstreams: an app instance may call them by its token (D89 B6), a member's Terminal only as the member.
+  assert.equal((await d(input(inst('io.ex.other'), proxy, { appId: 'io.ex.notes', instanceId: 'io.ex.notes-1' }, tok))).outcome, 'allow', 'unchanged for apps');
+  assert.equal((await d(input(memberTerm, proxy, { appId: 'io.ex.notes', instanceId: 'io.ex.notes-1' }, tok))).outcome, 'deny', 'not the owner\'s instance');
+  assert.equal((await d(input(memberTerm, proxy, { appId: 'io.ex.notes', instanceId: 'io.ex.notes-2' }, tok))).outcome, 'deny', 'not even its own without app.use');
+  held.add(`user:${MEMBER}|app.use:inst-notes`);
+  assert.equal((await d(input(memberTerm, proxy, { appId: 'io.ex.notes', instanceId: 'io.ex.notes-2' }, tok))).outcome, 'allow', 'its own instance with app.use');
+  assert.equal((await d(input(memberTerm, proxy, { appId: 'io.ex.notes', instanceId: 'io.ex.notes-1' }, tok))).outcome, 'deny', 'never the owner\'s');
+  // Owner operations: none (no owner level, whatever it holds).
+  for (const [path, method] of [['/api/apps/[id]/start', 'POST'], ['/api/terminal/share', 'POST']] as const) {
+    const r = ROUTE_ACCESS_MANIFEST.routes[path]?.methods?.[method];
+    if (r && !r.memberPermissions && !r.allow.includes('own-instance')) assert.equal((await d(input(memberTerm, r, { appId: 'io.ex.other' }, tok))).outcome, 'deny', path);
+  }
+  assert.equal((await d(input(memberTerm, start, { appId: 'io.ex.other' }, tok))).outcome, 'deny', 'starting an app it holds no app.use for');
+  // Its own Terminal: the session router still works (own-session), the owner's stays closed.
+  assert.equal((await d(input(memberTerm, proxy, { appId: 'com.aura.terminal', instanceId: 'com.aura.terminal-2' }, tok))).outcome, 'allow');
+  assert.equal((await d(input(memberTerm, proxy, { appId: 'com.aura.terminal', instanceId: 'com.aura.terminal-1' }, tok))).outcome, 'deny');
+});
+
 test('5-main integration (I.2 + D69): a member\'s app.use reaches its own Terminal past the owner-agent block, nothing else does', async () => {
   const held = new Set<string>(['user:' + MEMBER + '|app.use:inst-term', 'user:' + MEMBER + '|app.use:inst-shelld']);
   const grants = { get: async (s: { kind: string; id: string }, p: string) => (held.has(`${s.kind}:${s.id}|${p}`) ? { permission: p } : null) } as unknown as GrantStore;

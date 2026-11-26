@@ -213,6 +213,26 @@ test('D82: a member needs app.jump for every mode; with it, their own uid and Pr
   assert.deepEqual([c.uid, c.gid, c.home.hostPath], [100000, 100000, join(m.dataDir, 'aura/home/u-bob')]);
 });
 
+test('owner decision (5-main): the jump account is the Aura username within Linux naming rules; the uid stays authoritative; fail closed', async () => {
+  const m = manager({ grants: ['u-bob:inst-1'] });
+  const c = await m.ctx('ephemeral', BOB);
+  assert.match(c.passwd, /^bob:x:100000:100000:AuraOS user:/m, 'the member\'s username');
+  assert.deepEqual([c.uid, c.gid, c.env.USER], [100000, 100000, 'bob']);
+  // A username Linux can't take (or a base account name) falls back to user-<uid>; the uid never changes.
+  for (const account of ['Bad Name!', 'root', 'x'.repeat(40)]) {
+    const odd = manager({ grants: ['u-bob:inst-1'] });
+    const saved = USERS['u-bob'].account;
+    USERS['u-bob'].account = account;
+    try {
+      const s = await odd.ctx('private', BOB);
+      assert.match(s.passwd, /^user-100000:x:100000:100000:AuraOS user:/m, account);
+      assert.equal(s.uid, 100000);
+    } finally { USERS['u-bob'].account = saved; }
+  }
+  // An unknown user (no active Linux identity) gets nothing: no fallback to a shared or root account.
+  await assert.rejects(manager({ grants: ['u-ghost:inst-1'] }).ctx('private', { user: { userId: 'u-ghost', role: 'member' } }));
+});
+
 test('owner answer 2: a private or ephemeral session has only its user\'s group, never the app\'s (jump authorization implies none)', async () => {
   const m = manager({ grants: ['u-bob:inst-1'] });
   for (const [mode, caller, gid] of [['private', OWNER, 1000], ['ephemeral', OWNER, 1000], ['private', BOB, 100000], ['ephemeral', BOB, 100000]]) {

@@ -169,6 +169,21 @@ test('5-main (J + T + I.2): a member\'s own Terminal reaches the kernel as that 
   assert.equal((await connect(sidecar.url, '/api/instances/com.acme.notes-1/session', [open()])).status, 'refused');
 });
 
+test('owner decision (5-main): the POST exec/logs routes stay owner or self; a member, its Terminal or another user\'s Terminal are refused', () => {
+  const mgr = {
+    isTrustedSystemCopy: (id: string) => id === 'com.aura.terminal',
+    getInstance: (id: string) => ({ 'com.aura.terminal-1': { instanceId: id, appId: 'com.aura.terminal', owner: 'default' },
+      'com.aura.terminal-2': { instanceId: id, appId: 'com.aura.terminal', owner: 'bob' } } as Record<string, unknown>)[id],
+  };
+  const locals = (principal: Principal, via = 'instance-token') => ({ access: { principal, via } }) as unknown as App.Locals;
+  const status = (l: App.Locals) => { const c = execCaller(l, 'com.acme.notes-1', mgr as never); return c instanceof Response ? c.status : c.level; };
+  const bob: Principal = { kind: 'user', userId: 'bob', role: 'member', sessionId: 's2', verification: 'verified' };
+  const bobTerm: Principal = { kind: 'instance', appId: 'com.aura.terminal', instanceId: 'com.aura.terminal-2', userId: 'bob', verification: 'verified' };
+  assert.equal(status(locals(bob, 'login-session')), 403);
+  assert.equal(status(locals(bobTerm)), 403, 'a member\'s Terminal is no owner agent');
+  assert.equal(status(locals({ ...bobTerm, userId: 'default' })), 403, 'nor by claiming the owner in its token (the instance is bob\'s)');
+});
+
 test('the instance itself: non-TTY exec keeps stderr apart and ends on EOF', async (t) => {
   const r = await rig(t, { principal: self, reason: 'own-instance' });
   const res = await connect(r.url, '/api/instances/com.acme.notes-1/session', [open({ kind: 'exec', argv: ['cat'], tty: false })], {

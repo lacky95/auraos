@@ -162,6 +162,23 @@ async function memberHolds(
   return (await checkPermissions(deps, p as Principal, concrete, true)).ok ? null : 'missing-permission';
 }
 
+/**
+ * Owner decision (5-main, member semantics): a session host acting for a
+ * member (a member's own System Terminal: its token's `u`) is that member's
+ * agent. On the permission levels it holds the MEMBER's own grants (strict),
+ * never its app's (the Terminal's app grants are the owner's), so nothing a
+ * member runs in its Terminal implicitly reaches other apps or owner
+ * operations. Its own-instance rules stay the instance's. Null otherwise.
+ */
+function actingMember(p: AccessPrincipal): Extract<AccessPrincipal, { kind: 'user' }> | null {
+  if (p.kind !== 'instance' || p.sidecar || !SESSION_HOST_APPS.has(p.appId)) return null;
+  if (typeof p.userId !== 'string' || !p.userId || p.userId === core.DEFAULT_OWNER_ID) return null;
+  return {
+    kind: 'user', userId: p.userId, role: 'member', sessionId: '', verification: 'verified',
+    ...(p.systemId !== undefined ? { systemId: p.systemId } : {}),
+  } as Extract<AccessPrincipal, { kind: 'user' }>;
+}
+
 /** Core's wording is the only signal of an MVP auto-grant; a test pins it. */
 const isAutoGrant = (reason: string): boolean => reason.includes('MVP auto-grant');
 
@@ -249,8 +266,11 @@ async function matchLevel(
 
   // I.2 (D82): a member's own grants, on the rules that name them. Strict: an
   // auto-grant never counts for a member, and only `user` grants exist for one.
-  if (rule.memberPermissions && isMember(p)) {
-    const why = await memberHolds(deps, p, rule.memberPermissions, input.resource);
+  // A member's session host acts as that member (actingMember).
+  const asMember = actingMember(p);
+  const memberView = isMember(p) ? p : asMember;
+  if (rule.memberPermissions && memberView) {
+    const why = await memberHolds(deps, memberView, rule.memberPermissions, input.resource);
     if (why === null) return { granted: 'app-permission', failure, member: true };
     failure = why;
   }
@@ -258,10 +278,12 @@ async function matchLevel(
   if (rule.allow.includes('app-permission')) {
     const permissions = rule.permissions ?? [];
     // A member holds its own `user` grants (I.2, C7); the owner matched above.
-    const canHold = p.kind === 'instance' || p.kind === 'apiKey' || (p.kind === 'user' && p.role !== 'owner' && permissions.length > 0)
-      || (p.kind === 'anonymous' && permissions.length > 0);
+    // A member's session host holds the member's grants only (actingMember), never its app's.
+    const holder: AccessPrincipal = asMember ?? p;
+    const canHold = (holder.kind === 'instance' || holder.kind === 'apiKey' || (holder.kind === 'user' && holder.role !== 'owner' && permissions.length > 0)
+      || (holder.kind === 'anonymous' && permissions.length > 0));
     if (canHold) {
-      const held = await checkPermissions(deps, p as Principal, permissions, input.strict);
+      const held = await checkPermissions(deps, holder as Principal, permissions, input.strict || asMember !== null);
       if (held.ok) return { granted: held.auto ? 'auto-granted' : 'app-permission', failure };
       if (p.kind !== 'anonymous' && failure !== 'wrong-target') failure = 'missing-permission';
     }
