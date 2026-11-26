@@ -22,7 +22,7 @@
  * them to host ids (ARI §2.2).
  */
 import { randomBytes } from 'node:crypto';
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeSync } from 'node:fs';
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { Redis } from '@aura/kv-store';
 import { DEFAULT_OWNER_ID } from '../auth/identityContracts.js';
@@ -47,6 +47,9 @@ const USER_ID_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const INSTALLATION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const APP_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
 const MAX_ATTEMPTS = 16;
+/** A lock file older than this is a crashed writer's: taken over. */
+const HWM_LOCK_STALE_MS = 10_000;
+const HWM_LOCK_WAIT_MS = 15_000;
 
 export class LinuxIdentityError extends Error {
   constructor(readonly code: 'invalid-id' | 'range-exhausted' | 'uid-taken' | 'hwm-unwritable' | 'not-settled' | 'corrupt', message: string) {
@@ -146,6 +149,34 @@ export class LinuxIdentityStore {
     }
   }
 
+  /**
+   * Raise the mark of `range` to at least `uid`, never lowering either range:
+   * under an exclusive lock file it re-reads the file and keeps the maximum of
+   * each field, so two allocators (two processes, or an old and a new module
+   * copy) can't roll each other's mark back.
+   */
+  private async raiseHighWaterMark(range: AllocatedLinuxIdRange, uid: number): Promise<void> {
+    const lock = `${this.hwmFile}.lock`;
+    try { mkdirSync(dirname(this.hwmFile), { recursive: true, mode: 0o700 }); } catch {
+      throw new LinuxIdentityError('hwm-unwritable', `cannot create ${dirname(this.hwmFile)}`);
+    }
+    const deadline = Date.now() + HWM_LOCK_WAIT_MS;
+    for (;;) {
+      try { closeSync(openSync(lock, 'wx', 0o600)); break; } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw new LinuxIdentityError('hwm-unwritable', `cannot lock ${this.hwmFile}`);
+        try { if (Date.now() - statSync(lock).mtimeMs > HWM_LOCK_STALE_MS) rmSync(lock, { force: true }); } catch { /* gone meanwhile */ }
+        if (Date.now() > deadline) throw new LinuxIdentityError('hwm-unwritable', `${this.hwmFile} stayed locked`);
+        await new Promise((r) => setTimeout(r, 2 + Math.random() * 8));
+      }
+    }
+    try {
+      const cur = this.readHighWaterMark() ?? { user: 0, app: 0 };
+      if (cur[range] < uid) this.writeHighWaterMark({ ...cur, [range]: uid });
+    } finally {
+      rmSync(lock, { force: true });
+    }
+  }
+
   /** Atomic and durable: temp file, fsync, rename, fsync of the directory. */
   private writeHighWaterMark(hwm: IdentityHighWaterMark): void {
     const dir = dirname(this.hwmFile);
@@ -193,7 +224,7 @@ export class LinuxIdentityStore {
         const candidate = Math.max(first, Number.isSafeInteger(next) ? next : first, hwm[range] + 1, atLeast);
         if (candidate > last) throw new LinuxIdentityError('range-exhausted', `the ${range} range ${first}-${last} is exhausted`);
         // The mark goes to disk before the uid is committed (never reused after a Valkey restore).
-        if (hwm[range] < candidate) this.writeHighWaterMark({ ...hwm, [range]: candidate });
+        if (hwm[range] < candidate) await this.raiseHighWaterMark(range, candidate);
         const out = await r.eval(ALLOCATE, 2, key, identityNextKey(range),
           tombstone, `${IDENTITY_KEY_PREFIX}uid:`, candidate, candidate, last, json, '0') as [string, string];
         if (out[0] === 'existing' || out[0] === 'ok') return this.parse<T>(out[1]);

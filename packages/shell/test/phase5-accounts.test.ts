@@ -232,3 +232,10 @@ test('A9: an instance principal carries its spawn\'s lifetime, so its approvals 
   const b = await resolvePrincipal(req(), { mgr: mgr as never, apiKeys: null, login: null });
   assert.equal((b.principal as InstancePrincipal).lifetime, 'L2');
 });
+
+test('B1: a screen registered by a user\'s own login is bound to it; approvals read the deciding owner\'s screen only', () => {
+  const src = (f: string) => readFileSync(new URL(`../src/${f}`, import.meta.url), 'utf8');
+  assert.match(src('pages/api/os/clients/index.ts'), /p\.kind === 'user' && !p\.through\) owner = \{ userId: p\.userId, loginSessionId: p\.sessionId \}/);
+  assert.match(src('lib/approvals/routes.ts'), /deps\.lockOf\(sid, shell\.owner\.userId\)/);
+  assert.match(src('lib/clientSession.ts'), /effectiveLock\(sid, userId !== undefined \? \{ userId \} : \{\}\)/);
+});

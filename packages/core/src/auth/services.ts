@@ -16,7 +16,8 @@ import { ClientSessionStore } from './ClientSessions.js';
 import { Authorizer } from './Authorizer.js';
 import { GrantStore } from './GrantStore.js';
 import { defaultIdentityKeyFile } from './identityKey.js';
-import { LoginSessionStore } from './LoginSessionStore.js';
+import { LoginSessionStore, loginSessionKey } from './LoginSessionStore.js';
+import { OsEventBus } from '../ipc/OsEventBus.js';
 import { defaultSetupTicketDir, FileSetupTickets } from './setupTickets.js';
 import { ValkeyUserStore } from './ValkeyUserStore.js';
 import { LinuxIdentityStore, defaultHighWaterMarkFile } from '../identity/LinuxIdentityStore.js';
@@ -69,10 +70,12 @@ export function getAuthServices(): AuthServices {
     appScope: (appId) => registry()?.getScopeId(appId),
   });
   const identity = new LinuxIdentityStore({ redis, hwmFile: defaultHighWaterMarkFile() });
+  const clientSessions = new ClientSessionStore({ redis });
   const users = new ValkeyUserStore({
     identityKeyFile: defaultIdentityKeyFile(),
     redis,
     identity,
+    clientSessions,
     onTampered: () => {
       console.warn('[auth] a user record failed its integrity check');
       void audit.record({ by: { kind: 'system' }, action: IDENTITY_AUDIT_ACTIONS.recordTampered, outcome: 'failed' }).catch(() => undefined);
@@ -110,7 +113,7 @@ export function getAuthServices(): AuthServices {
   const setupTickets: FileSetupTickets = new FileSetupTickets({ dir: defaultSetupTicketDir(), beforeClaim: auditCreatedTickets });
   const svc: AuthServices = {
     version: AUTH_SERVICES_VERSION, grants, apiKeys: new ApiKeyStore(redis), audit, authorizer,
-    clientSessions: new ClientSessionStore({ redis }),
+    clientSessions,
     users, identity, loginSessions, setupTickets,
     approvals: new ValkeyApprovalStore({ redis }),
     securityPolicy: new SecurityPolicyStore({
@@ -123,6 +126,13 @@ export function getAuthServices(): AuthServices {
     }),
   };
   g[GLOBAL_KEY] = svc;
+  // D87 B1: a revoked login session (logout, sign out others, reset, disable) ends its shell screens.
+  // The event carries no ids, so the screens whose login session is gone are found by lookup.
+  OsEventBus.on('auth:sessionsRevoked', () => {
+    if ((globalThis as G)[GLOBAL_KEY] !== svc) return; // a replaced singleton's handler stays quiet
+    void clientSessions.endRevoked(async (sid) => (await redis().exists(loginSessionKey(sid))) > 0)
+      .catch((err) => console.warn(`[auth] ending revoked screens failed: ${(err as Error).message}`));
+  });
   void auditCreatedTickets().catch((err) => console.warn(`[auth] ticket audit failed: ${(err as Error).message}`));
   // I.2 / stream I: v1 → v2 owner record, the username index, the accounts' Linux identities (once, idempotent).
   void migrateIdentityRecords(svc);

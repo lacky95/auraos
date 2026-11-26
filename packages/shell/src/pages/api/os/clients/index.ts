@@ -3,6 +3,7 @@ import type { APIRoute } from 'astro';
 import * as core from '@aura/core';
 import { errorResponse, jsonResponse } from '../../../../lib/appResponse.js';
 import { readJson } from '../../../../lib/notificationCaller.js';
+import { authenticate } from '../../../../lib/auth.js';
 
 /**
  * Shell client sessions (phase 5) — the lock state of one shell screen
@@ -27,8 +28,18 @@ export const POST: APIRoute = async ({ request }) => {
   if (lock !== undefined && lock !== 'locked' && lock !== 'unlocked') return errorResponse("lock must be 'locked' or 'unlocked'", 400);
   const store = (core.getAuthServices() as { clientSessions?: core.ClientSessionStore }).clientSessions;
   if (!store) return errorResponse('client sessions are not available in the running core yet', 503);
+  // D87 B1: a screen opened by a signed-in user (its own login, not an app) is that user's,
+  // and ends with its login session. Anyone else registers an unbound screen, as before.
+  let owner: { userId?: string; loginSessionId?: string } = {};
   try {
-    const s = await store.register({ lock: (lock as 'locked' | 'unlocked' | undefined) ?? 'locked', ...(body['proof'] !== undefined ? { proof: body['proof'] } : {}) });
+    const p = await authenticate(request);
+    if (!(p instanceof Response) && p.kind === 'user' && !p.through) owner = { userId: p.userId, loginSessionId: p.sessionId };
+  } catch { /* unbound */ }
+  try {
+    const s = await store.register({
+      lock: (lock as 'locked' | 'unlocked' | undefined) ?? 'locked', ...owner,
+      ...(body['proof'] !== undefined ? { proof: body['proof'] } : {}),
+    });
     return jsonResponse(s, 201);
   } catch (err) {
     return errorResponse(`client session: ${(err as Error).message}`, 500);

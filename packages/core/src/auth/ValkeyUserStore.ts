@@ -264,6 +264,8 @@ export interface ValkeyUserStoreOptions {
   onPolicyTampered?: () => void;
   /** Stream I: a new member gets its Linux identity eagerly (`createUser`). */
   identity?: { ensureUser(userId: string): Promise<unknown> };
+  /** D87 B1: a disabled user's shell screens end with the account (`setDisabled`). */
+  clientSessions?: { endBy(sel: { userId: string }): Promise<number> };
 }
 
 export class ValkeyUserStore implements UserStore, UserProfiles {
@@ -277,6 +279,7 @@ export class ValkeyUserStore implements UserStore, UserProfiles {
   private readonly audit?: { record(entry: AuditInput): Promise<unknown> };
   private readonly onPolicyTampered?: () => void;
   private readonly identity?: { ensureUser(userId: string): Promise<unknown> };
+  private readonly clientSessions?: { endBy(sel: { userId: string }): Promise<number> };
   private keyErrorReported = false;
   /** Digest of the last bad record, so one tampering is reported once. */
   private reportedTamper: string | null = null;
@@ -295,6 +298,7 @@ export class ValkeyUserStore implements UserStore, UserProfiles {
     this.audit = opts.audit;
     this.onPolicyTampered = opts.onPolicyTampered;
     this.identity = opts.identity;
+    this.clientSessions = opts.clientSessions;
   }
 
   /** v2: the record key and every field, `externalIdentities` included. */
@@ -494,7 +498,7 @@ export class ValkeyUserStore implements UserStore, UserProfiles {
   /**
    * Disable or enable an account (D82). Disabling takes effect on the next
    * request everywhere (the per-request checks read the record) and revokes
-   * the user's login sessions. Deletes nothing. The owner is never disabled
+   * the user's login sessions and shell screens (D87 B1). Deletes nothing. The owner is never disabled
    * (break-glass). Audited by id.
    */
   async setDisabled(userId: string, disabled: boolean, by: ChangeAttribution): Promise<{ ok: true; changed: boolean; sessionsRevoked: number | null } | { ok: false; reason: 'no-user' | 'owner' | 'conflict' }> {
@@ -510,6 +514,7 @@ export class ValkeyUserStore implements UserStore, UserProfiles {
     if (disabled) {
       sessionsRevoked = null;
       try { sessionsRevoked = await this.sessions?.revokeByUser(userId) ?? null; } catch { /* reported below */ }
+      try { await this.clientSessions?.endBy({ userId }); } catch { /* the screens expire on their own */ }
     }
     await this.record({
       by, action: disabled ? IDENTITY_AUDIT_ACTIONS.userDisabled : IDENTITY_AUDIT_ACTIONS.userEnabled,

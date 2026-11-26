@@ -37,7 +37,7 @@ export function liveRouteDeps(): ApprovalRouteDeps {
       return edgeView({ peer, header: (name: string) => ctx.request.headers.get(name) }).scheme;
     },
     freshAuthRequiresHttps: () => freshAuthRequiresHttps(svc.securityPolicy),
-    lockOf: (sid) => svc.clientSessions.effectiveLock(sid),
+    lockOf: (sid, userId) => svc.clientSessions.effectiveLock(sid, { userId }),
     verifyPassword: async (username, password, rateLimitKey) => {
       const check = await svc.users.verifyPassword(username, password, { rateLimitKey });
       if (check.ok) return check.user.role === 'owner' && !check.user.disabled ? 'ok' : 'invalid';

@@ -532,3 +532,40 @@ test('A9: an approval binds the requesting instance\'s lifetime, so a reused id 
   const { lifetime: _l, ...unbound } = p;
   assert.equal(sameRequester(a, approvalRequester(unbound)), false);
 });
+
+// ── D87 B1: shell screens belong to the user that opened them ───────────────
+
+test('B1: a user\'s screen counts only for that user and ends with its login session or the account', async () => {
+  const { ClientSessionStore } = await import('../dist/auth/ClientSessions.js');
+  const screens = new ClientSessionStore({ redis: r, now, secret: Buffer.alloc(32, 7) });
+  const owner = await screens.register({ lock: 'unlocked', userId: 'default', loginSessionId: 'a'.repeat(32) });
+  const bob = await screens.register({ lock: 'unlocked', userId: 'uaaaaaaaaaaaaaaa', loginSessionId: 'b'.repeat(32) });
+  const anon = await screens.register({ lock: 'unlocked' });
+  assert.equal(await screens.effectiveLock(owner.sid, { userId: 'default' }), 'unlocked');
+  assert.equal(await screens.effectiveLock(bob.sid, { userId: 'default' }), 'locked', 'another user\'s sid is ignored');
+  assert.equal(await screens.effectiveLock(owner.sid), 'unlocked', 'unchanged for callers that name no user');
+  assert.equal(await screens.effectiveLock(anon.sid, { userId: 'default' }), 'unlocked', 'an unbound screen, as before');
+  // A revoke: bob's login session is gone, the owner's is live.
+  assert.equal(await screens.endRevoked(async (id) => id === 'a'.repeat(32)), 1);
+  assert.equal(await screens.get(bob.sid), null);
+  assert.ok(await screens.get(owner.sid));
+  assert.ok(await screens.get(anon.sid), 'an unbound screen is not touched');
+  assert.equal(await screens.endBy({ userId: 'default' }), 1);
+  assert.equal(await screens.get(owner.sid), null);
+  const again = await screens.register({ userId: 'default', loginSessionId: 'c'.repeat(32) });
+  assert.equal(await screens.endBy({ loginSessionId: 'c'.repeat(32) }), 1);
+  assert.equal(await screens.get(again.sid), null);
+});
+
+test('B1: disabling an account ends its screens', async () => {
+  const { ClientSessionStore } = await import('../dist/auth/ClientSessions.js');
+  const screens = new ClientSessionStore({ redis: r, now, secret: Buffer.alloc(32, 8) });
+  const { users } = accounts({ clientSessions: screens });
+  await users.createOwner({ username: 'lukas', password: PASSWORD });
+  const { user: bob } = await users.createUser({ username: 'bob' }, operatorAttribution());
+  const s = await screens.register({ userId: bob.id, loginSessionId: 'd'.repeat(32) });
+  const o = await screens.register({ userId: 'default', loginSessionId: 'e'.repeat(32) });
+  await users.setDisabled(bob.id, true, operatorAttribution());
+  assert.equal(await screens.get(s.sid), null);
+  assert.ok(await screens.get(o.sid));
+});
