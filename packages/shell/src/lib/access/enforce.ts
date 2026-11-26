@@ -9,10 +9,13 @@ import {
   combineCandidates, concreteRule, decideRule, isInternalCall, kvNamespace, liveDeps, resourceFor, withNetworkCaller,
   type CandidateRequest, type ObserverDeps,
 } from './observer.ts';
-import { candidateRules, handlersOf, manifestRoute, normalizeMethod, readsBody, refinementOf, type RuleCandidate } from './resolve.ts';
+import {
+  candidateRules, handlersOf, manifestRoute, normalizeMethod, readsBody, refinementOf,
+  type RouteHandlers, type RuleCandidate, type VariantFacts,
+} from './resolve.ts';
 import { ROUTE_ACCESS_MANIFEST } from './routeManifest.ts';
 import type {
-  AccessReason, AccessRule, DecideResult, PolicyOutcome, RequestSnapshot, RouteAccessManifest, VerifiedIdentity,
+  AccessReason, AccessRule, DecideResult, PolicyOutcome, RequestSnapshot, RouteAccessManifest, RouteMethod, VerifiedIdentity,
 } from './types.ts';
 
 /**
@@ -134,6 +137,39 @@ async function guardDecision(
   }
 }
 
+/**
+ * The candidates once the body is read, and the variant it settles (for the report:
+ * RequestSnapshot.bodyVariant). Unchanged, with no variant, when no rule reads the body.
+ */
+async function settleBody(
+  manifest: RouteAccessManifest, info: RouteHandlers, method: RouteMethod, facts: VariantFacts,
+  candidates: RuleCandidate[], request: Request,
+): Promise<{ candidates: RuleCandidate[]; bodyVariant?: string | null } | typeof TOO_LARGE> {
+  if (!readsBody(manifest, info, method)) return { candidates };
+  const body = await readJsonBody(request);
+  if (body === TOO_LARGE) return TOO_LARGE;
+  const settled = candidateRules(manifest, info, method, { ...facts, body });
+  const read = new Set((refinementOf(manifest, info.route)?.variants ?? []).filter((v) => v.match.on === 'body' && v.match.read).map((v) => v.id));
+  return { candidates: settled, bodyVariant: settled.find((c) => c.variant !== null && read.has(c.variant))?.variant ?? null };
+}
+
+/**
+ * The body variant a request settles, for the report of a request this gate never decides:
+ * one refused at the App Host gateway (enforceGateway). Undefined when no rule reads the body.
+ */
+export async function reportBodyVariant(
+  ctx: AccessContext, manifest: RouteAccessManifest = ROUTE_ACCESS_MANIFEST,
+): Promise<string | null | undefined> {
+  const route = manifestRoute(manifest, ctx.routePattern ?? '');
+  if (!route.startsWith('/api/')) return undefined;
+  const method = normalizeMethod(ctx.request.method);
+  const snapshot: RequestSnapshot = { ...snapshotOf(ctx), routePattern: route };
+  const info = { route, handlers: handlersOf(manifest, route) };
+  const facts = { query: new URLSearchParams(snapshot.search), namespace: kvNamespace(snapshot), params: snapshot.params };
+  const s = await settleBody(manifest, info, method, facts, [], ctx.request);
+  return s === TOO_LARGE ? undefined : s.bodyVariant;
+}
+
 export async function accessGate(
   ctx: AccessContext, deps: GateDeps, manifest: RouteAccessManifest = ROUTE_ACCESS_MANIFEST,
 ): Promise<GateResult> {
@@ -157,15 +193,10 @@ export async function accessGate(
   const identity: VerifiedIdentity = { principal: resolved.principal, via: resolved.via };
 
   // Before the gateway's early return too: the report counts the variant the body settles, never both (ambiguous).
-  let bodyVariant: string | null | undefined;
-  if (readsBody(manifest, info, method)) {
-    const body = await readJsonBody(ctx.request);
-    if (body === TOO_LARGE) return { refused: refused(413, 'body-too-large'), identity };
-    candidates = candidateRules(manifest, info, method, { ...facts, body });
-    const read = new Set((refinementOf(manifest, route)?.variants ?? []).filter((v) => v.match.on === 'body' && v.match.read).map((v) => v.id));
-    bodyVariant = candidates.find((c) => c.variant !== null && read.has(c.variant))?.variant ?? null;
-  }
-  const settled = bodyVariant === undefined ? {} : { bodyVariant };
+  const read = await settleBody(manifest, info, method, facts, candidates, ctx.request);
+  if (read === TOO_LARGE) return { refused: refused(413, 'body-too-large'), identity };
+  candidates = read.candidates;
+  const settled = read.bodyVariant === undefined ? {} : { bodyVariant: read.bodyVariant };
   // Decided at the gateway, in every mode; the route still gets its caller.
   if (enforcing && gateway) return { refused: null, identity, ...settled };
 

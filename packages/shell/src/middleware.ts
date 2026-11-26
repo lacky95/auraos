@@ -212,6 +212,13 @@ export const onRequest = defineMiddleware(async (ctx, next) => {
       refused = new Response(JSON.stringify({ error: 'gateway-denied' }), { status: 403, headers: { 'content-type': 'application/json' } });
     }
     if (refused) {
+      // The report counts the variant the body settles (the gate below never sees this request).
+      if (access) {
+        try {
+          const v = await (await import('./lib/access/enforce.ts')).reportBodyVariant(ctx);
+          if (v !== undefined) access.bodyVariant = v;
+        } catch { /* the report only */ }
+      }
       reportAccess(access, refused.status);
       return refused;
     }

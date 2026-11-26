@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { reduce, parseEventBody, recordEvent, agentFor, forgetAgent, subscribeAgents } from '../src/agent-state.ts';
 import {
-  HOOK_MARK, HOOK_SCRIPT, refreshHookScript, addClaudeHooks, removeClaudeHooks, claudeHooksInstalled,
+  HOOK_MARK, HOOK_HEADER, HOOK_SCRIPT, refreshHookScript, addClaudeHooks, removeClaudeHooks, claudeHooksInstalled,
   addCodexNotify, removeCodexNotify, codexNotifyInstalled, installHooks, uninstallHooks, hookStatus,
 } from '../src/agent-hooks.ts';
 
@@ -109,10 +109,35 @@ test('refreshHookScript: brings an older installed script up to date, never inst
   assert.equal(refreshHookScript(paths), false, 'not installed: nothing written');
   installHooks(paths);
   assert.equal(refreshHookScript(paths), false, 'current: untouched');
-  writeFileSync(paths.script, '#!/usr/bin/env bash\n# ' + HOOK_MARK + ' old version\n');
+  // The script installed before D89 (a742c7c~1), verbatim: no token, and not its own path in the text.
+  writeFileSync(paths.script, PRE_D89_SCRIPT);
   assert.equal(refreshHookScript(paths), true);
   assert.equal(readFileSync(paths.script, 'utf-8'), HOOK_SCRIPT);
+  assert.ok(HOOK_SCRIPT.startsWith(`#!/usr/bin/env bash\n${HOOK_HEADER}`));
+  writeFileSync(paths.script, '#!/usr/bin/env bash\n# someone else\'s hook\n');
+  assert.equal(refreshHookScript(paths), false, 'not ours: untouched');
 });
+
+const PRE_D89_SCRIPT = `#!/usr/bin/env bash
+# AuraOS terminal agent hook (installed by com.aura.terminal, see agent-hooks.ts).
+# Reports a coding agent's hook event to the terminal session it runs in.
+#   Claude Code: agent-hook.sh claude      (event JSON on stdin)
+#   Codex:       agent-hook.sh codex JSON  (notify passes the JSON as an argument)
+# Never blocks the agent for long: 2s cap, always exit 0. The post runs in the
+# foreground on purpose: a backgrounded pipeline outlives this script, gets
+# reparented to the container's PID 1 (node, which never reaps) and stays a
+# zombie until the 1035-pid cap is hit.
+src="\${1:-claude}"
+if [ "$src" = codex ]; then payload="\${2:-}"; else payload="$(cat)"; fi
+[ -n "\${AURA_TERM_SESSION:-}" ] && [ -n "$payload" ] || exit 0
+command -v curl >/dev/null 2>&1 || exit 0
+inst="\${AURA_TERM_SESSION%%#*}"
+base="\${OS_API_BASE:-http://localhost:3000}"
+printf '{"session":"%s","source":"%s","payload":%s}' "$AURA_TERM_SESSION" "$src" "$payload" \\
+  | curl -s -m 2 -o /dev/null -X POST -H 'content-type: application/json' --data-binary @- \\
+      "$base/api/proxy/$inst/api/sessions/events" >/dev/null 2>&1
+exit 0
+`;
 
 test('hook script posts the event and never blocks or fails', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'agent-hook-'));

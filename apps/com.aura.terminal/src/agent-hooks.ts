@@ -25,13 +25,15 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 export const HOOK_MARK = 'aura-terminal/agent-hook.sh';
+/** The script's first comment line, the same in every version: how an installed script is known as ours. */
+export const HOOK_HEADER = '# AuraOS terminal agent hook (installed by com.aura.terminal';
 
 export const CLAUDE_EVENTS = [
   'SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Notification', 'Stop', 'SessionEnd',
 ] as const;
 
 export const HOOK_SCRIPT = `#!/usr/bin/env bash
-# AuraOS terminal agent hook (installed by com.aura.terminal, see agent-hooks.ts).
+${HOOK_HEADER}, see agent-hooks.ts).
 # Reports a coding agent's hook event to the terminal session it runs in.
 #   Claude Code: agent-hook.sh claude      (event JSON on stdin)
 #   Codex:       agent-hook.sh codex JSON  (notify passes the JSON as an argument)
@@ -186,7 +188,8 @@ export function installHooks(paths = defaultPaths()): HookStatus {
 export function refreshHookScript(paths = defaultPaths()): boolean {
   if (!existsSync(paths.script)) return false;
   const current = readText(paths.script);
-  if (current === HOOK_SCRIPT || !current.includes(HOOK_MARK)) return false;
+  // By its header: the script's own path (HOOK_MARK) is not in its text, so older versions never matched it.
+  if (current === HOOK_SCRIPT || !current.includes(HOOK_HEADER)) return false;
   writeFileSync(paths.script, HOOK_SCRIPT);
   chmodSync(paths.script, 0o755);
   return true;

@@ -22,7 +22,7 @@ import { signGatewayClaim, signOwnerSsrClaim } from '../server/gateway-identity.
 import { stripShellCredentials } from '../server/shell-credentials.mjs';
 import { ACCESS_MODE_ENV } from '../server/access-mode.mjs';
 import { createDecide } from '../src/lib/access/decide.ts';
-import { accessGate, type GateDeps } from '../src/lib/access/enforce.ts';
+import { accessGate, reportBodyVariant, type GateDeps } from '../src/lib/access/enforce.ts';
 import { enforceGateway } from '../src/lib/access/gatewayCaller.ts';
 import { isTrustedOwnerAgent, type GatewayOwnerDeps } from '../src/lib/access/identify.ts';
 import type { ObserverManager } from '../src/lib/access/observer.ts';
@@ -428,6 +428,12 @@ test('enforce: apps send intents; only the System Terminal and the owner carry a
   // A gateway call is decided at the gateway; the report still gets the settled variant (else: ambiguous-rule).
   const viaGateway = await accessGate(ctx({ ...view, headers: gatewayClaim(COUNTER, 'POST', '/api/intents/start') }), gateDeps());
   assert.deepEqual([viaGateway.refused, viaGateway.bodyVariant], [null, null]);
+  // One refused at the gateway never reaches the gate: the middleware hands the report its variant (reportBodyVariant).
+  const counterCommand = { ...command, headers: gatewayClaim(COUNTER, 'POST', '/api/intents/start') };
+  assert.equal(await middleware(counterCommand), '403 gateway-denied');
+  assert.equal(await reportBodyVariant(ctx(counterCommand)), 'terminal-command');
+  assert.equal(await reportBodyVariant(ctx({ ...view, headers: gatewayClaim(COUNTER, 'POST', '/api/intents/start') })), null);
+  assert.equal(await reportBodyVariant(ctx({ path: '/api/apps', route: '/api/apps', headers: gatewayClaim(COUNTER, 'GET', '/api/apps') })), undefined);
 });
 
 test('enforce: TerminalX\'s agent watch by its list grant; another app none, in report mode too', async () => {
