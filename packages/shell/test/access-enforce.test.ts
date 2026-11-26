@@ -547,7 +547,7 @@ test('every .mjs surface asks the one surface gate', () => {
   assert.match(attach, /subject: 'socketio-os-events'[^\n]*identity \}\),\n\s*surfaceGate\(\{ subject: 'socketio-kv'/);
   const hosts = src('app-hosts.mjs');
   // I.2: both through hostGate, which decides a member's session on the slot's instance.
-  assert.match(hosts, /async function hostGate\(route, req, subject, method\) \{[\s\S]*?return surfaceGate\(\{\n\s*subject, method,/);
+  assert.match(hosts, /async function hostGate\(route, req, subject, method, t = null\) \{[\s\S]*?return surfaceGate\(\{\n\s*subject, method,/);
   assert.match(hosts, /hostGate\(route, req, 'app-hosts', req\.method\)/);
   assert.match(hosts, /hostGate\(route, req, mux \? 'sse-mux' : 'app-hosts', 'UPGRADE'\)/);
   assert.match(hosts, /surfaceGate\(\{ subject: 'vite-dev-server'/);

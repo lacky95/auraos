@@ -12,7 +12,7 @@
  */
 import { createAppHostRouter } from './app-hosts.mjs';
 import { loadAppHostServices } from './app-host-auth.mjs';
-import { terminalEmbedAncestors, watchTerminalInstances } from './terminal-embed.mjs';
+import { SESSION_HOST_APPS, terminalEmbedAncestors, watchTerminalInstances } from './terminal-embed.mjs';
 import { buildAppHost } from '@aura/core/host-rules';
 import { originOf, plainProxyPath } from './host-policy.mjs';
 import {
@@ -185,23 +185,28 @@ export function attachWsProxy(httpServer) {
       reported = true;
       reportSurface({ subject: subject(), method: 'UPGRADE', appId: chosenAppId, status, identity });
     };
-    // I.2 (D82): a member's upgrade goes to its own instance only (the gate
-    // below decides on the chosen instance; a bare app id picks the member's).
+    // I.2 (D82): a member's upgrade goes to its own instance only, and (D69) a
+    // session host's (the System Terminal's) to the caller's own: the gate below
+    // decides on the chosen instance; a bare app id picks the caller's.
     const caller = await Promise.resolve(identity?.verified ?? null).catch(() => null);
     const memberId = caller?.principal?.kind === 'user' && caller.principal.role !== 'owner' ? caller.principal.userId : null;
-    const mine = (i) => memberId === null || instanceOwnerOf(i.instanceId) === memberId;
+    const callerUser = typeof caller?.principal?.userId === 'string' && caller.principal.userId ? caller.principal.userId : null;
+    const mine = (i, appId) => {
+      const user = SESSION_HOST_APPS.has(appId) ? memberId ?? callerUser : memberId;
+      return user === null || instanceOwnerOf(i.instanceId) === user;
+    };
     // Pick the live instance for `instanceId` (an instance id, or an app id).
     const resolve = (apps) => {
       let chosen = null;
       // Pass 1: direct instanceId match.
       for (const a of apps) {
-        chosen = a.instances.find((i) => i.instanceId === instanceId && mine(i));
+        chosen = a.instances.find((i) => i.instanceId === instanceId && mine(i, a.manifest.id));
         if (chosen) break;
       }
       // Pass 2: appId match → prefer non-pool, resumed/started.
       if (!chosen) {
         const app = apps.find((a) => a.manifest.id === instanceId);
-        const candidates = (app?.instances ?? []).filter(mine);
+        const candidates = (app?.instances ?? []).filter((i) => mine(i, app.manifest.id));
         dbg('WS-PROXY', 'candidates', JSON.stringify(candidates.map((i) => ({ id: i.instanceId, port: i.port, state: i.state, inPool: i.inPool, sandbox: i.sandbox }))));
         chosen = candidates.find((i) => !i.inPool && !i.preview && (i.state === 'resumed' || i.state === 'started'))
               ?? candidates.find((i) => !i.preview && (i.state === 'resumed' || i.state === 'started'))

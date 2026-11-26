@@ -98,7 +98,8 @@ test('D82: the App Host, its event streams and WebSocket upgrades take the same 
   // The router decides a member's session on the slot's instance; the WS proxy on the chosen one.
   const src = (f: string) => readFileSync(new URL(`../server/${f}`, import.meta.url), 'utf8');
   assert.match(src('app-hosts.mjs'), /role !== 'owner' && !instanceId\) return false/);
-  assert.match(src('attach.mjs'), /\.\.\.\(memberId \? \{ instanceId: chosenInstanceId \} : \{\}\)/);
+  assert.match(src('attach.mjs'), /appId: chosenAppId, instanceId: chosenInstanceId, identity/);
+  assert.match(src('attach.mjs'), /SESSION_HOST_APPS\.has\(appId\) \? memberId \?\? callerUser : memberId/);
 });
 
 test('D82: a member signs itself out and reads its own session; it reaches no owner route', async () => {
@@ -182,4 +183,21 @@ test('D82 (C8): the desktop page lists only the signed-in user\'s windows; the h
   assert.match(handoff, /identity\.role !== 'owner' && !\(await memberMayOpen\(/);
   assert.match(handoff, /instance\.owner !== userId\) return false/);
   assert.match(handoff, /grants\.get\(\{ kind: 'user', id: userId \}, core\.appUsePermission\(installationId\)\)/);
+});
+
+test('5-main integration (I.2 + D69): a member\'s app.use reaches its own Terminal past the owner-agent block, nothing else does', async () => {
+  const held = new Set<string>(['user:' + MEMBER + '|app.use:inst-term', 'user:' + MEMBER + '|app.use:inst-shelld']);
+  const grants = { get: async (s: { kind: string; id: string }, p: string) => (held.has(`${s.kind}:${s.id}|${p}`) ? { permission: p } : null) } as unknown as GrantStore;
+  const d = createDecide({
+    authorizer: new Authorizer({ grants, declared: () => [], appScope: () => 'system' }),
+    instanceOwner: (id) => INSTANCES[id] ?? null,
+    installationOf: async (appId) => ({ 'com.aura.terminal': 'inst-term', 'com.aura.aurashelld': 'inst-shelld' } as Record<string, string>)[appId] ?? null,
+  });
+  const proxy = route('/api/proxy/[id]/[...path]', 'GET');
+  assert.deepEqual(await d(input(member, proxy, { appId: 'com.aura.terminal', instanceId: 'com.aura.terminal-2' })), { outcome: 'allow', reason: 'app-permission' });
+  assert.equal((await d(input(member, proxy, { appId: 'com.aura.terminal', instanceId: 'com.aura.terminal-1' }))).outcome, 'deny', 'the owner\'s Terminal');
+  // aurashelld is an owner agent but no session host: the owner level only, whatever a member holds.
+  assert.equal((await d(input(member, proxy, { appId: 'com.aura.aurashelld' }))).outcome, 'deny');
+  // Another app's instance token with an app-permission grant still never reaches a Terminal upstream (D89 B6).
+  assert.equal((await d(input(inst('io.ex.app', { userId: MEMBER }), proxy, { appId: 'com.aura.terminal', instanceId: 'com.aura.terminal-2' }, 'instance-token'))).outcome, 'deny');
 });

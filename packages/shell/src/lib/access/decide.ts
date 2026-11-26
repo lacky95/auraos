@@ -28,7 +28,9 @@ import type {
  * D89 B6: an address is never a principal. A call through `/api/proxy` is
  * decided on its credential like any other (the `proxy-upstream` rules),
  * and an owner agent's upstream (OWNER_AGENT_APPS) takes the `owner` level
- * only, never `app-permission`.
+ * only, never `app-permission`; the one exception is a member's own
+ * `memberPermissions` grant to its own session host (I.2 + D69): its
+ * Terminal, whose owner `sessionHostReachable` checks next.
  *
  * D69 (stream T): a System Terminal instance is ONE user's session host.
  * Whoever reaches its upstream (its PTY, MCP, session API: `proxy-upstream`)
@@ -228,7 +230,7 @@ export async function targetPermissionsHeld(
 
 async function matchLevel(
   input: DecideInput, rule: AccessRule, deps: DecideDeps,
-): Promise<{ granted: AccessReason | null; failure: AccessReason }> {
+): Promise<{ granted: AccessReason | null; failure: AccessReason; member?: true }> {
   const p = input.principal;
   let failure: AccessReason = p.kind === 'anonymous' ? 'unauthenticated' : 'wrong-principal';
 
@@ -249,7 +251,7 @@ async function matchLevel(
   // auto-grant never counts for a member, and only `user` grants exist for one.
   if (rule.memberPermissions && isMember(p)) {
     const why = await memberHolds(deps, p, rule.memberPermissions, input.resource);
-    if (why === null) return { granted: 'app-permission', failure };
+    if (why === null) return { granted: 'app-permission', failure, member: true };
     failure = why;
   }
 
@@ -287,10 +289,12 @@ async function evaluate(input: DecideInput, deps: DecideDeps): Promise<DecideRes
   const matched = await matchLevel(input, rule, deps);
   let granted = matched.granted;
   // An owner agent's upstream (the Terminal's PTY, MCP and sessions, aurashelld's
-  // MCP; H2, D89 B3/B6): the owner level only, or (D69) its user's own session host.
+  // MCP; H2, D89 B3/B6): the owner level only, or (D69) its user's own session host,
+  // or (I.2 + D69) a member's own memberPermissions grant to a session host (its own
+  // Terminal: memberHolds checked a named instance, sessionHostReachable checks it again).
   if (rule.target === 'proxy-upstream' && resource.appId && OWNER_AGENT_APPS.has(resource.appId) && granted !== 'owner') {
     if (ownSessionHost(principal, resource)) granted = 'own-session';
-    else return deny(granted ? 'wrong-target' : matched.failure);
+    else if (!(matched.member && SESSION_HOST_APPS.has(resource.appId))) return deny(granted ? 'wrong-target' : matched.failure);
   }
   if (!granted) return deny(matched.failure);
   if (!sessionHostReachable(principal, rule, resource, deps)) return deny('not-session-owner');

@@ -352,18 +352,22 @@ export function createAppHostRouter({
   }
 
   /**
-   * The surface gate of an App Host request or upgrade. I.2 (D82): a member's
-   * session is decided on the instance its slot holds now, so it reaches only
-   * its own (a slot reassigned to another user's instance refuses it); a
-   * member's slot without an instance is refused (the member starts its own
-   * from the desktop, `/api/apps/<id>/start`).
+   * The surface gate of an App Host request or upgrade, decided on the
+   * instance the slot holds (`t`, the live target once known; else the slot's
+   * record). I.2 (D82): a member's session reaches only its own instance (a
+   * slot reassigned to another user's instance refuses it); a member's slot
+   * without an instance is refused (the member starts its own from the
+   * desktop, `/api/apps/<id>/start`). D69 (stream T): a System Terminal
+   * instance is one user's session host, so the owner's session is decided on
+   * it too (decide.ts `sessionHostReachable`).
    */
-  async function hostGate(route, req, subject, method) {
+  async function hostGate(route, req, subject, method, t = null) {
     const role = verifiedSessions.get(req)?.role;
-    const instanceId = route.slot?.instanceId;
+    const instanceId = t?.instanceId ?? route.slot?.instanceId;
     if (role !== 'owner' && !instanceId) return false;
+    const named = instanceId && (role !== 'owner' || SESSION_HOST_APPS.has(route.record.appId));
     return surfaceGate({
-      subject, method, appId: route.record.appId, ...(role !== 'owner' ? { instanceId } : {}), identity: hostIdentity(route, req),
+      subject, method, appId: route.record.appId, ...(named ? { instanceId } : {}), identity: hostIdentity(route, req),
     });
   }
 
@@ -402,17 +406,6 @@ export function createAppHostRouter({
       appId: route.record.appId, installationId: route.record.installationId, instanceId: t.instanceId,
       userId: session.userId, sid: session.sid,
     });
-  }
-
-  /**
-   * D69 (stream T): a System Terminal instance is one user's session host.
-   * Once the slot's instance is known, the App Host rule is decided again on
-   * that instance, so the access decision checks it belongs to the user whose
-   * session this is (decide.ts `sessionHostReachable`). Any other app: yes.
-   */
-  async function sessionHostGate(route, req, method, t) {
-    if (!SESSION_HOST_APPS.has(t.appId)) return true;
-    return surfaceGate({ subject: 'app-hosts', method, appId: t.appId, instanceId: t.instanceId, identity: hostIdentity(route, req) });
   }
 
   /** Asks for a start, once at a time. `start()` claims the slot in the lifecycle. */
@@ -556,7 +549,10 @@ export function createAppHostRouter({
     if (t.missing) return page(404, 'No app here', 'This app has no page at this address.');
     if (t.notReady) return page(503, `${t.appName} is not ready`, 'No running instance holds this address. Open the app again from the AuraOS desktop.');
     if (t.starting) return page(503, `Starting ${t.appName}…`, 'This page reloads by itself when it is up.', { refresh: 2 });
-    if (!(await sessionHostGate(route, req, req.method, t))) return page(403, 'Request refused', 'This Terminal belongs to another user.');
+    // D69: a session host's live target may be newer than the slot the gate saw (a cold start): decide again on it.
+    if (SESSION_HOST_APPS.has(t.appId) && !(await hostGate(route, req, 'app-hosts', req.method, t))) {
+      return page(403, 'Request refused', 'This Terminal belongs to another user.');
+    }
     const headers = appRequestHeaders(req, 'app-hosts-http');
     for (const [k, v] of Object.entries({ ...forwardedHeaders(req, edge), ...identityHeaders(t), ...activityHeaders(req.url, t.instanceId), [APP_HOST_ROUTE_HEADER]: 'host' })) headers.push(k, v);
     const ownerSsr = await ownerSsrHeader(route, req, session, t);
@@ -615,7 +611,7 @@ export function createAppHostRouter({
     } catch { return fail(503, 'Service Unavailable'); }
     if (t.missing) return fail(404, 'Not Found');
     if (t.starting || t.notReady) return fail(503, 'Service Unavailable');
-    if (!(await sessionHostGate(route, req, 'UPGRADE', t))) return fail(403, 'Forbidden');
+    if (SESSION_HOST_APPS.has(t.appId) && !(await hostGate(route, req, 'app-hosts', 'UPGRADE', t))) return fail(403, 'Forbidden');
     const extra = { ...forwardedHeaders(req, edge), ...identityHeaders(t), ...activityHeaders(req.url, t.instanceId), [APP_HOST_ROUTE_HEADER]: 'host' };
     // D89 B4: the Terminal's PTY on its App Host gets the shell's relay claim for this upgrade.
     const relay = relayClaimOf({ appId: t.appId, instanceId: t.instanceId, method: req.method, path: url, session });
