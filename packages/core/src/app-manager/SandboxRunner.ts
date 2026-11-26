@@ -75,6 +75,12 @@ export interface SandboxRunner {
    * Returns null if the instance is unknown.
    */
   getHost(instanceId: string): string | null;
+  /**
+   * Optional — every network address of the instance's sandbox, so the shell
+   * can tell which instance a tokenless caller is on any network it shares
+   * with it (D28). Runners without addresses of their own omit it.
+   */
+  addresses?(instanceId: string): string[];
   /** True if the runner still tracks the instance as alive. */
   isRunning(instanceId: string): boolean;
   /** Every pid the runner currently owns (used by the reconciler's orphan reaper). */
@@ -108,8 +114,12 @@ export interface SandboxRunner {
     tokenNonce?: string;
     /** `aura.owner` label — absent on containers from before owners and on pool members. */
     ownerLabel?: string;
-    /** The container's own address on the shared network (lifecycle calls go there). */
+    /** The container's own address where the shell dials it: the shared network, or a Terminal's private one (lifecycle calls go there). */
     address?:   string;
+    /** Its addresses on every network it is on (D28 network identity). */
+    addresses?: string[];
+    /** The shell dials `address` rather than the container name (a Terminal, D58). */
+    dialByAddress?: boolean;
     /** `AURA_LIFECYCLE_TOKEN` from its env — absent on containers from before the token. */
     lifecycleToken?: string;
     /** `aura.preview` label: a preview instance's workspace (Track P). */
@@ -123,6 +133,8 @@ export interface SandboxRunner {
     hostname:   string;
     pid:        number;
     address?:   string;
+    addresses?: string[];
+    dialByAddress?: boolean;
     lifecycleToken?: string;
   }): void;
   /**

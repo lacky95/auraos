@@ -944,7 +944,7 @@ test('WS proxy strips shell credentials and keeps app cookies', { timeout: 10_00
     res.setHeader('content-type', 'application/json');
     res.end(JSON.stringify([{
       manifest: { id: 'com.a.app' },
-      instances: [{ instanceId: 'com.a.app-1', appId: 'com.a.app', port, state: 'resumed', sandbox: 'proot', inPool: false }],
+      instances: [{ instanceId: 'com.a.app-1', appId: 'com.a.app', port, state: 'resumed', sandbox: 'proot', inPool: false, upstreamHost: '127.0.0.1' }],
     }]));
   });
   attachWsProxy(shell);

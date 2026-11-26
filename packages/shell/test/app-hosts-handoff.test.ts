@@ -51,7 +51,7 @@ const slotOf = (slot: number, label: string, instanceId: string | null) => ({ sl
 const record = (slots: any[]) => ({
   installationId: INSTALL, appId: 'io.acme.notes', instanceScope: scope, baseName: 'notes1234', state: 'active', slots, createdAt: 1,
 });
-const live = (instanceId: string, extra = {}) => ({ instanceId, port: appPort, state: 'resumed', inPool: false, sandbox: 'proot', ...extra });
+const live = (instanceId: string, extra = {}) => ({ instanceId, port: appPort, state: 'resumed', inPool: false, sandbox: 'proot', upstreamHost: '127.0.0.1', ...extra });
 
 let labels: Record<string, any>;
 let apps: any[];
@@ -692,6 +692,16 @@ test('a higher slot routes only when assigned and never starts', async () => {
   labels[label] = { status: 'active', record: record([slotOf(2, label, 'io.acme.notes-2')]), slot: slotOf(2, label, 'io.acme.notes-2') };
   apps[0].instances = [live('io.acme.notes-2')];
   assert.equal((await get(`${label}--${BASE}`, '/', { cookie })).status, 200);
+});
+
+test('the router dials the host the runtime names (upstreamHost, D58), and none means not routable', async () => {
+  const good = await signIn();
+  apps[0].instances = [live('io.acme.notes', { upstreamHost: null })];
+  const before = seen.length;
+  assert.equal((await get(HOST, '/', { cookie: good })).status, 503);
+  assert.equal(seen.length, before, 'nothing reached the app');
+  apps[0].instances = [live('io.acme.notes')];
+  assert.equal((await get(HOST, '/', { cookie: good })).status, 200);
 });
 
 test('a service-only app gets no UI host', async () => {

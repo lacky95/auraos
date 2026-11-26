@@ -9,12 +9,16 @@ const { server } = startServer();
 const http = server.server;
 const KEY = Symbol.for('aura.terminal.getPtyWss');
 const port = process.env.PORT ?? process.env.APP_PORT ?? '4001';
+// The address the server listens on (core provisioning.ts LISTEN_HOST_SHELL):
+// only the private Terminal network's (D58), so loopback reaches nothing.
+const listenHost = !process.env.HOST || process.env.HOST === '0.0.0.0' ? '127.0.0.1' : process.env.HOST;
+const selfUrl = `http://${listenHost.includes(':') ? `[${listenHost}]` : listenHost}:${port}`;
 
 // Load + arm the bundled PTY module (src/pages/api/pty-ready.ts registers KEY).
 let ready = null;
 function ensurePty() {
   if (globalThis[KEY]) return Promise.resolve(globalThis[KEY]);
-  ready ??= fetch(`http://127.0.0.1:${port}/api/pty-ready`)
+  ready ??= fetch(`${selfUrl}/api/pty-ready`)
     .then(() => globalThis[KEY])
     .finally(() => { ready = null; });
   return ready;

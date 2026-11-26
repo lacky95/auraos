@@ -146,11 +146,19 @@ test('listenerOwnership: none, own (incl. a grandchild), foreign, unknown', asyn
 test('inspectSpawned binds to the created container: its pid and its own address on the shared network', () => {
   const calls = [];
   const ok = inspectSpawned('abc123', (args) => { calls.push(args); return '4242 {"aura-net":{"IPAddress":"172.18.0.9"},"other":{"IPAddress":"10.1.1.1"}}\n'; });
-  assert.deepEqual(ok, { pid: 4242, address: '172.18.0.9' });
+  assert.deepEqual(ok, { pid: 4242, address: '172.18.0.9', addresses: ['172.18.0.9', '10.1.1.1'] });
   assert.equal(calls[0].at(-1), 'abc123', 'inspected by the id docker run returned, not the name');
-  assert.deepEqual(inspectSpawned('x', () => '7 {"bridge":{"IPAddress":"172.17.0.2"}}'), { pid: 7, address: null });
-  assert.deepEqual(inspectSpawned('x', () => '7 {"aura-net":{"IPAddress":""}}'), { pid: 7, address: null });
-  assert.deepEqual(inspectSpawned('x', () => { throw new Error('gone'); }), { pid: 0, address: null });
+  assert.deepEqual(inspectSpawned('x', () => '7 {"bridge":{"IPAddress":"172.17.0.2"}}'), { pid: 7, address: null, addresses: ['172.17.0.2'] });
+  assert.deepEqual(inspectSpawned('x', () => '7 {"aura-net":{"IPAddress":""}}'), { pid: 7, address: null, addresses: [] });
+  assert.deepEqual(inspectSpawned('x', () => { throw new Error('gone'); }), { pid: 0, address: null, addresses: [] });
+});
+
+test('inspectSpawned binds a System Terminal to its private network (D58)', () => {
+  const out = '9 {"aura-net":{"IPAddress":"172.18.0.9"},"aura-term-default":{"IPAddress":"172.30.0.3"}}';
+  assert.deepEqual(inspectSpawned('t', () => out, 'aura-term-default'),
+    { pid: 9, address: '172.30.0.3', addresses: ['172.18.0.9', '172.30.0.3'] });
+  // Not on that network: no address, so no lifecycle token and no start.
+  assert.equal(inspectSpawned('t', () => '9 {"aura-net":{"IPAddress":"172.18.0.9"}}', 'aura-term-default').address, null);
 });
 
 // ── ProotRunner end to end (not prooted: AURA_USE_PROOT is unset in tests) ──

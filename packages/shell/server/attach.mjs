@@ -210,12 +210,11 @@ export function attachWsProxy(httpServer) {
       if (!chosen) chosen = resolve(await appsListCached({ fresh: true }));
       dbg('WS-PROXY', 'resolve', `${Date.now() - tLoadStart}ms`);
       if (chosen) {
-        // PRoot instances use 127.0.0.1; container-mode instances
-        // expose a docker hostname like 'aura-com.aura.terminal-3'.
-        // Mirror the AppManager.getUpstreamUrl rule inline here so the
-        // proxy doesn't need the singleton at all.
-        host = chosen.sandbox === 'container' ? `aura-${chosen.instanceId}` : '127.0.0.1';
-        port = chosen.port;
+        // AppManager.getUpstreamUrl's host, carried in the list
+        // (`upstreamHost`): 127.0.0.1 for PRoot, the container name, or a
+        // System Terminal's private address (D58). None: no route.
+        host = chosen.upstreamHost ?? null;
+        port = host ? chosen.port : null;
         chosenInstanceId = chosen.instanceId;
         chosenAppId = chosen.appId ?? null;
       }

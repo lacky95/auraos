@@ -9,7 +9,8 @@ import { MY_TOOLS_PATH, currentToolsMode, provisionAllowlist, toolchainMirrorBin
 import { containerHomeEnv, containerHomeMount } from './spawn/homeArgs.js';
 import { containerContextEnv, containerContextMounts } from './spawn/contextArgs.js';
 import { containerSocketArgs } from './spawn/socketArgs.js';
-import { containerNetworkArgs } from './spawn/networkArgs.js';
+import { containerNetworkArgs, containerNetworkEnv, terminalNetworkUser } from './spawn/networkArgs.js';
+import { TERM_NETWORK_CONTAINER_LABEL, TermNetworks, type TermNetwork } from './TermNetworks.js';
 import { containerIdentityArgs } from './spawn/identityArgs.js';
 import type { RuntimeCapabilities } from '../runtimes/types.js';
 // Value import, but MountManager imports ContainerRunner type-only, so there
@@ -175,20 +176,31 @@ async function dockerInspectState(name: string): Promise<ContainerNameState | nu
 }
 
 /**
- * The pid and shared-network address of the container `docker run` just
- * created, by its id (never by name). `address` is null when docker reports
- * none — the caller then can't bind lifecycle calls to it.
+ * The pid and addresses of the container `docker run` just created, by its id
+ * (never by name). `address` is its address on `network` (the shared one, or
+ * a Terminal's private one: where the shell dials it); null when docker
+ * reports none — the caller then can't bind lifecycle calls to it.
+ * `addresses` are its addresses on every network (network identity, D28).
  */
-export function inspectSpawned(containerId: string, run: (args: string[]) => string = dockerOut): { pid: number; address: string | null } {
+export function inspectSpawned(
+  containerId: string, run: (args: string[]) => string = dockerOut, network: string = SHARED_NETWORK,
+): { pid: number; address: string | null; addresses: string[] } {
   try {
     const out = run(['inspect', '-f', '{{.State.Pid}} {{json .NetworkSettings.Networks}}', containerId]).trim();
     const space = out.indexOf(' ');
     const pid = parseInt(out.slice(0, space), 10) || 0;
-    const networks = JSON.parse(out.slice(space + 1)) as Record<string, { IPAddress?: string }> | null;
-    return { pid, address: networks?.[SHARED_NETWORK]?.IPAddress || null };
+    const networks = JSON.parse(out.slice(space + 1)) as DockerNetworks | null;
+    return { pid, address: networks?.[network]?.IPAddress || null, addresses: networkAddresses(networks) };
   } catch {
-    return { pid: 0, address: null };
+    return { pid: 0, address: null, addresses: [] };
   }
+}
+
+type DockerNetworks = Record<string, { IPAddress?: string; GlobalIPv6Address?: string }>;
+
+/** Every address a container has, over all its networks. */
+function networkAddresses(networks: DockerNetworks | null | undefined): string[] {
+  return Object.values(networks ?? {}).flatMap((n) => [n?.IPAddress, n?.GlobalIPv6Address]).filter((a): a is string => !!a);
 }
 
 function dockerOut(args: string[]): string {
@@ -217,6 +229,14 @@ interface TrackedContainer {
    * then gets lifecycle calls by name and without the token.
    */
   address: string | null;
+  /**
+   * The shell dials `address`, not the name: a Terminal on its private
+   * network (D58), whose name also resolves to its shared-network address,
+   * where nothing of its own listens.
+   */
+  dialByAddress: boolean;
+  /** Its addresses on every network it is on (network identity, D28). */
+  addresses: string[];
   /** This start's lifecycle secret (`AURA_LIFECYCLE_TOKEN` in the container's env). */
   lifecycleToken?: string;
   /** Health identity and runtime-check result, once healthy (not for adopted containers). */
@@ -278,6 +298,8 @@ export class ContainerRunner implements SandboxRunner {
   private contextStore: ContextStore;
   /** OS-managed shared volumes, mounted into every container. */
   private volumeStore: VolumeStore;
+  /** The per-user private Terminal networks (D58). */
+  private termNetworks: TermNetworks;
 
   /**
    * Whether the survivors of the last shell lifetime are still unknown: the
@@ -311,6 +333,9 @@ export class ContainerRunner implements SandboxRunner {
     void opts.baseRootfs; // unused — containers bring their own rootfs via the image
     this.ensureNetwork();
     this.resolveVolumeNames();
+    this.termNetworks = new TermNetworks(() => this.getOwnContainerId());
+    // Before adoption: a surviving Terminal is reachable only there.
+    this.termNetworks.joinExisting();
   }
 
   /**
@@ -435,7 +460,12 @@ export class ContainerRunner implements SandboxRunner {
     await this.volumeStore.ensureAll();
     const contextVolumes = await this.volumeStore.resolveMounts();
 
-    const args = this.buildDockerArgs(instanceId, appId, port, manifest, hostname, ctx, contextEnv, contextVolumes);
+    // A System Terminal's private network (D58), with the shell on it. A
+    // failure fails the spawn: never a Terminal listening on the shared network.
+    const termUser = terminalNetworkUser(appId, ctx);
+    const term = termUser ? this.termNetworks.ensure(termUser) : null;
+
+    const args = this.buildDockerArgs(instanceId, appId, port, manifest, hostname, ctx, contextEnv, contextVolumes, term);
     console.log(`[ContainerRunner] Spawning ${hostname} (app=${appId}) on port ${port}`);
 
     // Use spawnSync (not execSync with a joined string) so multi-word args
@@ -476,9 +506,13 @@ export class ContainerRunner implements SandboxRunner {
     // accounting) and the address the lifecycle calls are bound to. No
     // address on the shared network = the destination can't be bound to this
     // container, so the token is never sent and the start fails.
-    const { pid, address } = inspectSpawned(containerId);
+    const dialNetwork = term?.name ?? SHARED_NETWORK;
+    const { pid, address, addresses } = inspectSpawned(containerId, dockerOut, dialNetwork);
 
-    const tracked: TrackedContainer = { containerId, hostname, address, lifecycleToken, port, appId, logTail, pid, exitCb: null, expectingKill: false, provision };
+    const tracked: TrackedContainer = {
+      containerId, hostname, address, dialByAddress: !!term, addresses, lifecycleToken, port, appId, logTail, pid,
+      exitCb: null, expectingKill: false, provision,
+    };
     this.containers.set(instanceId, tracked);
 
     // Watch for container exit so we can fire the exit callback.
@@ -490,7 +524,7 @@ export class ContainerRunner implements SandboxRunner {
     }, stillTracked, () => this.handleExit(instanceId, null, containerId));
 
     try {
-      if (!address) throw new Error(`cannot bind ${instanceId} to container ${containerId.slice(0, 12)}: no address on ${SHARED_NETWORK}; lifecycle token not sent`);
+      if (!address) throw new Error(`cannot bind ${instanceId} to container ${containerId.slice(0, 12)}: no address on ${dialNetwork}; lifecycle token not sent`);
       const identity = await this.waitHealthy(instanceId, appId, containerId, port);
       const lifecycle: LifecycleStatus = { identity, guard: await checkHealthGuard(lifecycleUrl(address, port, 'health')) };
       const refusal = lifecycleStatusRefusal(instanceId, lifecycle);
@@ -606,6 +640,7 @@ export class ContainerRunner implements SandboxRunner {
     ctx: InstanceSpawnContext,
     contextEnv: Record<string, string>,
     contextVolumes: VolumeEntry[],
+    term: TermNetwork | null = null,
   ): string[] {
     // myTools is only used to provision the per-instance symlinks before
     // docker run — the bind itself goes through aura-app-data's volume-subpath.
@@ -710,7 +745,7 @@ export class ContainerRunner implements SandboxRunner {
       // env (read by bashrc.aura.sh below) keeps the override discoverable
       // even when something resets `hostname`.
       '--hostname', appId,
-      ...containerNetworkArgs({ network: SHARED_NETWORK }),
+      ...containerNetworkArgs({ network: SHARED_NETWORK, term }),
       // Lets InstanceTokens re-learn the nonce of a container adopted after a
       // shell restart. Not `aura.parent`: that label marks sidecars, which
       // orphan adoption must skip.
@@ -826,6 +861,8 @@ export class ContainerRunner implements SandboxRunner {
       // docker takes the value from spawn()'s env, so it stays off the
       // command line. After contextEnv, like the instance token.
       '-e', 'AURA_LIFECYCLE_TOKEN',
+      // A Terminal's private listen subnet and shell peer (spawn/networkArgs.ts, D58).
+      ...containerNetworkEnv({ term, shellHostname: this.shellHostname }),
       // The process identity (spawn/identityArgs.ts): root today, until stream A.
       ...containerIdentityArgs(ctx.identity),
       BASE_IMAGE,
@@ -1049,12 +1086,14 @@ export class ContainerRunner implements SandboxRunner {
     tokenNonce?: string;
     ownerLabel?: string;
     address?:   string;
+    addresses?: string[];
+    dialByAddress?: boolean;
     lifecycleToken?: string;
     preview?: string;
   }> | null> {
     type DockerInspect = {
       Config: { Env: string[]; Labels?: Record<string, string> }; State: { Pid: number };
-      NetworkSettings?: { Networks?: Record<string, { IPAddress?: string }> };
+      NetworkSettings?: { Networks?: DockerNetworks };
     };
     let psOut: string;
     try {
@@ -1070,7 +1109,7 @@ export class ContainerRunner implements SandboxRunner {
       return null;
     }
     const names = psOut.split('\n').map((l) => l.trim()).filter(Boolean);
-    const out: Array<{ instanceId: string; appId: string; port: number; hostname: string; pid: number; tokenNonce?: string; ownerLabel?: string; address?: string; lifecycleToken?: string; preview?: string }> = [];
+    const out: Array<{ instanceId: string; appId: string; port: number; hostname: string; pid: number; tokenNonce?: string; ownerLabel?: string; address?: string; addresses?: string[]; dialByAddress?: boolean; lifecycleToken?: string; preview?: string }> = [];
     for (const name of names) {
       if (!name.startsWith('aura-')) continue;
       // Skip aura-shell itself — it's not an app instance, just the
@@ -1102,6 +1141,9 @@ export class ContainerRunner implements SandboxRunner {
       if (!appId || !instanceId || !portStr) continue;
       const port = parseInt(portStr, 10);
       if (!Number.isFinite(port) || port <= 0) continue;
+      // A Terminal listens on its private network (D58): dial it there.
+      const termNet = inspect.Config?.Labels?.[TERM_NETWORK_CONTAINER_LABEL];
+      const networks = inspect.NetworkSettings?.Networks;
       out.push({
         instanceId,
         appId,
@@ -1112,7 +1154,9 @@ export class ContainerRunner implements SandboxRunner {
         ownerLabel: inspect.Config?.Labels?.[OWNER_LABEL],
         // The survivor's own address and lifecycle secret, read from the very
         // container inspected here (absent on containers from before tokens).
-        address: inspect.NetworkSettings?.Networks?.[SHARED_NETWORK]?.IPAddress || undefined,
+        address: networks?.[termNet ?? SHARED_NETWORK]?.IPAddress || undefined,
+        addresses: networkAddresses(networks),
+        ...(termNet ? { dialByAddress: true } : {}),
         lifecycleToken: env['AURA_LIFECYCLE_TOKEN'] || undefined,
         ...(inspect.Config?.Labels?.[PREVIEW_LABEL] ? { preview: inspect.Config.Labels[PREVIEW_LABEL] } : {}),
       });
@@ -1134,6 +1178,8 @@ export class ContainerRunner implements SandboxRunner {
     hostname:   string;
     pid:        number;
     address?:   string;
+    addresses?: string[];
+    dialByAddress?: boolean;
     lifecycleToken?: string;
   }): void {
     if (this.containers.has(rec.instanceId)) return;
@@ -1160,6 +1206,8 @@ export class ContainerRunner implements SandboxRunner {
       containerId:   rec.hostname,
       hostname:      rec.hostname,
       address:       rec.address ?? null,
+      dialByAddress: rec.dialByAddress === true,
+      addresses:     [...(rec.addresses ?? [])],
       ...(rec.address && rec.lifecycleToken ? { lifecycleToken: rec.lifecycleToken } : {}),
       port:          rec.port,
       appId:         rec.appId,
@@ -1338,7 +1386,13 @@ export class ContainerRunner implements SandboxRunner {
     return this.containers.get(instanceId)?.port ?? null;
   }
   getHost(instanceId: string): string | null {
-    return this.containers.get(instanceId)?.hostname ?? null;
+    const t = this.containers.get(instanceId);
+    if (!t) return null;
+    return t.dialByAddress && t.address ? t.address : t.hostname;
+  }
+  /** The container's addresses on every network it is on (D28 network identity). */
+  addresses(instanceId: string): string[] {
+    return [...(this.containers.get(instanceId)?.addresses ?? [])];
   }
   lifecycleStatus(instanceId: string): LifecycleStatus | null {
     return this.containers.get(instanceId)?.lifecycle ?? null;

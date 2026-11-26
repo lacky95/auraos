@@ -21,6 +21,11 @@ export const GET: APIRoute = () => {
     instances:  mgr.getInstancesByApp(manifest.id).map((inst) => ({
       ...publicInstance(inst),
       sidecarCount: mgr.getSidecars(inst.instanceId).length,
+      // Where the shell dials the instance (AppManager.getUpstreamUrl): the WS
+      // proxy and the App Host router read it here instead of guessing (a
+      // System Terminal listens only on its private network, D58). Null when
+      // its runner no longer tracks it. The owner and the shell read this list.
+      upstreamHost: mgr.getUpstreamUrl(inst.instanceId)?.host ?? null,
     })),
     activities: mgr.getActivitiesByApp(manifest.id),
   }));

@@ -413,9 +413,12 @@ export function createAppHostRouter({
     if (!app || app.manifest.componentType === 'service') return { missing: true };
     const appName = app.manifest.name ?? record.appId;
     const inst = slot.instanceId ? assigned(app) : null;
+    // Running, but its runner has no address for it (yet): not routable.
+    if (inst && !inst.upstreamHost) return { notReady: true, appName };
     if (inst) {
       return {
-        host: inst.sandbox === 'container' ? `aura-${inst.instanceId}` : '127.0.0.1',
+        // AppManager.getUpstreamUrl's host, carried in the list (D58: a System Terminal's private address).
+        host: inst.upstreamHost,
         port: inst.port, appId: record.appId, instanceId: inst.instanceId, sidecar: false, appName,
       };
     }

@@ -141,7 +141,7 @@ response automatically. Raw-runtime apps use middleware (e.g.
 
 Docker container sibling on the `aura-net` network. Each instance gets:
 - its own PID/net/mount namespaces
-- a hostname like `aura-com.aura.terminal-3` (proxy uses it as the upstream host)
+- a hostname like `aura-com.aura.counter-3` (proxy uses it as the upstream host)
 - a sliced bind of `apps/<id>/` (the container sees ONLY its own app dir)
 - shared bind of `packages/` (so workspace imports resolve)
 - shared `aura-node-modules` volume so pnpm hoist works
@@ -168,6 +168,22 @@ docker run -d --rm
 The aura-net network is what lets the shell reach each app by
 hostname. The shell joins the same network at compose time.
 
+### The System Terminal's private network (D58)
+
+The System Terminal is on two networks. Its own servers (PTY, MCP, session
+control) listen only on a private, internal network per user,
+`aura-term-<userId>`, which holds only that user's Terminals and the shell, so
+no app can connect to them. It also stays on `aura-net`, which carries its
+default route: `curl` to apps, MCP calls through the shell and dev servers you
+start in it work as before.
+
+- The network is created on the user's first Terminal (`docker network create
+  --internal`); the shell joins it then, and again at boot.
+- The Terminal gets `AURA_LISTEN_SUBNET`; its start script binds the server to
+  the container's own address in that subnet and refuses to start without one.
+- The shell dials the Terminal at that address (`getUpstreamUrl`), not by
+  name, and recognises its tokenless calls on either network.
+
 ### Orphan adoption at shell boot
 
 `listOrphanRecords()` walks `docker ps --filter name=aura-*` at AppManager
@@ -177,6 +193,7 @@ init. For each surviving container it:
 - re-registers as state `resumed` (record and lifecycle FSM) without
   re-running `onCreate/onStart/onResume`
 - re-learns the instance's token nonce from its `aura.token.nonce` label
+- dials a System Terminal at its private address again (`aura.term.net` label)
 
 This is why `docker compose restart aura-shell` doesn't kill your
 running terminal/console — the containers outlive the shell.
