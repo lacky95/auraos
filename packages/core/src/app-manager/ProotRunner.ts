@@ -20,8 +20,9 @@ import {
 import { serveState } from './appBuild.js';
 import {
   checkHealthGuard, classifyHealthIdentity, healthIdentityRefusal, lifecycleHeaders, lifecycleStatusRefusal,
-  newLifecycleToken, type HealthIdentityClass, type LifecycleStatus,
+  newLifecycleToken, relayStrictEnv, type HealthIdentityClass, type LifecycleStatus,
 } from './lifecycleGate.js';
+import { relayKey } from '../app-hosts/relayClaim.js';
 
 const HEALTH_CHECK_INTERVAL_MS = 200;
 const HEALTH_CHECK_TIMEOUT_MS = 30_000;
@@ -318,6 +319,8 @@ export class ProotRunner implements SandboxRunner {
       ...(ctx.instanceToken ? { AURA_INSTANCE_TOKEN: ctx.instanceToken.token } : {}),
       // Per-start shell→app secret for the lifecycle routes (lifecycleGate.ts).
       AURA_LIFECYCLE_TOKEN: newLifecycleToken(),
+      // D89 B4: a strict relay mode (app-sdk shell-peer); nothing in the default `warn`.
+      ...relayStrictEnv(),
     };
 
     try {
@@ -641,6 +644,12 @@ export class ProotRunner implements SandboxRunner {
 
   lifecycleStatus(instanceId: string): LifecycleStatus | null {
     return this.processes.get(instanceId)?.lifecycle ?? null;
+  }
+
+  /** D89 B4: the relay claim key of this start (from its lifecycle token), or null without one. */
+  relayKey(instanceId: string): Buffer | null {
+    const token = this.processes.get(instanceId)?.lifecycleToken;
+    return token ? relayKey(token) : null;
   }
 
   /**

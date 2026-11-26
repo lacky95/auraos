@@ -11,6 +11,8 @@
  *   - the lifecycle token header: only the kernel's runner sends it, straight
  *     to the app, so no caller can present one through the shell
  *   - the host operator's one-time ticket (`X-Aura-Operator`, lib/access/identify.ts)
+ *   - the shell's relay claim (`x-aura-relay`, D89 B4): only the shell adds
+ *     one, after this, for the instance it relays to
  *   - instance tokens (`aura1.`) and API keys (`aura_k1_`): the shell has
  *     already judged the caller by them, and an app holding one could act as
  *     that caller (the System Terminal's is an owner agent's). D89 / B2.
@@ -18,11 +20,12 @@
  * App cookies and app-owned auth pass through byte for byte.
  */
 import { GATEWAY_IDENTITY_HEADER, LIFECYCLE_TOKEN_HEADER, OWNER_SSR_HEADER } from '@aura/core/host-rules';
+import { RELAY_CLAIM_HEADER } from '@aura/core/relay-claim';
 import { INTERNAL_SERVICE_HEADER, SESSION_COOKIES, countCredential } from './access-bridge.mjs';
 
 /** lib/access/identify.ts OPERATOR_HEADER: the shell claims the ticket; an app never sees it. */
 const OPERATOR_HEADER = 'x-aura-operator';
-const SHELL_ONLY_HEADERS = new Set([INTERNAL_SERVICE_HEADER, GATEWAY_IDENTITY_HEADER, OWNER_SSR_HEADER, LIFECYCLE_TOKEN_HEADER, OPERATOR_HEADER]);
+const SHELL_ONLY_HEADERS = new Set([INTERNAL_SERVICE_HEADER, GATEWAY_IDENTITY_HEADER, OWNER_SSR_HEADER, LIFECYCLE_TOKEN_HEADER, OPERATOR_HEADER, RELAY_CLAIM_HEADER]);
 const SHELL_BEARER = /(?:^|,)\s*Bearer\s+aura-(sess1|admin1)\./i;
 const INSTANCE_BEARER = /(?:^|,)\s*Bearer\s+aura1\./i;
 const API_KEY_BEARER = /(?:^|,)\s*Bearer\s+aura_k1_/i;

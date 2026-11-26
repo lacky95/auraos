@@ -2,7 +2,8 @@ import { APP_HOST_ROUTE_HEADER, lifecycleRequestPath } from '@aura/core/host-rul
 import type { APIContext, APIRoute } from 'astro';
 import { browserDocumentRequest, plainProxyPath } from '../../../../../server/host-policy.mjs';
 import { dropServiceWorkerScope, stripShellCredentials } from '../../../../../server/shell-credentials.mjs';
-import { getAppManager, resolveProxyConfig, INTERFACE_PATH_KINDS } from '@aura/core';
+import { getAppManager, resolveProxyConfig, INTERFACE_PATH_KINDS, RELAY_CLAIM_HEADER } from '@aura/core';
+import { relayCaller, relayClaimFor, type RelaySigner } from '../../../../lib/access/relay.ts';
 
 /**
  * The machine proxy: a call to a running app's server, for machine callers
@@ -77,7 +78,7 @@ function machineOnly(res: Response): Response {
   }
 }
 
-const forward = async ({ params, request }: APIContext): Promise<Response> => {
+const forward = async ({ params, request, locals }: APIContext): Promise<Response> => {
   const id   = params['id'];
   const path = params['path'] ?? '';
 
@@ -183,6 +184,11 @@ const forward = async ({ params, request }: APIContext): Promise<Response> => {
     headers.delete(APP_HOST_ROUTE_HEADER);
     headers.set('X-Aura-App-Id', instance.appId);
     headers.set('X-Aura-Instance-Id', instance.instanceId);
+    // D89 B4: to an owner-agent app, the shell's relay claim (who it authorized), never the caller's credential.
+    const relay = relayClaimFor(mgr as unknown as RelaySigner, {
+      appId: instance.appId, instanceId: instance.instanceId, method: request.method, path: `/${forwardPath}${reqUrl.search}`,
+    }, relayCaller(locals?.access?.principal));
+    if (relay) headers.set(RELAY_CLAIM_HEADER, relay);
 
     // Tell the app which origin the caller used, before we drop the Host
     // header, so absolute URLs it builds don't name `aura-<instance>:<port>`,

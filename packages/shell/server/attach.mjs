@@ -16,9 +16,10 @@ import { terminalEmbedAncestors, watchTerminalInstances } from './terminal-embed
 import { buildAppHost } from '@aura/core/host-rules';
 import { originOf, plainProxyPath } from './host-policy.mjs';
 import {
-  countSurfaceEvent, followIdentity, internalServiceHeaders, reportSurface, requestIdentity, surfaceGate, surfaceIdentity,
+  countSurfaceEvent, followIdentity, internalServiceHeaders, relayClaimOf, reportSurface, requestIdentity, surfaceGate, surfaceIdentity,
 } from './access-bridge.mjs';
 import { stripShellCredentials } from './shell-credentials.mjs';
+import { RELAY_CLAIM_HEADER } from '@aura/core/relay-claim';
 import { attachExecBridge } from './exec-bridge.mjs';
 
 // Plain-inline mirror of @aura/core/logger's filter spec. These servers are
@@ -246,6 +247,13 @@ export function attachWsProxy(httpServer) {
     }
     stripShellCredentials(upstreamHeaders, 'ws-proxy');
     if (activityId) upstreamHeaders['x-aura-activity-id'] = activityId;
+    // D89 B4: to an owner-agent app (the Terminal's PTY), the shell's relay claim for this upgrade.
+    const verified = await Promise.resolve(identity?.verified ?? null).catch(() => null);
+    const relay = relayClaimOf({
+      appId: chosenAppId, instanceId: chosenInstanceId, method: 'GET', path: `/${proxyPath}${upstreamQuery}`,
+      principal: verified?.principal ?? null,
+    });
+    if (relay) upstreamHeaders[RELAY_CLAIM_HEADER] = relay;
     // Offer the browser's subprotocols upstream and answer the browser with the
     // one upstream chose: servers such as Vite's HMR refuse an upgrade without
     // theirs (`vite-hmr`). An upstream that ignores them makes the `ws` client

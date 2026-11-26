@@ -71,8 +71,14 @@ Open **Aura Docs** — this site. For agents, the docs also have an MCP
 server:
 
 ```sh
-claude mcp add --scope user --transport http aura-docs "$OS_API_BASE/api/proxy/com.aura.docs/mcp"
+aura mcp add aura-docs com.aura.docs
 ```
+
+New installs have it preconfigured. `aura mcp add` writes it for Claude Code
+and Codex with your instance token **by reference**
+(`Authorization: Bearer ${AURA_INSTANCE_TOKEN}`), never the token itself:
+every app shares the home the configs live in. See
+[`aura mcp`](/docs/cli-reference#mcp-servers--aura-mcp-).
 
 ## Start over
 

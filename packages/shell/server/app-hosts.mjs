@@ -29,9 +29,10 @@ import {
   APP_HOST_ROUTE_HEADER, AURA_RESERVED_PATHS, OWNER_SSR_HEADER, appHostCookieName, isAuraReservedPath, lifecycleRequestPath,
   parseAppHost,
 } from '@aura/core/host-rules';
+import { RELAY_CLAIM_HEADER } from '@aura/core/relay-claim';
 import {
   SESSION_COOKIES, countSurfaceEvent, followIdentity, gatedHttpSurface, internalServiceHeaders, observeHttpSurface,
-  reportSurface, requestIdentity, surfaceGate,
+  relayClaimOf, reportSurface, requestIdentity, surfaceGate,
 } from './access-bridge.mjs';
 import { appHostAuth, appHostEmbedCookieName, safeReturnPath } from './app-host-auth.mjs';
 import { handleAppGateway, handleAppGatewayUpgrade, serveAppRuntime } from './app-gateway.mjs';
@@ -531,6 +532,9 @@ export function createAppHostRouter({
     for (const [k, v] of Object.entries({ ...forwardedHeaders(req, edge), ...identityHeaders(t), ...activityHeaders(req.url, t.instanceId), [APP_HOST_ROUTE_HEADER]: 'host' })) headers.push(k, v);
     const ownerSsr = await ownerSsrHeader(route, req, session, t);
     if (ownerSsr) headers.push(OWNER_SSR_HEADER, ownerSsr);
+    // D89 B4: to an owner-agent app, the shell's relay claim (the session's user), bound to this call.
+    const relay = relayClaimOf({ appId: t.appId, instanceId: t.instanceId, method: req.method, path: url, session });
+    if (relay) headers.push(RELAY_CLAIM_HEADER, relay);
     const { ancestors, embedders } = await frameAncestors(route, edge, session, url);
     // The embed document still needs the grant its code was issued under.
     if (session.embed && path === '/' && embedders === 0) return page(403, 'Request refused', 'This embedded session is no longer granted.');
@@ -554,8 +558,9 @@ export function createAppHostRouter({
     if (!url.startsWith('/') || (!mux && isAuraReservedPath(url)) || lifecycleRequestPath(url) !== null) return fail(404, 'Not Found');
     if (req.headers.origin !== edge.origin) return fail(403, 'Forbidden');
     let t;
+    let session;
     try {
-      const session = await appSession(route, req, edge);
+      session = await appSession(route, req, edge);
       if (!session) return fail(401, 'Unauthorized');
       if (mux && session.embed) return fail(403, 'Forbidden');
       const identity = hostIdentity(route, req);
@@ -583,6 +588,9 @@ export function createAppHostRouter({
     if (t.missing) return fail(404, 'Not Found');
     if (t.starting || t.notReady) return fail(503, 'Service Unavailable');
     const extra = { ...forwardedHeaders(req, edge), ...identityHeaders(t), ...activityHeaders(req.url, t.instanceId), [APP_HOST_ROUTE_HEADER]: 'host' };
+    // D89 B4: the Terminal's PTY on its App Host gets the shell's relay claim for this upgrade.
+    const relay = relayClaimOf({ appId: t.appId, instanceId: t.instanceId, method: req.method, path: url, session });
+    if (relay) extra[RELAY_CLAIM_HEADER] = relay;
     const raw = appRequestHeaders(req, 'app-hosts-upgrade', { keepUpgrade: true });
     const lines = [`${req.method} ${url} HTTP/${req.httpVersion}`];
     for (let i = 0; i + 1 < raw.length; i += 2) lines.push(`${raw[i]}: ${raw[i + 1]}`);

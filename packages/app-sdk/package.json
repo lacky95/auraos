@@ -29,6 +29,10 @@
       "import": "./dist/shell-peer.js",
       "types": "./dist/shell-peer.d.ts"
     },
+    "./relay-claim": {
+      "import": "./dist/relayClaim.js",
+      "types": "./dist/relayClaim.d.ts"
+    },
     "./os-sidecars": {
       "import": "./dist/os-sidecars.js",
       "types": "./dist/os-sidecars.d.ts"

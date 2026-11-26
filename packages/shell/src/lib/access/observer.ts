@@ -7,7 +7,7 @@ import { accessMode, wouldEnforce } from '../../../server/access-mode.mjs';
 import { userSessionOf, sessionCookieToken } from '../authSurface.ts';
 import { createDecide, freshAuthRequiresHttps, type DecideDeps } from './decide.ts';
 import {
-  isTrustedOwnerAgent, liveNetworkIdentity, resolvePrincipal, type AppHostSession, type PrincipalDeps,
+  isTrustedOwnerAgent, liveNetworkIdentity, normalizePeer, resolvePrincipal, type AppHostSession, type PrincipalDeps,
 } from './identify.ts';
 import { refererProxyId } from './legacyReferer.ts';
 import { followSocket } from '../streamSession.ts';
@@ -78,6 +78,8 @@ export interface ObserverManager {
   getManifest?(id: string): unknown;
   /** AppManager `isTrustedSystemCopy`: the active copy is the system installation. */
   isTrustedSystemCopy?(appId: string): boolean;
+  /** AppManager `getInstanceAddresses`: the sandbox's addresses on every network (D28; B7 binding signal). */
+  getInstanceAddresses?(instanceId: string): string[];
   registry?: { getById(id: string): unknown };
   providers?: {
     resolveProvider(authority: string, path: string): {
@@ -358,6 +360,45 @@ export async function withNetworkCaller(
   }
 }
 
+/**
+ * D89 B7, report-only: a verified instance token that arrived from an address
+ * its instance does not have. For runtimes that report addresses (containers);
+ * PRoot instances, sidecars (their own containers) and unknown peers are never
+ * flagged. Never proof and never required: an address may legitimately differ
+ * behind NAT or a remote runtime, so this only counts
+ * (`binding|token-address-mismatch|<appId>` in the access report).
+ */
+export function tokenAddressMismatch(
+  seen: { principal: AccessPrincipal; via: AccessVia },
+  peer: string | null | undefined,
+  mgr: Pick<ObserverManager, 'getInstanceAddresses'> | null,
+): boolean {
+  if (seen.via !== 'instance-token' || seen.principal.kind !== 'instance') return false;
+  const p = seen.principal as InstancePrincipal;
+  if (p.sidecar) return false;
+  const a = normalizePeer(peer);
+  if (!a) return false;
+  let addresses: string[] = [];
+  try { addresses = mgr?.getInstanceAddresses?.(p.instanceId) ?? []; } catch { return false; }
+  if (addresses.length === 0) return false;
+  return !addresses.some((x) => normalizePeer(x) === a);
+}
+
+const MISMATCH_LOG_EVERY_MS = 10 * 60_000;
+const mismatchLogged = new Map<string, number>();
+
+/** Count it, and say it in the shell log once per instance and address every 10 minutes (no credential). */
+function noteAddressMismatch(report: AccessReport, appId: string | null, instanceId: string, peer: string | null | undefined): void {
+  report.note(`binding|token-address-mismatch|${appId ?? 'unknown'}`);
+  const key = `${instanceId} ${normalizePeer(peer)}`;
+  const t = Date.now();
+  if (t - (mismatchLogged.get(key) ?? 0) < MISMATCH_LOG_EVERY_MS) return;
+  if (mismatchLogged.size > 500) mismatchLogged.clear();
+  mismatchLogged.set(key, t);
+  console.warn(`[access] token-address-mismatch (report-only, D89 B7): ${instanceId}'s token from ${normalizePeer(peer)}, `
+    + 'not an address of that instance');
+}
+
 // ── the observer ────────────────────────────────────────────────────────────
 
 const RESTRICTIVENESS: readonly DecideResult['outcome'][] = [
@@ -445,6 +486,10 @@ export function createObserver({ deps, report, manifest = ROUTE_ACCESS_MANIFEST,
     const observed = await observeIdentity(s.identity, deps);
     if (observed.failed) report.note('errors');
     const mgr = deps.mgr();
+    if (tokenAddressMismatch(observed, s.identity?.peer, mgr)) {
+      const p = observed.principal as InstancePrincipal;
+      noteAddressMismatch(report, knownApp(p.appId), p.instanceId, s.identity?.peer);
+    }
     let candidates: ReadonlyArray<{ variant: string | null; rule: AccessRule }> = [];
     if (page) candidates = [{ variant: null, rule: page.rule }];
     else if (isApi) {
@@ -519,6 +564,10 @@ export function createObserver({ deps, report, manifest = ROUTE_ACCESS_MANIFEST,
     }
 
     const observed = await observeIdentity(o.identity ?? null, deps);
+    if (tokenAddressMismatch(observed, o.identity?.peer, deps.mgr())) {
+      const p = observed.principal as InstancePrincipal;
+      noteAddressMismatch(report, knownApp(p.appId), p.instanceId, o.identity?.peer);
+    }
     const seen = { ...observed, ...await withNetworkCaller(observed, [surface.rule], o.identity?.peer, deps.network) };
     const https = false;
     const result = await policy(

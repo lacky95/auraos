@@ -32,8 +32,9 @@ import { BUILD_STAGING_DIR, serveState } from './appBuild.js';
 import { BASE_IMAGE, whenBaseImageReady } from './BaseImage.js';
 import {
   checkHealthGuard, classifyHealthIdentity, healthIdentityRefusal, lifecycleHeaders, lifecycleStatusRefusal,
-  newLifecycleToken, type HealthIdentityClass, type LifecycleStatus,
+  newLifecycleToken, relayStrictEnv, type HealthIdentityClass, type LifecycleStatus,
 } from './lifecycleGate.js';
+import { relayKey } from '../app-hosts/relayClaim.js';
 
 const HEALTH_CHECK_INTERVAL_MS = 200;
 const HEALTH_CHECK_TIMEOUT_MS = 60_000; // slightly higher than PRoot because container spawn adds ~100 ms
@@ -865,6 +866,8 @@ export class ContainerRunner implements SandboxRunner {
       // docker takes the value from spawn()'s env, so it stays off the
       // command line. After contextEnv, like the instance token.
       '-e', 'AURA_LIFECYCLE_TOKEN',
+      // D89 B4: a strict relay mode (app-sdk shell-peer); nothing in the default `warn`.
+      ...Object.entries(relayStrictEnv()).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
       // A Terminal's private listen subnet and shell peer (spawn/networkArgs.ts, D58).
       ...containerNetworkEnv({ term, shellHostname: this.shellHostname }),
       // The process identity (spawn/identityArgs.ts): root today, until stream A.
@@ -1400,6 +1403,11 @@ export class ContainerRunner implements SandboxRunner {
   }
   lifecycleStatus(instanceId: string): LifecycleStatus | null {
     return this.containers.get(instanceId)?.lifecycle ?? null;
+  }
+  /** D89 B4: the relay claim key of this start (from its lifecycle token), or null without one. */
+  relayKey(instanceId: string): Buffer | null {
+    const token = this.containers.get(instanceId)?.lifecycleToken;
+    return token ? relayKey(token) : null;
   }
 
   /**

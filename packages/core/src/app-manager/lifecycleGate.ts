@@ -34,6 +34,21 @@ export function lifecycleStrictMode(): LifecycleStrictMode {
   return cachedMode;
 }
 
+/**
+ * D89 B4: whether the Terminal and aurashelld refuse a call from the shell's
+ * address without a valid relay claim (`relay-strict`, AURA_RELAY_STRICT,
+ * default `warn`). Read by the shell at each start and handed to the app only
+ * when strict (`relayStrictEnv`), so the default adds nothing to a spawn.
+ */
+export function relayStrictMode(env: Record<string, string | undefined> = process.env): LifecycleStrictMode {
+  return securityEnvValue('relay-strict', env) === 'strict' ? 'strict' : 'warn';
+}
+
+/** The app env that carries a strict relay mode (app-sdk shell-peer reads it); empty in `warn`. */
+export function relayStrictEnv(env: Record<string, string | undefined> = process.env): Record<string, string> {
+  return relayStrictMode(env) === 'strict' ? { AURA_RELAY_STRICT: 'strict' } : {};
+}
+
 /** Tests only: forget the cached mode so the next read sees the env again. */
 export function resetLifecycleStrictModeForTests(): void { cachedMode = null; }
 

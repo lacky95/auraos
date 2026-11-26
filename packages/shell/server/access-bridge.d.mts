@@ -30,3 +30,14 @@ export function gatedHttpSurface(req: unknown): boolean;
 export function staticSurface(url: unknown): string | null;
 export function observeHttpSurface(req: unknown, res: unknown): void;
 export function internalServiceHeaders(url: string): Record<string, string>;
+
+/** D89 B4: the shell's relay claim for a call forwarded to an owner-agent app, or null (lib/access/relay.ts). */
+export function relayClaimOf(call: {
+  appId: string | null | undefined;
+  instanceId: string;
+  method: string;
+  path: string;
+  principal?: unknown;
+  session?: { userId?: string; sid?: string } | null;
+  system?: boolean;
+}): string | null;

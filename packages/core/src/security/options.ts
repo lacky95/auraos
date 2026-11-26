@@ -95,6 +95,16 @@ export const SECURITY_OPTIONS: readonly SecurityOption[] = Object.freeze([
     restartRequired: true, change: 'fresh', since: '2026-11-25', phase: '3b',
   },
   {
+    id: 'relay-strict',
+    title: 'Shell relay claim',
+    description: 'How the Terminal and aurashelld treat a call from the shell\'s address without a valid relay claim '
+      + '(x-aura-relay, signed per app start; D28/D89 B4). warn (default): it is served as before and reported in the '
+      + 'app\'s log. strict: it is refused; the address alone no longer proves the shell relayed it. Planned to become '
+      + 'strict in 5-main. Applies to app starts after the change.',
+    type: 'enum', values: ['warn', 'strict'], default: 'warn', source: 'env', env: 'AURA_RELAY_STRICT',
+    restartRequired: true, change: 'fresh', since: '2026-11-26', phase: '5-pre2 (D89 B4)',
+  },
+  {
     id: 'host-policy',
     title: 'Host check',
     description: 'Which addresses the shell answers on (DNS rebinding protection). enforce (default): a malformed address, '

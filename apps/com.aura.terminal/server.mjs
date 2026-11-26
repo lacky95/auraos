@@ -2,7 +2,12 @@
 // standalone Astro server plus the PTY WebSocket on /ws — what the dev server
 // gets from ptyWsIntegration in astro.config.mjs.
 process.env.ASTRO_NODE_AUTOSTART = 'disabled';
-const { fromShell } = await import('@aura/app-sdk/shell-peer');
+const { RELAY_CLAIM_HEADER, checkShellRelay } = await import('@aura/app-sdk/shell-peer');
+
+/** The PTY upgrade came through the shell (app-sdk shell-peer, D89 B4 relay claim). */
+const shellRelayed = async (req) => (await checkShellRelay({
+  peer: req.socket.remoteAddress, header: req.headers[RELAY_CLAIM_HEADER], method: req.method ?? 'GET', path: req.url ?? '/',
+})).ok;
 
 const { startServer } = await import('./dist/server/entry.mjs');
 const { server } = startServer();
@@ -34,7 +39,8 @@ http.on('upgrade', async (req, socket, head) => {
   const pathname = new URL(req.url ?? '/', 'http://localhost').pathname;
   if (pathname !== '/ws') return;
   // Only the shell relays a PTY socket (src/middleware.ts, H4 stopgap).
-  if (!(await fromShell(req.socket.remoteAddress))) { socket.destroy(); return; }
+  // D89 B4: and carries its relay claim (warn: reported; strict: required).
+  if (!(await shellRelayed(req))) { socket.destroy(); return; }
   ensurePty().then((get) => {
     if (!get) { socket.destroy(); return; }
     const wss = get();

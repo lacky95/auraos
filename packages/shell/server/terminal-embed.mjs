@@ -26,6 +26,7 @@
  * imported lazily, and its services are globalThis singletons, so both copies
  * of this file see the same grants and apps.
  */
+import { RELAY_CLAIM_HEADER } from '@aura/core/relay-claim';
 
 export const TERMINAL_APP_ID = 'com.aura.terminal';
 export const OPEN_TERMINAL_ACTION = 'aura.intent.action.OPEN_TERMINAL';
@@ -118,6 +119,22 @@ export function terminalUpstream(mgr, instanceId) {
 }
 
 /**
+ * D89 B4: the shell's relay claim on its own call to a Terminal instance
+ * (AppManager.relayClaim, as `system`), or no header when there is none.
+ *
+ * @param {any} mgr
+ * @param {string} instanceId
+ * @param {string} method
+ * @param {string} path
+ * @returns {Record<string, string>}
+ */
+export function shellRelayHeader(mgr, instanceId, method, path) {
+  let claim = null;
+  try { claim = mgr.relayClaim?.(instanceId, { method, path, caller: 'system' }) ?? null; } catch { claim = null; }
+  return claim ? { [RELAY_CLAIM_HEADER]: claim } : {};
+}
+
+/**
  * A request to a running Terminal instance's own API, sent as the OS (the
  * instance's identity headers), or null when it is not running. Throws when
  * the instance does not answer in `timeoutMs`; with `timeoutMs` null (a
@@ -134,7 +151,7 @@ export async function fetchTerminal(mgr, instanceId, path, init = {}, timeoutMs 
   if (!up) return null;
   return fetch(`${up.base}${path}`, {
     ...init,
-    headers: { 'x-aura-app-id': up.inst.appId, 'x-aura-instance-id': up.inst.instanceId },
+    headers: { 'x-aura-app-id': up.inst.appId, 'x-aura-instance-id': up.inst.instanceId, ...shellRelayHeader(mgr, instanceId, init.method ?? 'GET', path) },
     signal: timeoutMs === null ? init.signal : AbortSignal.timeout(timeoutMs),
   });
 }
@@ -244,7 +261,7 @@ const liveSweep = {
     const up = terminalUpstream(c.getAppManager(), instanceId);
     if (!up) throw new Error('not running');
     const res = await fetch(`${up.base}/api/sessions`, {
-      headers: { 'x-aura-app-id': up.inst.appId, 'x-aura-instance-id': up.inst.instanceId },
+      headers: { 'x-aura-app-id': up.inst.appId, 'x-aura-instance-id': up.inst.instanceId, ...shellRelayHeader(c.getAppManager(), instanceId, 'GET', '/api/sessions') },
       signal: AbortSignal.timeout(SWEEP_TIMEOUT_MS),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);

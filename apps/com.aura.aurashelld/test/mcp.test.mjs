@@ -827,8 +827,9 @@ test('notification tools: popupDurationMs is forwarded on create and update (nul
 
 test('H3: the MCP answers only calls the shell relays; a direct container call is refused', async () => {
   const { createMcpRoute } = await import('../src/mcp/serve.ts');
-  const fromShell = async (peer) => peer === '172.20.0.2';
-  const route = createMcpRoute(buildShellServer, fromShell);
+  const seen = [];
+  const check = async (call) => { seen.push(call); return { ok: call.peer === '172.20.0.2' }; };
+  const route = createMcpRoute(buildShellServer, check);
   const post = (clientAddress) => route({ clientAddress, request: new Request('http://svc/api/mcp/shell', {
     method: 'POST',
     headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
@@ -840,4 +841,32 @@ test('H3: the MCP answers only calls the shell relays; a direct container call i
   assert.equal((await post('172.20.0.2')).status, 200);
   const noPeer = await route({ get clientAddress() { throw new Error('no adapter'); }, request: new Request('http://svc/api/mcp/shell', { method: 'POST' }) });
   assert.equal(noPeer.status, 403);
+  // D89 B4: the check gets the relay header and the call it is bound to.
+  assert.deepEqual(seen[0], { peer: '172.20.0.9', header: null, method: 'POST', path: '/api/mcp/shell' });
+});
+
+test('D89 B4: the live route verifies the shell\'s relay claim; strict refuses the shell\'s address without one', async () => {
+  const { createMcpRoute } = await import('../src/mcp/serve.ts');
+  const { createShellRelay } = await import('@aura/app-sdk/shell-peer');
+  const { relayKey, signRelayClaim, RELAY_CLAIM_HEADER } = await import('@aura/app-sdk/relay-claim');
+  let mode = 'warn';
+  const reports = [];
+  const check = createShellRelay({
+    peerKind: async (p) => (p === '172.20.0.2' ? 'shell' : p === '127.0.0.1' ? 'self' : null),
+    lifecycleToken: () => 'lt-1', instanceId: () => 'com.aura.aurashelld-1', mode: () => mode,
+    report: (verdict) => reports.push(verdict),
+  });
+  const route = createMcpRoute(buildShellServer, check);
+  const init = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '0' } } });
+  const post = (headers = {}) => route({ clientAddress: '172.20.0.2', request: new Request('http://svc/api/mcp/shell', {
+    method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...headers }, body: init,
+  }) });
+  assert.equal((await post()).status, 200, 'warn: served');
+  assert.deepEqual(reports, ['missing'], 'and reported');
+  mode = 'strict';
+  assert.equal((await post()).status, 403, 'strict: no claim, refused');
+  assert.equal((await post({ [RELAY_CLAIM_HEADER]: 'agr1.x.y' })).status, 403, 'strict: an invalid claim, refused');
+  const good = signRelayClaim(relayKey('lt-1'), { i: 'com.aura.aurashelld-1', m: 'POST', p: '/api/mcp/shell', c: 'instance:com.aura.terminal-1' });
+  assert.equal((await post({ [RELAY_CLAIM_HEADER]: good })).status, 200, 'strict: a valid claim');
+  assert.deepEqual(reports, ['missing', 'missing', 'invalid']);
 });
