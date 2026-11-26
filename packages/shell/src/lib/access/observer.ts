@@ -508,12 +508,20 @@ export function createObserver({ deps, report, manifest = ROUTE_ACCESS_MANIFEST,
       }
     }
 
+    let instanceId: string | null = null;
+    if (o.instanceId !== undefined && o.instanceId !== null) {
+      const inst = typeof o.instanceId === 'string' ? deps.mgr()?.getInstance(o.instanceId) : undefined;
+      if (!inst) return null;
+      instanceId = inst.instanceId;
+      appId = knownApp(inst.appId) ?? inst.appId;
+    }
+
     const observed = await observeIdentity(o.identity ?? null, deps);
     const seen = { ...observed, ...await withNetworkCaller(observed, [surface.rule], o.identity?.peer, deps.network) };
     const https = false;
     const result = await policy(
       surface.rule,
-      { target: surface.rule.target, ...(appId ? { appId } : {}) },
+      { target: surface.rule.target, ...(appId ? { appId } : {}), ...(instanceId ? { instanceId } : {}) },
       seen.principal,
       seen.via,
       https,

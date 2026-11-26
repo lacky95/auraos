@@ -323,6 +323,12 @@ export interface SurfaceObservation {
   method: string;
   status: number;
   appId?: string | null;
+  /**
+   * The instance a surface acts on (the exec bridge's URL names it), for a
+   * rule whose target is `instance`. Checked against the running instances:
+   * an unknown one drops the observation, so the gate refuses it.
+   */
+  instanceId?: string | null;
   via?: 'sse-mux';
   identity?: SurfaceIdentity | null;
 }

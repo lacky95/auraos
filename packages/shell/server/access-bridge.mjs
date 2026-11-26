@@ -114,21 +114,32 @@ export function followIdentity(identity, end) {
 // ── the surface gate ────────────────────────────────────────────────────────
 
 /**
- * Whether a surface may go on: `{ subject, method, appId?, identity }`, the
- * same observation `reportSurface` takes. Outside `enforce` always yes (the
- * report counts it as before). In `enforce` the observer decides on the
- * surface's manifest rule; a refusal, an observer that isn't loaded yet or
+ * Whether a surface may go on: `{ subject, method, appId?, instanceId?, identity }`,
+ * the same observation `reportSurface` takes. Outside `enforce` always yes
+ * (the report counts it as before), unless `everyMode`: a surface whose rule
+ * is its own guard (the exec bridge, which was never open) is decided in
+ * every mode. Where it is decided, the observer decides on the surface's
+ * manifest rule; a refusal, an observer that isn't loaded yet (or is off) or
  * any failure is a no. Never throws.
  */
-export async function surfaceGate(observation) {
+export async function surfaceGate(observation, { everyMode = false } = {}) {
+  if (!everyMode && accessMode() !== 'enforce') return true;
+  return (await surfaceDecision(observation))?.outcome === 'allow';
+}
+
+/**
+ * The observer's decision on a surface's rule, in any mode: `{ outcome,
+ * reason }` (reason `owner` or `own-instance` tells a surface which level let
+ * the caller in), or null when it can't be made (no observer, a failure).
+ * Never throws.
+ */
+export async function surfaceDecision(observation) {
   try {
-    if (accessMode() !== 'enforce') return true;
     const decide = globalThis[BRIDGE]?.decideSurface;
-    if (typeof decide !== 'function') return false;
-    const decision = await decide(observation);
-    return decision?.outcome === 'allow';
+    if (typeof decide !== 'function') return null;
+    return (await decide(observation)) ?? null;
   } catch {
-    return false;
+    return null;
   }
 }
 

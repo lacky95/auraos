@@ -56,9 +56,10 @@ export const SURFACE_MANIFEST: readonly AccessSurface[] = [
     paths: ['/api/instances/{id}/session (upgrade)'],
     attach: 'attachExecBridge',
     rule: {
-      allow: [],
+      allow: ['own-instance', 'owner'],
       target: 'instance',
-      note: 'Phase 5 stream X: jump and exec through the shell (D74). Denied until it lands: the stub answers 501 to every upgrade and executes nothing. X sets the rule (the owner session, or the caller\'s instance token with its `u` claim) and checks it with surfaceGate at the upgrade.',
+      guard: 'rule',
+      note: 'Phase 5 stream X: jump and exec through the shell (D74). The owner (login, host operator, or a trusted owner agent such as the System Terminal, D29) or the instance itself by its own token; the user is the verified principal\'s (its `u` claim), never a header. Decided at the upgrade in every access mode (surfaceGate `everyMode`: it executes as root in the app container). A sidecar target is the owner\'s only; session.opened/closed are audited.',
     },
   },
   {
