@@ -30,7 +30,6 @@ import { registerSystemMode } from './commands/systemMode.js';
 import { registerIdentity } from './commands/identity.js';
 import { registerApprove } from './commands/approve.js';
 import { registerSecret } from './commands/secret.js';
-import { registerMcp } from './commands/mcp.js';
 import { registerRuntime } from './commands/runtime.js';
 import { registerRoot } from './commands/root.js';
 import { LEGACY_GROUPS, markLegacy } from './lib/deprecate.js';
@@ -71,6 +70,7 @@ export const HELP_SECTIONS: Array<{ title: string; lines: Array<[string, string]
     ['aura get scopes [name]', 'Install scopes (system / global / user)'],
     ['aura get themes [name]', 'Theme presets, ACTIVE marks the one in use'],
     ['aura get perms [app]', 'Declared manifest permissions'],
+    ['aura get iface [app/name]', 'Interface Registry: MCP, REST, WS … (URL: $OS_API_BASE + url)'],
     ['aura describe <resource> <name>', 'Full YAML of one resource (-o json)'],
     ['aura logs inst <name>', 'Output of an instance (-f to follow)'],
     ['aura logs inst <name> -c <sidecar>', 'Logs of an instance sidecar'],
@@ -108,7 +108,6 @@ export const HELP_SECTIONS: Array<{ title: string; lines: Array<[string, string]
     ['aura mount ...', "Mount another app's files, live"],
     ['aura port ...', 'Expose a TCP port to an app or the host'],
     ['aura data ...', 'Query / write / watch content providers'],
-    ['aura mcp ...', 'Aura MCP servers for Claude Code / Codex, token by reference: ls · add · fix'],
   ] },
   { title: 'Access', lines: [
     ['aura grant perms <app> [names...]', 'Grant permissions (picker if empty)'],
@@ -287,7 +286,6 @@ export function buildProgram(): Command {
   registerIdentity(program);
   registerApprove(program);
   registerSecret(program);
-  registerMcp(program);
   registerApiKey(program);
   // Phase 5: the streams fill these files in (R: runtime, J: root).
   registerRuntime(program);

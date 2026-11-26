@@ -721,10 +721,9 @@ export class AppManager {
 
   /**
    * Seed the user home (/home/aura) from os/home-seed (homeSeed.ts): the
-   * onboarding AGENTS.md and ~/.claude/CLAUDE.md, so `claude` / `codex`
-   * started in any directory know what AuraOS is, and ~/.claude.json +
-   * ~/.codex/config.toml, which preconfigure the docs and interface-registry
-   * MCP servers. Only missing files are copied; an existing ~/AGENTS.md gets
+   * onboarding AGENTS.md and whatever convention files and optional client
+   * adapters the seed ships (D96: the core copies files, it never reads or
+   * depends on a product's format). Only missing files are copied; an existing ~/AGENTS.md gets
    * new marked sections appended once. The master home is left alone — it is
    * the OS's own.
    */

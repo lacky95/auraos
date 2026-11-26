@@ -20,7 +20,7 @@ AuraOS is a WebOS for humans and their agents. It is a desktop that runs in the 
    - `aura get apps`: installed apps
    - `aura ps`: what is running
    - `aura get caps`: tools that can be shared
-   - `curl -s -H "Authorization: Bearer $AURA_INSTANCE_TOKEN" "$OS_API_BASE/api/interfaces?kind=mcp&consumers=0"`: MCP servers apps provide
+   - `aura get iface`: MCP servers and other interfaces apps provide
 3. Offer next steps from **Things you can do** below. Building their first app with `aura dev new` is the usual favourite.
 
 ## Concepts
@@ -113,23 +113,23 @@ The grammar is kubectl-style: `aura <verb> <resource> [name]`. Short resource na
 - **`url`:** relative to `$OS_API_BASE`.
 - **`description`:** what it offers.
 
-You can read it two ways:
+You can read it three ways:
+- **With the CLI.** `aura get iface` (`-a <app>` filters, `-o wide` adds the description, `-o json` everything).
 - **Over HTTP.** Every MCP server: `curl -s -H "Authorization: Bearer $AURA_INSTANCE_TOKEN" "$OS_API_BASE/api/interfaces?kind=mcp&consumers=0"`. Everything: drop `kind`. Filters are `kind`, `appId`, `name` and `live=1`. Leave out `consumers=0` to also get the dependency report (`live` / `installed` / `unmet`).
 - **Over MCP.** `com.aura.settings` provides an MCP server for the registry itself at `$OS_API_BASE/api/proxy/com.aura.settings/mcp/interfaces`. Its tools are `list_interfaces`, `resolve_interface`, `get_interface` and `list_consumers`.
 
 Humans browse the same registry in Settings → Interfaces.
 
-**These two come preconfigured.** New installs register both, as `aura-docs` and `aura-interfaces`, for Claude Code (`~/.claude.json`) and Codex (`~/.codex/config.toml`). On an older install, or if they're missing, add them the same way you would any other server.
-
-**Connect an MCP server you found.** The full address is `$OS_API_BASE` + the entry's `url`. Offer to add it, e.g. the docs server, with `aura mcp add aura-docs com.aura.docs` (both clients; see below).
+**Connect an MCP server you found.** Any MCP client works the same way: the endpoint is `$OS_API_BASE` + the entry's `url`, and every call sends `Authorization: Bearer $AURA_INSTANCE_TOKEN` (see below). Offer to add it in the client the user works with. New installs preconfigure the docs and the registry servers, as `aura-docs` and `aura-interfaces`, for the two clients the Terminal ships (Claude Code, Codex); on an older install, or if they're missing, add them like any other server.
 
 <!-- aura:section mcp-token-by-reference -->
-**Aura MCP servers carry your instance token by reference, never by value.** Every call through the shell (`$OS_API_BASE/api/proxy/…`) should send `Authorization: Bearer $AURA_INSTANCE_TOKEN`. Write the *reference* into a config, never the token itself: `~` is shared by every app, so a literal token there would let all of them act as you, and the reference gives each app its own identity.
-- `aura mcp ls` shows every Aura MCP entry in `~/.claude.json` and `~/.codex/config.toml` and how it authenticates (never a value). `aura mcp fix` rewrites tokenless or literal-token entries to the reference, with a backup and the owner's confirmation at the terminal. `aura mcp add <name> <app>[/<interface>]` adds one to both clients.
-- By hand, Claude Code (single quotes, so the shell does not expand it): `claude mcp add --scope user --transport http aura-docs '${OS_API_BASE}/api/proxy/com.aura.docs/mcp' -H 'Authorization: Bearer ${AURA_INSTANCE_TOKEN}'`.
-- By hand, Codex: `codex mcp add aura-docs --url "$OS_API_BASE/api/proxy/com.aura.docs/mcp" --bearer-token-env-var AURA_INSTANCE_TOKEN` (in `config.toml`: `bearer_token_env_var = "AURA_INSTANCE_TOKEN"`).
-- `curl` to the shell: add `-H "Authorization: Bearer $AURA_INSTANCE_TOKEN"` (double quotes: expanded in your shell, never stored). Never print the token or paste it into a file.
-- Entries without a token still work for ordinary apps for now (the shell names a caller by its network address, D28); that ends with release 5-main, so fix them now.
+**Calls to the shell carry your session credential, by reference, never by value.** `$AURA_INSTANCE_TOKEN` is the credential AuraOS gives this session (each app instance, this Terminal included, has its own); it is not the internal lifecycle token the shell uses to drive an app. Every call through the shell (`$OS_API_BASE/api/proxy/…`, `$OS_API_BASE/api/…`) sends `Authorization: Bearer $AURA_INSTANCE_TOKEN`. Calls without it are refused once release 5-main is in.
+- A client config names the *variable*, never its value: `~` is shared by every app, so a token written there would let all of them act as you, while the reference gives each app its own. Never print the token or paste it into a file.
+- `curl`: `-H "Authorization: Bearer $AURA_INSTANCE_TOKEN"` (double quotes: expanded in your shell, never stored).
+- Examples for two clients (any client that reads a header from the environment works the same way):
+  - Claude Code (single quotes, so the shell does not expand it): `claude mcp add --scope user --transport http aura-docs '${OS_API_BASE}/api/proxy/com.aura.docs/mcp' -H 'Authorization: Bearer ${AURA_INSTANCE_TOKEN}'`.
+  - Codex: `codex mcp add aura-docs --url "$OS_API_BASE/api/proxy/com.aura.docs/mcp" --bearer-token-env-var AURA_INSTANCE_TOKEN` (in `config.toml`: `bearer_token_env_var = "AURA_INSTANCE_TOKEN"`).
+- Older Claude Code or Codex entries without the token (or with a token written in): the optional adapter `node ~/.aura/adapters/mcp-clients.mjs ls` shows them (never a value) and `… fix` moves them to the reference, with a backup and the owner's yes at the terminal. It is a plain script in your home: edit, replace or delete it.
 <!-- /aura:section mcp-token-by-reference -->
 
 Your own app can show up in the registry too: add `provides[]` to its manifest (see the docs page "Interfaces").

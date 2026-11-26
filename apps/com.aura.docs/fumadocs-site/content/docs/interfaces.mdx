@@ -173,6 +173,50 @@ one wrong address until that app stops, never a persistent lie.
 
 ---
 
+## Connect from an agent or tool
+
+AuraOS does not depend on any particular agent or client: the registry is the
+one source, and the access is the same for every caller.
+
+| | |
+|---|---|
+| **Find it** | `aura get iface` (`-a <app>`, `-o json`), `GET $OS_API_BASE/api/interfaces?kind=mcp`, or the registry's own MCP server (`com.aura.settings`, `/mcp/interfaces`) |
+| **Endpoint** | `$OS_API_BASE` + the entry's `url` (an MCP server: streamable HTTP) |
+| **Credential** | `Authorization: Bearer $AURA_INSTANCE_TOKEN` |
+
+`AURA_INSTANCE_TOKEN` is the **session credential**: AuraOS hands every app
+instance (each Terminal included) its own, and the shell names the caller by
+it. It is not the internal **lifecycle token** (`AURA_LIFECYCLE_TOKEN`), which
+only the shell uses to drive an app's lifecycle endpoints and which no client
+should ever send. Calls without a credential are refused from release 5-main.
+
+**Write the reference, never the value.** The home (`~`) is shared by every
+app, so a token written into a config there would let all of them act as that
+one instance. A config names the variable, and each process expands its own.
+
+Examples for two clients (any client that can read a header from the
+environment works the same way):
+
+```sh
+# Claude Code: single quotes, so it is stored as a reference and expanded per process
+claude mcp add --scope user --transport http aura-docs \
+  '${OS_API_BASE}/api/proxy/com.aura.docs/mcp' -H 'Authorization: Bearer ${AURA_INSTANCE_TOKEN}'
+
+# Codex: bearer_token_env_var in ~/.codex/config.toml
+codex mcp add aura-docs --url "$OS_API_BASE/api/proxy/com.aura.docs/mcp" --bearer-token-env-var AURA_INSTANCE_TOKEN
+```
+
+Product-specific helpers are **optional client adapters**, outside the OS: the
+home seed ships one, `~/.aura/adapters/mcp-clients.mjs`, that moves older
+Claude Code and Codex entries (no token, or a token written in) to the
+reference. `node ~/.aura/adapters/mcp-clients.mjs ls` shows how each Aura
+entry authenticates, never a value; `… fix` rewrites them after a yes at the
+terminal and keeps `<file>.bak-aura-mcp` with any AuraOS credential removed.
+It is a plain script in your home: edit, replace or delete it. Supporting
+another client needs no change to AuraOS.
+
+---
+
 ## Gotchas
 
 - **Rebuild core after editing a manifest schema.** Adding `provides` to a
