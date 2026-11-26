@@ -533,9 +533,11 @@ test('DNS rebinding: only listed custom domains are served, and every other acce
     'localhost:3000', 'aura.localhost:3000', 'os.aura.localhost:3000',          // loopback names
     '10-0-0-2.nip.io:3000', '127-0-0-1.nip.io:3000', 'notes--10-0-0-2.nip.io:3000',
     'aura-shell:3000',                                                          // a container name
+    'aura-shell.aura-term-default:3000', 'aura-shell.aura-term-u_1',            // the shell on a Terminal network (D89 B8)
     'box.example.com', 'notes1234--box.example.com', 'desk.example:3000',       // configured custom domains
   ]) assert.equal(cls(h), true, h);
-  for (const h of ['evil.example', 'rebind.attacker.com:3000', 'notes1234--evil.example', 'sub.box.example.com', 'bad_host', '']) {
+  for (const h of ['evil.example', 'rebind.attacker.com:3000', 'notes1234--evil.example', 'sub.box.example.com', 'bad_host', '',
+    'aura-shell.aura-term-default.attacker.com', 'aura-shell.aura-term-u.1', 'a.b.aura-term-default', 'notes--x.aura-term-default']) {
     assert.equal(cls(h), false, h);
   }
   assert.equal(hostListed(classifyHost('box.example.com'), {}), false, 'nothing listed: no custom domain');

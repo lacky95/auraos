@@ -1,5 +1,6 @@
 import type { APIRoute } from 'astro';
 import { getPtyWss } from '../../pty-server';
+import { refreshHookScript } from '../../agent-hooks';
 
 /**
  * GET /api/pty-ready — the production server's way into the bundle.
@@ -13,5 +14,9 @@ import { getPtyWss } from '../../pty-server';
 
 export const GET: APIRoute = () => {
   getPtyWss();
+  // Once at boot: an older hook script in the shared home is brought up to date (D89).
+  try { if (refreshHookScript()) console.log('[terminal] agent hook script updated'); } catch (err) {
+    console.warn('[terminal] agent hook script refresh failed:', (err as Error).message);
+  }
   return new Response(JSON.stringify({ ok: true }), { headers: { 'Content-Type': 'application/json' } });
 };

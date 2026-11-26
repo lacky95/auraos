@@ -563,7 +563,7 @@
       "-e",
       "APP_PORT=4321",
       "-e",
-      "OS_API_BASE=http://golden-shell:3000",
+      "OS_API_BASE=http://golden-shell.aura-term-default:3000",
       "-e",
       "AURA_LAYER_TAG=[ctnr]",
       "-e",

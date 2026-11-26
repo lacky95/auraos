@@ -9,7 +9,7 @@ import { MY_TOOLS_PATH, currentToolsMode, provisionAllowlist, toolchainMirrorBin
 import { containerHomeEnv, containerHomeMount } from './spawn/homeArgs.js';
 import { containerContextEnv, containerContextMounts } from './spawn/contextArgs.js';
 import { containerSocketArgs } from './spawn/socketArgs.js';
-import { containerNetworkArgs, containerNetworkEnv, rawSocketArgs, terminalNetworkUser } from './spawn/networkArgs.js';
+import { containerNetworkArgs, containerNetworkEnv, containerShellBase, rawSocketArgs, terminalNetworkUser } from './spawn/networkArgs.js';
 import { TERM_NETWORK_CONTAINER_LABEL, TermNetworks, type TermNetwork } from './TermNetworks.js';
 import { containerIdentityArgs } from './spawn/identityArgs.js';
 import type { RuntimeCapabilities } from '../runtimes/types.js';
@@ -807,7 +807,8 @@ export class ContainerRunner implements SandboxRunner {
       '-e', `APP_ID=${appId}`,
       '-e', `APP_INSTANCE_ID=${instanceId}`,
       '-e', `APP_PORT=${port}`,
-      '-e', `OS_API_BASE=${this.osApiBase}`,
+      // A Terminal reaches the shell over its private network (spawn/networkArgs.ts, D89 B8).
+      '-e', `OS_API_BASE=${containerShellBase({ osApiBase: this.osApiBase, term, shellHostname: this.shellHostname })}`,
       '-e', `AURA_LAYER_TAG=[ctnr]`,
       // prod = start from the app's build (it matches the sources), dev =
       // astro dev. Read by ASTRO_START_SHELL; also tells an adopted container

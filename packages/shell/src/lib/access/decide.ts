@@ -188,11 +188,11 @@ async function evaluate(input: DecideInput, deps: DecideDeps): Promise<DecideRes
   const refusedAs: AccessReason = principal.kind === 'anonymous' ? 'unauthenticated' : 'wrong-principal';
   // D28: a network-identified caller is good for a `networkCaller` rule and nothing else,
   // and never for an owner agent's upstream (the Terminal's PTY, MCP and sessions,
-  // aurashelld's MCP) unless it is the System Terminal itself (H2).
+  // aurashelld's MCP; H2). D89 B3: not even the System Terminal's address: an address is
+  // no credential, so an owner agent proves itself by its instance token (matchLevel).
   if (via === 'network') {
     if (!rule.networkCaller) return deny('unauthenticated');
-    if (rule.target === 'proxy-upstream' && resource.appId && OWNER_AGENT_APPS.has(resource.appId)
-      && !(principal.kind === 'instance' && deps.ownerAgent?.(principal))) return deny('wrong-target');
+    if (rule.target === 'proxy-upstream' && resource.appId && OWNER_AGENT_APPS.has(resource.appId)) return deny('wrong-target');
     return allow('network-caller');
   }
   if (rule.credentials && !(via && rule.credentials.includes(via))) return deny(refusedAs);

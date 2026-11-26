@@ -72,11 +72,20 @@ export function hostParses(host) {
 }
 
 const INTERNAL_NAME_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?::\d{1,5})?$/;
+/**
+ * A container's name on a private Terminal network (`aura-shell.aura-term-<user>`,
+ * Docker's network-scoped DNS name): how a Terminal names the shell (D89 B8).
+ * Not public DNS either (no such top-level domain). Exactly two labels: no
+ * dot in the user part, so no `….aura-term-x.attacker.com` (core
+ * spawn/networkArgs.ts `containerShellBase` names only such networks).
+ */
+const TERM_NET_NAME_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.aura-term-[a-z0-9][a-z0-9_-]{0,63}(?::\d{1,5})?$/;
 
 /**
  * The one Host allowlist:
  *   `app`      `{name}--{a desktop host that can carry App Hosts}`
- *   `shell`    a desktop address, or a single-label container name (`internal`)
+ *   `shell`    a desktop address, or a single-label container name or one
+ *              on a Terminal network (`internal`)
  *   `unknown`  anything else
  * The syntax only: whether a label exists is the registry's answer.
  */
@@ -88,6 +97,7 @@ export function classifyHost(host) {
     if (supportsAppHosts(desktop)) return { kind: 'app', label: app.name, base: app.base, desktop };
     return { kind: 'unknown', reason: 'app-host-base', label: app.name };
   }
+  if (TERM_NET_NAME_RE.test(value) && !value.includes('--')) return { kind: 'shell', internal: true, desktop: null };
   const desktop = classifyDesktopHost(value);
   if (desktop.kind !== 'invalid') return { kind: 'shell', internal: false, desktop };
   if (INTERNAL_NAME_RE.test(value) && !value.includes('--')) return { kind: 'shell', internal: true, desktop: null };
@@ -242,7 +252,8 @@ export function desktopHosts(env = process.env) {
  *   nip          `a-b-c-d.nip.io` always resolves to a.b.c.d, so no one can
  *                point it elsewhere (true for the machine's own addresses
  *                and any other: it only ever reaches the address it names)
- *   internal     a single-label container name (`aura-shell`), not public DNS
+ *   internal     a single-label container name (`aura-shell`), or one on a
+ *                Terminal network (`aura-shell.aura-term-default`): not public DNS
  *   custom       only the names in AURA_DESKTOP_HOSTS, and their App Hosts
  */
 export function hostListed(host, env = process.env) {

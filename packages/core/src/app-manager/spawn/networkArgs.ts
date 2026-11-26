@@ -36,6 +36,24 @@ export function containerNetworkArgs(o: { network: string; term?: TermNetwork | 
 }
 
 /**
+ * The shell's base URL as a container gets it (`OS_API_BASE`). A Terminal
+ * names the shell by its name on the Terminal's private network
+ * (`<shell>.<aura-term-user>`, Docker's DNS), so its calls to the shell go
+ * over that network, never over the shared one (D89 B8, defence in depth:
+ * the shell's D28 table knows the Terminal on both). Everyone else keeps it.
+ */
+/** A network name the shell's host policy accepts in `<shell>.<network>` (shell server/host-policy.mjs: no dot). */
+const HOST_SAFE_TERM_NET_RE = /^aura-term-[a-z0-9][a-z0-9_-]{0,63}$/;
+
+export function containerShellBase(o: { osApiBase: string; term?: TermNetwork | null; shellHostname: string }): string {
+  if (!o.term || !HOST_SAFE_TERM_NET_RE.test(o.term.name)) return o.osApiBase;
+  const url = new URL(o.osApiBase);
+  if (url.hostname !== o.shellHostname) return o.osApiBase;
+  url.hostname = `${o.shellHostname}.${o.term.name}`;
+  return url.toString().replace(/\/$/, o.osApiBase.endsWith('/') ? '/' : '');
+}
+
+/**
  * The env a Terminal needs to listen privately (after the context env, so no
  * context key replaces it):
  *   AURA_LISTEN_SUBNET  its servers bind to its address in this subnet

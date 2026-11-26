@@ -370,6 +370,8 @@ export type ContractSignal = (typeof CONTRACT_SIGNALS)[number];
 
 export const CREDENTIAL_COUNT_KINDS = [
   'stripped-session-cookie', 'stripped-login-bearer', 'stripped-admin-bearer',
+  'stripped-instance-token', 'stripped-api-key',
+  // Counted before D89 (B2), when they were still forwarded: kept so older report days read.
   'forwarded-instance-token', 'forwarded-api-key',
 ] as const;
 export const CREDENTIAL_SURFACES = [
