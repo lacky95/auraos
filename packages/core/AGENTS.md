@@ -23,23 +23,21 @@ Sectors are logical groups over the existing directories. There is no sector dir
 
 ```text dep-check:sectors
 foundation: types logger ipc system index
-execution: app-manager scopes
-identity-security: auth permissions approvals security
-resource: context users
+execution: app-manager scopes runtimes
+identity-security: auth permissions approvals security identity
+resource: context users homes
 communication: interfaces app-hosts content
 system-management: nexus patches updater contract capabilities
 platform-services: notifications
 presentation-contracts: theme layout keymap
 ```
 
-The Phase 5 modules join their sectors when 5-main is integrated: `runtimes` goes to execution, `identity` to identity-security and `homes` to resource.
-
 | Sector | Responsibility | Not here |
 |---|---|---|
 | **Foundation** (`types`, `logger`, `ipc`, `system`, `index`) | the manifest schema and shared types, logging, the event-bus primitive (`OsEventBus`), system identity (D47); from Phase 6 the composition root `system/bootstrap.ts` (`bootSystem()`); `index.ts` is the public barrel | any domain logic. **Foundation is leaf-only:** apart from the composition root and the barrel, it imports no other sector |
-| **Execution** (`app-manager`, `scopes`; `runtimes` after 5-main) | the app, instance and activity lifecycle; supervision, services and pools; intents; sidecars, ports and mounts as runtime capabilities; the ARI and the runtime providers (`ContainerRunner`, `ProotRunner`); the spawn context | window flight and other presentation (debt); install and build policy |
-| **Identity & Security** (`auth`, `permissions`, `approvals`, `security`; `identity` after 5-main) | users, sessions, principals; grants; the authorizer; the approval state machine; the D64 security options and policy records; the credential vault lives in `context/CredentialVault.ts` | transport-side enforcement, which is `packages/shell/src/lib/access` |
-| **Resource** (`context`, `users`; `homes` after 5-main) | Context env and secrets (sealed), volumes, per-user data, Private and App Homes | mounts and ports (Execution until 5b G) |
+| **Execution** (`app-manager`, `scopes`, `runtimes`) | the app, instance and activity lifecycle; supervision, services and pools; intents; sidecars, ports and mounts as runtime capabilities; the ARI and the runtime providers (`ContainerRunner`, `ProotRunner`); the spawn context | window flight and other presentation (debt); install and build policy |
+| **Identity & Security** (`auth`, `permissions`, `approvals`, `security`, `identity`) | users, sessions, principals; grants; the authorizer; the approval state machine; the D64 security options and policy records; the credential vault lives in `context/CredentialVault.ts` | transport-side enforcement, which is `packages/shell/src/lib/access` |
+| **Resource** (`context`, `users`, `homes`) | Context env and secrets (sealed), volumes, per-user data, Private and App Homes | mounts and ports (Execution until 5b G) |
 | **Communication** (`interfaces`, `app-hosts`, `content`) | the Interface Registry, App Host routing and gateway contracts, content providers; `IntentResolver` stays in `app-manager` for now | sockets, HTTP and WS, which are server-layer transport |
 | **System Management** (`nexus`, `patches`, `updater`, `contract`, `capabilities`) | install and remove, sources and registries, app contract checks, patch series, the self-updater, the capability (tool) registry and provisioning; `AppRegistry.ts`, `appBuild.ts`, `BaseImage.ts` and `tool-*.ts` sit in `app-manager` (they move in the Phase 8 decomposition) | grants (Identity & Security) |
 | **Platform services** (`notifications`) | a system service reached through its contract; not a kernel sector (D97 §4) | kernel decisions |
