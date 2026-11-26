@@ -133,6 +133,12 @@ export interface SpawnIdentity extends LinuxIdentity {
   userId?: string;
   /** A session identity's account name (the user's username, stream T); the passwd entry's name. */
   account?: string;
+  /**
+   * uid 0 granted by the owner's approval of the app's root request
+   * (identity/execution.ts): runtime root only, with no capability and
+   * no-new-privileges (spawn/identityArgs.ts). Absent on legacy root.
+   */
+  approvedRoot?: true;
 }
 
 export const ROOT_SPAWN_IDENTITY: Readonly<SpawnIdentity> = Object.freeze({ uid: 0, gid: 0, range: 'root' as const });

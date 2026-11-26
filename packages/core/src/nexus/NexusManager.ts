@@ -29,7 +29,8 @@ import { fetchGit } from './Fetchers/GitFetcher.js';
 import { fetchOci } from './Fetchers/OciFetcher.js';
 import { publishGit, publishOci } from './Publisher.js';
 import { isDevCheckout, SYSTEM_APP_LATER, SYSTEM_APP_LATER_MESSAGE } from './AppSource.js';
-import { computePermissionDiff } from './PermissionDiff.js';
+import { computePermissionDiff, installExposure } from './PermissionDiff.js';
+import { executionBinding, type ExecutionBinding } from '../identity/execution.js';
 import type {
   IdentityDecision, InstallBinding, InstallRecord, NexusProgressEvent, PermissionDiff, ResolvedRef,
 } from './types.js';
@@ -590,11 +591,19 @@ export class NexusManager {
         tools: [...new Set(manifest.tools)].sort(), permissions: [...new Set(manifest.permissions)].sort(),
         context: [...new Set(manifest.context ?? [])].sort(),
         replaceCheckout: replacesCheckout,
+        // A root request (identity/execution.ts) is bound by its digest; `renew` compares with the installation's approval.
+        execution: executionBinding(manifest, await this.hostLifecycle?.installationOf(manifest.id, targetScope).catch(() => null)),
+        exposure: installExposure(manifest),
       };
 
       // Installing code is always the owner's decision (D31), not only when
-      // the diff grows.
-      if (!(opts.approval && await opts.approval(binding, diff))) {
+      // the diff grows. Only a consumed approval of this binding grants a root
+      // request it carries; an in-process `{ approve: true }` installs the app
+      // without it (the app then does not start until the owner approves root).
+      let executionApproved: ExecutionBinding | null = null;
+      if (opts.approval && await opts.approval(binding, diff)) {
+        executionApproved = binding.execution;
+      } else {
         // Pausing for the user's decision — not actively installing. Clear the
         // flag (the route returns here and abandons this generator).
         unmark();
@@ -627,6 +636,16 @@ export class NexusManager {
           await this.hostLifecycle?.completeInstall(landed, restore, manifest.hosts.map((h) => h.name));
         } catch (err) {
           console.warn(`[nexus] app host update for ${manifest.id} failed: ${(err as Error).message}`);
+        }
+        // The approved root request, on the installation, before the app can start (fail closed if it can't be).
+        if (executionApproved) {
+          try {
+            await this.hostLifecycle?.approveExecution(manifest.id, targetScope, {
+              runAs: 'root', digest: executionApproved.digest, approvedAt: Date.now(), via: binding.action,
+            });
+          } catch (err) {
+            console.warn(`[nexus] ${manifest.id}: its root approval could not be recorded (${(err as Error).message}); it does not start until you approve it again (aura admin apps run-as ${manifest.id} root)`);
+          }
         }
       } finally {
         this.hostLifecycle?.endInstall(manifest.id, targetScope);

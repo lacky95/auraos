@@ -93,6 +93,8 @@ export function initOwnerDialog(): void {
   const title = $('aura-owner-password-title');
   const intro = $('aura-owner-password-intro');
   const changes = $<HTMLUListElement>('aura-owner-password-changes');
+  const riskBox = $('aura-owner-password-risk');
+  const riskList = $<HTMLUListElement>('aura-owner-password-risk-list');
   const reasonBox = $('aura-owner-password-reason');
   const reasonText = $('aura-owner-password-reason-text');
   const currentLabel = $('aura-owner-password-current-label');
@@ -141,6 +143,7 @@ export function initOwnerDialog(): void {
   /** The password and policy modes' own layout (the approval mode changes it). */
   function setPasswordMode(): void {
     if (reasonBox) reasonBox.hidden = true;
+    if (riskBox) riskBox.hidden = true;
     if (blockBtn) blockBtn.hidden = true;
     if (secretLabel) secretLabel.hidden = true;
     if (secretNotice) secretNotice.hidden = true;
@@ -224,6 +227,22 @@ export function initOwnerDialog(): void {
       return li;
     }));
     changes.hidden = view.display.details.length === 0;
+    // The high-risk review first (5-main item 3): server-built item and why, `NEW` when this request adds it.
+    const risks = view.display.highRisk ?? [];
+    if (riskList) {
+      riskList.replaceChildren(...risks.map((r) => {
+        const li = document.createElement('li');
+        const item = document.createElement('span');
+        item.className = 'aura-owner-password-risk-item';
+        item.textContent = r.added ? `NEW: ${r.item}` : r.item;
+        const why = document.createElement('span');
+        why.className = 'aura-owner-password-risk-why';
+        why.textContent = r.why;
+        li.append(item, why);
+        return li;
+      }));
+    }
+    if (riskBox) riskBox.hidden = risks.length === 0;
     reasonText.textContent = view.display.reason ?? '';
     reasonBox.hidden = !view.display.reason;
     newFields.hidden = true;

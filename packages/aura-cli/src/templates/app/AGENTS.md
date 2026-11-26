@@ -193,6 +193,13 @@ git checkout at exactly that commit.
 starts as (default `closed`: read-only, changed only through patches; see
 "Source changes"). The owner's choice per install wins over it.
 
+`execution: { runAs: "root", reason }` REQUESTS root for your app process
+(it runs as its own non-root uid otherwise). Avoid it: the owner must approve
+it with their password, the dialog lists it as high risk, and without the
+approval your app installs but does not start. It is root inside the
+container only: no capabilities, no Docker socket, no host access, and PRoot
+refuses it. Nothing else goes in the block.
+
 **Instance vs. Activity**:
 - *Instance* = one running backend process (one Astro server, one PID, one port).
 - *Activity* = one UI screen / iframe. Multiple activities can share an instance.

@@ -76,6 +76,13 @@ export * from './identity/appOwnership.js';
 export * from './identity/ownershipApply.js';
 export * from './identity/privilegeReview.js';
 export * from './identity/appIdentityProvider.js';
+export {
+  APP_ROOT_EXECUTION_OPTION, EXECUTION_AUDIT_ACTIONS, RootExecutionError, executionApproved, executionBinding, executionConfigOf,
+  executionDecision, executionDigest,
+} from './identity/execution.js';
+export type {
+  AppRootExecutionPolicy, ExecutionApproval, ExecutionApprovedVia, ExecutionBinding, ExecutionConfig, ExecutionDecision, ExecutionRequest,
+} from './identity/execution.js';
 export { renderIdentityFiles, identityFilesSubpath, isNonRootIdentity } from './app-manager/spawn/identityArgs.js';
 export * from './homes/importReport.js';
 export * from './homes/plan.js';

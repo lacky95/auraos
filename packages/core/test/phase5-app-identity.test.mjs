@@ -167,7 +167,8 @@ test('sidecars keep their image user; only an aura-base inheritHome sidecar of a
 test('adoption keeps the latched identity from Config.User (D77)', () => {
   assert.deepEqual(adoptedIdentity(undefined), { runAs: 'root', uid: 0, gid: 0 });
   assert.deepEqual(adoptedIdentity(''), { runAs: 'root', uid: 0, gid: 0 });
-  assert.deepEqual(adoptedIdentity('0:0'), { runAs: 'root', uid: 0, gid: 0 });
+  // 5-main item 3: only an approved root request sets an explicit --user 0:0 (no capabilities).
+  assert.deepEqual(adoptedIdentity('0:0'), { runAs: 'root', uid: 0, gid: 0, approvedRoot: true });
   assert.deepEqual(adoptedIdentity('200007:200007'), { runAs: 'app', uid: 200007, gid: 200007 });
   assert.deepEqual(adoptedIdentity('200008'), { runAs: 'app', uid: 200008, gid: 200008 });
 });

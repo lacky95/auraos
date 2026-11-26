@@ -182,6 +182,42 @@ export interface InstallBinding {
   context:     string[];
   /** It replaces a dev checkout (`force`): the owner's working tree, uncommitted work included (M1). */
   replaceCheckout: boolean;
+  /**
+   * The manifest's root request (`execution`, identity/execution.ts), bound
+   * by its digest; null when it requests none. The approval of this binding
+   * is what grants it (at `fresh`); `renew` is false only when the
+   * installation already holds an approval of exactly this digest.
+   */
+  execution: import('../identity/execution.js').ExecutionBinding | null;
+  /** What the manifest asks of the host beyond tools and permissions, for the dialog's high-risk section. */
+  exposure: InstallExposure;
+}
+
+/**
+ * Host-facing facts of a manifest (`installExposure`, PermissionDiff.ts):
+ * what its sidecar templates and port settings ask for. Derived from the
+ * bound artifact; the shell's dialog classifies them (lib/approvals/display.ts).
+ */
+export interface InstallExposure {
+  /** Sidecar templates that ask for more than an unprivileged container. */
+  sidecars: Array<{
+    name: string;
+    image: string;
+    privileged: boolean;
+    capabilities: string[];
+    devices: string[];
+    /** `host:container` publishes. */
+    publish: string[];
+    dockerSocket: boolean;
+    /** No `user`, or uid 0 / root: the image's root. */
+    root: boolean;
+  }>;
+  /** `ports.hostPublish`: this app's ports on the host (127.0.0.1). */
+  hostPublish: number[];
+  /** `ports.exposes`: other apps' ports pulled onto its loopback, `<app>:<port>`. */
+  portExposes: string[];
+  /** `hosts[]` names: its own App Host origins. */
+  hosts: string[];
 }
 
 /**

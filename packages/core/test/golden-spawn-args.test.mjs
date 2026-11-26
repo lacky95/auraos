@@ -29,6 +29,9 @@
 // Stream C (owner-approved difference, Q7): no `/run/context` mount or bind;
 // the context env is what the kernel resolved for the start (`ctx.contextEnv`:
 // declared AND granted keys), which the runners pass through unchanged.
+// Root requests (owner decision 5-main item 3, new fixture `approved-root`):
+// an approved root request runs as --user 0:0 with cap-drop ALL and
+// no-new-privileges; every other fixture is unchanged.
 //
 // Run via: node tools/run-tests.mjs --only=core
 
@@ -143,6 +146,18 @@ const FIXTURES = [
     manifest: { id: 'org.golden.appid', sandbox: 'container' },
     appDir: () => userApp('org.golden.appid'),
     ctx: { owner: 'default', identity: { uid: 200001, gid: 200001, range: 'app' }, installationId: '3f1c2e7a-0000-4000-8000-000000000001', home: { ...appHome('3f1c2e7a-0000-4000-8000-000000000001'), uid: 200001, gid: 200001 } },
+    contextEnv: {},
+    volumes: [],
+  },
+  {
+    // Owner decision 5-main item 3: an APPROVED root request (manifest `execution`).
+    // uid 0 and nothing more: --user 0:0, cap-drop ALL, no-new-privileges, no
+    // passwd mounts, no socket (even with docker and *), no --privileged/--cap-add.
+    // PRoot refuses it (R2).
+    name: 'approved-root',
+    manifest: { id: 'org.golden.rootreq', tools: ['docker', '*'], sandbox: 'container', execution: { runAs: 'root', reason: 'binds :80' } },
+    appDir: () => userApp('org.golden.rootreq'),
+    ctx: { owner: 'default', identity: { uid: 0, gid: 0, range: 'root', approvedRoot: true }, installationId: '3f1c2e7a-0000-4000-8000-000000000002', home: appHome('3f1c2e7a-0000-4000-8000-000000000002') },
     contextEnv: {},
     volumes: [],
   },

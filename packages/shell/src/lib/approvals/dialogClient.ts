@@ -15,7 +15,11 @@ export interface ApprovalDialogView {
   level: 'session' | 'fresh';
   state: 'pending' | 'approved' | 'denied' | 'consumed' | 'expired';
   expiresAt: number;
-  display: { title: string; details: string[]; requestedBy: string; reason?: string };
+  display: {
+    title: string; details: string[]; requestedBy: string; reason?: string;
+    /** The server's high-risk review, shown first (lib/approvals/display.ts `installRisks`). */
+    highRisk?: Array<{ item: string; why: string; added: boolean }>;
+  };
   appId: string | null;
   /** The app "Deny and block" would block (L4), or null: no block offered. */
   blockable: string | null;
@@ -46,11 +50,20 @@ export function parseApprovalView(x: unknown, protocol = 'https:'): ApprovalDial
       title: d['title'], requestedBy: d['requestedBy'],
       details: (d['details'] as unknown[]).filter((l): l is string => typeof l === 'string'),
       ...(typeof d['reason'] === 'string' ? { reason: d['reason'] } : {}),
+      ...(Array.isArray(d['highRisk']) ? { highRisk: parseRisks(d['highRisk']) } : {}),
     },
     appId: typeof v['appId'] === 'string' ? v['appId'] : null,
     blockable: typeof v['blockable'] === 'string' ? v['blockable'] : null,
     freshVia: freshViaOf(v['freshVia'], protocol),
   };
+}
+
+/** The well-formed high-risk lines of a view; anything else is dropped. */
+function parseRisks(x: unknown[]): Array<{ item: string; why: string; added: boolean }> {
+  return x.flatMap((r) => {
+    const o = r as Record<string, unknown> | null;
+    return o && typeof o['item'] === 'string' && typeof o['why'] === 'string' ? [{ item: o['item'], why: o['why'], added: o['added'] === true }] : [];
+  });
 }
 
 /**

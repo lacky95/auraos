@@ -6,7 +6,7 @@
  * "what's about to change" view stays identical across surfaces.
  */
 import type { AppManifest } from '../types/manifest.js';
-import type { PermissionDiff } from './types.js';
+import type { InstallExposure, PermissionDiff } from './types.js';
 
 export function computePermissionDiff(
   current: AppManifest | null,
@@ -122,4 +122,28 @@ export function renderDiffPlainText(diff: PermissionDiff): string {
     for (const f of diff.intentFiltersAdded) lines.push(`  + ${f}`);
   }
   return lines.join('\n');
+}
+
+/**
+ * The host-facing facts of a manifest for the install dialog (InstallBinding
+ * `exposure`): only sidecar templates that ask for more than an unprivileged
+ * container, and the port settings. Sorted, so the binding hashes the same.
+ */
+export function installExposure(m: AppManifest): InstallExposure {
+  const sidecars = (m.services ?? []).map((s) => ({
+    name: s.name, image: s.image,
+    privileged: s.privileged === true,
+    capabilities: [...(s.capabilities ?? [])].sort(),
+    devices: [...(s.devices ?? [])].sort(),
+    publish: (s.publish ?? []).map((p) => `${p.host}:${p.container}`).sort(),
+    dockerSocket: s.inheritDockerSocket === true,
+    root: !s.user || /^0(:|$)|^root(:|$)/.test(s.user),
+  })).filter((s) => s.privileged || s.capabilities.length || s.devices.length || s.publish.length || s.dockerSocket)
+    .sort((a, b) => a.name.localeCompare(b.name));
+  return {
+    sidecars,
+    hostPublish: [...new Set((m.ports?.hostPublish ?? []).map((p) => p.hostPort ?? p.port))].sort((a, b) => a - b),
+    portExposes: [...new Set((m.ports?.exposes ?? []).map((e) => `${e.sourceApp}:${e.sourcePort}`))].sort(),
+    hosts: [...new Set((m.hosts ?? []).map((h) => h.name))].sort(),
+  };
 }
