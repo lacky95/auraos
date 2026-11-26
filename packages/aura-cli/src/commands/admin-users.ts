@@ -75,7 +75,7 @@ export function registerAdminUsers(admin: Command): void {
       if (opts.role !== 'member') fail('--role owner is refused: there is exactly one owner. Members only.');
       const r = await call<{ user: { id: string; username: string; role: string }; created: boolean }>('post', '/api/admin/users', { username, role: 'member' });
       if (r.created) ok(`member ${r.user.username} created (${r.user.id})`);
-      else warn(`${r.user.username} exists already (${r.user.id}); a new enrolment code replaces any earlier one`);
+      else info(`${r.user.username} exists already (${r.user.id}); a new enrolment code replaces any earlier one`);
       info('It holds no app yet: aura admin user grant <user> use com.aura.terminal');
       await printEnrolmentCode(r.user, 'Enrolment code');
     });
