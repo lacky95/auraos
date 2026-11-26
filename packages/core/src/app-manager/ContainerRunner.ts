@@ -103,6 +103,9 @@ export function pickVolumeByDestination(mounts: DockerMount[], destination: stri
 // ASTRO_START_SHELL, chosen per start via AURA_SERVE (appBuild.ts serveState).
 const SYNTHESISED_ENTRYPOINT = ASTRO_START_SHELL;
 
+/** Workspace root files an app container and an app build mount read-only (workspaceMounts). */
+export const WORKSPACE_ROOT_FILES = ['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'tsconfig.base.json'] as const;
+
 /** What `docker inspect` says about a container name; null when no such container. */
 export interface ContainerNameState { id: string; status: string }
 
@@ -700,10 +703,7 @@ export class ContainerRunner implements SandboxRunner {
       //     daemons where /workspace doesn't exist outside the shell container.
       //   • User/global scope: volume-subpath mount of the aura-app-data volume.
       ...appDirMount,
-      '-v', `${this.workspaceRoot}/packages:/workspace/packages:ro`,
-      '-v', `${this.workspaceRoot}/package.json:/workspace/package.json:ro`,
-      '-v', `${this.workspaceRoot}/pnpm-lock.yaml:/workspace/pnpm-lock.yaml:ro`,
-      '-v', `${this.workspaceRoot}/pnpm-workspace.yaml:/workspace/pnpm-workspace.yaml:ro`,
+      ...this.workspaceMounts(),
       // The capability registry. Without it the sandboxed `aura cap …` seeds
       // a PRIVATE copy from the CLI bundle's built-in defaults and never sees
       // entries added to the real file afterwards — `aura cap list` in a
@@ -1389,6 +1389,20 @@ export class ContainerRunner implements SandboxRunner {
    * instance loads from is untouched. The caller installs the result
    * (installBuild) and writes the build stamp.
    */
+  /**
+   * The read-only slice of /workspace every app container and app build
+   * sees: the packages and the workspace root files they resolve against.
+   * tsconfig.base.json because packages/<pkg>/tsconfig.json extends it:
+   * Vite 8 (Astro 7) reads the tsconfig of every file it transforms and
+   * fails on a missing `extends`, where Vite 7 went on without it.
+   */
+  workspaceMounts(): string[] {
+    return [
+      '-v', `${this.workspaceRoot}/packages:/workspace/packages:ro`,
+      ...WORKSPACE_ROOT_FILES.flatMap((f) => ['-v', `${this.workspaceRoot}/${f}:/workspace/${f}:ro`]),
+    ];
+  }
+
   /** Shell-side pids of the `docker run` clients of running builds (getActivePids). */
   private readonly buildPids = new Set<number>();
 
@@ -1401,10 +1415,7 @@ export class ContainerRunner implements SandboxRunner {
       '--workdir', `/workspace/apps/${appId}`,
       ...this.buildAppDirMount(appDir, appId, this.appDataVolume),
       ...this.buildAppDirMount(`${appDir}/dist/${BUILD_STAGING_DIR}`, appId, this.appDataVolume, `/workspace/apps/${appId}/dist`),
-      '-v', `${this.workspaceRoot}/packages:/workspace/packages:ro`,
-      '-v', `${this.workspaceRoot}/package.json:/workspace/package.json:ro`,
-      '-v', `${this.workspaceRoot}/pnpm-lock.yaml:/workspace/pnpm-lock.yaml:ro`,
-      '-v', `${this.workspaceRoot}/pnpm-workspace.yaml:/workspace/pnpm-workspace.yaml:ro`,
+      ...this.workspaceMounts(),
       '--mount', `type=volume,source=${this.nodeModulesVolume},target=/workspace/node_modules,readonly`,
       '-e', 'NODE_ENV=production', '-e', 'GOMAXPROCS=2', '-e', `APP_ID=${appId}`,
       '-e', 'ASTRO_TELEMETRY_DISABLED=1',
