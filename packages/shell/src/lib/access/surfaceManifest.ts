@@ -43,10 +43,10 @@ export const SURFACE_MANIFEST: readonly AccessSurface[] = [
     paths: ['/api/proxy/{id}/{path} (upgrade)'],
     attach: 'attachWsProxy',
     rule: {
-      allow: ['owner'],
+      allow: ['owner', 'app-permission'],
       target: 'proxy-upstream',
-      networkCaller: true,
-      note: 'As /api/proxy (D28): the owner, and a tokenless app container by its network address. Upgrades skip the middleware, so surfaceGate checks them; the target lookup carries the internal label.',
+      credentials: ['login-session', 'operator-ticket', 'instance-token'],
+      note: 'As /api/proxy (D89 B6): the owner, and an app instance by its own token; never an address. An owner agent\'s upstream takes the owner only, a Terminal instance only its own user (D69). Upgrades skip the middleware, so surfaceGate checks them (with the chosen instance); the target lookup carries the internal label.',
     },
   },
   {
@@ -106,7 +106,7 @@ export const SURFACE_MANIFEST: readonly AccessSurface[] = [
     rule: {
       allow: ['owner'],
       target: 'proxy-upstream',
-      ...decide(5, 'A shell on the owner\'s home, and every /ws connection creates state. The D29 table applies: System Terminal full, TerminalX embed only, other apps none until granted.'),
+      note: 'D69 (stream T): a shell in one user\'s session host: the owner level (the owner, the owner\'s System Terminal), and only for a Terminal instance of the user the caller acts for (decide.ts `sessionHostReachable`; the instance checks the relay claim\'s user again). TerminalX reaches a granted session through its App Host embed (D25).',
     },
   },
   {
@@ -115,10 +115,10 @@ export const SURFACE_MANIFEST: readonly AccessSurface[] = [
     source: 'manifest provides[] kind http/mcp (through /api/proxy)',
     paths: ['/api/proxy/{id}/{mcp address}'],
     rule: {
-      allow: ['owner'],
+      allow: ['owner', 'app-permission'],
       target: 'proxy-upstream',
-      networkCaller: true,
-      note: 'The /api/proxy route rule decides (C6: the same rule): the owner, and an app container by its network address (D28), except to an owner agent\'s MCP (the Terminal, aurashelld), which only the owner and the System Terminal reach (H2). Caller-scoped grants and the private Terminal ingress are Phase 5.',
+      credentials: ['login-session', 'operator-ticket', 'instance-token'],
+      note: 'The /api/proxy route rule decides (C6: the same rule): the owner, and an app instance by its own token (D89 B5/B6: MCP entries send it by reference), except to an owner agent\'s MCP (the Terminal, aurashelld), which only the owner and the owner\'s System Terminal reach (H2), and a Terminal instance only its own user (D69).',
     },
   },
   {

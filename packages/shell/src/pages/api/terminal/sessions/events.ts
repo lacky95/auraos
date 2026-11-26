@@ -1,6 +1,6 @@
 import type { APIRoute } from 'astro';
 import * as core from '@aura/core';
-import { grantedAppCaller } from '../../../../lib/terminalCaller.ts';
+import { callerOwnsTerminal, grantedAppCaller } from '../../../../lib/terminalCaller.ts';
 import { createAgentEventsRoute } from '../../../../lib/terminalAgents.ts';
 import { fetchTerminal, holdsListGrant } from '../../../../../server/terminal-embed.mjs';
 
@@ -11,6 +11,7 @@ import { fetchTerminal, holdsListGrant } from '../../../../../server/terminal-em
 const handle = createAgentEventsRoute({
   caller: grantedAppCaller,
   holdsListGrant,
+  owns: callerOwnsTerminal,
   open: (instanceId, signal) => fetchTerminal(core.getAppManager(), instanceId, '/api/sessions/events?stream=1', { signal }, null),
 });
 

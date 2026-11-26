@@ -1,4 +1,5 @@
 import type { AccessPrincipal } from '@aura/core';
+import { DEFAULT_OWNER_ID } from '@aura/core';
 import { OWNER_AGENT_APPS } from './identify.ts';
 
 /**
@@ -33,7 +34,8 @@ export function relayCaller(principal: AccessPrincipal | { kind: 'operator' } | 
         ...(typeof p['userId'] === 'string' && p['userId'] ? { userId: p['userId'] as string } : {}),
         caller: `instance:${p['instanceId'] as string}`,
       };
-    case 'operator': return { caller: 'operator' };
+    // The host operator acts for the owner (D29; D69: the claim names the user a session host serves).
+    case 'operator': return { userId: DEFAULT_OWNER_ID, caller: 'operator' };
     case 'apiKey': return { caller: 'api-key' };
     default: return { caller: 'anonymous' };
   }

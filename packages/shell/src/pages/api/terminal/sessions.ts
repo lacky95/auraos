@@ -1,13 +1,15 @@
 import type { APIRoute } from 'astro';
 import * as core from '@aura/core';
 import { jsonResponse } from '../../../lib/appResponse.js';
-import { grantedAppCaller } from '../../../lib/terminalCaller.ts';
+import { callerOwnsTerminal, grantedAppCaller } from '../../../lib/terminalCaller.ts';
 import {
   fetchTerminal, forgetSessionGrants, holdsListGrant, mayUseSession, terminalSessionInstance,
 } from '../../../../server/terminal-embed.mjs';
 
 /**
- * The owner's Terminal sessions, for an app with a grant (D29, 5.16 safeguard 4).
+ * The caller's own Terminal sessions, for an app with a grant (D29, 5.16
+ * safeguard 4). D69 (stream T): only Terminal instances of the user the caller
+ * acts for; another user's answer as not running.
  *
  *   GET    ?instance=<terminal instance>  that instance's `/api/sessions` list.
  *          Needs `terminal.sessions.list` (TerminalX's watcher).
@@ -27,6 +29,9 @@ async function appCaller(request: Request): Promise<{ appId: string } | null | R
   const caller = await grantedAppCaller(request);
   return caller === 'invalid' ? jsonResponse({ error: 'caller-invalid' }, 401) : caller;
 }
+
+const notRunning = (instanceId: string) =>
+  jsonResponse({ error: 'instance-not-running', message: `${instanceId} is not a running Terminal instance` }, 404);
 
 async function forward(instanceId: string, path: string, init: RequestInit = {}): Promise<Response> {
   try {
@@ -50,6 +55,8 @@ export const GET: APIRoute = async ({ request, url }) => {
   }
   const instanceId = url.searchParams.get('instance');
   if (!instanceId) return jsonResponse({ error: 'instance required' }, 400);
+  // D69: only the caller's own user's Terminal; another's is as good as not running.
+  if (!(await callerOwnsTerminal(request, instanceId))) return notRunning(instanceId);
   return forward(instanceId, '/api/sessions');
 };
 
@@ -59,6 +66,7 @@ export const DELETE: APIRoute = async ({ request, url }) => {
   const id = url.searchParams.get('id');
   const instanceId = terminalSessionInstance(id);
   if (!id || !instanceId) return jsonResponse({ error: 'bad-session-id' }, 400);
+  if (!(await callerOwnsTerminal(request, instanceId))) return notRunning(instanceId);
   if (caller && !(await mayUseSession(caller.appId, id))) {
     return jsonResponse({ error: 'not-granted', message: 'This app was not granted that Terminal session.' }, 403);
   }

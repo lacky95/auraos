@@ -12,6 +12,11 @@
 // the System Terminal its owner's Private Home; an unwrapped PRoot spawn
 // (`direct`) is refused, since it has no home of its own.
 //
+// Stream T (owner-approved D89 B4 strict, D69): every container start carries
+// its relay mode (`AURA_RELAY_STRICT=strict` by default); a System Terminal
+// carries its session user and the tmux socket tmpfs, and with a session
+// identity runs as that user's uid.
+//
 // Run via: node tools/run-tests.mjs --only=core
 
 import { test } from 'node:test';
@@ -102,6 +107,18 @@ const FIXTURES = [
     appDir: '/workspace/apps/com.aura.terminal',
     ctx: { owner: 'default', home: privateHome('default') },
     contextEnv: { AURA_LISTEN_SUBNET: '0.0.0.0/0' },
+    volumes: [],
+    term: { name: 'aura-term-default', subnet: '172.30.0.0/16' },
+  },
+  {
+    // Stream T (D69): the System Terminal as its user's session host: the
+    // user's uid (passwd names the username), no capabilities, the user's
+    // Private Home, AURA_SESSION_USER and the tmux socket tmpfs.
+    name: 'system-terminal-session-user',
+    manifest: { id: 'com.aura.terminal', tools: ['*'], sandbox: 'container' },
+    appDir: '/workspace/apps/com.aura.terminal',
+    ctx: { owner: 'default', identity: { uid: 1000, gid: 1000, range: 'owner', userId: 'default', account: 'lukas' }, home: privateHome('default') },
+    contextEnv: {},
     volumes: [],
     term: { name: 'aura-term-default', subnet: '172.30.0.0/16' },
   },

@@ -7,7 +7,7 @@ import { accessMode, wouldEnforce } from '../../../server/access-mode.mjs';
 import { userSessionOf, sessionCookieToken } from '../authSurface.ts';
 import { createDecide, freshAuthRequiresHttps, type DecideDeps } from './decide.ts';
 import {
-  isTrustedOwnerAgent, liveNetworkIdentity, normalizePeer, resolvePrincipal, type AppHostSession, type PrincipalDeps,
+  isTrustedOwnerAgent, normalizePeer, resolvePrincipal, type AppHostSession, type PrincipalDeps,
 } from './identify.ts';
 import { refererProxyId } from './legacyReferer.ts';
 import { followSocket } from '../streamSession.ts';
@@ -62,8 +62,6 @@ export interface ObserverDeps extends DecideDeps {
   services(): ObserverServices | null;
   redisReady(): boolean;
   internalSecret(): string | null;
-  /** D28: the instance whose container network address `peer` is (identify.ts `createNetworkIdentity`). */
-  network?(peer: string | null | undefined): Promise<InstancePrincipal | null>;
 }
 
 export interface ObserverManager {
@@ -341,26 +339,6 @@ export function decideRule(
 }
 
 /**
- * D28: an anonymous caller with no credential at all, on a request one of
- * whose rules takes a network caller, is the instance its address names.
- */
-export async function withNetworkCaller(
-  seen: { principal: AccessPrincipal; via: AccessVia },
-  rules: ReadonlyArray<AccessRule>,
-  peer: string | null | undefined,
-  network: ObserverDeps['network'],
-): Promise<{ principal: AccessPrincipal; via: AccessVia }> {
-  if (seen.principal.kind !== 'anonymous' || seen.via !== 'none' || !network || !peer) return seen;
-  if (!rules.some((r) => r.networkCaller)) return seen;
-  try {
-    const inst = await network(peer);
-    return inst ? { principal: inst, via: 'network' } : seen;
-  } catch {
-    return seen;
-  }
-}
-
-/**
  * D89 B7, report-only: a verified instance token that arrived from an address
  * its instance does not have. For runtimes that report addresses (containers);
  * PRoot instances, sidecars (their own containers) and unknown peers are never
@@ -501,10 +479,7 @@ export function createObserver({ deps, report, manifest = ROUTE_ACCESS_MANIFEST,
       );
     }
 
-    const seen = {
-      ...observed,
-      ...await withNetworkCaller(observed, candidates.map((c) => c.rule), s.identity?.peer, deps.network),
-    };
+    const seen = observed;
     const req: CandidateRequest = {
       snapshot: s, principal: seen.principal, via: seen.via, surface, subject, method, strict: true,
     };
@@ -568,7 +543,7 @@ export function createObserver({ deps, report, manifest = ROUTE_ACCESS_MANIFEST,
       const p = observed.principal as InstancePrincipal;
       noteAddressMismatch(report, knownApp(p.appId), p.instanceId, o.identity?.peer);
     }
-    const seen = { ...observed, ...await withNetworkCaller(observed, [surface.rule], o.identity?.peer, deps.network) };
+    const seen = observed;
     const https = false;
     const result = await policy(
       surface.rule,
@@ -660,7 +635,10 @@ export const liveDeps: ObserverDeps = {
   ownerAgent: (p) => isTrustedOwnerAgent(p, liveMgr() as unknown as Pick<AppManager, 'isTrustedSystemCopy' | 'getInstance'> | null),
   freshAuthRequiresHttps: () => freshAuthRequiresHttps(
     ((globalThis as Record<string, unknown>)[AUTH_SERVICES] as { securityPolicy?: core.SecurityPolicyStore } | undefined)?.securityPolicy ?? null),
-  network: liveNetworkIdentity(() => liveMgr() as unknown as Pick<AppManager, 'getAllInstances' | 'getInstanceAddresses'> | null),
+  instanceOwner: (id) => {
+    const inst = liveMgr()?.getInstance(id) as { owner?: string; inPool?: boolean } | undefined;
+    return inst && !inst.inPool && typeof inst.owner === 'string' ? inst.owner : null;
+  },
   // Read, never created: creating them has side effects of its own.
   services: () => ((globalThis as Record<string, unknown>)[AUTH_SERVICES] as ObserverServices | undefined) ?? null,
   redisReady: () => liveRedis() !== null,

@@ -89,7 +89,7 @@ const ownerServices = (async () => ({
   sessionLive: async (sid: string) => (sid === OWNER_SID ? ({ role: 'owner' as const }) : false as const),
 })) as unknown as GatewayOwnerDeps['services'];
 
-// D28: the Terminal container's address on the app network.
+// D89 B6: the Terminal container's address on the app network: no identity any more.
 const TERMINAL_PEER = '172.20.0.7';
 
 let dataDir = '';
@@ -120,9 +120,7 @@ const gateDeps = (): GateDeps => ({
   services: () => null,
   redisReady: () => false,
   internalSecret: () => 'internal-secret',
-  network: async (peer) => (peer === TERMINAL_PEER
-    ? { kind: 'instance', appId: TERMINAL, instanceId: `${TERMINAL}-1`, verification: 'verified' }
-    : null),
+  instanceOwner: (id) => ((mgr as unknown as { getInstance(id: string): { owner?: string } | undefined }).getInstance(id)?.owner ?? null),
   principal: (request) => resolveCaller(request, authDeps()),
   // No `mode`: the gate reads AURA_ACCESS_ENFORCE, as on the shell.
 });
@@ -222,9 +220,11 @@ test('enforce: the host operator CLI, by its one-time ticket', async () => {
   }
 });
 
-test('enforce: agent MCP: tokenless from the Terminal container (D28), and aurashelld by its token', async () => {
+test('enforce: agent MCP: from the Terminal by its token (D89 B5/B6; tokenless from its address no more), and aurashelld by its token', async () => {
   const mcp = { method: 'POST', path: '/api/proxy/com.aura.docs/mcp', route: '/api/proxy/[id]/[...path]', params: { id: 'com.aura.docs', path: 'mcp' }, body: {} };
-  assert.equal(await middleware({ ...mcp, peer: TERMINAL_PEER }), 'pass');
+  assert.equal(await middleware({ ...mcp, peer: TERMINAL_PEER }), '401 unauthenticated', 'an address is no caller');
+  assert.equal(await middleware({ ...mcp, peer: TERMINAL_PEER, headers: bearer('aura1.terminal') }), 'pass');
+  assert.equal(await middleware({ ...mcp, headers: bearer('aura1.counter') }), 'pass', 'any app by its own token reaches another app\'s MCP');
   const ui = { method: 'POST', path: '/api/os/ui/command', route: '/api/os/ui/command', body: { command: 'noop' } };
   assert.equal(await middleware({ ...ui, headers: bearer('aura1.aurashelld') }), 'pass');
 });

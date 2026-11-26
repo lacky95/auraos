@@ -1,6 +1,6 @@
 import type { APIRoute } from 'astro';
 import * as core from '@aura/core';
-import { terminalCaller } from '../../../../lib/terminalCaller.ts';
+import { callerOwnsTerminal, terminalCaller } from '../../../../lib/terminalCaller.ts';
 import { createScreenStateRoute } from '../../../../lib/terminalScreen.ts';
 import {
   fetchTerminal, isSystemTerminal, mayReadScreens, terminalSessionInstance,
@@ -23,6 +23,7 @@ async function terminalJson<T>(instanceId: string, path: string): Promise<T | nu
 
 const handle = createScreenStateRoute({
   caller: terminalCaller,
+  owns: callerOwnsTerminal,
   isSystemTerminal,
   mayReadScreens,
   sessionInstance: (id) => terminalSessionInstance(id) ?? null,

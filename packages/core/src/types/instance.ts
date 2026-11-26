@@ -62,9 +62,10 @@ export interface AppInstance {
    * How this instance's app process runs (P5-3), latched at spawn from its
    * installation's `runAs`, or read from the container on adoption (D77: a
    * re-adopted instance keeps it, and nothing is re-chowned). `uid`/`gid`
-   * are the process identity (0 for root).
+   * are the process identity (0 for root). `user`: a System Terminal
+   * instance, its user's session host, runs as that user's uid (stream T, D69).
    */
-  runAs?: 'root' | 'app';
+  runAs?: 'root' | 'app' | 'user';
   uid?: number;
   gid?: number;
 }

@@ -20,8 +20,10 @@
  */
 import { execFile, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
+import { tmpdir, userInfo } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { HOOK_TOKEN_ENV, hookToken } from './hook-token.ts';
 
 // The host this terminal physically lives on — the AuraOS master ("aura-shell"
 // by default, overridable via AURA_SHELL_HOSTNAME, which ContainerRunner
@@ -33,6 +35,73 @@ export const HOST_LABEL = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
 /** Private -L namespace, never collides with a user's own tmux. Overridable so
  *  tests can run against a throwaway server instead of the real one. */
 export const TMUX_SOCKET = process.env['AURA_TERM_TMUX_SOCKET'] ?? 'aura';
+
+/**
+ * Where the tmux server listens (stream T, D69): an explicit socket per uid,
+ * `-S /run/aura-term/<uid>/tmux.sock`, in the tmpfs the runtime mounts for a
+ * session host (owned by the session uid, 0700; core spawn/sessionArgs.ts).
+ * A named test socket (`AURA_TERM_TMUX_SOCKET`) keeps `-L`; a server started
+ * by hand without that directory uses the per-uid temp dir.
+ */
+export function tmuxSocketArgs(env: NodeJS.ProcessEnv = process.env, uid: number = process.getuid?.() ?? 0): string[] {
+  if (env['AURA_TERM_TMUX_SOCKET']) return ['-L', env['AURA_TERM_TMUX_SOCKET']];
+  for (const root of [env['AURA_TERM_TMUX_DIR'] || '/run/aura-term', join(tmpdir(), 'aura-term')]) {
+    const dir = join(root, String(uid));
+    try {
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      return ['-S', join(dir, 'tmux.sock')];
+    } catch { /* not ours to create: the next one */ }
+  }
+  return ['-L', TMUX_SOCKET];
+}
+export const TMUX_SOCKET_ARGS: readonly string[] = tmuxSocketArgs();
+
+/**
+ * Variables of this server that a session never gets (stream T; the D28
+ * review: `AURA_LIFECYCLE_TOKEN` keys the shell's relay claims and hook
+ * tokens), plus the server's own listen and build settings.
+ */
+const SERVER_ONLY_ENV = new Set([
+  'AURA_LIFECYCLE_TOKEN', 'AURA_RELAY_STRICT', 'AURA_LISTEN_SUBNET', 'AURA_SHELL_PEERS', 'AURA_SERVE',
+  'PORT', 'APP_PORT', 'HOST', 'NODE_ENV', 'ASTRO_NODE_AUTOSTART',
+]);
+const SERVER_ONLY_PREFIXES = ['npm_', 'ASTRO_', 'VITE_', 'PNPM_'];
+
+/**
+ * A session's environment: the container's (the OS variables, the user's
+ * context keys, `AURA_INSTANCE_TOKEN` for the `aura` CLI) without the
+ * server's own (SERVER_ONLY_ENV), `HOME=/home/aura`, and the account's
+ * `USER`/`LOGNAME` from the generated passwd. A denylist on purpose: the
+ * container env also carries the user's context keys (stream C), which a
+ * fixed allowlist would drop.
+ */
+export function sessionEnv(base: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(base)) {
+    if (v === undefined || SERVER_ONLY_ENV.has(k) || SERVER_ONLY_PREFIXES.some((p) => k.startsWith(p))) continue;
+    env[k] = v;
+  }
+  env['HOME'] = '/home/aura';
+  try {
+    const name = userInfo().username;
+    if (name && (process.getuid?.() ?? 0) !== 0) { env['USER'] = name; env['LOGNAME'] = name; }
+  } catch { /* no passwd entry: leave them */ }
+  env['AURA_TERM_LABEL'] = HOST_LABEL;
+  return env;
+}
+
+/**
+ * The `-e` flags of a new tmux session: its label, its id (agent hooks name
+ * their session) and its own hook token. The session environment, so it
+ * holds when the tmux server is already running.
+ */
+export function sessionEnvArgs(sessionId: string): string[] {
+  return [
+    '-e', `AURA_TERM_LABEL=${HOST_LABEL}`,
+    '-e', `AURA_TERM_SESSION=${sessionId}`,
+    '-e', `${HOOK_TOKEN_ENV}=${hookToken(sessionId)}`,
+  ];
+}
 // Next to src/ when run from source (dev, tests); from a production build this
 // module sits in dist/server/chunks/, so fall back to the app dir (the cwd).
 const CONF_FROM_SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'tmux.conf');
@@ -63,7 +132,7 @@ export function tmuxName(sessionId: string): string {
 export function liveTmuxSessions(): Set<string> {
   if (!tmuxBin) return new Set();
   try {
-    const r = spawnSync(tmuxBin, ['-L', TMUX_SOCKET, 'list-sessions', '-F', '#{session_name}'],
+    const r = spawnSync(tmuxBin, [...TMUX_SOCKET_ARGS, 'list-sessions', '-F', '#{session_name}'],
       { encoding: 'utf-8' });
     if (r.status !== 0 || !r.stdout) return new Set();   // no server running ⇒ no sessions
     return new Set(r.stdout.split('\n').map((l) => l.trim()).filter(Boolean));
@@ -83,7 +152,7 @@ export async function liveTmuxSessionsAsync(): Promise<Set<string>> {
 export function tmuxKill(sessionId: string): boolean {
   if (!tmuxBin) return false;
   try {
-    const r = spawnSync(tmuxBin, ['-L', TMUX_SOCKET, 'kill-session', '-t', tmuxName(sessionId)], { stdio: 'ignore' });
+    const r = spawnSync(tmuxBin, [...TMUX_SOCKET_ARGS, 'kill-session', '-t', tmuxName(sessionId)], { stdio: 'ignore' });
     return r.status === 0;
   } catch { /* no server / no such session — nothing to clean up */ }
   return false;
@@ -133,7 +202,7 @@ export function tmux(
   const bin = requireTmux();
   return new Promise((resolve, reject) => {
     const child = execFile(
-      bin, ['-L', TMUX_SOCKET, ...args],
+      bin, [...TMUX_SOCKET_ARGS, ...args],
       { encoding: 'utf-8', timeout: opts.timeoutMs ?? 5_000, maxBuffer: 16 * 1024 * 1024, env: opts.env },
       (err, stdout, stderr) => {
         if (!err) return resolve(stdout);
@@ -346,10 +415,9 @@ export async function newSession(sessionId: string, cols: number, rows: number):
     'new-session', '-d', '-s', tmuxName(sessionId),
     '-x', String(cols), '-y', String(rows),
     '-c', shellCwd(),
-    '-e', `AURA_TERM_LABEL=${HOST_LABEL}`,
-    '-e', `AURA_TERM_SESSION=${sessionId}`,   // lets programs in the shell (agent hooks) name their session
+    ...sessionEnvArgs(sessionId),
     ...shellArgv(shell),
-  ], { env: { ...process.env, AURA_TERM_LABEL: HOST_LABEL } });
+  ], { env: sessionEnv() });
 }
 
 /**

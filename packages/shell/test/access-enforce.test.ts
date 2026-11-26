@@ -13,7 +13,7 @@ import type { AccessPrincipal, InstancePrincipal } from '@aura/core';
 import { GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
 import { createDecide } from '../src/lib/access/decide.ts';
 import { accessGate, type GateDeps } from '../src/lib/access/enforce.ts';
-import { createNetworkIdentity, isTrustedOwnerAgent, normalizePeer } from '../src/lib/access/identify.ts';
+import { isTrustedOwnerAgent } from '../src/lib/access/identify.ts';
 import { createObserver, type ObserverManager } from '../src/lib/access/observer.ts';
 import { AccessReport } from '../src/lib/access/report.ts';
 import { candidateRules, dispatchedMethods, effectiveRule, handlersOf, manifestRoute } from '../src/lib/access/resolve.ts';
@@ -40,6 +40,9 @@ const instances: Record<string, { appId: string; instanceId: string; sandbox?: s
   'com.acme.notes-1': { appId: 'com.acme.notes', instanceId: 'com.acme.notes-1', sandbox: 'container' },
   'com.other.app-1': { appId: 'com.other.app', instanceId: 'com.other.app-1', sandbox: 'container' },
   'com.aura.terminal-1': { appId: 'com.aura.terminal', instanceId: 'com.aura.terminal-1', sandbox: 'container', owner: 'default' },
+  // D69 (stream T): a member's Terminal, and an unclaimed pool member.
+  'com.aura.terminal-2': { appId: 'com.aura.terminal', instanceId: 'com.aura.terminal-2', sandbox: 'container', owner: 'u2' },
+  'com.aura.terminal-3': { appId: 'com.aura.terminal', instanceId: 'com.aura.terminal-3', sandbox: 'container' },
   'com.aura.settings-1': { appId: 'com.aura.settings', instanceId: 'com.aura.settings-1', sandbox: 'container' },
   'com.aura.aurashelld-1': { appId: 'com.aura.aurashelld', instanceId: 'com.aura.aurashelld-1', sandbox: 'container', owner: 'default' },
 };
@@ -79,10 +82,6 @@ async function held(appId: string, permission: string): Promise<{ before: string
 }
 
 const SECRET = 'internal-secret';
-const NET: Record<string, { appId: string; instanceId: string }> = {
-  '172.20.0.7': instances['com.aura.terminal-1']!,
-  '172.20.0.8': instances['com.acme.notes-1']!,
-};
 
 function deps(mode: string, who: { principal: AccessPrincipal; via: AccessVia }): GateDeps {
   return {
@@ -92,10 +91,7 @@ function deps(mode: string, who: { principal: AccessPrincipal; via: AccessVia })
     services: () => null,
     redisReady: () => false,
     internalSecret: () => SECRET,
-    network: async (peer) => {
-      const hit = NET[normalizePeer(peer) ?? ''];
-      return hit ? inst(hit.appId, hit.instanceId) : null;
-    },
+    instanceOwner: (id) => instances[id]?.owner ?? null,
     principal: async () => ({ principal: who.principal as never, via: who.via }),
     mode: () => mode,
   };
@@ -263,60 +259,74 @@ test('D29: TerminalX lists the Terminal\'s instances with its terminal.sessions.
   assert.deepEqual(candidateRules(M, info, 'GET', facts).map((c) => c.variant), [null], 'no params: no param variant');
 });
 
-// ── D28: tokenless callers by network address ───────────────────────────────
+// ── D89 B6: no address is a caller ──────────────────────────────────────────
 
-test('D28: a tokenless call from an app container reaches /api/proxy; loopback, unknown and gateway callers do not', async () => {
+test('B6: a tokenless call is unauthenticated whatever its peer; any app by its own token reaches another app\'s upstream; a gateway call and an API key do not', async () => {
   const proxy = { path: '/api/proxy/io.x.excalidraw/mcp', route: '/api/proxy/[id]/[...path]', params: { id: 'io.x.excalidraw', path: 'mcp' } };
-  assert.equal(await gate('enforce', anon, { ...proxy, peer: '::ffff:172.20.0.7' }), 'pass');
-  assert.equal(await gate('enforce', anon, { ...proxy, peer: '127.0.0.1' }), '401 unauthenticated');
-  assert.equal(await gate('enforce', anon, { ...proxy, peer: '10.9.9.9' }), '401 unauthenticated');
-  assert.equal(await gate('enforce', inst('com.other.app'), proxy, 'gateway'), '403 access-denied');
+  for (const peer of ['::ffff:172.20.0.7', '172.20.0.8', '127.0.0.1', '10.9.9.9']) {
+    assert.equal(await gate('enforce', anon, { ...proxy, peer }), '401 unauthenticated', `from ${peer}`);
+  }
+  assert.equal(await gate('enforce', inst('com.acme.notes'), proxy), 'pass', 'an app by its token');
+  assert.equal(await gate('enforce', inst('com.acme.notes', 'com.acme.notes-1', { sidecar: 'db' }), proxy), 'pass', 'an inheritIdentity sidecar by its token');
+  assert.equal(await gate('enforce', inst('com.other.app'), proxy, 'gateway'), '403 access-denied', 'a gateway call');
+  assert.equal(await gate('enforce', { kind: 'apiKey', keyId: 'k', name: 'n', scopes: [], verification: 'verified' } as AccessPrincipal, proxy, 'api-key'), '403 access-denied', 'an API key');
   assert.equal(await gate('enforce', owner, proxy), 'pass');
-  // Only for a rule that takes it: the same container can't reach an owner route this way.
   assert.equal(await gate('enforce', anon, { path: '/api/scopes', route: '/api/scopes', peer: '172.20.0.7' }), '401 unauthenticated');
-  // The documented tour: `curl $OS_API_BASE/api/interfaces` from the Terminal.
-  assert.equal(await gate('enforce', anon, { path: '/api/interfaces', route: '/api/interfaces', peer: '172.20.0.7' }), 'pass');
+  // The documented tour sends the token now: `curl -H "Authorization: Bearer $AURA_INSTANCE_TOKEN" $OS_API_BASE/api/interfaces`.
+  assert.equal(await gate('enforce', anon, { path: '/api/interfaces', route: '/api/interfaces', peer: '172.20.0.7' }), '401 unauthenticated');
+  assert.equal(await gate('enforce', inst('com.aura.terminal', 'com.aura.terminal-1', { userId: 'default' }), { path: '/api/interfaces', route: '/api/interfaces' }), 'pass');
+  // No rule carries the D28 flag any more, and no surface.
+  for (const [route, entry] of Object.entries(M.routes)) {
+    for (const r of [...Object.values(entry.methods ?? {}), ...(entry.variants ?? []).map((v) => v.rule)]) {
+      assert.ok(!('networkCaller' in (r as object)), `${route}: no networkCaller`);
+    }
+  }
+  for (const sfc of SURFACE_MANIFEST) assert.ok(!('networkCaller' in sfc.rule), `${sfc.id}: no networkCaller`);
+  const src = fs.readFileSync(path.join(root, 'src/lib/access/identify.ts'), 'utf8');
+  assert.ok(!/createNetworkIdentity|liveNetworkIdentity/.test(src), 'the D28 table is gone');
 });
 
-test('D28: the network table names live containers by their DNS name, and is rebuilt on a miss at most every 2 s', async () => {
-  let now = 0;
-  let lookups = 0;
-  const net = createNetworkIdentity({
-    instances: () => [
-      { appId: 'a', instanceId: 'a-1', sandbox: 'container', state: 'resumed' },
-      { appId: 'p', instanceId: 'p-1', sandbox: 'proot', state: 'resumed' },
-      { appId: 'w', instanceId: 'w-1', sandbox: 'container', state: 'resumed', inPool: true },
-    ],
-    resolve: async (name) => { lookups++; return name === 'aura-a-1' ? ['172.20.0.5'] : name === 'aura-w-1' ? ['172.20.0.6'] : []; },
-    now: () => now,
-  });
-  assert.deepEqual(await net('172.20.0.5'), inst('a', 'a-1'));
-  assert.equal(await net('172.20.0.6'), null, 'a pool member is nobody');
-  assert.equal(await net('127.0.0.1'), null);
-  const before = lookups;
-  now = 1000;
-  assert.equal(await net('172.20.0.99'), null);
-  assert.equal(lookups, before, 'no rebuild within 2 s');
-  now = 5000;
-  await net('172.20.0.99');
-  assert.ok(lookups > before);
-});
+// ── D69 (stream T): a Terminal instance is one user's session host ──────────
 
-test('D28 + D58: a System Terminal is named on both its networks, by the addresses its runtime read', async () => {
-  const asked: string[] = [];
-  const net = createNetworkIdentity({
-    instances: () => [
-      { appId: 'com.aura.terminal', instanceId: 'com.aura.terminal-1', sandbox: 'container', state: 'resumed' },
-      { appId: 'a', instanceId: 'a-1', sandbox: 'container', state: 'resumed' },
-    ],
-    addresses: (id) => (id === 'com.aura.terminal-1' ? ['172.20.0.7', '172.30.0.3'] : []),
-    resolve: async (name) => { asked.push(name); return name === 'aura-a-1' ? ['172.20.0.5'] : ['172.20.0.99']; },
-  });
-  assert.deepEqual(await net('172.30.0.3'), inst('com.aura.terminal', 'com.aura.terminal-1'), 'on its private network');
-  assert.deepEqual(await net('172.20.0.7'), inst('com.aura.terminal', 'com.aura.terminal-1'), 'on the app network');
-  assert.deepEqual(await net('172.20.0.5'), inst('a', 'a-1'), 'no runtime addresses: the DNS answer');
-  assert.equal(await net('172.20.0.99'), null, 'the name is not asked when the runtime knows the addresses');
-  assert.deepEqual(asked, ['aura-a-1']);
+test('D69: a Terminal instance\'s upstream only for its own user: not the owner into a member\'s, not a member into the owner\'s, nobody into a pool member', async () => {
+  const proxy = (id: string, p = 'mcp/terminal') =>
+    ({ method: 'POST', path: `/api/proxy/${id}/${p}`, route: '/api/proxy/[id]/[...path]', params: { id, path: p } });
+  const ownerTerm = inst('com.aura.terminal', 'com.aura.terminal-1', { userId: 'default' });
+  const memberTerm = inst('com.aura.terminal', 'com.aura.terminal-2', { userId: 'u2' });
+  const member: AccessPrincipal = { kind: 'user', userId: 'u2', role: 'member', sessionId: 's2', verification: 'verified' };
+  // The owner and the owner's System Terminal: the owner's instance, never the member's.
+  assert.equal(await gate('enforce', owner, proxy('com.aura.terminal-1')), 'pass');
+  assert.equal(await gate('enforce', owner, proxy('com.aura.terminal-2')), '403 access-denied', 'the owner into a member\'s sessions');
+  assert.equal(await gate('enforce', operator, proxy('com.aura.terminal-2')), '403 access-denied', 'nor the host operator');
+  assert.equal(await gate('enforce', ownerTerm, proxy('com.aura.terminal-1', 'api/sessions/input')), 'pass');
+  assert.equal(await gate('enforce', ownerTerm, proxy('com.aura.terminal-2', 'api/sessions/input')), '403 access-denied');
+  // A member's Terminal reaches its own user's instances (the session router), never the owner's, nor aurashelld.
+  assert.equal(await gate('enforce', memberTerm, proxy('com.aura.terminal-2')), 'pass', 'its own sessions (own-session)');
+  assert.equal(await gate('enforce', memberTerm, proxy('com.aura.terminal')), 'pass', 'bare id: the route picks the member\'s own');
+  assert.equal(await gate('enforce', memberTerm, proxy('com.aura.terminal-1')), '403 access-denied', 'the owner\'s sessions');
+  assert.equal(await gate('enforce', memberTerm, proxy('com.aura.aurashelld', 'api/mcp/shell')), '403 access-denied', 'the owner\'s shell MCP');
+  assert.equal(await gate('enforce', member, proxy('com.aura.terminal-2')), '403 access-denied', 'a member\'s login holds no proxy level');
+  // An unclaimed pool member belongs to nobody.
+  for (const p of [owner, operator, ownerTerm, memberTerm]) {
+    assert.equal(await gate('enforce', p, proxy('com.aura.terminal-3')), '403 access-denied', `${p.kind} into a pool member`);
+  }
+  // Another app's token never reaches a Terminal, whoever it acts for.
+  assert.equal(await gate('enforce', inst('com.acme.notes', 'com.acme.notes-1', { userId: 'u2' }), proxy('com.aura.terminal-2')), '403 access-denied');
+
+  // The upgrade surfaces decide the same on the instance the shell resolved (WS proxy, App Host).
+  const d = deps('enforce', { principal: anon, via: 'none' });
+  const { bridge } = createObserver({ deps: d, report: new AccessReport({ redis: () => null }) });
+  const ws = async (subject: string, p: AccessPrincipal, via: AccessVia, instanceId: string) => (await bridge.decideSurface({
+    subject, method: 'UPGRADE', status: 0, appId: 'com.aura.terminal', instanceId,
+    identity: { verified: { principal: p, via }, referer: null, instanceId: null, peer: null },
+  })).outcome;
+  assert.equal(await ws('terminal-pty', owner, 'login-session', 'com.aura.terminal-1'), 'allow');
+  assert.equal(await ws('terminal-pty', owner, 'login-session', 'com.aura.terminal-2'), 'deny');
+  assert.equal(await ws('terminal-pty', ownerTerm, 'instance-token', 'com.aura.terminal-2'), 'deny');
+  assert.equal(await ws('app-hosts', { ...owner, through: { appId: 'com.aura.terminal', instanceId: 'com.aura.terminal-2' } } as AccessPrincipal, 'app-host', 'com.aura.terminal-2'), 'deny',
+    'an App Host session of another user');
+  assert.equal(await ws('app-hosts', { ...owner, through: { appId: 'com.aura.terminal', instanceId: 'com.aura.terminal-1' } } as AccessPrincipal, 'app-host', 'com.aura.terminal-1'), 'allow');
+  bridge.dispose();
 });
 
 // ── guard classes: what the routes checked themselves, in every mode ────────
@@ -511,7 +521,7 @@ test('surfaceGate: yes outside enforce; in enforce the observer decides, and no 
   }
 });
 
-test('surfaces decide on their manifest rule: owner yes, anonymous no, an app container on the WS proxy by address (D28)', async () => {
+test('surfaces decide on their manifest rule: owner yes, anonymous no, an app on the WS proxy by its token only (D89 B6)', async () => {
   const d = deps('enforce', { principal: anon, via: 'none' });
   const { bridge } = createObserver({ deps: d, report: new AccessReport({ redis: () => null }) });
   const as = (principal: AccessPrincipal, via: AccessVia, peer: string | null = null) =>
@@ -521,10 +531,10 @@ test('surfaces decide on their manifest rule: owner yes, anonymous no, an app co
   for (const subject of ['ws-proxy', 'socketio-os-events', 'socketio-kv', 'sse-mux', 'app-hosts', 'vite-dev-server', 'terminal-pty']) {
     assert.equal(await decision(subject, as(owner, 'login-session')), 'allow', subject);
     assert.equal(await decision(subject, as(anon, 'none')), 'deny', subject);
-    assert.equal(await decision(subject, as(inst('com.other.app'), 'instance-token')), 'deny', subject);
+    assert.equal(await decision(subject, as(inst('com.other.app'), 'instance-token')), subject === 'ws-proxy' ? 'allow' : 'deny', subject);
   }
   assert.equal(await decision('sse-mux', as(ownerThrough('com.acme.notes'), 'app-host')), 'allow');
-  assert.equal(await decision('ws-proxy', as(anon, 'none', '172.20.0.7')), 'allow');
+  assert.equal(await decision('ws-proxy', as(anon, 'none', '172.20.0.7')), 'deny', 'an address is no caller');
   assert.equal(await decision('socketio-os-events', as(anon, 'none', '172.20.0.7')), 'deny');
   assert.equal((await bridge.decideSurface({ subject: 'no-such-surface', method: 'UPGRADE', status: 0, identity: null })).outcome, 'deny');
   bridge.dispose();
@@ -581,35 +591,38 @@ test('H1: a proxy path the upstream would read as another is refused; the Termin
   assert.match(src('src/pages/api/proxy/[id]/[...path].ts'), /if \(!plainProxyPath\(new URL\(request\.url\)\.pathname\)\) return jsonError\(400/);
 });
 
-test('H2, D89 B3: no network-identified caller reaches an owner agent upstream, not even from the System Terminal\'s address; its token and the owner do', async () => {
-  const term = inst('com.aura.terminal', 'com.aura.terminal-1');
+test('H2, D89 B3/B6: no address reaches an owner agent upstream, not even the System Terminal\'s; its token and the owner do', async () => {
+  const term = inst('com.aura.terminal', 'com.aura.terminal-1', { userId: 'default' });
   const proxy = (id: string, peer?: string, p = 'mcp') =>
     ({ method: 'POST', path: `/api/proxy/${id}/${p}`, route: '/api/proxy/[id]/[...path]', params: { id, path: p }, ...(peer ? { peer } : {}) });
   for (const target of ['com.aura.terminal', 'com.aura.terminal-1', 'com.aura.aurashelld']) {
-    assert.equal(await gate('enforce', anon, proxy(target, '172.20.0.8')), '403 access-denied', `notes → ${target}`);
-    assert.equal(await gate('enforce', anon, proxy(target, '172.20.0.8', 'api/sessions/input')), '403 access-denied');
-    assert.equal(await gate('enforce', anon, proxy(target, '172.20.0.7')), '403 access-denied', `System Terminal's address alone → ${target}`);
-    assert.equal(await gate('enforce', anon, proxy(target, '172.20.0.7', 'api/sessions/events')), '403 access-denied', 'a tokenless hook post');
+    assert.equal(await gate('enforce', anon, proxy(target, '172.20.0.8')), '401 unauthenticated', `notes → ${target}`);
+    assert.equal(await gate('enforce', anon, proxy(target, '172.20.0.8', 'api/sessions/input')), '401 unauthenticated');
+    assert.equal(await gate('enforce', anon, proxy(target, '172.20.0.7')), '401 unauthenticated', `System Terminal's address alone → ${target}`);
+    assert.equal(await gate('enforce', anon, proxy(target, '172.20.0.7', 'api/sessions/events')), '401 unauthenticated', 'a tokenless hook post');
     assert.equal(await gate('enforce', term, proxy(target)), 'pass', `System Terminal by its token → ${target}`);
     assert.equal(await gate('enforce', inst('com.acme.notes'), proxy(target)), '403 access-denied', `an app's token → ${target}`);
     assert.equal(await gate('enforce', owner, proxy(target)), 'pass', `owner → ${target}`);
     assert.equal(await gate('enforce', anon, proxy(target)), '401 unauthenticated');
   }
-  assert.equal(await gate('enforce', anon, proxy('com.other.app', '172.20.0.8')), 'pass', 'app-to-app MCP keeps working until Phase 5');
-  assert.equal(await gate('enforce', anon, proxy('com.acme.notes', '172.20.0.7')), 'pass', 'the Terminal\'s agents reach app MCPs');
+  assert.equal(await gate('enforce', anon, proxy('com.other.app', '172.20.0.8')), '401 unauthenticated', 'B6: app-to-app MCP needs the caller\'s token');
+  assert.equal(await gate('enforce', inst('com.acme.notes'), proxy('com.other.app')), 'pass', 'app-to-app MCP by token');
+  assert.equal(await gate('enforce', term, proxy('com.acme.notes')), 'pass', 'the Terminal\'s agents reach app MCPs by its token');
 
   // The upgrade surface decides the same, by the app it resolved.
   const d = deps('enforce', { principal: anon, via: 'none' });
   const { bridge } = createObserver({ deps: d, report: new AccessReport({ redis: () => null }) });
-  const ws = async (subject: string, appId: string, peer: string) => (await bridge.decideSurface({
+  const ws = async (subject: string, appId: string, peer: string, p: AccessPrincipal = anon, via: AccessVia = 'none') => (await bridge.decideSurface({
     subject, method: 'UPGRADE', status: 0, appId,
-    identity: { verified: { principal: anon, via: 'none' }, referer: null, instanceId: null, peer },
+    identity: { verified: { principal: p, via }, referer: null, instanceId: null, peer },
   })).outcome;
   assert.equal(await ws('ws-proxy', 'com.aura.terminal', '172.20.0.8'), 'deny');
   assert.equal(await ws('ws-proxy', 'com.aura.terminal', '172.20.0.7'), 'deny', 'the System Terminal\'s address alone');
   assert.equal(await ws('ws-proxy', 'com.aura.aurashelld', '172.20.0.7'), 'deny');
-  assert.equal(await ws('ws-proxy', 'com.acme.notes', '172.20.0.7'), 'allow');
-  assert.equal(await ws('ws-proxy', 'com.other.app', '172.20.0.8'), 'allow');
+  assert.equal(await ws('ws-proxy', 'com.acme.notes', '172.20.0.7'), 'deny', 'B6: no address caller');
+  assert.equal(await ws('ws-proxy', 'com.acme.notes', '172.20.0.7', term, 'instance-token'), 'allow');
+  assert.equal(await ws('ws-proxy', 'com.other.app', '172.20.0.8', inst('com.acme.notes'), 'instance-token'), 'allow');
+  assert.equal(await ws('ws-proxy', 'com.aura.aurashelld', '172.20.0.8', inst('com.acme.notes'), 'instance-token'), 'deny');
   bridge.dispose();
 });
 

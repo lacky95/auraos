@@ -190,7 +190,43 @@ start in it work as before.
 - The Terminal gets `AURA_LISTEN_SUBNET`; its start script binds the server to
   the container's own address in that subnet and refuses to start without one.
 - The shell dials the Terminal at that address (`getUpstreamUrl`), not by
-  name, and recognises its tokenless calls on either network.
+  name. Its calls to the shell carry its instance token: an address is never
+  a caller (D89 B6).
+
+### The System Terminal as each user's session host (D69)
+
+Every Terminal instance belongs to one user from its spawn on, and is that
+user's session host:
+
+- **It runs as the user's uid/gid** (the owner 1000, members from 100000),
+  with `--cap-drop ALL` and `no-new-privileges`. Its generated `/etc/passwd`
+  names the user (`pw_dir=/home/aura`), so `id`, git and ssh agree. Root comes
+  only from a root tab (`aura root`).
+- **It mounts only that user's Private Home** at `/home/aura` (the Home
+  Resolver's `terminal-session` context). The Terminal service never holds
+  another user's home.
+- **Its sessions get a clean environment:** the container's (OS variables, the
+  user's context keys, `AURA_INSTANCE_TOKEN` for the `aura` CLI) without the
+  server's own (`AURA_LIFECYCLE_TOKEN`, listen settings, `NODE_ENV`), with
+  `HOME=/home/aura`.
+- **tmux listens on an explicit socket per uid**,
+  `/run/aura-term/<uid>/tmux.sock`, in a tmpfs owned by that uid (0700).
+- **Each session has its own agent-hook token** (`AURA_TERM_HOOK_TOKEN`, in
+  that session's env only). The hook script sends it; the Terminal refuses an
+  agent event without it.
+- **Ownership is checked everywhere a session is reached:** the shell's proxy,
+  WebSocket proxy, App Host and `/api/terminal/*` routes reach a Terminal
+  instance only for a caller acting for its user (the owner's login never
+  reaches a member's sessions). The instance checks it again: the shell's
+  relay claim must name its user (`AURA_SESSION_USER`). Instance lists and the
+  terminal MCP show only the caller's own Terminals.
+- **The warm pool is per user:** the owner's Terminal is pre-warmed at boot;
+  a member's is created when they open one, and a pool member is never handed
+  to another user. A reused instance id never inherits another user's
+  scrollback or saved state (it is moved aside, root-only).
+- **Before the ownership apply** (`aura admin homes ownership --apply`), the
+  owner's Private Home is still root's; until then the owner's Terminal runs as
+  root as before (shown as `runAs root` in `aura get inst`), never a member's.
 
 ### Orphan adoption at shell boot
 

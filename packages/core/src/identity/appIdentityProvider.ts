@@ -37,3 +37,53 @@ export function appIdentityProvider(store: () => Promise<Pick<LinuxIdentityStore
     },
   };
 }
+
+/**
+ * Stream T (D69): the System Terminal is not an app identity. Each of its
+ * instances is the session host of one user and runs as that user's uid/gid
+ * (the owner 1000, members from 100000; D70), with no capability, never as
+ * root and never as an app uid. Every other app keeps `base`.
+ *
+ * Fail closed: an instance with no user, a user without an enabled account,
+ * or one whose identity can't be allocated or is retired does not start.
+ */
+export interface SessionHostIdentityDeps {
+  /** The apps whose instances are user session hosts (homes/plan.ts TERMINAL_SESSION_APPS). */
+  sessionApps: ReadonlySet<string>;
+  /** The user's account: its username (the passwd name) and whether it is disabled; null when unknown. */
+  account(userId: string): Promise<{ username: string; disabled: boolean } | null>;
+  /** The user's Linux identity, allocated on first use (LinuxIdentityStore `ensureUser`). */
+  identity(userId: string): Promise<{ uid: number; gid: number; state: string }>;
+  /** The owner's user id (`default`, D47): its range is `owner`. */
+  ownerId: string;
+}
+
+export class SessionIdentityError extends Error {
+  constructor(readonly appId: string, message: string) {
+    super(message);
+    this.name = 'SessionIdentityError';
+  }
+}
+
+export function sessionHostIdentityProvider(base: SpawnIdentityProvider, deps: SessionHostIdentityDeps): SpawnIdentityProvider {
+  return {
+    async identityFor(req: SpawnIdentityRequest): Promise<SpawnIdentity> {
+      if (!deps.sessionApps.has(req.appId)) return base.identityFor(req);
+      const userId = req.userId;
+      if (!userId) throw new SessionIdentityError(req.appId, `${req.appId} hosts a user's sessions and was asked to start for nobody; not started`);
+      let account;
+      try { account = await deps.account(userId); }
+      catch (err) { throw new SessionIdentityError(req.appId, `${req.appId}: user ${userId}'s account can't be read (${(err as Error).message}); not started`); }
+      if (!account) throw new SessionIdentityError(req.appId, `${req.appId}: user ${userId} has no account; not started`);
+      if (account.disabled) throw new SessionIdentityError(req.appId, `${req.appId}: user ${userId} is disabled; not started`);
+      let rec;
+      try { rec = await deps.identity(userId); }
+      catch (err) { throw new SessionIdentityError(req.appId, `${req.appId}: user ${userId}'s identity could not be allocated (${(err as Error).message}); not started (no root fallback)`); }
+      if (rec.state !== 'active') throw new SessionIdentityError(req.appId, `${req.appId}: user ${userId}'s identity is ${rec.state}; not started`);
+      if (!(rec.uid > 0 && rec.gid > 0)) throw new SessionIdentityError(req.appId, `${req.appId}: user ${userId} has no non-root identity; not started`);
+      return {
+        uid: rec.uid, gid: rec.gid, range: userId === deps.ownerId ? 'owner' : 'user', userId, account: account.username,
+      };
+    },
+  };
+}

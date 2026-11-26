@@ -12,6 +12,7 @@ import { containerSocketArgs } from './spawn/socketArgs.js';
 import { containerNetworkArgs, containerNetworkEnv, containerShellBase, rawSocketArgs, terminalNetworkUser } from './spawn/networkArgs.js';
 import { TERM_NETWORK_CONTAINER_LABEL, TermNetworks, type TermNetwork } from './TermNetworks.js';
 import { containerIdentityArgs, isNonRootIdentity, writeIdentityFiles } from './spawn/identityArgs.js';
+import { terminalSessionArgs } from './spawn/sessionArgs.js';
 import type { RuntimeCapabilities } from '../runtimes/types.js';
 // Value import, but MountManager imports ContainerRunner type-only, so there
 // is no runtime cycle.
@@ -875,6 +876,8 @@ export class ContainerRunner implements SandboxRunner {
       ...containerNetworkEnv({ term, shellHostname: this.shellHostname }),
       // The process identity (spawn/identityArgs.ts): root, or the installation's app uid (P5-3).
       ...containerIdentityArgs(ctx.identity, { appDataVolume, instanceId }),
+      // A System Terminal is its user's session host (spawn/sessionArgs.ts, stream T, D69).
+      ...terminalSessionArgs(appId, ctx),
       BASE_IMAGE,
     );
     a.push(...entrypoint);

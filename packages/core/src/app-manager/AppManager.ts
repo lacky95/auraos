@@ -49,11 +49,11 @@ import { HomeDeniedError, type HomeResolver, type ResolvedHome } from '../homes/
 import { kernelHomeResolver } from '../homes/HomeResolver.js';
 import { TERMINAL_SESSION_APPS } from '../homes/plan.js';
 import { appJumpPermission } from '../auth/GrantStore.js';
-import type { AppRunAs, SpawnIdentity, SpawnIdentityProvider } from '../identity/types.js';
-import { appIdentityProvider } from '../identity/appIdentityProvider.js';
+import { LINUX_ID_RANGES, ROOT_SPAWN_IDENTITY, linuxIdRangeOf, type AppRunAs, type SpawnIdentity, type SpawnIdentityProvider } from '../identity/types.js';
+import { appIdentityProvider, sessionHostIdentityProvider } from '../identity/appIdentityProvider.js';
 import { appOwnershipSpecs, applyAppOwnership } from '../identity/appOwnership.js';
 import { RuntimeCapabilityError } from '../runtimes/types.js';
-import { isNonRootIdentity } from './spawn/identityArgs.js';
+import { isNonRootIdentity, isSessionIdentity } from './spawn/identityArgs.js';
 import { selectOrphanSidecars } from './sidecars.js';
 import { SidecarParking, keepServicesOf } from './sidecarParking.js';
 import {
@@ -63,7 +63,7 @@ import {
 import { PermissionManager } from '../permissions/PermissionManager.js';
 import { ContentProviderRegistry } from '../content/ContentProviderRegistry.js';
 import { InterfaceRegistry } from '../interfaces/InterfaceRegistry.js';
-import { signRelayClaim } from '../app-hosts/relayClaim.js';
+import { RELAY_CLAIM_HEADER, signRelayClaim } from '../app-hosts/relayClaim.js';
 import type { InterfaceView } from '../interfaces/InterfaceRegistry.js';
 import { keymapRegistry } from '../keymap/KeymapRegistry.js';
 import { ScopeRegistry } from '../scopes/ScopeRegistry.js';
@@ -80,12 +80,50 @@ const RECONCILE_INTERVAL_MS = 5_000;
 const ERROR_GRACE_MS        = 30_000;
 
 /** The latched identity of an adopted container from its `Config.User` (P5-3). */
+/**
+ * Stream T: whether a System Terminal for the owner must wait for the
+ * ownership apply: its Private Home exists and is still root's. Only the
+ * owner (`default`); a member's home is created owned by them (H).
+ */
+export function ownerHomeAwaitsOwnership(
+  home: { kind: string; hostPath: string | null } | null | undefined, userId: string | undefined,
+  stat: (path: string) => { uid: number } | null = (p) => { try { return lstatSync(p); } catch { return null; } },
+): boolean {
+  if (userId !== DEFAULT_OWNER_ID || home?.kind !== 'private' || !home.hostPath) return false;
+  return stat(home.hostPath)?.uid === 0;
+}
+
+/**
+ * Stream T: a System Terminal instance's data dir (scrollback, saved
+ * directories, launch commands) belongs to the one user whose sessions it
+ * held. Instance ids are reused (D85 A7), so when the dir was left by another
+ * user's uid it is moved aside, root-only, and the new user starts empty:
+ * nothing of one user's sessions is replayed, restored or run in another's.
+ * Ownership is the dir's own uid (chowned at each non-root start), which a
+ * capability-less user can't forge; root-owned dirs predate stream T and
+ * were the owner's.
+ */
+export function retireForeignSessionData(dir: string, uid: number, now = Date.now()): string | null {
+  let st;
+  try { st = lstatSync(dir); } catch { return null; }
+  if (!st.isDirectory() || st.isSymbolicLink() || st.uid === 0 || st.uid === uid) return null;
+  const aside = join(dirname(dir), `.${basename(dir)}.retired-${st.uid}-${now}`);
+  renameSync(dir, aside);
+  chmodSync(aside, 0o700);
+  mkdirSync(dir, { recursive: true });
+  console.log(`[AppManager] ${basename(dir)}: its data was another user's (uid ${st.uid}); moved aside, starting empty`);
+  return aside;
+}
+
 export function adoptedIdentity(user: string | undefined): Pick<AppInstance, 'runAs' | 'uid' | 'gid'> {
   const m = /^(\d+)(?::(\d+))?$/.exec(user ?? '');
   if (!m) return { runAs: 'root', uid: 0, gid: 0 };
   const uid = Number(m[1]);
   const gid = m[2] !== undefined ? Number(m[2]) : uid;
-  return uid === 0 ? { runAs: 'root', uid: 0, gid } : { runAs: 'app', uid, gid };
+  if (uid === 0) return { runAs: 'root', uid: 0, gid };
+  // A user's uid (the owner, a member): a System Terminal session host (stream T).
+  const range = linuxIdRangeOf(uid);
+  return { runAs: range === 'owner' || range === 'user' ? 'user' : 'app', uid, gid };
 }
 
 export class AppManager {
@@ -229,7 +267,16 @@ export class AppManager {
         .get({ kind: 'user', id: p.userId }, appJumpPermission(installationId))),
     });
     // The installation's runAs decides (P5-3): root as today, or its app identity from the one registry.
-    this.identities = opts.identities ?? appIdentityProvider(async () => (await import('../auth/services.js')).getAuthServices().identity);
+    // A System Terminal instance is its user's session host instead (stream T, D69): that user's uid.
+    this.identities = opts.identities ?? sessionHostIdentityProvider(
+      appIdentityProvider(async () => (await import('../auth/services.js')).getAuthServices().identity),
+      {
+        sessionApps: TERMINAL_SESSION_APPS,
+        ownerId: DEFAULT_OWNER_ID,
+        account: async (userId) => (await import('../auth/services.js')).getAuthServices().users.getUser(userId),
+        identity: async (userId) => (await import('../auth/services.js')).getAuthServices().identity.ensureUser(userId),
+      },
+    );
     this.permissions = new PermissionManager(this.registry);
     this.tokens      = new InstanceTokens(join(opts.dataDir, 'aura', 'secrets', 'instance-token.key'));
     this.providers   = new ContentProviderRegistry();
@@ -1717,20 +1764,33 @@ export class AppManager {
       installation: { installationId: string; runAs?: AppRunAs } | null;
     },
   ): Promise<Pick<InstanceSpawnContext, 'home' | 'identity'>> {
-    void instanceId; // a runtime handle only: never a durable reference (D85 A7)
+    // instanceId: a runtime handle only, for the log line below; never a durable reference (D85 A7).
     if (!opts.installation) {
       throw new HomeDeniedError('installation-unresolved', `${appId}: its installation identity is unavailable, so it has no App Home; not started`);
     }
-    // Stream A (P5-3): the installation's runAs. Never a root fallback.
-    const identity = await this.identities.identityFor({
+    // The user it is for: its owner, or the user a pool member is warmed for (D78; stream T keys the pool per user).
+    const user = opts.owner ?? (opts.inPool ? this.poolHomeUser(appId, opts.manifest) : undefined);
+    // Stream A (P5-3): the installation's runAs; a System Terminal its user's uid (stream T, D69). Never a root fallback.
+    let identity = await this.identities.identityFor({
       appId, installationId: opts.installation.installationId, runAs: opts.installation.runAs ?? 'root',
-      ...(opts.owner ? { userId: opts.owner } : {}),
+      ...(user ? { userId: user } : {}),
     });
     if (isNonRootIdentity(identity) && opts.runtime.capabilities.identity === 'none') {
       throw new RuntimeCapabilityError(opts.runtime.runtime, ['identity'],
         `${appId} runs as its app identity, and runtime ${opts.runtime.runtime} can't enforce one: not started (no root fallback)`);
     }
-    const home = await this.homes.resolve(this.homeRequest(appId, opts.manifest, opts.installation.installationId, identity, opts.runtime.capabilities, opts.owner ?? (opts.inPool ? this.poolHomeUser(appId, opts.manifest) : undefined), !!opts.preview));
+    const home = await this.homes.resolve(this.homeRequest(appId, opts.manifest, opts.installation.installationId, identity, opts.runtime.capabilities, user, !!opts.preview));
+    if (TERMINAL_SESSION_APPS.has(appId) && isNonRootIdentity(identity)
+      && ownerHomeAwaitsOwnership(home, identity.userId)) {
+      // The owner's Private Home is still root's (D70: only the owner-approved
+      // ownership apply hands it to uid 1000): as uid 1000 the owner's own
+      // Terminal could read none of it (0600 logins), so until the apply it
+      // runs as before. Never for a member (their home is created theirs), and
+      // reported (diagnose/terminal-sessions, `aura get inst`: runAs root).
+      console.warn(`[AppManager] ${instanceId}: the owner's Private Home is still root-owned (ownership apply pending): `
+        + 'this Terminal runs as root until `aura admin homes ownership --apply` (stream T)');
+      identity = { ...ROOT_SPAWN_IDENTITY, userId: identity.userId! };
+    }
     return { home, identity };
   }
 
@@ -1914,12 +1974,18 @@ export class AppManager {
       if (spawnCtx.home?.kind === 'private' && spawnCtx.home.hostPath) this.seedPrivateHome(spawnCtx.home.hostPath);
       if (opts.inPool) this.poolHomes.set(instanceId, this.poolHomeUser(appId, manifest) ?? '');
       const appDir = opts.preview?.appDir ?? manifest.appDir;
+      // A session host's data is its user's: never another user's (stream T).
+      // (A Terminal as root is only ever the owner's, before the ownership apply: the owner's uid then.)
+      const sessionUid = isNonRootIdentity(spawnCtx.identity) ? spawnCtx.identity.uid : LINUX_ID_RANGES.owner.first;
+      if (TERMINAL_SESSION_APPS.has(appId) && retireForeignSessionData(instanceDataDir, sessionUid)) {
+        this.mounts.forget(instanceId);   // nor its cross-app mounts (normally forgotten at its stop already)
+      }
       if (isNonRootIdentity(spawnCtx.identity)) {
         nonRoot = spawnCtx.identity;
         await this.prepareNonRootStart(appId, manifest, appDir, instanceDataDir, nonRoot, installation?.installationId ?? null, spawnCtx.home);
       }
       const ident = spawnCtx.identity ?? { uid: 0, gid: 0 };
-      this.upsertInstance(instanceId, appId, { runAs: nonRoot ? 'app' : 'root', uid: ident.uid, gid: ident.gid });
+      this.upsertInstance(instanceId, appId, { runAs: isSessionIdentity(nonRoot) ? 'user' : nonRoot ? 'app' : 'root', uid: ident.uid, gid: ident.gid });
       const pid = await runner.spawn(instanceId, appId, port, manifest, {
         ...spawnCtx,
         ...(installation ? { installationId: installation.installationId } : {}),
@@ -1927,8 +1993,9 @@ export class AppManager {
         instanceDataDir,
         // Fresh nonce per spawn: tokens of a previous life of a recycled
         // instance id stop verifying the moment this one is minted. An owned
-        // instance's token names its owner (`u`); a pool member's names nobody.
-        instanceToken:   this.tokens.mint(instanceId, undefined, owner),
+        // instance's token names its owner (`u`); a pool member's names nobody,
+        // except a session host's, which is its user's from the start (stream T).
+        instanceToken:   this.tokens.mint(instanceId, undefined, owner ?? spawnCtx.identity?.userId),
         ...(owner ? { owner } : {}),
         // A preview runs the user's own workspace, not the installed source.
         sourceMode,
@@ -1986,7 +2053,7 @@ export class AppManager {
         const warmups = ['/'];
         const host = this.runnerOf(instanceId).getHost(instanceId) ?? '127.0.0.1';
         for (const path of warmups) {
-          fetch(`http://${host}:${port}${path}`, { signal: AbortSignal.timeout(5000) })
+          fetch(`http://${host}:${port}${path}`, { signal: AbortSignal.timeout(5000), headers: this.ownRelayHeaders(appId, instanceId, 'GET', path) })
             .then((r) => r.body?.cancel()).catch(() => undefined);
         }
       }
@@ -2360,6 +2427,18 @@ export class AppManager {
    * running or its start has no lifecycle token (the receiver then reports
    * the claim missing).
    */
+  /**
+   * The relay claim header of a call the shell makes on its own behalf (pool
+   * warm-up, the reconciler's identity probe) to a session host, which
+   * answers the shell only with one (D89 B4 strict, stream T). Empty for
+   * every other app.
+   */
+  private ownRelayHeaders(appId: string, instanceId: string, method: string, path: string): Record<string, string> {
+    if (!TERMINAL_SESSION_APPS.has(appId)) return {};
+    const claim = this.relayClaim(instanceId, { method, path, caller: 'system' });
+    return claim ? { [RELAY_CLAIM_HEADER]: claim } : {};
+  }
+
   relayClaim(instanceId: string, call: { method: string; path: string; userId?: string; sid?: string; caller?: string }): string | null {
     if (!this.instances.get(instanceId)?.sandbox) return null;
     let key: Buffer | null = null;
@@ -3220,6 +3299,7 @@ export class AppManager {
         if (!host) continue; // runner doesn't track it (yet); step 1 handles dead ones
         const res = await fetch(`http://${host}:${inst.port}${lifecyclePath('health')}`, {
           signal: AbortSignal.timeout(1000),
+          headers: this.ownRelayHeaders(inst.appId, inst.instanceId, 'GET', lifecyclePath('health')),
         });
         if (!res.ok) continue; // transient — don't punish on a single bad response
         const declaredHeaderApp  = res.headers.get('x-aura-app-id');

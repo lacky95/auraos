@@ -222,8 +222,9 @@ export function attachWsProxy(httpServer) {
     } catch (err) { dbg('WS-PROXY', 'resolve-err', String(err)); }
 
     if (!port) { reportWs(0); dbg('WS-PROXY', 'no-port → destroy', instanceId, `t=${Date.now() - t0}ms`); socket.destroy(); return; }
-    // Upgrades never reach Astro's middleware: the surface's own rule decides (enforce only).
-    if (!(await surfaceGate({ subject: subject(), method: 'UPGRADE', appId: chosenAppId, identity }))) {
+    // Upgrades never reach Astro's middleware: the surface's own rule decides (enforce only),
+    // on the instance it would reach (D69: a Terminal instance only for its own user).
+    if (!(await surfaceGate({ subject: subject(), method: 'UPGRADE', appId: chosenAppId, instanceId: chosenInstanceId, identity }))) {
       reportWs(403);
       try { socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n'); } catch { /* gone */ }
       return;

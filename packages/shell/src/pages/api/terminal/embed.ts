@@ -7,6 +7,7 @@ import { loadAppHostServices } from '../../../../server/app-host-auth.mjs';
 import { gatewayClaimOf } from '../../../../server/gateway-identity.mjs';
 import { EMBEDDER_PARAM, TERMINAL_APP_ID, mayUseSession, terminalSessionInstance } from '../../../../server/terminal-embed.mjs';
 import { gatewayInstance } from '../../../lib/access/identify.ts';
+import { liveInstanceOwner } from '../../../lib/access/decide.ts';
 
 /**
  * Show a Terminal session inside an app (D25, 5.16). App Host gateway only:
@@ -36,6 +37,10 @@ export const POST: APIRoute = async ({ request }) => {
   const sessionId = body?.sessionId;
   const terminalInstance = terminalSessionInstance(sessionId);
   if (!terminalInstance || typeof sessionId !== 'string') return jsonResponse({ error: 'bad-session-id' }, 400);
+  // D69: only a session of the Terminal instance of the user this App Host session is (D25 grant AND owner).
+  if (liveInstanceOwner(terminalInstance) !== claim.userId) {
+    return jsonResponse({ error: 'not-granted', message: 'That Terminal session belongs to another user.' }, 403);
+  }
   if (!(await mayUseSession(inst.appId, sessionId))) {
     return jsonResponse({ error: 'not-granted', message: 'This app was not granted that Terminal session. Open it in a Terminal window.' }, 403);
   }

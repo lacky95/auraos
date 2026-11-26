@@ -6,7 +6,7 @@ import { snapshotOf, type AccessContext } from './guard.ts';
 import { OWNER_UI_EXCLUDED_TARGETS, actingInstance, type ResolvedPrincipal } from './identify.ts';
 import { resolveCaller } from '../auth.ts';
 import {
-  combineCandidates, concreteRule, decideRule, isInternalCall, kvNamespace, liveDeps, resourceFor, withNetworkCaller,
+  combineCandidates, concreteRule, decideRule, isInternalCall, kvNamespace, liveDeps, resourceFor,
   type CandidateRequest, type ObserverDeps,
 } from './observer.ts';
 import { candidateRules, handlersOf, manifestRoute, normalizeMethod, readsBody, refinementOf, type RuleCandidate } from './resolve.ts';
@@ -27,7 +27,7 @@ import type {
  *             refused (observer.ts), and in `off` not even counted.
  *
  * One verdict per request: the principal resolved here (identify.ts
- * `resolvePrincipal`, verifying, with the D28 network caller) is the one the
+ * `resolvePrincipal`, verifying; never an address, D89 B6) is the one the
  * report counts and the route reads (`locals.access`). A refusal is JSON in
  * the gateway's style: 401 for an unauthenticated caller, 403 otherwise, its
  * `error` the outcome when a further step is needed (`needs-fresh-auth`,
@@ -169,7 +169,7 @@ export async function accessGate(
   // Decided at the gateway, in every mode; the route still gets its caller.
   if (enforcing && gateway) return { refused: null, identity, ...settled };
 
-  const seen = await withNetworkCaller(identity, candidates.map((c) => c.rule), snapshot.identity.peer, deps.network);
+  const seen = identity;
   const req: CandidateRequest = {
     snapshot, principal: seen.principal as AccessPrincipal, via: seen.via,
     surface: 'api', subject: route, method, strict: enforcing,

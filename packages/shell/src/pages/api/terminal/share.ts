@@ -2,6 +2,7 @@ import type { APIRoute } from 'astro';
 import * as core from '@aura/core';
 import { shellOwner } from '../../../lib/appHostHandoff.ts';
 import { jsonResponse } from '../../../lib/appResponse.js';
+import { liveInstanceOwner } from '../../../lib/access/decide.ts';
 import { holdsEmbedGrant, isSystemTerminal, shareSession, shellRelayHeader, TERMINAL_APP_ID, terminalSessionInstance } from '../../../../server/terminal-embed.mjs';
 
 /**
@@ -15,11 +16,13 @@ import { holdsEmbedGrant, isSystemTerminal, shareSession, shellRelayHeader, TERM
  * (POST both: a same-origin GET carries no Origin to check.)
  */
 
-async function sessionExists(sessionId: string): Promise<boolean> {
+async function sessionExists(sessionId: string, userId: string): Promise<boolean> {
   const instanceId = terminalSessionInstance(sessionId);
   const mgr = core.getAppManager();
   const inst = instanceId ? mgr.getInstance(instanceId) : null;
   if (!inst || inst.appId !== TERMINAL_APP_ID || inst.port == null || !(await isSystemTerminal(inst.appId))) return false;
+  // D69: only a session of this user's own Terminal is theirs to share.
+  if (liveInstanceOwner(inst.instanceId) !== userId) return false;
   const up = mgr.getUpstreamUrl?.(inst.instanceId);
   try {
     const res = await fetch(`http://${up?.host ?? 'localhost'}:${up?.port ?? inst.port}/api/sessions`, {
@@ -43,10 +46,10 @@ export const POST: APIRoute = async (ctx) => {
     return jsonResponse({ error: 'invalid-request' }, 400);
   }
   if (src?.['check'] === true) {
-    const eligible = !(await isSystemTerminal(appId)) && await holdsEmbedGrant(appId) && await sessionExists(sessionId);
+    const eligible = !(await isSystemTerminal(appId)) && await holdsEmbedGrant(appId) && await sessionExists(sessionId, owner.identity.userId);
     return jsonResponse({ eligible });
   }
-  if (!(await sessionExists(sessionId))) return jsonResponse({ error: 'session-gone', message: 'That Terminal session has ended.' }, 404);
+  if (!(await sessionExists(sessionId, owner.identity.userId))) return jsonResponse({ error: 'session-gone', message: 'That Terminal session has ended.' }, 404);
   const refusal = await shareSession(appId, sessionId);
   if (refusal) return jsonResponse({ error: refusal }, refusal === 'bad-session-id' ? 400 : refusal === 'unavailable' ? 503 : 403);
   return jsonResponse({ ok: true, appId, sessionId });

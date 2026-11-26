@@ -4,6 +4,9 @@ import { browserDocumentRequest, plainProxyPath } from '../../../../../server/ho
 import { dropServiceWorkerScope, stripShellCredentials } from '../../../../../server/shell-credentials.mjs';
 import { getAppManager, resolveProxyConfig, INTERFACE_PATH_KINDS, RELAY_CLAIM_HEADER } from '@aura/core';
 import { relayCaller, relayClaimFor, type RelaySigner } from '../../../../lib/access/relay.ts';
+import { actingUser } from '../../../../lib/access/decide.ts';
+import { SESSION_HOST_APPS } from '../../../../lib/access/identify.ts';
+import { requestUserId } from '../../../../lib/userContext.ts';
 
 /**
  * The machine proxy: a call to a running app's server, for machine callers
@@ -32,18 +35,20 @@ export const ALL: APIRoute = async (ctx) => machineOnly(dropServiceWorkerScope(a
 const coldStarts = new Map<string, Promise<unknown>>();
 const COLD_START_TIMEOUT_MS = 30_000;
 
-function ensureInstance(mgr: ReturnType<typeof getAppManager>, appId: string): Promise<unknown> {
-  let p = coldStarts.get(appId);
+function ensureInstance(mgr: ReturnType<typeof getAppManager>, appId: string, userId: string | null = null): Promise<unknown> {
+  // A session host starts for its user (D69): one cold start per app and user.
+  const key = userId ? `${appId}\0${userId}` : appId;
+  let p = coldStarts.get(key);
   if (!p) {
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const started = mgr.start(appId);
+    const started = userId ? mgr.start(appId, { userId }) : mgr.start(appId);
     const timeout = new Promise((_, reject) => {
       timer = setTimeout(() => reject(new Error(`timed out after ${COLD_START_TIMEOUT_MS}ms`)), COLD_START_TIMEOUT_MS);
     });
     p = Promise.race([started, timeout])
-      .finally(() => { clearTimeout(timer); coldStarts.delete(appId); });
+      .finally(() => { clearTimeout(timer); coldStarts.delete(key); });
     started.catch(() => {}); // the race surfaces the rejection; keep the loser from tripping unhandledRejection
-    coldStarts.set(appId, p);
+    coldStarts.set(key, p);
   }
   return p;
 }
@@ -122,10 +127,21 @@ const forward = async ({ params, request, locals }: APIContext): Promise<Respons
   //   - Bare appId match: pick a USER-OWNED live instance (skip inPool=true),
   //     never a pool member that hasn't been handed over yet, nor a preview
   //     (Track P: it is reached by its own instance id and App Host only).
+  //   - A session host (the System Terminal, D69) by its bare appId: the
+  //     caller's own instance only, started for the caller when it has none.
+  //     An exact instance id was checked against the caller by the access
+  //     rule (decide.ts `sessionHostReachable`).
+  const sessionUser = SESSION_HOST_APPS.has(id)
+    ? (locals?.access?.principal ? actingUser(locals.access.principal) : await requestUserId(request))
+    : null;
+  if (SESSION_HOST_APPS.has(id) && !sessionUser) {
+    return jsonError(403, { error: 'not-session-owner', message: `${id} instances are user sessions: call as the user whose session it is` });
+  }
+  const mine = (i: { owner?: string }) => sessionUser === null || i.owner === sessionUser;
   const exact = mgr.getInstance(id);
   let instance = exact && isLive(exact.state)
     ? exact
-    : mgr.getInstancesByApp(id).find((i) => !i.inPool && !i.preview && isLive(i.state) && i.port != null);
+    : mgr.getInstancesByApp(id).find((i) => !i.inPool && !i.preview && isLive(i.state) && i.port != null && mine(i));
 
   if (!instance?.port) {
     // Cold-start: a bare-appId request for a path the app's manifest declares
@@ -142,9 +158,9 @@ const forward = async ({ params, request, locals }: APIContext): Promise<Respons
       && (reqPath === p.address || reqPath.startsWith(p.address + '/')));
     if (servesPath) {
       try {
-        await ensureInstance(mgr, id);
+        await ensureInstance(mgr, id, sessionUser);
         instance = mgr.getInstancesByApp(id)
-          .find((i) => !i.inPool && !i.preview && isLive(i.state) && i.port != null);
+          .find((i) => !i.inPool && !i.preview && isLive(i.state) && i.port != null && mine(i));
       } catch (err) {
         console.error(`[proxy] cold-start of ${id} failed: ${(err as Error).message}`);
       }

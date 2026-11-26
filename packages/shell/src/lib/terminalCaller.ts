@@ -1,5 +1,6 @@
 import type { APIContext } from 'astro';
 import { actingInstance, bearerToken } from './access/identify.ts';
+import { actingUser, liveInstanceOwner } from './access/decide.ts';
 import { shellOwner } from './appHostHandoff.ts';
 import { authenticate, resolveCaller, type AuthDeps } from './auth.ts';
 import { isSystemTerminal } from '../../server/terminal-embed.mjs';
@@ -70,6 +71,29 @@ export async function isOwnerCaller(ctx: Pick<APIContext, 'request' | 'cookies'>
   } catch { /* not the operator */ }
   try {
     return !('error' in await shellOwner(ctx));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * D69 (stream T): whether the caller of `request` acts for the user whose
+ * session host `instanceId` is (decide.ts `actingUser`, the instance's
+ * `owner`). A Terminal instance of another user, or of nobody yet (an
+ * unclaimed pool member), is not the caller's: the routes answer as if it
+ * were not running. Never throws.
+ */
+export async function callerOwnsTerminal(
+  request: Request, instanceId: string | null,
+  deps: { owner(instanceId: string): string | null } = { owner: liveInstanceOwner },
+): Promise<boolean> {
+  if (!instanceId) return false;
+  try {
+    const r = await resolveCaller(request);
+    if (r.rejected) return false;
+    const user = actingUser(r.principal);
+    const owner = deps.owner(instanceId);
+    return !!user && owner !== null && owner === user;
   } catch {
     return false;
   }

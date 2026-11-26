@@ -158,7 +158,10 @@ POST   /api/interfaces                     register (body = a provides entry)
 DELETE /api/interfaces/<name>              withdraw a runtime registration
 ```
 
-Reads are open to every app — they expose only what apps themselves declared.
+Reads are open to every app — they expose only what apps themselves declared
+— by its credential: on a server or in a terminal, send the instance token
+(`curl -H "Authorization: Bearer $AURA_INSTANCE_TOKEN" …`); a call without one
+is refused, whatever address it comes from.
 Writes are caller-scoped: there is no `appId` field in a write, so you can only
 ever register under your own instance. In a page, the App Host gateway
 (`/_aura/os/`) signs the call with your app and instance; on your server, the

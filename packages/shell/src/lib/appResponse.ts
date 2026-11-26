@@ -1,5 +1,6 @@
 import { join } from 'node:path';
-import { getAppManager, lifecyclePath } from '@aura/core';
+import { getAppManager, lifecyclePath, RELAY_CLAIM_HEADER } from '@aura/core';
+import { relayClaimFor, type RelaySigner } from './access/relay.ts';
 import type { AppManifest, AppInstance } from '@aura/core';
 
 export interface AppHealth {
@@ -70,8 +71,11 @@ async function probeHealth(instance: AppInstance): Promise<AppHealth> {
     const upHost = up?.host ?? 'localhost';
     const path = lifecyclePath('health');
     try {
+      // An owner agent's server answers the shell only with its relay claim (D89 B4, strict since 5-main): this probe is the shell's own.
+      const relay = relayClaimFor(mgr as unknown as RelaySigner, { appId: instance.appId, instanceId: instance.instanceId, method: 'GET', path }, { caller: 'system' });
       const res = await fetch(`http://${upHost}:${instance.port}${path}`, {
         signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
+        ...(relay ? { headers: { [RELAY_CLAIM_HEADER]: relay } } : {}),
       });
       health.httpLatencyMs = Date.now() - start;
       health.httpHealthy = res.ok;

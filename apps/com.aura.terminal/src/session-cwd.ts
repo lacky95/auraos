@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
-import { TMUX_SOCKET, tmuxBin, tmuxName } from './tmux-control.ts';
+import { TMUX_SOCKET_ARGS, tmuxBin, tmuxName } from './tmux-control.ts';
 
 /**
  * The working directory of every session, so a shell that has to be
@@ -52,7 +52,7 @@ export function forgetCwd(sessionId: string): void {
 function currentCwd(sessionId: string): string | null {
   if (!tmuxBin) return null;
   try {
-    const r = spawnSync(tmuxBin, ['-L', TMUX_SOCKET, 'display-message', '-p', '-t', tmuxName(sessionId), '#{pane_current_path}'],
+    const r = spawnSync(tmuxBin, [...TMUX_SOCKET_ARGS, 'display-message', '-p', '-t', tmuxName(sessionId), '#{pane_current_path}'],
       { encoding: 'utf-8', timeout: 2_000 });
     const dir = r.status === 0 ? r.stdout.trim() : '';
     return dir && existsSync(dir) ? dir : null;

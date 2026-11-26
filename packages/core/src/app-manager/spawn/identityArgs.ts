@@ -14,6 +14,11 @@
  *   AURA_RUN_AS=app                       for the start shell's messages only; it decides by `id -u`
  *   ASTRO_TELEMETRY_DISABLED=1            no telemetry state in the App Home, and no first-run prompt
  *
+ * A user's session identity (stream T, D69): the System Terminal instance of
+ * user U runs as U's uid/gid (range `owner` or `user`), with the same flags
+ * and no capability either; its passwd names U by username, `pw_dir=/home/aura`,
+ * and `AURA_RUN_AS=user`.
+ *
  * There is no fallback: the runner never retries a failed non-root start as
  * root (P5-3). Sidecars keep their image user, except an `aura-base` sidecar
  * that inherits the app's home: it is the app's own code and runs as the app
@@ -51,17 +56,35 @@ export const BASE_GROUP = [
   'root:x:0:', 'daemon:x:1:', 'bin:x:2:', 'sys:x:3:', 'nogroup:x:65534:', 'node:x:1000:',
 ].join('\n');
 
-/** The account name of a spawn identity: `app-<installation>` for an app identity. */
+/** Names the base files keep for themselves: a user account never takes one over. */
+const BASE_NAMES = new Set(BASE_PASSWD.split('\n').map((l) => l.split(':')[0]!));
+const ACCOUNT_RE = /^[a-z_][a-z0-9_-]{0,31}$/;
+
+/** True for a user's session identity (stream T): the owner's or a member's uid, never an app's. */
+export function isSessionIdentity(identity: SpawnIdentity | undefined | null): boolean {
+  return isNonRootIdentity(identity) && (identity.range === 'owner' || identity.range === 'user');
+}
+
+/**
+ * The account name of a spawn identity: `app-<installation>` for an app
+ * identity; a session identity's username (D69), unless it is not a safe
+ * account name or one the base files use (`user-<uid>` then).
+ */
 export function identityAccountName(identity: SpawnIdentity, installationId: string | null): string {
   if (identity.range === 'app' && installationId) return appAccountName(installationId);
+  if (isSessionIdentity(identity)) {
+    const name = (identity.account ?? '').toLowerCase();
+    return ACCOUNT_RE.test(name) && !BASE_NAMES.has(name) ? name : `user-${identity.uid}`;
+  }
   return `aura-${identity.range}-${identity.uid}`;
 }
 
 /** The rendered `/etc/passwd` and `/etc/group` of a non-root app container. Pure. */
 export function renderIdentityFiles(identity: SpawnIdentity, installationId: string | null): { passwd: string; group: string } {
   const name = identityAccountName(identity, installationId);
+  const gecos = isSessionIdentity(identity) ? 'AuraOS user' : 'AuraOS app';
   return {
-    passwd: renderPasswd(BASE_PASSWD, [{ name, uid: identity.uid, gid: identity.gid, gecos: 'AuraOS app' }]),
+    passwd: renderPasswd(BASE_PASSWD, [{ name, uid: identity.uid, gid: identity.gid, gecos }]),
     group: renderGroup(BASE_GROUP, [{ name, gid: identity.gid }]),
   };
 }
@@ -114,7 +137,7 @@ export function containerIdentityArgs(identity: SpawnIdentity | undefined, opts?
   return [
     ...processIdentityFlags(identity),
     ...identityFileMounts(opts.appDataVolume, opts.instanceId),
-    '-e', 'AURA_RUN_AS=app',
+    '-e', `AURA_RUN_AS=${isSessionIdentity(identity) ? 'user' : 'app'}`,
     // No Astro telemetry state in the App Home (and no first-run notice).
     '-e', 'ASTRO_TELEMETRY_DISABLED=1',
   ];

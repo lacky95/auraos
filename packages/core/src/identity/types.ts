@@ -131,6 +131,8 @@ export interface SpawnIdentity extends LinuxIdentity {
   range: AllocatedLinuxIdRange | 'owner' | 'root';
   /** The user the process acts for, when it acts for one. */
   userId?: string;
+  /** A session identity's account name (the user's username, stream T); the passwd entry's name. */
+  account?: string;
 }
 
 export const ROOT_SPAWN_IDENTITY: Readonly<SpawnIdentity> = Object.freeze({ uid: 0, gid: 0, range: 'root' as const });

@@ -69,7 +69,7 @@ async function resolveMcp(ref: string): Promise<InterfaceRow> {
   if (!APP_ID_RE.test(appId)) fail(`invalid app id '${appId}'`);
   const q = new URLSearchParams({ appId, kind: 'mcp', consumers: '0', ...(iface ? { name: iface } : {}) });
   const { interfaces } = await api.get<{ interfaces: InterfaceRow[] }>(`/api/interfaces?${q}`);
-  if (interfaces.length === 0) fail(`${ref}: no MCP interface (see: curl -s "$OS_API_BASE/api/interfaces?kind=mcp&consumers=0")`);
+  if (interfaces.length === 0) fail(`${ref}: no MCP interface (see: curl -s -H "Authorization: Bearer $AURA_INSTANCE_TOKEN" "$OS_API_BASE/api/interfaces?kind=mcp&consumers=0")`);
   if (interfaces.length > 1) fail(`${appId} provides ${interfaces.length} MCP interfaces; name one: ${interfaces.map((i) => `${appId}/${i.name}`).join(', ')}`);
   return interfaces[0]!;
 }

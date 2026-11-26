@@ -122,7 +122,7 @@ test('hook script posts the event and never blocks or fails', async () => {
   const server = createServer((req, res) => {
     let b = '';
     req.on('data', (d) => { b += d; });
-    req.on('end', () => { got.push({ url: req.url, auth: req.headers.authorization ?? null, body: JSON.parse(b) }); res.end('{}'); });
+    req.on('end', () => { got.push({ url: req.url, auth: req.headers.authorization ?? null, hook: req.headers['x-aura-hook-token'] ?? null, body: JSON.parse(b) }); res.end('{}'); });
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -132,9 +132,10 @@ test('hook script posts the event and never blocks or fails', async () => {
     p.on('exit', (code) => resolve(code));
   });
 
-  assert.equal(await run(['claude'], '{"hook_event_name":"Stop"}', { AURA_TERM_SESSION: 'com.aura.terminal-2#a3', AURA_INSTANCE_TOKEN: 'aura1.t.k' }), 0);
-  assert.equal(await run(['codex', '{"type":"agent-turn-complete"}'], '', { AURA_TERM_SESSION: 'com.aura.terminal-2#a3' }), 0);
+  assert.equal(await run(['claude'], '{"hook_event_name":"Stop"}', { AURA_TERM_SESSION: 'com.aura.terminal-2#a3', AURA_TERM_HOOK_TOKEN: 'ht-1', AURA_INSTANCE_TOKEN: 'aura1.t.k' }), 0);
+  assert.equal(await run(['codex', '{"type":"agent-turn-complete"}'], '', { AURA_TERM_SESSION: 'com.aura.terminal-2#a3', AURA_TERM_HOOK_TOKEN: 'ht-1' }), 0);
   assert.equal(await run(['claude'], '{"hook_event_name":"Stop"}', {}), 0, 'outside a terminal session: silent no-op');
+  assert.equal(await run(['claude'], '{"hook_event_name":"Stop"}', { AURA_TERM_SESSION: 'com.aura.terminal-2#a3' }), 0, 'a session from before stream T (no hook token): silent no-op');
   for (let i = 0; i < 50 && got.length < 2; i++) await new Promise((r) => setTimeout(r, 50));
   server.close();
 
@@ -143,6 +144,9 @@ test('hook script posts the event and never blocks or fails', async () => {
   // D89 B3: the post carries the session's instance token (never on the command line); none without one.
   assert.deepEqual(got.map((g) => g.body.source + ':' + g.auth).sort(), ['claude:Bearer aura1.t.k', 'codex:null']);
   assert.ok(!/curl[^\n]*Bearer \$/.test(HOOK_SCRIPT), 'the token is read from a descriptor, not passed as an argument');
+  // Stream T: every post carries its session's hook token, read from the same descriptor.
+  assert.deepEqual(got.map((g) => g.hook), ['ht-1', 'ht-1']);
+  assert.ok(!/curl[^\n]*HOOK_TOKEN/.test(HOOK_SCRIPT), 'the hook token is not on curl\'s command line');
   const bodies = got.map((g) => g.body).sort((a, b) => a.source.localeCompare(b.source));
   assert.deepEqual(bodies[0], { session: 'com.aura.terminal-2#a3', source: 'claude', payload: { hook_event_name: 'Stop' } });
   assert.deepEqual(bodies[1], { session: 'com.aura.terminal-2#a3', source: 'codex', payload: { type: 'agent-turn-complete' } });
@@ -150,7 +154,7 @@ test('hook script posts the event and never blocks or fails', async () => {
   // Endpoint down: still exits 0 promptly.
   const t0 = Date.now();
   const r = spawnSync('bash', [script, 'claude'], {
-    input: '{}', env: { PATH: process.env.PATH, OS_API_BASE: 'http://127.0.0.1:1', AURA_TERM_SESSION: 'x-1#a1' },
+    input: '{}', env: { PATH: process.env.PATH, OS_API_BASE: 'http://127.0.0.1:1', AURA_TERM_SESSION: 'x-1#a1', AURA_TERM_HOOK_TOKEN: 'h' },
   });
   assert.equal(r.status, 0);
   assert.ok(Date.now() - t0 < 1500);
