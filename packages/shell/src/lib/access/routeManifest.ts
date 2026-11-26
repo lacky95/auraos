@@ -391,12 +391,6 @@ const routes: RouteAccessManifest['routes'] = {
       ...why('Track P: an agent finds an app\'s source. Read-only for a closed install; writable only for an open one and only in the owner\'s Terminal (the handler).'),
     })),
   },
-  '/api/instances/[instanceId]/app-workspace': {
-    methods: on(['POST', 'DELETE'], rule(INSTANCE, 'instance', {
-      targetPermissions: ['apps.mount'], guard: 'target-permissions',
-      ...why('Track P: a writable patch workspace (a copy, never the installed source), bound into the calling instance only.'),
-    })),
-  },
   '/api/instances/[instanceId]/app-workspace/clean': {
     methods: { POST: rule(INSTANCE, 'instance', {
       targetPermissions: ['apps.mount'], guard: 'target-permissions',

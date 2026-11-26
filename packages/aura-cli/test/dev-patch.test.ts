@@ -1,6 +1,6 @@
 // Track P authoring and patch tooling (commands/dev.ts, dev-source.ts,
 // dev-patch.ts) against a fake shell on loopback that plays P-SYS's routes:
-// R1 app-source, R2 app-workspace, R4 activate (aura-work/trackp-streams.md).
+// R1 app-source, the mount API (kinds patches, work), R4 activate (aura-work/trackp-streams.md).
 //
 //   pnpm --filter @aura/cli test
 import { TEST_ROOT } from './helpers/dev-env.js';
