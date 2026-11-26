@@ -376,8 +376,18 @@ import { NATIVE_KEYBOARD_JS } from '../../../lib/keyboard/nativeKeyboardScript.t
       }
     };
     st.$suppressNative.listen(broadcastPolicy);
+    //
+    // Each document reports its own field: "focused" at once, "left" 200 ms
+    // after the blur. Moving from one terminal (or any field) to another
+    // therefore delivers the new document's "focused" before the old one's
+    // "left". Only the document that reported focus last may close the
+    // keyboard, and only if no field takes focus within FIELD_LEFT_GRACE_MS.
+    const FIELD_LEFT_GRACE_MS = 150;
     let autoOpened = false;
-    st.$open.listen((open) => { if (!open) autoOpened = false; });
+    let fieldOwner: unknown = null;
+    let leftTimer: ReturnType<typeof setTimeout> | null = null;
+    const cancelLeft = () => { if (leftTimer) { clearTimeout(leftTimer); leftTimer = null; } };
+    st.$open.listen((open) => { if (!open) { autoOpened = false; cancelLeft(); } });
     onAuraChannel(['aura.keyboard.hello', 'aura.keyboard.field'], (ev) => {
       const d = ev.data as { type?: string; focused?: boolean };
       const nested = isHostNestedSender(ev.sender);
@@ -388,8 +398,14 @@ import { NATIVE_KEYBOARD_JS } from '../../../lib/keyboard/nativeKeyboardScript.t
         return;
       }
       if (!st.$autoOpen.get() || !matchMedia('(pointer: coarse)').matches) return;
-      if (d.focused) { if (!st.$open.get()) { autoOpened = true; st.$open.set(true); } }
-      else if (autoOpened) st.$open.set(false);
+      if (d.focused) {
+        fieldOwner = ev.source;
+        cancelLeft();
+        if (!st.$open.get()) { autoOpened = true; st.$open.set(true); }
+      } else if (autoOpened && ev.source === fieldOwner) {
+        cancelLeft();
+        leftTimer = setTimeout(() => { leftTimer = null; if (autoOpened) st.$open.set(false); }, FIELD_LEFT_GRACE_MS);
+      }
     });
     // The shell page's own copy said hello before this script ran.
     broadcastPolicy();
