@@ -9,7 +9,7 @@
  */
 import { api } from './client.js';
 import { color, stateColor, uptime } from './format.js';
-import { ensureRegistry, loadRegistry, loadState, type State } from './registry.js';
+import { loadRegistry, loadState, type State } from './registry.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -309,7 +309,6 @@ const capabilities: ResourceDef<CapRow> = {
   scopes: ['app'],
   nameOf: (c) => c.name,
   list: async (ctx) => {
-    ensureRegistry();
     const reg = loadRegistry();
     // The shell is the state writer; the local file can be stale inside a PRoot.
     let state: State;
@@ -346,7 +345,6 @@ const services: ResourceDef<ServiceRow> = {
   verbs: ['get', 'describe', 'start', 'stop', 'restart', 'install', 'delete', 'logs'],
   nameOf: (s) => s.name,
   list: async () => {
-    ensureRegistry();
     const reg = loadRegistry();
     const state = loadState();
     return Object.entries(reg.services).map(([name, entry]) => {

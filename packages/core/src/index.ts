@@ -47,6 +47,7 @@ export * from './auth/index.js';
 export * from './approvals/index.js';
 export * from './security/options.js';
 export * from './security/SecurityPolicyStore.js';
+export * from './capabilities/index.js';
 export * from './system/systemIdentity.js';
 export * from './users/profileRegistry.js';
 export * from './users/userData.js';

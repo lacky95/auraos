@@ -72,6 +72,6 @@ export function ensureIdentityKey(keyFile: string): string {
 }
 
 /** A purpose-bound subkey, so a session MAC can never pass as a record MAC. */
-export function deriveIdentitySubkey(keyFile: string, purpose: 'login-session' | 'user-record' | 'password-policy' | 'security-policy'): Buffer {
+export function deriveIdentitySubkey(keyFile: string, purpose: 'login-session' | 'user-record' | 'password-policy' | 'security-policy' | 'capability-registry'): Buffer {
   return createHmac('sha256', ensureIdentityKey(keyFile)).update(`aura-identity/v1/${purpose}`).digest();
 }

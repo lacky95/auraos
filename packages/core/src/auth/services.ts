@@ -20,9 +20,10 @@ import { LoginSessionStore } from './LoginSessionStore.js';
 import { defaultSetupTicketDir, FileSetupTickets } from './setupTickets.js';
 import { ValkeyUserStore } from './ValkeyUserStore.js';
 import { SECURITY_AUDIT_ACTIONS, SecurityPolicyStore } from '../security/SecurityPolicyStore.js';
+import { CapabilityRegistryStore } from '../capabilities/CapabilityRegistryStore.js';
 
 /** Bump when the shape changes, so a singleton made by an older module copy is replaced. */
-export const AUTH_SERVICES_VERSION = 9;
+export const AUTH_SERVICES_VERSION = 10;
 
 export interface AuthServices {
   version: number;
@@ -42,6 +43,8 @@ export interface AuthServices {
   approvals: ValkeyApprovalStore;
   /** The writable security options (D64, security/options.ts). */
   securityPolicy: SecurityPolicyStore;
+  /** Capability definitions the owner added (SF-2, capabilities/CapabilityRegistryStore.ts). */
+  capabilityRegistry: CapabilityRegistryStore;
 }
 
 const GLOBAL_KEY = '__auraAuthServices';
@@ -112,6 +115,14 @@ export function getAuthServices(): AuthServices {
       onTampered: () => {
         console.warn('[auth] the security options failed their integrity check; the defaults apply');
         void audit.record({ by: { kind: 'system' }, action: SECURITY_AUDIT_ACTIONS.policyTampered, outcome: 'failed' }).catch(() => undefined);
+      },
+    }),
+    capabilityRegistry: new CapabilityRegistryStore({
+      identityKeyFile: defaultIdentityKeyFile(),
+      redis,
+      onTampered: () => {
+        console.warn('[auth] the added capability definitions failed their integrity check; they are not used');
+        void audit.record({ by: { kind: 'system' }, action: 'capability.registry-tampered', outcome: 'failed' }).catch(() => undefined);
       },
     }),
   };

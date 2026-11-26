@@ -314,7 +314,9 @@ test('source: no shell string, no insecure apt flag, the route delegates to the 
     assert.doesNotMatch(src, /\bexecSync\b|\bexec\(|\bexecFile\(|shell:\s*true|\/bin\/sh|bash -c/);
     assert.doesNotMatch(src, INSECURE);
   }
-  assert.match(lib, /spawnSync\(file, \[\.\.\.args\], \{/);
+  // The one runner (lib/privilegedExec.ts, shared with SF-2) is spawnSync with argv.
+  assert.match(readFileSync(new URL('../src/lib/privilegedExec.ts', import.meta.url), 'utf8'), /spawnSync\(file, \[\.\.\.args\], \{/);
+  assert.match(lib, /from '\.\/privilegedExec\.ts'/);
   assert.match(route, /postBaseInstall\(ctx\)/);
   assert.doesNotMatch(route, /child_process/);
 });
