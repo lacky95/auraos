@@ -59,11 +59,15 @@ export function auraAppIntegration(opts = {}) {
         // proxy verifies identity via X-Aura-App-Id headers anyway.
         updateConfig({ vite: { server: { allowedHosts: true } } });
         // No image transcoding (Astro's passthroughImageService): Aura apps
-        // don't use astro:assets, and Sharp behind `/_image` carries the
-        // Astro 6 AVIF RCE (GHSA-26w7-cxv4-gfx2) and the libvips/libheif
-        // advisories until the Astro 7 upgrade. An app that needs optimised
-        // images sets `image.service` itself after this integration.
+        // don't use astro:assets, so Sharp behind `/_image` would only be an
+        // image decoder anyone can feed (GHSA-26w7-cxv4-gfx2 was one). An app
+        // that needs optimised images sets `image.service` itself after this
+        // integration.
         updateConfig({ image: { service: { entrypoint: 'astro/assets/services/noop', config: {} } } });
+        // Astro 7 defaults to compressHTML 'jsx', which drops the whitespace
+        // between inline elements (`<b>a</b> <i>b</i>` renders "ab"). Keep
+        // Astro 6's lossless compression, so apps render as they always did.
+        updateConfig({ compressHTML: true });
         injectScript('head-inline', AURA_RUNTIME_LOADER_JS);
         for (const pattern of SHELL_ASSET_ROUTES) {
           injectRoute({ pattern, entrypoint: new URL('./runtime/shell-asset-route.js', import.meta.url) });

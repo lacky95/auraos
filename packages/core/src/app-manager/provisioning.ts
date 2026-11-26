@@ -155,7 +155,7 @@ exec bash "$1"`;
  * sources, see appBuild.ts) starts the production server: the app's own
  * `server.mjs` when it has one (apps with WebSockets etc.), else the adapter's
  * standalone entry. Anything else — or a build that vanished — runs
- * `astro dev`, exactly as before.
+ * `astro dev` in the foreground, without Astro 7's lock file.
  */
 export const ASTRO_START_SHELL = `set -e
 export PORT="\${APP_PORT:-4001}"
@@ -172,7 +172,12 @@ fi
 ASTRO="node_modules/.bin/astro"
 [ -x "\$ASTRO" ] || ASTRO="/workspace/node_modules/.bin/astro"
 echo "[\${APP_ID:-app}] Starting Astro server on port \$PORT via \$ASTRO"
-exec "\$ASTRO" dev --host 0.0.0.0 --port "\$PORT"`;
+# The runner supervises this process: Astro 7 must neither detach it when it
+# detects an agent (ASTRO_DEV_BACKGROUND=0) nor refuse a second instance of
+# the same app dir over its .astro/dev.json lock (--ignore-lock). Astro 6
+# had neither. os/boot.sh does the same for the shell.
+export ASTRO_DEV_BACKGROUND=0
+exec "\$ASTRO" dev --host 0.0.0.0 --port "\$PORT" --ignore-lock`;
 
 /**
  * The health-wait deadline for the next poll.

@@ -11,13 +11,13 @@
     "typecheck": "astro check"
   },
   "dependencies": {
-    "@astrojs/node": "^10.0.0",
+    "@astrojs/node": "^11.1.14",
     "@aura/app-sdk": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@types/ws": "^8.5.0",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/xterm": "^5.5.0",
-    "astro": "^6.0.0",
+    "astro": "^7.4.13",
     "node-pty": "^1.0.0",
     "ws": "^8.18.0",
     "zod": "^3.25.76",
