@@ -16,7 +16,14 @@
  * for it; a TCP peer address there can't be taken over without the reply
  * (the reasoning of the shell's D28 table). Loopback and the container's
  * own addresses are the app itself (a tool in the Terminal calling its own
- * server by name). Phase 5's private Terminal network (D58) replaces this.
+ * server by name).
+ *
+ * Phase 5's private Terminal network (D58) is the boundary now: the Terminal's
+ * servers listen only there, where only the shell and that user's Terminals
+ * are. This check stays as the second layer (another Terminal is no shell).
+ * On that network the shell connects from its address there, which its plain
+ * name need not resolve to when the container is on two networks: the runtime
+ * names it in `AURA_SHELL_PEERS` (comma-separated host names), resolved too.
  */
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
@@ -25,6 +32,8 @@ import { networkInterfaces } from 'node:os';
 export interface ShellPeerDeps {
   /** The shell's base URL (OS_API_BASE). */
   base(): string | undefined;
+  /** More host names of the shell (AURA_SHELL_PEERS): its name on a private network. */
+  peers?(): string[];
   resolve(host: string): Promise<string[]>;
   /** This container's own addresses. */
   own?(): string[];
@@ -44,15 +53,20 @@ export function createShellPeer(deps: ShellPeerDeps) {
   let addresses = new Set<string>();
   let resolvedAt = -Infinity;
 
+  async function addressesOf(host: string): Promise<string[]> {
+    const literal = normalize(host);
+    if (literal) return [literal];
+    try {
+      return (await deps.resolve(host)).map(normalize).filter((a): a is string => a !== null);
+    } catch { return []; }
+  }
+
   async function refresh(): Promise<void> {
     resolvedAt = now();
-    let host: string;
-    try { host = new URL(deps.base() ?? '').hostname.replace(/^\[|\]$/g, ''); } catch { addresses = new Set(); return; }
-    const literal = normalize(host);
-    if (literal) { addresses = new Set([literal]); return; }
-    try {
-      addresses = new Set((await deps.resolve(host)).map(normalize).filter((a): a is string => a !== null));
-    } catch { addresses = new Set(); }
+    const hosts: string[] = [];
+    try { hosts.push(new URL(deps.base() ?? '').hostname.replace(/^\[|\]$/g, '')); } catch { /* no base: no shell */ }
+    if (hosts.length) hosts.push(...(deps.peers?.() ?? []).map((h) => h.trim()).filter(Boolean));
+    addresses = new Set((await Promise.all(hosts.map(addressesOf))).flat());
   }
 
   return async function fromShell(peer: string | null | undefined): Promise<boolean> {
@@ -69,6 +83,7 @@ export function createShellPeer(deps: ShellPeerDeps) {
 /** The live check, over OS_API_BASE and the container's DNS. */
 export const fromShell = createShellPeer({
   base: () => process.env['OS_API_BASE'],
+  peers: () => (process.env['AURA_SHELL_PEERS'] ?? '').split(','),
   resolve: async (host) => (await lookup(host, { all: true })).map((r) => r.address),
   own: () => Object.values(networkInterfaces()).flat().map((i) => i?.address ?? ''),
 });

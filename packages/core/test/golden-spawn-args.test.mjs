@@ -81,6 +81,17 @@ const FIXTURES = [
     volumes: [],
   },
   {
+    // Stream N (D58): the System Terminal on its user's private network.
+    // A context key can't replace its listen env (pushed after the context env).
+    name: 'system-terminal-private-network',
+    manifest: { id: 'com.aura.terminal', tools: ['*'], sandbox: 'container' },
+    appDir: '/workspace/apps/com.aura.terminal',
+    ctx: { owner: 'default' },
+    contextEnv: { AURA_LISTEN_SUBNET: '0.0.0.0/0' },
+    volumes: [],
+    term: { name: 'aura-term-default', subnet: '172.30.0.0/16' },
+  },
+  {
     name: 'docker-tool',
     manifest: { id: 'org.golden.docker', tools: ['docker'] },
     appDir: () => userApp('org.golden.docker'),
@@ -114,7 +125,7 @@ async function containerArgv(fx) {
   const m = manifest(fx.manifest);
   const instanceId = `${m.id}-1`;
   const ctx = { appDir, instanceDataDir: join(dataDir, 'scopes', 'users', 'default', 'apps', m.id, instanceId), ...fx.ctx };
-  const argv = runner.buildDockerArgs(instanceId, m.id, 4321, m, `aura-${instanceId}`, ctx, fx.contextEnv, fx.volumes);
+  const argv = runner.buildDockerArgs(instanceId, m.id, 4321, m, `aura-${instanceId}`, ctx, fx.contextEnv, fx.volumes, fx.term ?? null);
   const granted = (m.tools ?? []).some((t) => t === '*' || t === 'docker');
   return norm(stripSocket(argv, granted));
 }

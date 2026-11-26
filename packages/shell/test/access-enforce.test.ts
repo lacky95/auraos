@@ -302,6 +302,23 @@ test('D28: the network table names live containers by their DNS name, and is reb
   assert.ok(lookups > before);
 });
 
+test('D28 + D58: a System Terminal is named on both its networks, by the addresses its runtime read', async () => {
+  const asked: string[] = [];
+  const net = createNetworkIdentity({
+    instances: () => [
+      { appId: 'com.aura.terminal', instanceId: 'com.aura.terminal-1', sandbox: 'container', state: 'resumed' },
+      { appId: 'a', instanceId: 'a-1', sandbox: 'container', state: 'resumed' },
+    ],
+    addresses: (id) => (id === 'com.aura.terminal-1' ? ['172.20.0.7', '172.30.0.3'] : []),
+    resolve: async (name) => { asked.push(name); return name === 'aura-a-1' ? ['172.20.0.5'] : ['172.20.0.99']; },
+  });
+  assert.deepEqual(await net('172.30.0.3'), inst('com.aura.terminal', 'com.aura.terminal-1'), 'on its private network');
+  assert.deepEqual(await net('172.20.0.7'), inst('com.aura.terminal', 'com.aura.terminal-1'), 'on the app network');
+  assert.deepEqual(await net('172.20.0.5'), inst('a', 'a-1'), 'no runtime addresses: the DNS answer');
+  assert.equal(await net('172.20.0.99'), null, 'the name is not asked when the runtime knows the addresses');
+  assert.deepEqual(asked, ['aura-a-1']);
+});
+
 // ── guard classes: what the routes checked themselves, in every mode ────────
 
 test('guard ownerManages (D50) → the owner, the operator and the System Terminal reach the owner routes in every mode; other apps never', async () => {

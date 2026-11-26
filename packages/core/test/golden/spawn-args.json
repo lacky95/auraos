@@ -86,7 +86,7 @@
       "aura-base",
       "bash",
       "-c",
-      "<sha256:7ab9771bb7e30af01a6491404427475f6819acdc7dbb66daec634731dfc41570>"
+      "<sha256:977083c8e265527a52f35426ca77a83dd0201cfd730a626382624ecfc4af13e5>"
     ],
     "proot": {
       "prooted": true,
@@ -107,13 +107,13 @@
         "--bind=<TMP>/data/aura/runtime/org.golden.system-1/tools:/aura/my-tools",
         "bash",
         "-c",
-        "<sha256:7ab9771bb7e30af01a6491404427475f6819acdc7dbb66daec634731dfc41570>"
+        "<sha256:977083c8e265527a52f35426ca77a83dd0201cfd730a626382624ecfc4af13e5>"
       ],
       "appDir": "/workspace/apps/org.golden.system",
       "entrypointArgv": [
         "bash",
         "-c",
-        "<sha256:7ab9771bb7e30af01a6491404427475f6819acdc7dbb66daec634731dfc41570>"
+        "<sha256:977083c8e265527a52f35426ca77a83dd0201cfd730a626382624ecfc4af13e5>"
       ],
       "env": {
         "APP_ID": "org.golden.system",
@@ -132,13 +132,13 @@
       "args": [
         "bash",
         "-c",
-        "<sha256:7ab9771bb7e30af01a6491404427475f6819acdc7dbb66daec634731dfc41570>"
+        "<sha256:977083c8e265527a52f35426ca77a83dd0201cfd730a626382624ecfc4af13e5>"
       ],
       "appDir": "/workspace/apps/org.golden.system",
       "entrypointArgv": [
         "bash",
         "-c",
-        "<sha256:7ab9771bb7e30af01a6491404427475f6819acdc7dbb66daec634731dfc41570>"
+        "<sha256:977083c8e265527a52f35426ca77a83dd0201cfd730a626382624ecfc4af13e5>"
       ],
       "env": {
         "APP_ID": "org.golden.system",
@@ -494,6 +494,174 @@
       }
     }
   },
+  "system-terminal-private-network": {
+    "container": [
+      "run",
+      "--rm",
+      "-d",
+      "--init",
+      "--name",
+      "aura-com.aura.terminal-1",
+      "--hostname",
+      "com.aura.terminal",
+      "--network",
+      "name=aura-term-default",
+      "--network",
+      "name=golden-net,gw-priority=1",
+      "--label",
+      "aura.term.net=aura-term-default",
+      "--label",
+      "aura.owner=default",
+      "--workdir",
+      "/workspace/apps/com.aura.terminal",
+      "-v",
+      "/workspace/apps/com.aura.terminal:/workspace/apps/com.aura.terminal",
+      "-v",
+      "/workspace/packages:/workspace/packages:ro",
+      "-v",
+      "/workspace/package.json:/workspace/package.json:ro",
+      "-v",
+      "/workspace/pnpm-lock.yaml:/workspace/pnpm-lock.yaml:ro",
+      "-v",
+      "/workspace/pnpm-workspace.yaml:/workspace/pnpm-workspace.yaml:ro",
+      "-v",
+      "/workspace/tsconfig.base.json:/workspace/tsconfig.base.json:ro",
+      "-v",
+      "/workspace/.aura:/workspace/.aura:ro",
+      "--mount",
+      "type=volume,source=golden_node-modules,target=/workspace/node_modules,readonly",
+      "--mount",
+      "type=volume,source=golden_app-data,target=/data,volume-subpath=scopes/users/default/apps/com.aura.terminal/com.aura.terminal-1",
+      "--mount",
+      "type=volume,source=golden_app-data,target=/aura/all-tools,volume-subpath=aura/toolchain/bin,readonly",
+      "--mount",
+      "type=volume,source=golden_app-data,target=/aura/my-tools,volume-subpath=aura/runtime/com.aura.terminal-1/tools,readonly",
+      "--mount",
+      "type=volume,source=golden_app-data,target=/mnt/aura,volume-subpath=aura/mounts/com.aura.terminal-1",
+      "-v",
+      "/workspace/os/bashrc.aura.sh:/etc/bash.bashrc:ro",
+      "-v",
+      "/workspace/os/bashrc.aura.sh:/etc/profile.d/aura-prompt.sh:ro",
+      "--mount",
+      "type=volume,source=golden_app-data,target=/home/aura,volume-subpath=aura/home/default",
+      "--mount",
+      "type=volume,source=golden_app-data,target=/run/context,volume-subpath=context/system,readonly",
+      "-e",
+      "AURA_LISTEN_SUBNET=0.0.0.0/0",
+      "-e",
+      "APP_ID=com.aura.terminal",
+      "-e",
+      "APP_INSTANCE_ID=com.aura.terminal-1",
+      "-e",
+      "APP_PORT=4321",
+      "-e",
+      "OS_API_BASE=http://golden-shell:3000",
+      "-e",
+      "AURA_LAYER_TAG=[ctnr]",
+      "-e",
+      "AURA_SERVE=dev",
+      "-e",
+      "AURA_HOSTNAME=com.aura.terminal",
+      "-e",
+      "AURA_SHELL_HOSTNAME=golden-shell",
+      "-e",
+      "AURA_APP_DATA_VOLUME=golden_app-data",
+      "-e",
+      "AURA_APP_DATA_SUBPATH=scopes/users/default/apps/com.aura.terminal",
+      "-e",
+      "HOME=/home/aura",
+      "-e",
+      "TERM=xterm-256color",
+      "-e",
+      "COLORTERM=truecolor",
+      "-e",
+      "LANG=C.UTF-8",
+      "-e",
+      "LC_ALL=C.UTF-8",
+      "-e",
+      "PATH=/aura/my-tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      "-e",
+      "AURA_TOOLS_MODE=symlink",
+      "-e",
+      "AURA_MOUNT_ROOT=/mnt/aura",
+      "-e",
+      "AURA_LIFECYCLE_TOKEN",
+      "-e",
+      "AURA_LISTEN_SUBNET=172.30.0.0/16",
+      "-e",
+      "AURA_SHELL_PEERS=golden-shell.aura-term-default",
+      "aura-base",
+      "bash",
+      "-c",
+      "<sha256:977083c8e265527a52f35426ca77a83dd0201cfd730a626382624ecfc4af13e5>"
+    ],
+    "proot": {
+      "prooted": true,
+      "args": [
+        "--rootfs=<TMP>/rootfs",
+        "--bind=/workspace:/workspace",
+        "--bind=<TMP>/data/inst/com.aura.terminal-1:/data",
+        "--bind=/proc",
+        "--bind=/dev",
+        "--bind=/tmp",
+        "--bind=/etc/resolv.conf:/etc/resolv.conf",
+        "--bind=/usr/local/bin/node:/usr/local/bin/node",
+        "--bind=<TMP>/data/aura/home/default:/home/aura",
+        "--bind=<TMP>/data/context/system:/run/context",
+        "--bind=/workspace/apps/com.aura.terminal:/workspace/apps/com.aura.terminal",
+        "--cwd=/workspace/apps/com.aura.terminal",
+        "--bind=<TMP>/toolchain/bin:/aura/all-tools",
+        "--bind=<TMP>/data/aura/runtime/com.aura.terminal-1/tools:/aura/my-tools",
+        "bash",
+        "-c",
+        "<sha256:977083c8e265527a52f35426ca77a83dd0201cfd730a626382624ecfc4af13e5>"
+      ],
+      "appDir": "/workspace/apps/com.aura.terminal",
+      "entrypointArgv": [
+        "bash",
+        "-c",
+        "<sha256:977083c8e265527a52f35426ca77a83dd0201cfd730a626382624ecfc4af13e5>"
+      ],
+      "env": {
+        "APP_ID": "com.aura.terminal",
+        "APP_INSTANCE_ID": "com.aura.terminal-1",
+        "APP_PORT": "4321",
+        "AURA_LAYER_TAG": "[proot+ctnr]",
+        "AURA_LIFECYCLE_TOKEN": "<token>",
+        "AURA_LISTEN_SUBNET": "0.0.0.0/0",
+        "AURA_SERVE": "dev",
+        "HOME": "/home/aura",
+        "OS_API_BASE": "http://127.0.0.1:3000",
+        "PATH": "/aura/my-tools:<PATH>"
+      }
+    },
+    "direct": {
+      "prooted": false,
+      "args": [
+        "bash",
+        "-c",
+        "<sha256:977083c8e265527a52f35426ca77a83dd0201cfd730a626382624ecfc4af13e5>"
+      ],
+      "appDir": "/workspace/apps/com.aura.terminal",
+      "entrypointArgv": [
+        "bash",
+        "-c",
+        "<sha256:977083c8e265527a52f35426ca77a83dd0201cfd730a626382624ecfc4af13e5>"
+      ],
+      "env": {
+        "APP_ID": "com.aura.terminal",
+        "APP_INSTANCE_ID": "com.aura.terminal-1",
+        "APP_PORT": "4321",
+        "AURA_LAYER_TAG": "[ctnr]",
+        "AURA_LIFECYCLE_TOKEN": "<token>",
+        "AURA_LISTEN_SUBNET": "0.0.0.0/0",
+        "AURA_SERVE": "dev",
+        "HOME": "/home/aura",
+        "OS_API_BASE": "http://127.0.0.1:3000",
+        "PATH": "<PATH>"
+      }
+    }
+  },
   "docker-tool": {
     "container": [
       "run",
@@ -581,7 +749,7 @@
       "aura-base",
       "bash",
       "-c",
-      "<sha256:7ab9771bb7e30af01a6491404427475f6819acdc7dbb66daec634731dfc41570>"
+      "<sha256:977083c8e265527a52f35426ca77a83dd0201cfd730a626382624ecfc4af13e5>"
     ],
     "proot": {
       "prooted": true,
@@ -602,13 +770,13 @@
         "--bind=<TMP>/data/aura/runtime/org.golden.docker-1/tools:/aura/my-tools",
         "bash",
         "-c",
-        "<sha256:7ab9771bb7e30af01a6491404427475f6819acdc7dbb66daec634731dfc41570>"
+        "<sha256:977083c8e265527a52f35426ca77a83dd0201cfd730a626382624ecfc4af13e5>"
       ],
       "appDir": "<TMP>/data/scopes/users/default/apps/org.golden.docker",
       "entrypointArgv": [
         "bash",
         "-c",
-        "<sha256:7ab9771bb7e30af01a6491404427475f6819acdc7dbb66daec634731dfc41570>"
+        "<sha256:977083c8e265527a52f35426ca77a83dd0201cfd730a626382624ecfc4af13e5>"
       ],
       "env": {
         "APP_ID": "org.golden.docker",
@@ -627,13 +795,13 @@
       "args": [
         "bash",
         "-c",
-        "<sha256:7ab9771bb7e30af01a6491404427475f6819acdc7dbb66daec634731dfc41570>"
+        "<sha256:977083c8e265527a52f35426ca77a83dd0201cfd730a626382624ecfc4af13e5>"
       ],
       "appDir": "<TMP>/data/scopes/users/default/apps/org.golden.docker",
       "entrypointArgv": [
         "bash",
         "-c",
-        "<sha256:7ab9771bb7e30af01a6491404427475f6819acdc7dbb66daec634731dfc41570>"
+        "<sha256:977083c8e265527a52f35426ca77a83dd0201cfd730a626382624ecfc4af13e5>"
       ],
       "env": {
         "APP_ID": "org.golden.docker",

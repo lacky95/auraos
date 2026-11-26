@@ -611,7 +611,7 @@ export const liveDeps: ObserverDeps = {
   ownerAgent: (p) => isTrustedOwnerAgent(p, liveMgr() as unknown as Pick<AppManager, 'isTrustedSystemCopy' | 'getInstance'> | null),
   freshAuthRequiresHttps: () => freshAuthRequiresHttps(
     ((globalThis as Record<string, unknown>)[AUTH_SERVICES] as { securityPolicy?: core.SecurityPolicyStore } | undefined)?.securityPolicy ?? null),
-  network: liveNetworkIdentity(() => liveMgr() as unknown as Pick<AppManager, 'getAllInstances'> | null),
+  network: liveNetworkIdentity(() => liveMgr() as unknown as Pick<AppManager, 'getAllInstances' | 'getInstanceAddresses'> | null),
   // Read, never created: creating them has side effects of its own.
   services: () => ((globalThis as Record<string, unknown>)[AUTH_SERVICES] as ObserverServices | undefined) ?? null,
   redisReady: () => liveRedis() !== null,

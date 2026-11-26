@@ -2078,7 +2078,9 @@ export class AppManager {
    * Resolve the upstream URL the shell should hit for a given instance.
    * PRoot instances live in the shell's network namespace → host is
    * '127.0.0.1'. Container instances are on the shared docker network →
-   * host is the container's name (e.g. 'aura-com.aura.terminal-3').
+   * host is the container's name (e.g. 'aura-com.aura.counter-3'); a System
+   * Terminal's servers listen only on its private network (D58) → host is its
+   * address there.
    *
    * Used by the WS proxy + HTTP proxy. Returns null if the instance has
    * already exited or never existed.
@@ -2090,6 +2092,16 @@ export class AppManager {
     const port   = runner.getPort(instanceId);
     if (host == null || port == null) return null;
     return { host, port };
+  }
+
+  /**
+   * Every network address of the instance's sandbox (D28 network identity):
+   * a container's addresses on all its networks, so the shell recognises a
+   * Terminal on its private network too (D58). Empty for PRoot instances and
+   * unknown ones.
+   */
+  getInstanceAddresses(instanceId: string): string[] {
+    return this.runnerOf(instanceId).addresses?.(instanceId) ?? [];
   }
 
   /**

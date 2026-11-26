@@ -76,7 +76,7 @@ const auth = createAppHostAuth({ secret: Buffer.alloc(32, 9) });
 const appsList = async () => [...new Set(Object.values(APPS).map(([appId]) => appId))].map((appId) => ({
   manifest: { id: appId, name: appId, componentType: 'activity', hosts: [] },
   instances: Object.keys(APPS).filter((label) => APPS[label]![0] === appId)
-    .map((label) => ({ instanceId: instanceOf(label), port: appPort, state: 'resumed', inPool: false, sandbox: 'proot' })),
+    .map((label) => ({ instanceId: instanceOf(label), port: appPort, state: 'resumed', inPool: false, sandbox: 'proot', upstreamHost: '127.0.0.1' })),
 }));
 const front = http.createServer((_req, res) => res.end('desktop'));
 createAppHostRouter({ appsList, services: async () => svc, auth, env: { AURA_DESKTOP_HOSTS: BASE } }).attach(front);

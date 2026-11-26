@@ -148,6 +148,23 @@ ${provisionShell('raw')}
 exec bash "$1"`;
 
 /**
+ * Where an app server listens: every address, or, when the runner sets
+ * `AURA_LISTEN_SUBNET` (a System Terminal, D58), only this container's own
+ * IPv4 address inside that subnet. No such address means no start, never a
+ * fallback to every address. Sets `LISTEN_HOST`.
+ */
+export const LISTEN_HOST_SCRIPT =
+  'const [n,b]=process.argv[1].split("/"),m=b==0?0:~0<<32-b>>>0,' +
+  'v=a=>a.split(".").reduce((x,o)=>(x*256+ +o)>>>0,0),' +
+  'h=Object.values(require("os").networkInterfaces()).flat()' +
+  '.find(i=>i&&i.family=="IPv4"&&(v(i.address)&m)>>>0==(v(n)&m)>>>0);' +
+  'if(!h)process.exit(1);console.log(h.address)';
+export const LISTEN_HOST_SHELL = `LISTEN_HOST=0.0.0.0
+if [ -n "\${AURA_LISTEN_SUBNET:-}" ]; then
+  LISTEN_HOST=$(node -e '${LISTEN_HOST_SCRIPT}' "$AURA_LISTEN_SUBNET") || { echo "[\${APP_ID:-app}] no address in AURA_LISTEN_SUBNET=$AURA_LISTEN_SUBNET; not starting" >&2; exit 1; }
+fi`;
+
+/**
  * The start command of an Astro app that ships no entrypoint of its own —
  * shared by ContainerRunner and ProotRunner (they used to carry a copy each).
  *
@@ -159,9 +176,10 @@ exec bash "$1"`;
  */
 export const ASTRO_START_SHELL = `set -e
 export PORT="\${APP_PORT:-4001}"
+${LISTEN_HOST_SHELL}
 ${PROVISION_SHELL}
 if [ "\${AURA_SERVE:-dev}" = prod ] && [ -f dist/server/entry.mjs ]; then
-  export HOST=0.0.0.0 NODE_ENV=production
+  export HOST="$LISTEN_HOST" NODE_ENV=production
   if [ -f server.mjs ]; then
     echo "[\${APP_ID:-app}] Starting production server (server.mjs) on port \$PORT"
     exec node server.mjs
@@ -177,7 +195,7 @@ echo "[\${APP_ID:-app}] Starting Astro server on port \$PORT via \$ASTRO"
 # the same app dir over its .astro/dev.json lock (--ignore-lock). Astro 6
 # had neither. os/boot.sh does the same for the shell.
 export ASTRO_DEV_BACKGROUND=0
-exec "\$ASTRO" dev --host 0.0.0.0 --port "\$PORT" --ignore-lock`;
+exec "\$ASTRO" dev --host "\$LISTEN_HOST" --port "\$PORT" --ignore-lock`;
 
 /**
  * The health-wait deadline for the next poll.
