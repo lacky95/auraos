@@ -37,14 +37,3 @@ export function containerHomeEnv(): string[] {
 export function prootHomeBind(o: { home: ResolvedHome | undefined }): string {
   return `--bind=${volumeHome(o.home).hostPath}:${SHARED_HOME_PATH}`;
 }
-
-/**
- * The `HOME` of a PRoot app process: the bound `/home/aura`. An unwrapped
- * (master-direct) process sees the shell's filesystem, where `/home/aura` is
- * the master's: it gets its App Home's own path instead (R2 removes the
- * unwrapped path; the `proot` runtime already refuses it, D75).
- */
-export function prootHomeEnv(o: { home: ResolvedHome | undefined; prooted: boolean }): string {
-  const h = volumeHome(o.home);
-  return o.prooted ? SHARED_HOME_PATH : h.hostPath;
-}

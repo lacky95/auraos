@@ -12,6 +12,14 @@
 // the System Terminal its owner's Private Home; an unwrapped PRoot spawn
 // (`direct`) is refused, since it has no home of its own.
 //
+// Stream R2 (owner-approved difference, Phase 5b P-3): the `direct` column is
+// gone (PRoot never runs an app unwrapped) and a `pool` column records the
+// pool placement's refusal (not built in this release; no fallback to master).
+// The `proot` column is the narrowed master placement: setpriv to the app
+// identity, no /workspace beyond the shared pieces, no /run/context, no
+// socket, a per-instance /tmp and a clean env. PRoot runs only app
+// identities, so a fixture without one runs there as PROOT_APP_IDENTITY.
+//
 // Run via: node tools/run-tests.mjs --only=core
 
 import { test } from 'node:test';
@@ -35,6 +43,7 @@ delete process.env['AURA_HOST_WORKSPACE'];
 const { AppManifestSchema } = await import('../dist/types/manifest.js');
 const { ContainerRunner } = await import('../dist/app-manager/ContainerRunner.js');
 const { ProotRunner } = await import('../dist/app-manager/ProotRunner.js');
+const { prootRuntime } = await import('../dist/runtimes/builtins/proot.js');
 
 const TMP = mkdtempSync(join(tmpdir(), 'aura-golden-'));
 const dataDir = join(TMP, 'data');
@@ -107,8 +116,8 @@ const FIXTURES = [
   },
   {
     // Stream A (P5-3): an installation with runAs: app. --user, cap-drop ALL,
-    // no-new-privileges and the generated passwd/group (container); PRoot
-    // ignores the identity (AppManager refuses an app identity there).
+    // no-new-privileges and the generated passwd/group (container); setpriv
+    // to the same uid and the passwd/group binds (PRoot, R2).
     name: 'app-identity',
     manifest: { id: 'org.golden.appid', sandbox: 'container' },
     appDir: () => userApp('org.golden.appid'),
@@ -155,55 +164,53 @@ async function containerArgv(fx) {
   return norm(stripSocket(argv, granted));
 }
 
-async function prootLaunch(fx, useProot) {
+/** The app identity a PRoot fixture without one runs as (PRoot refuses root, R2). */
+const PROOT_APP_IDENTITY = { uid: 200099, gid: 200099, range: 'app' };
+
+/** The master placement's launch (command, prefix, env), with AURA_USE_PROOT set. */
+async function prootLaunch(fx, { ctx: extra = {}, env: hostEnv = { AURA_USE_PROOT: 'true' } } = {}) {
   const saved = process.env['AURA_USE_PROOT'];
-  if (useProot) process.env['AURA_USE_PROOT'] = 'true'; else delete process.env['AURA_USE_PROOT'];
+  if (hostEnv.AURA_USE_PROOT === undefined) delete process.env['AURA_USE_PROOT']; else process.env['AURA_USE_PROOT'] = hostEnv.AURA_USE_PROOT;
   try {
     const runner = new ProotRunner(opts);
     stubStores(runner, fx.contextEnv, fx.volumes);
     let captured;
-    runner.startProcess = async (_i, _a, _p, _m, args, appDir, env, prooted, entrypointArgv) => {
-      captured = { args, appDir, env, prooted, entrypointArgv };
+    runner.startProcess = async (_i, _a, _p, launch, entrypointArgv) => {
+      captured = { launch, entrypointArgv };
       return 4242;
     };
     const appDir = typeof fx.appDir === 'function' ? fx.appDir() : fx.appDir;
     const m = manifest(fx.manifest);
     const instanceId = `${m.id}-1`;
-    try {
-      await runner.spawn(instanceId, m.id, 4321, m, { appDir, instanceDataDir: join(dataDir, 'inst', instanceId), ...fx.ctx });
-    } catch (err) {
-      if (useProot) throw err;
-      return { refused: err.message };
-    }
-    const granted = (m.tools ?? []).some((t) => t === '*' || t === 'docker');
-    // The env carries the shell's whole environment (ProotRunner.ts, R2
-    // narrows it): keep only what the runner sets or overrides.
-    const env = {};
-    for (const [k, v] of Object.entries(captured.env)) {
-      if (k === 'AURA_USE_PROOT') continue;
-      if (k === 'PATH') { env[k] = v.split(process.env['PATH'] ?? '').join('<PATH>'); continue; }
-      if (k === 'AURA_LIFECYCLE_TOKEN') { assert.match(v, /^[A-Za-z0-9_-]{16,}$/); env[k] = '<token>'; continue; }
-      if (process.env[k] !== v) env[k] = v;
-    }
+    await runner.spawn(instanceId, m.id, 4321, m, {
+      appDir, instanceDataDir: join(dataDir, 'inst', instanceId), identity: PROOT_APP_IDENTITY, ...fx.ctx, ...extra,
+    });
+    const { command, prefix, env, appDir: cwd } = captured.launch;
+    assert.ok(!prefix.some((a) => a.includes(SOCKET)), 'PRoot never binds the docker socket');
+    assert.match(env['AURA_LIFECYCLE_TOKEN'], /^[A-Za-z0-9_-]{16,}$/);
     return norm({
-      prooted: captured.prooted,
-      args: useProot ? stripSocket(captured.args, granted) : captured.args,
-      appDir: captured.appDir,
+      command, prefix, appDir: cwd,
       entrypointArgv: captured.entrypointArgv,
-      env: Object.fromEntries(Object.entries(env).sort(([a], [b]) => a.localeCompare(b))),
+      env: Object.fromEntries(Object.entries({ ...env, AURA_LIFECYCLE_TOKEN: '<token>' }).sort(([a], [b]) => a.localeCompare(b))),
     });
   } finally {
     if (saved === undefined) delete process.env['AURA_USE_PROOT']; else process.env['AURA_USE_PROOT'] = saved;
   }
 }
 
-test('spawn args match the golden file (container argv; proot argv and env)', async () => {
+/** The pool placement: refused before any start (not built in this release), never the master's argv. */
+function prootPool() {
+  const runtime = prootRuntime(new ProotRunner(opts), { baseRootfs: rootfs, env: { AURA_USE_PROOT: 'true' } });
+  return { refused: runtime.unavailable({ placement: 'pool' }) };
+}
+
+test('spawn args match the golden file (container argv; proot master launch and env; proot pool)', async () => {
   const actual = {};
   for (const fx of FIXTURES) {
     actual[fx.name] = {
       container: await containerArgv(fx),
-      proot: await prootLaunch(fx, true),
-      direct: await prootLaunch(fx, false),
+      proot: await prootLaunch(fx),
+      pool: prootPool(),
     };
   }
   if (!existsSync(GOLDEN)) {
@@ -221,7 +228,48 @@ test('spawn args match the golden file (container argv; proot argv and env)', as
 test('no resolved home: both runners refuse the spawn (no shared-home fallback)', async () => {
   const fx = { ...FIXTURES[0], ctx: {} };
   await assert.rejects(containerArgv(fx), /no home was resolved/);
-  await assert.rejects(prootLaunch(fx, true), /no home was resolved/);
+  await assert.rejects(prootLaunch(fx), /no home was resolved/);
   const tmpfs = { ...FIXTURES[0], ctx: { home: { kind: 'ephemeral', hostPath: null, volumeSubpath: null, logicalPath: '/home/aura', uid: 1000, gid: 1000, mode: 0o700 } } };
   await assert.rejects(containerArgv(tmpfs), /can't be an app process's home/);
+  await assert.rejects(prootLaunch(tmpfs), /can't be an app process's home/);
+});
+
+test('R2: PRoot refuses a root (or non-app) identity, never runs it as root', async () => {
+  for (const identity of [undefined, { uid: 0, gid: 0, range: 'root' }, { uid: 1000, gid: 1000, range: 'owner' }]) {
+    await assert.rejects(prootLaunch(FIXTURES[0], { ctx: { identity } }),
+      (e) => e.name === 'ProotIdentityError' && /only under its own app identity/.test(e.message) && /run-as org\.golden\.system app/.test(e.message));
+  }
+});
+
+test('R2: without AURA_USE_PROOT (proot-host) the runner itself refuses; nothing runs unwrapped', async () => {
+  for (const v of [undefined, 'false', 'no']) {
+    await assert.rejects(prootLaunch(FIXTURES[0], { env: { AURA_USE_PROOT: v } }), /runtime proot is not available: AURA_USE_PROOT is not true/);
+  }
+});
+
+test('R2: the master placement is narrowed (no /workspace, /run/context, socket or master env; own /tmp; app uid)', async () => {
+  const fx = FIXTURES.find((f) => f.name === 'user-tools-token-owner-preview');
+  const saved = process.env['AURA_GOLDEN_LEAK'];
+  process.env['AURA_GOLDEN_LEAK'] = 'master-only';
+  try {
+    const l = await prootLaunch({ ...fx, manifest: { ...fx.manifest, context: ['FOO', 'APP_ID'] } });
+    assert.equal(l.command, 'setpriv');
+    assert.deepEqual(l.prefix.slice(0, 6), ['--reuid=200099', '--regid=200099', '--clear-groups', '--no-new-privs', '--', 'proot']);
+    assert.ok(!l.prefix.includes('--bind=/workspace:/workspace'), 'never all of /workspace');
+    assert.ok(!l.prefix.some((a) => /^--bind=\/workspace\/apps(\/|:|$)/.test(a)), 'no other app dir (only its own appDir)');
+    assert.ok(!l.prefix.some((a) => a.endsWith(':/run/context')), 'no /run/context');
+    assert.ok(l.prefix.includes('--bind=<TMP>/data/aura/runtime/org.golden.user-1/tmp:/tmp'), 'its own /tmp');
+    assert.ok(!l.prefix.includes('--bind=/tmp'), 'never the master /tmp');
+    assert.equal(l.env['AURA_GOLDEN_LEAK'], undefined, 'nothing of the master env');
+    assert.equal(l.env['FOO'], 'bar', 'a declared context key');
+    assert.equal(l.env['APP_ID'], 'org.golden.user', 'a context key never clobbers an OS var');
+    const undeclared = await prootLaunch(fx);
+    assert.equal(undeclared.env['FOO'], undefined, 'an undeclared context key is not handed over');
+  } finally {
+    if (saved === undefined) delete process.env['AURA_GOLDEN_LEAK']; else process.env['AURA_GOLDEN_LEAK'] = saved;
+  }
+  const { statSync } = await import('node:fs');
+  const st = statSync(join(dataDir, 'aura', 'runtime', 'org.golden.user-1', 'tmp'));
+  assert.equal(st.mode & 0o777, 0o700);
+  if (process.getuid?.() === 0) assert.deepEqual([st.uid, st.gid], [200099, 200099], 'the tmp dir belongs to the app identity');
 });

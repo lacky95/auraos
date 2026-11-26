@@ -57,7 +57,7 @@ test('capabilities: booleans, identity order and isolation order fail closed', (
   const proot = new ProotRunner({ baseRootfs: '/nonexistent', toolchainDir: '/nonexistent', appsDir: '/nonexistent', dataDir: '/tmp', osApiBase: 'http://127.0.0.1:3000' }).capabilities();
   assert.deepEqual(missingCapabilities(proot, { privateHomeSession: true, sessionExec: true }), ['privateHomeSession', 'sessionExec']);
   assert.deepEqual(missingCapabilities(proot, { readOnlyBinds: true }), ['readOnlyBinds'], 'ARI-4: closed source fails closed on PRoot');
-  assert.deepEqual(missingCapabilities(proot, { identity: 'enforced' }), ['identity']);
+  assert.deepEqual(missingCapabilities({ ...proot, identity: 'none' }, { identity: 'enforced' }), ['identity']);
   assert.deepEqual(missingCapabilities(proot, { isolation: 'namespace' }), ['isolation']);
   assert.deepEqual(missingCapabilities(proot, { isolation: 'ptrace', warmPool: true }), []);
   assert.deepEqual(missingCapabilities({ ...proot, isolation: 'vm' }, { isolation: 'namespace' }), []);
@@ -67,11 +67,16 @@ test('capabilities: booleans, identity order and isolation order fail closed', (
 });
 
 test('runner capabilities declare today honestly', () => {
-  const proot = new ProotRunner({ baseRootfs: '/nonexistent', toolchainDir: '/nonexistent', appsDir: '/nonexistent', dataDir: '/tmp', osApiBase: 'x' }).capabilities();
+  const runner = new ProotRunner({ baseRootfs: '/nonexistent', toolchainDir: '/nonexistent', appsDir: '/nonexistent', dataDir: '/tmp', osApiBase: 'x' });
+  const proot = runner.capabilities();
+  // R2: app processes run under their app uid (setpriv), which the kernel enforces.
   assert.deepEqual(proot, {
-    isolation: 'ptrace', privateHomeSession: false, sessionExec: false, identity: 'none', readOnlyBinds: false,
+    isolation: 'ptrace', privateHomeSession: false, sessionExec: false, identity: 'enforced', readOnlyBinds: false,
     mounts: false, portExpose: false, sidecars: false, warmPool: true, survivesShellRestart: false,
   });
+  // Placement-aware (ARI-1, 5b P-3): master is the default; the pool declares the same flags (Phase 5 plan R2).
+  assert.deepEqual(runner.capabilities({ placement: 'master' }), proot);
+  assert.deepEqual(runner.capabilities({ placement: 'pool' }), proot);
   // capabilities() reads no instance state: call it without constructing (no docker).
   const container = ContainerRunner.prototype.capabilities.call({});
   assert.deepEqual(container, {

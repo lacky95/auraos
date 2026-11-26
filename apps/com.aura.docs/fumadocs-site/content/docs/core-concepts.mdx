@@ -84,7 +84,13 @@ primitive differs. Apps migrate between them with no source change.
 
 - **`sandbox: 'proot'`** — ptrace-based filesystem sandbox inside the
   master container. Cheap (~3 ms spawn), weak isolation. Shared host
-  kernel and PID space.
+  kernel and PID space. An app runs there only under its own app identity
+  (never root), sees only the shared workspace packages and its own source,
+  gets its App Home, its own `/tmp` and a clean environment. Without
+  `AURA_USE_PROOT=true` on the host (security option `proot-host`) the
+  PRoot runtime is unavailable and a start fails; nothing runs unwrapped.
+  The `pool` placement (one shared runner container) is not available yet:
+  choosing it is refused, never replaced by `master`.
 - **`sandbox: 'container'`** — kernel-namespace container spawned as a
   sibling of `aura-shell`, sharing the host filesystem only via sliced
   bind mounts. Real PID/net/mount namespaces. Heavier (~80-150 ms
@@ -433,7 +439,7 @@ apps/<id>             Each app, including this one
   `packages/shell/server/app-hosts.mjs`; the runtime script and
   gateway: `packages/shell/server/app-gateway.mjs`
 - How the spawner constructs the PRoot args:
-  `packages/core/src/app-manager/ProotRunner.ts` (`buildProotArgs`)
+  `packages/core/src/app-manager/ProotRunner.ts` (`prootBinds`)
 - Reference apps for richer patterns: `apps/com.aura.terminal`
   (WS+PTY), `apps/com.aura.notepad` (multi-activity shared state),
   `apps/com.aura.counter` (multi×multi), `apps/com.aura.settings`
