@@ -8,6 +8,7 @@ import { CONTRACT_DOCS_HINT, DOCS_HINT, lintAppSources, lintContract, lintManife
 import { promptText, promptChoice, promptConfirm, promptMultiSelect, PromptCancelled, BACK, type MultiSelectMode } from '../lib/prompts.js';
 import { ensureRegistry, loadRegistry, loadState, type CapabilityEntry } from '../lib/registry.js';
 import { api } from '../lib/client.js';
+import { inSandbox } from '../lib/identity.js';
 import {
   ALL_SCOPES, PKG_RE, SELECTABLE_SCOPES, defaultIconFor, scopeAppsDir, stdoutDivider,
   type ScopeId, type SelectableScope,
@@ -663,6 +664,8 @@ async function scaffoldFromConfig(cfg: ScaffoldConfig): Promise<void> {
     // If we're inside a sliced-bind sandbox, the write will succeed in our
     // overlay but the host AppManager won't see it; warn the caller.
     const msg = (err as Error).message;
+    // In a sandbox a local write lands in the sandbox's own volume, where AppManager never sees it.
+    if (inSandbox()) fail(`scaffold via the shell failed: ${msg.split('\n')[0]}`);
     warn(`shell scaffold unreachable (${msg.split('\n')[0]}); writing locally instead.`);
     const localDest = join(scopeAppsDir(cfg.scope), cfg.appId);
     if (existsSync(localDest)) {
@@ -796,8 +799,10 @@ export function registerDev(program: Command): void {
       }
       enumGuard('--scope',          opts.scope,        SELECTABLE_SCOPES);
 
+      // On the host the scope dir is real: refuse an existing app unless --force. In a sandbox `/data`
+      // is the sandbox's own volume, so the shell decides (overwriting asks the owner).
       const dest = join(scopeAppsDir(opts.scope), appId);
-      if (existsSync(dest) && !opts.force) fail(`${dest} already exists. Pass --force to overwrite.`);
+      if (!inSandbox() && existsSync(dest) && !opts.force) fail(`${dest} already exists. Pass --force to overwrite.`);
 
       const cfg: ScaffoldConfig = {
         appId,
