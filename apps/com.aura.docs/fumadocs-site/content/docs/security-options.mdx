@@ -1,0 +1,47 @@
+---
+title: Security options
+description: Every security switch of AuraOS in one list — its default, where its value comes from, and how to change it.
+---
+
+AuraOS declares every security switch once, in the **security options
+registry** (core `security/options.ts`). Settings, the CLI, the API and the
+diagnostics all read that one list. A test keeps this page in step with it.
+
+```bash
+aura admin security            # every option: value, source, how to set it
+aura admin security set <id> <value>
+```
+
+`GET /api/admin/security-options` returns the same list (an owner view).
+
+## Where a value comes from
+
+- **policy**: stored by AuraOS in one sealed record (`user:policy:security`)
+  that only the owner changes. A change needs your password in AuraOS's own
+  dialog (`fresh`), from Settings or the System Terminal; on the host,
+  `docker exec -it aura-shell aura admin security set …` acts directly. A
+  record that fails its integrity check counts as the defaults, and the audit
+  trail says so.
+- **env**: set on the host, in `docker-compose.yml` or `.env`, then
+  `aura restart os`. Shown here, never set here: the API answers 409 with the
+  variable to set.
+- **record**: has its own sealed record and its own place to change it.
+- **reserved**: declared for later; not yet available.
+
+A host variable always wins over the stored value.
+
+## The options
+
+| Id | Default | Source | What it does |
+|---|---|---|---|
+| `fresh-auth-require-https` | off | policy | **Require HTTPS for password confirmations.** Off: an approval that needs your password ("fresh") works in the desktop dialog over plain HTTP too, with the note "(HTTP: password sent unencrypted)". On: over HTTP it needs `aura approve <id>` on the host; over HTTPS the dialog still takes the password. Turn it on if AuraOS is reachable from networks you don't trust. While it is on, turning it off over HTTP needs HTTPS or the host. Settings → Users & Identities → Global. |
+| `password-policy` | 4 characters, 0 types, differs from username | record (`user:policy:password`) | The rules for new and changed passwords. Settings → Users & Identities → Global. |
+| `access-enforce` | report | env `AURA_ACCESS_ENFORCE` | `off`: no access report. `report`: decisions are counted in `aura admin access-report`, nothing refused. `enforce`: what the route access manifest denies is refused. App Host gateway calls are enforced in every mode. |
+| `lifecycle-strict` | warn | env `AURA_LIFECYCLE_STRICT` | `warn`: an app whose lifecycle checks fail still starts, with a finding. `strict`: its start is refused. |
+| `host-policy` | enforce | env `AURA_HOST_POLICY` | `enforce`: a malformed address, or a custom domain not listed, is refused (DNS rebinding protection). `report`: served and logged. |
+| `desktop-hosts` | (none) | env `AURA_DESKTOP_HOSTS` | Custom domains AuraOS is opened at; their App Hosts follow. IPs, localhost and nip.io need no entry. See [Reaching AuraOS](/docs/reaching-auraos). |
+| `trusted-proxies` | (none) | env `AURA_TRUSTED_PROXIES` | Addresses whose `X-Forwarded-Proto`, `-Host` and `-For` count: your HTTPS edge. Empty: a request is HTTPS only when it really is. |
+| `access-profile` | open | reserved | Open, or Zero Trust (every app call needs an explicit grant). Not yet available. |
+
+A full **Security** page in Settings comes later; until then the HTTPS switch
+lives under Users & Identities → Global.

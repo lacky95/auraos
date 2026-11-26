@@ -167,11 +167,17 @@ test('decide: an MVP auto-grant is surfaced, and Authorizer answers are unchange
   assert.deepEqual(await d(input(inst('com.a.app'), rule('data:x:<unfilled>'))), { outcome: 'deny', reason: 'missing-permission' });
 });
 
-test('decide: transport and fresh-auth outcomes', async () => {
+test('decide: transport and fresh-auth outcomes (D18, D63)', async () => {
   const d = createDecide({ authorizer: authorizer() });
   const fresh: AccessRule = { allow: ['owner'], target: 'system', freshAuth: true };
-  assert.equal((await d(input(operator, fresh))).outcome, 'needs-operator');
+  assert.equal((await d(input(operator, fresh))).outcome, 'needs-fresh-auth', 'HTTP: the password by default');
   assert.equal((await d({ ...input(operator, fresh), transport: 'https' })).outcome, 'needs-fresh-auth');
+  let asked = 0;
+  const strict = createDecide({ authorizer: authorizer(), freshAuthRequiresHttps: async () => { asked += 1; return true; } });
+  assert.equal((await strict(input(operator, fresh))).outcome, 'needs-operator', 'HTTPS required: HTTP is the operator\'s');
+  assert.equal((await strict({ ...input(operator, fresh), transport: 'https' })).outcome, 'needs-fresh-auth');
+  assert.equal(asked, 1, 'the switch is read only for a fresh-auth rule over HTTP');
+  assert.equal((await d({ ...input(operator, fresh), auth: { fresh: true } })).outcome, 'allow');
   assert.equal((await d({ ...input(operator, fresh), auth: { fresh: true } })).outcome, 'allow');
   const login: AccessRule = { allow: ['public'], target: 'session' };
   assert.equal((await d(input(anon, login))).outcome, 'allow');

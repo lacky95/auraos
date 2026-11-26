@@ -7,7 +7,10 @@ import Icon from '../components/Icon.astro';
  *
  * My account: the signed-in owner, their login sessions, "Change password…"
  * and "Sign out other sessions". Global: the password policy for new and
- * changed passwords.
+ * changed passwords, and "Require HTTPS for password confirmations" (D63),
+ * the first writable entry of the security options registry (D64): read
+ * with `GET /api/admin/security-options`, changed with `PUT` through
+ * AuraOS's approval dialog and the owner's password, in either direction.
  *
  * A password is never typed into this page: it runs on its own App Host, so
  * its script could read anything typed here. "Change password…" and
@@ -180,10 +183,27 @@ const MAX = 128;
           the exact change.
         </p>
       </section>
+
+      <section class="acc-section">
+        <div class="acc-head">
+          <span class="acc-title"><Icon name="lock" /> Password confirmations</span>
+        </div>
+        <div class="row-inline">
+          <label><input id="sec-fresh-https" type="checkbox" disabled /> Require HTTPS for password confirmations</label>
+          <span class="acc-note" id="sec-fresh-https-source"></span>
+        </div>
+        <p class="acc-note">
+          Some approvals ask for your password again. Over plain HTTP your password crosses the network unencrypted.
+          Turn this on if Aura is reachable from networks you don't trust: over HTTP those approvals then need
+          <code>aura approve &lt;id&gt;</code> on the host. Changing it asks for your password in AuraOS's own dialog;
+          while it is on, that means turning it off over HTTP also needs HTTPS or the host
+          (<code>aura admin security set fresh-auth-require-https off</code>).
+        </p>
+      </section>
     </div>
   </main>
 
-  <footer class="settings-foot">PROVIDER · /api/auth/account · /api/admin/credentials · /api/user/me · /api/user/me/profile · /api/auth/password-policy · /api/auth/sessions/revoke-others</footer>
+  <footer class="settings-foot">PROVIDER · /api/auth/account · /api/admin/credentials · /api/user/me · /api/user/me/profile · /api/auth/password-policy · /api/admin/security-options · /api/auth/sessions/revoke-others</footer>
 
   <script is:inline define:vars={{ MIN, MAX }}>
     (() => {
@@ -402,6 +422,34 @@ const MAX = 128;
         await loadPolicy();
       });
 
+      // ── global: security options (D63, D64) ──────────────────────────
+      const FRESH_HTTPS = 'fresh-auth-require-https';
+      async function loadSecurity() {
+        const box = $('sec-fresh-https');
+        try {
+          const o = ((await owner('GET', '/api/admin/security-options')).options || []).find((x) => x.id === FRESH_HTTPS);
+          if (!o) throw new Error('unavailable');
+          box.checked = o.value === true;
+          box.disabled = !o.writable || o.effectiveSource.startsWith('env ');
+          $('sec-fresh-https-source').textContent = o.effectiveSource === 'default' ? '(default)' : `(${o.effectiveSource})`;
+        } catch (err) {
+          box.disabled = true;
+          setStatus(`ERROR — security options: ${err.message}`, 'error');
+        }
+      }
+      $('sec-fresh-https').addEventListener('change', async () => {
+        const box = $('sec-fresh-https');
+        const value = box.checked;
+        box.disabled = true;
+        try {
+          await owner('PUT', '/api/admin/security-options', { id: FRESH_HTTPS, value });
+          setStatus(value ? 'Password confirmations now need HTTPS (or the host).' : 'Password confirmations work over HTTP too.');
+        } catch (err) {
+          if (err.message !== 'cancelled') setStatus(`ERROR — ${err.message}`, 'error');
+        }
+        await loadSecurity();
+      });
+
       // ── tabs ──────────────────────────────────────────────────────────
       document.querySelectorAll('.usr-tab').forEach((btn) => {
         btn.addEventListener('click', () => {
@@ -420,14 +468,14 @@ const MAX = 128;
         if (window.auraOs) return fn();
         setTimeout(() => whenReady(fn), 10);
       }
-      whenReady(() => { void loadAccount(); void loadProfile(); void loadSecrets(); void loadPolicy(); });
+      whenReady(() => { void loadAccount(); void loadProfile(); void loadSecrets(); void loadPolicy(); void loadSecurity(); });
     })();
   </script>
   <script>
     import { OsClient } from '@aura/app-sdk';
     import '../scripts/os.ts';
     new OsClient().nav.installGridNav({
-      selector: '.usr-tab, #btn-password, #btn-revoke-others, #pol-min, #pol-classes, #pol-username, #btn-policy',
+      selector: '.usr-tab, #btn-password, #btn-revoke-others, #pol-min, #pol-classes, #pol-username, #btn-policy, #sec-fresh-https',
     });
   </script>
 </body>

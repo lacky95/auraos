@@ -94,8 +94,8 @@ const modalApps = apps.filter((a) => requests(a, 'notifications.systemModal'));
       </div>
       <p class="acc-note">
         You manage grants and API keys here as the signed-in owner. Each change opens AuraOS's own approval dialog;
-        privileged grants and new API keys also ask for your password (over HTTP, approve it on the host with
-        <code>aura approve &lt;id&gt;</code>). From the Terminal, <code>aura grant</code> and <code>aura apikey</code> ask the
+        privileged grants and new API keys also ask for your password (if you require HTTPS for password
+        confirmations, over HTTP approve it on the host with <code>aura approve &lt;id&gt;</code>). From the Terminal, <code>aura grant</code> and <code>aura apikey</code> ask the
         same way. Every change is audited with your name.
       </p>
     </section>

@@ -2,7 +2,7 @@ import * as core from '@aura/core';
 import type { AccessPrincipal, InstancePrincipal, Principal } from '@aura/core';
 import { OWNER_AGENT_APPS, OWNER_AGENT_EXCLUDED_TARGETS } from './identify.ts';
 import type {
-  AccessReason, AccessRule, Decide, DecideInput, DecideResult, PolicyResource,
+  AccessReason, AccessRule, Decide, DecideInput, DecideResult, PolicyResource, PolicyTransport,
 } from './types.ts';
 
 /**
@@ -23,6 +23,42 @@ export interface DecideDeps {
   authorizer: { authorize(principal: Principal, action: string): Promise<{ allow: boolean; reason: string }> };
   /** D29: whether this instance acts for the owner (identify.ts `isTrustedOwnerAgent`). Never asked at the gateway. */
   ownerAgent?(principal: InstancePrincipal): boolean;
+  /** D63: the owner's switch (`freshAuthRequiresHttps`). Absent: its default, off. */
+  freshAuthRequiresHttps?(): Promise<boolean>;
+}
+
+// ── fresh authentication and transport (D18, D63) ───────────────────────────
+
+/**
+ * How the owner gives a `fresh` confirmation: `password` in the shell's own
+ * dialog, or `operator` (`aura approve <id>` on the host, which works in
+ * every mode). The one place transport decides it: the access decision
+ * below, the approve route and the dialog's view all ask this.
+ *
+ * D63 (owner, 2026-11-26): over plain HTTP the dialog takes the password by
+ * default; the security option `fresh-auth-require-https` makes HTTP the
+ * host operator's again (D18). HTTPS counts only as `requestScheme` /
+ * `edgeView` decide it: `X-Forwarded-Proto` only from a trusted proxy.
+ */
+export type FreshAuthPath = 'password' | 'operator';
+
+export const freshAuthPath = (transport: PolicyTransport, requireHttps: boolean): FreshAuthPath =>
+  transport === 'https' || !requireHttps ? 'password' : 'operator';
+
+/**
+ * The switch, from the security options registry (D64). A tampered record
+ * reads as the default (off; core reports it). No store, or a read that
+ * fails, keeps HTTP to the host operator.
+ */
+export async function freshAuthRequiresHttps(
+  store: { get(): Promise<core.SecurityPolicy> } | null = core.getAuthServices().securityPolicy,
+): Promise<boolean> {
+  try {
+    if (!store) return true;
+    return core.securityPolicyValue(await store.get(), core.FRESH_AUTH_REQUIRE_HTTPS) === true;
+  } catch {
+    return true;
+  }
 }
 
 const allow = (reason: AccessReason): DecideResult => ({ outcome: 'allow', reason });
@@ -161,7 +197,8 @@ async function evaluate(input: DecideInput, deps: DecideDeps): Promise<DecideRes
   if (target.reason === 'auto-granted') reason = 'auto-granted';
 
   if (rule.freshAuth && !input.auth.fresh) {
-    return input.transport === 'https'
+    const requireHttps = input.transport === 'http' && (await deps.freshAuthRequiresHttps?.() ?? false);
+    return freshAuthPath(input.transport, requireHttps) === 'password'
       ? { outcome: 'needs-fresh-auth', reason: 'fresh-auth-required' }
       : { outcome: 'needs-operator', reason: 'operator-required' };
   }
@@ -179,4 +216,4 @@ export function createDecide(deps: DecideDeps): Decide {
 }
 
 /** The live decision, on the shell's `Authorizer`. */
-export const decide: Decide = (input) => createDecide({ authorizer: core.getAuthServices().authorizer })(input);
+export const decide: Decide = (input) => createDecide({ authorizer: core.getAuthServices().authorizer, freshAuthRequiresHttps: () => freshAuthRequiresHttps() })(input);

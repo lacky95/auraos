@@ -192,6 +192,56 @@ export function registerAdmin(program: Command): void {
         DETAIL: e.detail ? JSON.stringify(e.detail) : '',
       }))));
     });
+
+  registerAdminSecurity(admin);
+}
+
+interface SecurityOptionDto {
+  id: string; title: string; description: string; type: string; values?: string[];
+  default: unknown; value: unknown; source: string; effectiveSource: string; env?: string;
+  writable: boolean; restartRequired: boolean; phase: string; invalidEnv?: boolean;
+}
+
+const showValue = (v: unknown): string =>
+  v === true ? 'on' : v === false ? 'off' : Array.isArray(v) ? (v.join(',') || '-') : v === null || v === undefined ? '-' : String(v);
+
+/**
+ * `aura admin security [list] | set <id> <value>`: the security options
+ * registry (D64). A change is the owner's with the password (`fresh`): from
+ * the System Terminal it waits for the owner's approval; on the host the
+ * operator acts directly. Options set on the host (env) are shown, not set.
+ */
+function registerAdminSecurity(admin: Command): void {
+  const security = admin
+    .command('security')
+    .description('Security options (D64): every security switch, its value and where it comes from. `set` changes a writable one.');
+
+  security
+    .command('list', { isDefault: true })
+    .alias('options')
+    .description('Every security option: value, source (default, policy, env), and what it does.')
+    .option('-o, --output <fmt>', 'json for the full records')
+    .action(async (opts: { output?: string }) => {
+      const { options } = await api.get<{ options: SecurityOptionDto[] }>('/api/admin/security-options');
+      if (opts.output === 'json') { console.log(JSON.stringify(options, null, 2)); return; }
+      console.log(table(options.map((o) => ({
+        ID: o.id,
+        VALUE: o.invalidEnv ? color.yellow(`${showValue(o.value)} (invalid env)`) : showValue(o.value),
+        SOURCE: o.effectiveSource,
+        SET: o.writable ? 'aura admin security set' : o.env ? `${o.env} on the host` : o.source === 'reserved' ? color.dim('not yet available') : color.dim('own setting'),
+        TITLE: o.title,
+      }))));
+    });
+
+  security
+    .command('set <id> <value>')
+    .description('Set a writable security option, e.g. `set fresh-auth-require-https on`. Needs the owner\'s password in the desktop, or run it on the host.')
+    .action(async (id: string, value: string) => {
+      const v = value === 'on' || value === 'true' ? true : value === 'off' || value === 'false' ? false : value;
+      const r = await api.put<{ changed: boolean; option: SecurityOptionDto }>('/api/admin/security-options', { id, value: v });
+      if (r.changed) ok(`${color.bold(r.option.id)} = ${showValue(r.option.value)}`);
+      else info(`${r.option.id} is already ${showValue(r.option.value)}`);
+    });
 }
 
 const REPORT_COLUMNS = ['surface', 'subject', 'method', 'variant', 'principal', 'appId', 'decision', 'reason', 'status', 'via', 'wouldEnforce', 'count'];

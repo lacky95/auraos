@@ -16,7 +16,9 @@ import {
 import { installGate, runInstall } from '../src/lib/approvals/nexus.ts';
 import { agentHooksDisplay, contextWrite, installDisplay, installLevel, requesterReason } from '../src/lib/approvals/display.ts';
 import { approvedOrAsk, presentsApproval } from '../src/lib/approvals/service.ts';
-import { approvalReply, outcomeOf, parseApprovalView } from '../src/lib/approvals/dialogClient.ts';
+import {
+  approvalReply, freshViaOf, outcomeOf, parseApprovalView, passwordTransportNote, PASSWORD_OVER_HTTP_NOTE,
+} from '../src/lib/approvals/dialogClient.ts';
 import { blockableApp } from '../src/lib/approvals/service.ts';
 import { approvalBelongsToSender, authorizeShellMessage, type ChannelSender } from '../src/lib/auraChannelShell.ts';
 import { ROUTE_ACCESS_MANIFEST } from '../src/lib/access/routeManifest.ts';
@@ -74,6 +76,8 @@ let store: MemoryStore;
 let audits: AuditInput[];
 let tickets: Map<string, SetupTicket>;
 let scheme: string;
+/** D63: the owner's switch `fresh-auth-require-https`. */
+let requireHttps: boolean;
 let lock: 'locked' | 'unlocked';
 let ownerOk: boolean;
 let passwordAttempts: number;
@@ -93,6 +97,8 @@ function deps(): ApprovalRouteDeps {
       ? { owner: { userId: 'default', sessionId: 'sess-desk', username: 'owner' }, scheme }
       : { error: 'forbidden-origin', status: 403 }),
     ownerRead: async () => (ownerOk ? { userId: 'default', sessionId: 'sess-desk', username: 'owner' } : null),
+    scheme: () => scheme,
+    freshAuthRequiresHttps: async () => requireHttps,
     lockOf: async () => lock,
     verifyPassword: async (_u, p) => {
       passwordAttempts += 1;
@@ -108,6 +114,7 @@ beforeEach(() => {
   audits = [];
   tickets = new Map();
   scheme = 'https';
+  requireHttps = false;
   lock = 'unlocked';
   ownerOk = true;
   passwordAttempts = 0;
@@ -212,9 +219,10 @@ test('only the owner in the shell document decides: tokens, keys, apps, a locked
   assert.equal((await decide(body.id, 'approve')).status, 409, 'decided once');
 });
 
-test('fresh: HTTPS and the password, rate limited; over HTTP it is the operator\'s', async () => {
+test('fresh: HTTPS and the password, rate limited; over HTTP with HTTPS required it is the operator\'s', async () => {
   const { body } = await askConfirm({ level: 'fresh' });
   scheme = 'http';
+  requireHttps = true;
   const http = await decide(body.id, 'approve', { password: PASSWORD });
   assert.equal(http.body.error, 'operator-required');
   assert.match(http.body.message, new RegExp(`aura approve ${body.id}`));
@@ -231,6 +239,72 @@ test('fresh: HTTPS and the password, rate limited; over HTTP it is the operator\
   passwordAttempts = 5;
   assert.deepEqual([(await decide(next.body.id, 'approve', { password: PASSWORD })).status], [429]);
   assert.equal((await decide(next.body.id, 'deny')).body.state, 'denied', 'denying needs no password');
+});
+
+test('D63: fresh over HTTP takes the password by default, with every other rule kept', async () => {
+  scheme = 'http';
+  const { body } = await askConfirm({ level: 'fresh' });
+  // The owner's views say how a fresh approval is given on this connection.
+  const list = await read(await listApprovals(ctx('GET', '/api/approvals'), deps()));
+  assert.equal(list.body.freshVia, 'password');
+  assert.equal(list.body.pending[0].freshVia, 'password');
+  assert.equal((await read(await getApproval(ctx('GET', `/api/approvals/${body.id}`), body.id, deps()))).body.freshVia, 'password');
+
+  assert.equal((await decide(body.id, 'approve')).body.error, 'password-required');
+  assert.equal((await decide(body.id, 'approve', { password: 'wrong' })).body.error, 'invalid-credentials');
+  lock = 'locked';
+  assert.equal((await decide(body.id, 'approve', { password: PASSWORD })).body.error, 'locked');
+  lock = 'unlocked';
+  callerPrincipal = TERMINAL;
+  const bearer = await decide(body.id, 'approve', { password: PASSWORD }, { ...desk, authorization: 'Bearer aura1.x' });
+  assert.equal(bearer.status, 403, 'the requester never approves');
+  const ok = await decide(body.id, 'approve', { password: PASSWORD });
+  assert.equal(ok.body.state, 'approved');
+  assert.equal(audits.at(-1)?.detail?.['fresh'], true);
+  assert.equal((await decide(body.id, 'approve', { password: PASSWORD })).status, 409, 'single use');
+
+  const next = await askConfirm({ level: 'fresh', payload: { action: 'again' } });
+  passwordAttempts = 5;
+  assert.equal((await decide(next.body.id, 'approve', { password: PASSWORD })).status, 429, 'the login rate limit');
+});
+
+test('D63: with HTTPS required, HTTP views say operator, HTTPS still takes the password, the operator always works', async () => {
+  requireHttps = true;
+  scheme = 'http';
+  const { body } = await askConfirm({ level: 'fresh' });
+  assert.equal((await read(await listApprovals(ctx('GET', '/api/approvals'), deps()))).body.pending[0].freshVia, 'operator');
+  assert.equal((await decide(body.id, 'approve', { password: PASSWORD })).body.error, 'operator-required');
+  assert.equal(passwordAttempts, 0, 'the password was not even checked');
+  scheme = 'https';
+  assert.equal((await read(await listApprovals(ctx('GET', '/api/approvals'), deps()))).body.freshVia, 'password');
+  tickets.set('op', { purpose: 'operator', subject: `approve:${body.id}` } as SetupTicket);
+  scheme = 'http';
+  const op = await read(await decideApproval(ctx('POST', `/api/approvals/${body.id}/approve`, { operatorCode: 'op' }), body.id, 'approve', deps()));
+  assert.equal(op.body.state, 'approved', 'the host operator approves in every mode');
+});
+
+test('D63: the dialog asks for what the server takes, with a note over HTTP', () => {
+  assert.equal(freshViaOf('password', 'http:'), 'password');
+  assert.equal(freshViaOf('operator', 'https:'), 'operator');
+  assert.equal(freshViaOf(undefined, 'http:'), 'operator', 'an older server: HTTP stays the operator\'s');
+  assert.equal(freshViaOf('nonsense', 'https:'), 'password');
+  assert.equal(passwordTransportNote({ level: 'fresh', freshVia: 'password' }, 'http:'), PASSWORD_OVER_HTTP_NOTE);
+  assert.equal(PASSWORD_OVER_HTTP_NOTE, '(HTTP: password sent unencrypted)');
+  assert.equal(passwordTransportNote({ level: 'fresh', freshVia: 'password' }, 'https:'), null);
+  assert.equal(passwordTransportNote({ level: 'fresh', freshVia: 'operator' }, 'http:'), null, 'the refusal text instead');
+  assert.equal(passwordTransportNote({ level: 'session', freshVia: 'password' }, 'http:'), null);
+});
+
+test('D63: the central point: freshAuthPath and the live switch read', async () => {
+  const { freshAuthPath, freshAuthRequiresHttps } = await import('../src/lib/access/decide.ts');
+  assert.equal(freshAuthPath('https', true), 'password');
+  assert.equal(freshAuthPath('https', false), 'password');
+  assert.equal(freshAuthPath('http', false), 'password');
+  assert.equal(freshAuthPath('http', true), 'operator');
+  assert.equal(await freshAuthRequiresHttps({ get: async () => ({}) }), false, 'the default is off');
+  assert.equal(await freshAuthRequiresHttps({ get: async () => ({ 'fresh-auth-require-https': true }) }), true);
+  assert.equal(await freshAuthRequiresHttps({ get: async () => { throw new Error('valkey down'); } }), true, 'an unreadable switch keeps HTTP to the operator');
+  assert.equal(await freshAuthRequiresHttps(null), true);
 });
 
 test('deny and block stops the app asking until the block is lifted', async () => {

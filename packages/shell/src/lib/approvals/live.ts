@@ -7,6 +7,8 @@ import * as core from '@aura/core';
 import { authenticate } from '../auth.ts';
 import { clientRateKey, coreAuthServices, currentOwnerSession } from '../authSurface.ts';
 import { shellOwner } from '../appHostHandoff.ts';
+import { freshAuthRequiresHttps } from '../access/decide.ts';
+import { edgeView } from '../../../server/host-policy.mjs';
 import { liveApprovalDeps } from './service.ts';
 import type { ApprovalRouteDeps, OwnerSession, RouteCtx } from './routes.ts';
 
@@ -28,6 +30,12 @@ export function liveRouteDeps(): ApprovalRouteDeps {
       return owner ? { owner, scheme: r.edge.scheme } : { error: 'login-required', status: 401 };
     },
     ownerRead: async (ctx) => withUsername(await currentOwnerSession(ctx)),
+    scheme: (ctx) => {
+      let peer: string | undefined;
+      try { peer = ctx.clientAddress; } catch { peer = undefined; }
+      return edgeView({ peer, header: (name: string) => ctx.request.headers.get(name) }).scheme;
+    },
+    freshAuthRequiresHttps: () => freshAuthRequiresHttps(svc.securityPolicy),
     lockOf: (sid) => svc.clientSessions.effectiveLock(sid),
     verifyPassword: async (username, password, rateLimitKey) => {
       const check = await svc.users.verifyPassword(username, password, { rateLimitKey });

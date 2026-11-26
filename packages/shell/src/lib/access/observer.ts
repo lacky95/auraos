@@ -5,7 +5,7 @@ import { GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
 import { defaultRedis } from '@aura/kv-store';
 import { accessMode, wouldEnforce } from '../../../server/access-mode.mjs';
 import { ownerSessionOf, sessionCookieToken } from '../authSurface.ts';
-import { createDecide, type DecideDeps } from './decide.ts';
+import { createDecide, freshAuthRequiresHttps, type DecideDeps } from './decide.ts';
 import {
   isTrustedOwnerAgent, liveNetworkIdentity, resolvePrincipal, type AppHostSession, type PrincipalDeps,
 } from './identify.ts';
@@ -598,6 +598,8 @@ export const liveDeps: ObserverDeps = {
   },
   mgr: liveMgr,
   ownerAgent: (p) => isTrustedOwnerAgent(p, liveMgr() as unknown as Pick<AppManager, 'isTrustedSystemCopy'> | null),
+  freshAuthRequiresHttps: () => freshAuthRequiresHttps(
+    ((globalThis as Record<string, unknown>)[AUTH_SERVICES] as { securityPolicy?: core.SecurityPolicyStore } | undefined)?.securityPolicy ?? null),
   network: liveNetworkIdentity(() => liveMgr() as unknown as Pick<AppManager, 'getAllInstances'> | null),
   // Read, never created: creating them has side effects of its own.
   services: () => ((globalThis as Record<string, unknown>)[AUTH_SERVICES] as ObserverServices | undefined) ?? null,
