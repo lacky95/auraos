@@ -136,7 +136,8 @@ async function savedChange(w: ReturnType<typeof world>) {
 // ─── tests ──────────────────────────────────────────────────────────────────
 
 test('dev new: a git repo with an initial commit of the files, AGENTS.md + one-line CLAUDE.md, closed by default', async () => {
-  // No shell: the local-write fallback runs the same git step as scaffold.ts.
+  // No shell, on the host (not a sandbox): the local-write fallback runs the same git step as scaffold.ts.
+  for (const k of ['AURA_INSTANCE_TOKEN', 'APP_INSTANCE_ID', 'AURA_INSTANCE_ID']) delete process.env[k];
   process.env['AURA_SHELL_URL'] = 'http://127.0.0.1:1';
   const program = new Command();
   program.exitOverride();
@@ -158,6 +159,20 @@ test('dev new: a git repo with an initial commit of the files, AGENTS.md + one-l
   assert.match(readFileSync(join(dest, '.gitignore'), 'utf-8'), /^node_modules\/$/m);
   const manifest = JSON.parse(readFileSync(join(dest, 'app.manifest.json'), 'utf-8'));
   assert.deepEqual(manifest.source, { defaultMode: 'closed' });
+});
+
+test('dev new in a sandbox: its own /data never decides — an old local dir does not block, no shell writes nothing locally', async () => {
+  const local = join(process.env['AURA_DATA_DIR']!, 'scopes', 'users', 'default', 'apps', 'com.example.sbx');
+  mkdirSync(local, { recursive: true });   // e.g. left by an earlier fallback write in this sandbox
+  const seen = await fakeShell((r) => (r.url === '/api/admin/scaffold'
+    ? [200, { ok: true, dest: '/data/scopes/users/default/apps/com.example.sbx', installed: true, git: { commit: 'b'.repeat(40) } }] : undefined));
+  const run = (id: string) => { const p = new Command(); p.exitOverride(); registerDev(p); return quiet(() => p.parseAsync(['node', 'aura', 'dev', 'new', id, '--non-interactive'])); };
+  await run('com.example.sbx');
+  assert.equal(seen.filter((r) => r.url === '/api/admin/scaffold').length, 1, 'the shell scaffolds (and asks the owner if it overwrites)');
+
+  process.env['AURA_SHELL_URL'] = 'http://127.0.0.1:1';
+  await assert.rejects(run('com.example.sbx2'), /exit/);
+  assert.equal(existsSync(join(process.env['AURA_DATA_DIR']!, 'scopes', 'users', 'default', 'apps', 'com.example.sbx2')), false, 'nothing written in the sandbox');
 });
 
 test('dev new via the shell: the payload carries AGENTS.md, CLAUDE.md, .gitignore and source.defaultMode', async () => {
