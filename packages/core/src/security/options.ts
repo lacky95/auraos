@@ -13,12 +13,18 @@
  *             a restart applies it. Read-only here.
  *   record    its own sealed record and route (the password policy); listed
  *             here, changed where it always was.
+ *   file      its own switch file under the data dir and its own route
+ *             (system mode, shell mode); an `env` variable wins over it.
+ *             Listed here, changed where it always was.
  *   reserved  declared for the future; not yet available.
  *
  * An `envOverride` wins over the policy record.
  */
 
-export type SecurityOptionSource = 'policy' | 'env' | 'record' | 'reserved';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+export type SecurityOptionSource = 'policy' | 'env' | 'record' | 'file' | 'reserved';
 export type SecurityOptionType = 'boolean' | 'enum' | 'list' | 'record';
 export type SecurityOptionValue = boolean | string | readonly string[] | null;
 
@@ -36,10 +42,15 @@ export interface SecurityOption {
   env?: string;
   /** `record` options: the record that holds it. */
   record?: string;
+  /** `file` options: the switch file, relative to the data dir (`AURA_DATA_DIR`, /data). */
+  file?: string;
   /** A change takes effect only after `aura restart os`. */
   restartRequired: boolean;
-  /** The approval level a write needs (D9): every security option is `fresh`. */
-  change: 'fresh';
+  /**
+   * The approval level a write needs (D9): `fresh` (the password). The one
+   * exception is the shell mode's one click (`session`, D57).
+   */
+  change: 'fresh' | 'session';
   /** For display. */
   since: string;
   phase: string;
@@ -106,6 +117,25 @@ export const SECURITY_OPTIONS: readonly SecurityOption[] = Object.freeze([
       + 'Empty (default): nobody is trusted, so a request counts as HTTPS only when it really is.',
     type: 'list', default: [], source: 'env', env: 'AURA_TRUSTED_PROXIES',
     restartRequired: true, change: 'fresh', since: '2026-11-22', phase: '2',
+  },
+  {
+    id: 'system-mode',
+    title: 'System mode',
+    description: 'developer (default until Phase 6): AuraOS runs from its /workspace checkout, `aura mount workspace` and '
+      + '`aura dev rebuild|restart` work, and the desktop shows the "Developer mode" badge. normal: those are refused '
+      + '(recorded and shown; the locked release comes with Phase 6). Turning it on needs the password; turning it off '
+      + 'lists what differs from the release first. Settings → System, or `aura mode`.',
+    type: 'enum', values: ['normal', 'developer'], default: 'developer', source: 'file', file: 'aura/system-mode',
+    env: 'AURA_SYSTEM_MODE', restartRequired: false, change: 'fresh', since: '2026-11-25', phase: '4 (D60)',
+  },
+  {
+    id: 'shell-mode',
+    title: 'Shell mode',
+    description: 'dev (default): the shell runs `astro dev` from source (Vite, HMR). prod: the shell\'s production build '
+      + '(packages/shell/server.mjs), no dev server. Takes effect on the next `aura restart os`. `aura shell mode`; '
+      + 'one approval click (D57).',
+    type: 'enum', values: ['dev', 'prod'], default: 'dev', source: 'file', file: 'aura/shell-mode',
+    env: 'AURA_SHELL_MODE', restartRequired: true, change: 'session', since: '2026-10-30', phase: 'early',
   },
   {
     id: 'access-profile',
@@ -187,20 +217,28 @@ export function securityEnvValue(id: string, env: Record<string, string | undefi
 
 export interface EffectiveSecurityOption extends SecurityOption {
   value: SecurityOptionValue;
-  /** `default`, `policy`, `env AURA_X`, `record user:policy:…` or `reserved`. */
+  /** `default`, `policy`, `env AURA_X`, `record user:policy:…`, `file /data/aura/…` or `reserved`. */
   effectiveSource: string;
   writable: boolean;
   /** An env value that is not one of `values`: the default applies (its read point logs it). */
   invalidEnv?: true;
 }
 
+/** A `file` option's switch file, or null when it is missing or unreadable. */
+export type SecurityOptionFileReader = (file: string) => string | null;
+
+const readDataFile: SecurityOptionFileReader = (file) => {
+  try { return readFileSync(join(process.env['AURA_DATA_DIR'] ?? '/data', file), 'utf8'); } catch { return null; }
+};
+
 /**
  * Every option's effective value and where it comes from. A host variable
- * wins; then the policy record; then the default.
+ * wins; then the policy record or the switch file; then the default.
  */
 export function resolveSecurityOptions(
   policy: SecurityPolicy,
   env: Record<string, string | undefined> = process.env,
+  readFile: SecurityOptionFileReader = readDataFile,
 ): EffectiveSecurityOption[] {
   return SECURITY_OPTIONS.map((o) => {
     const writable = o.source === 'policy';
@@ -212,6 +250,10 @@ export function resolveSecurityOptions(
       return { ...o, value: policy[o.id]!, effectiveSource: 'policy', writable };
     }
     if (o.source === 'record') return { ...o, value: o.default, effectiveSource: `record ${o.record}`, writable };
+    if (o.source === 'file' && o.file) {
+      const v = (readFile(o.file) ?? '').trim();
+      if (o.values?.includes(v)) return { ...o, value: v, effectiveSource: `file /data/${o.file}`, writable };
+    }
     if (o.source === 'reserved') return { ...o, value: o.default, effectiveSource: 'reserved', writable };
     return { ...o, value: o.default, effectiveSource: 'default', writable };
   });

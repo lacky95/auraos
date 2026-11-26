@@ -27,7 +27,8 @@ function memoryRedis() {
 test('every option is declared with its default, source and the fresh change level', () => {
   for (const o of SECURITY_OPTIONS) {
     assert.ok(o.id && o.title && o.description && o.source && o.since && o.phase, o.id);
-    assert.equal(o.change, 'fresh');
+    // The shell mode's switch is one approval click (D57); every other option needs the password.
+    assert.equal(o.change, o.id === 'shell-mode' ? 'session' : 'fresh', o.id);
     assert.ok(Object.isFrozen(o));
   }
   assert.ok(Object.isFrozen(SECURITY_OPTIONS));

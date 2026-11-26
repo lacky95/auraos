@@ -228,7 +228,7 @@ function registerAdminSecurity(admin: Command): void {
         ID: o.id,
         VALUE: o.invalidEnv ? color.yellow(`${showValue(o.value)} (invalid env)`) : showValue(o.value),
         SOURCE: o.effectiveSource,
-        SET: o.writable ? 'aura admin security set' : o.env ? `${o.env} on the host` : o.source === 'reserved' ? color.dim('not yet available') : color.dim('own setting'),
+        SET: o.writable ? 'aura admin security set' : o.source === 'file' ? color.dim('own setting') : o.env ? `${o.env} on the host` : o.source === 'reserved' ? color.dim('not yet available') : color.dim('own setting'),
         TITLE: o.title,
       }))));
     });
