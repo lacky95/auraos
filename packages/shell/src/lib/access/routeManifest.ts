@@ -229,6 +229,12 @@ const routes: RouteAccessManifest['routes'] = {
       POST: ownerManages('`aura cap doctor --fix` re-stages toolchain libraries and refreshes running apps: the owner decides.'),
     },
   },
+  '/api/admin/app-checkout': {
+    methods: {
+      GET: rule(OWNER, 'system', why('`aura dev checkout --dry-run`: where an app\'s source would come from; changes nothing.')),
+      POST: ownerManages('`aura dev checkout` makes an installed app a git working tree: the `aura dev open` rules (no system app, a closed install opened first), then the owner\'s password (fresh), bound to the installation.'),
+    },
+  },
   '/api/admin/cap-refresh': { methods: { POST: ownerManages('Re-applies an app\'s granted tools to its running instances: the owner decides.') } },
   '/api/admin/reap-orphans': { methods: { POST: ownerManages('Kills app processes no instance tracks (a dry run lists them): the owner decides.') } },
   '/api/admin/install-aura-shim': { methods: { POST: ownerManages('Replaces the toolchain\'s aura CLI with its wrapper script: the owner decides.') } },
