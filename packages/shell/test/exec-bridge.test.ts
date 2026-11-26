@@ -220,3 +220,14 @@ test('socket.io leaves the bridge time to decide: an upgrade answered after 1.5 
     assert.equal(first, 'HTTP/1.1 401 Unauthorized');
   } finally { io.close(); srv.close(); }
 });
+
+test('dev parity: astro.config attaches every server attachShellServers does (the shell runs `astro dev` on installs)', async () => {
+  const { readFileSync } = await import('node:fs');
+  const here = new URL('..', import.meta.url);
+  const prod = readFileSync(new URL('server/attach.mjs', here), 'utf8');
+  const dev = readFileSync(new URL('astro.config.mjs', here), 'utf8');
+  const body = /export async function attachShellServers[\s\S]*?\n\}/.exec(prod)?.[0] ?? '';
+  const calls = [...body.matchAll(/(attach\w+)\(httpServer\)/g)].map((m) => m[1]).filter((n) => n !== 'attachShellServers');
+  assert.ok(calls.includes('attachExecBridge'), 'attachShellServers attaches the exec bridge');
+  for (const name of calls) assert.match(dev, new RegExp(`${name}\\(server\\.httpServer\\)`), `astro.config attaches ${name}`);
+});
