@@ -221,3 +221,20 @@ test('M6: boot tries the scan once and leaves retries to the reconciler; the run
   const recs = await runner().listOrphanRecords();
   assert.equal(recs.length, 3);
 });
+
+test('a port two survivors share is given back only when the last of them goes', () => {
+  const released = [];
+  const fake = {
+    instances: new Map([
+      ['com.aura.console', { instanceId: 'com.aura.console', port: 4004 }],
+      ['com.aura.counter-4', { instanceId: 'com.aura.counter-4', port: 4004 }],
+    ]),
+    ports: { release: (p) => released.push(p) },
+  };
+  const release = (id) => AppManager.prototype.releasePort.call(fake, 4004, id);
+  release('com.aura.console');
+  assert.deepEqual(released, [], 'Counter still holds 4004');
+  fake.instances.delete('com.aura.console');
+  release('com.aura.counter-4');
+  assert.deepEqual(released, [4004]);
+});
