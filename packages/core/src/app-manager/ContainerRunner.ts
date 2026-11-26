@@ -9,7 +9,7 @@ import { MY_TOOLS_PATH, currentToolsMode, provisionAllowlist, toolchainMirrorBin
 import { containerHomeEnv, containerHomeMount } from './spawn/homeArgs.js';
 import { containerContextEnv, containerContextMounts } from './spawn/contextArgs.js';
 import { containerSocketArgs } from './spawn/socketArgs.js';
-import { containerNetworkArgs, containerNetworkEnv, terminalNetworkUser } from './spawn/networkArgs.js';
+import { containerNetworkArgs, containerNetworkEnv, rawSocketArgs, terminalNetworkUser } from './spawn/networkArgs.js';
 import { TERM_NETWORK_CONTAINER_LABEL, TermNetworks, type TermNetwork } from './TermNetworks.js';
 import { containerIdentityArgs } from './spawn/identityArgs.js';
 import type { RuntimeCapabilities } from '../runtimes/types.js';
@@ -747,6 +747,8 @@ export class ContainerRunner implements SandboxRunner {
       // even when something resets `hostname`.
       '--hostname', appId,
       ...containerNetworkArgs({ network: SHARED_NETWORK, term }),
+      // No raw sockets: its address can't be forged on a shell network (D28, D88 S1).
+      ...rawSocketArgs(),
       // Lets InstanceTokens re-learn the nonce of a container adopted after a
       // shell restart. Not `aura.parent`: that label marks sidecars, which
       // orphan adoption must skip.

@@ -135,6 +135,7 @@ test('spawn: labels, network, env order, own token, mount root, no socket', asyn
   assert.equal(c.labels['aura.service'], 'box');
   assert.equal(c.labels['aura.managed'], 'os');
   assert.equal(flag(c.args, '--network')[0], 'aura-net');
+  assert.deepEqual(flag(c.args, '--cap-drop'), ['NET_RAW'], 'no raw sockets on a shell network (D88 S1)');
   const env = Object.fromEntries(flag(c.args, '-e').map((kv) => [kv.slice(0, kv.indexOf('=')), kv.slice(kv.indexOf('=') + 1)]));
   assert.equal(env.A, '2', 'request env wins over the template');
   assert.equal(env.CTX_KEY, 'ctx-value', 'envInherit from OS Context');

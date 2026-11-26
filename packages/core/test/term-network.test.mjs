@@ -11,7 +11,7 @@ import { spawnSync } from 'node:child_process';
 
 import { TermNetworks, termNetworkName, TERM_NETWORK_CONTAINER_LABEL } from '../dist/app-manager/TermNetworks.js';
 import {
-  TERMINAL_APP_ID, containerNetworkArgs, containerNetworkEnv, terminalNetworkUser,
+  TERMINAL_APP_ID, containerNetworkArgs, containerNetworkEnv, rawSocketArgs, rawSocketsRequested, terminalNetworkUser,
 } from '../dist/app-manager/spawn/networkArgs.js';
 import { LISTEN_HOST_SHELL } from '../dist/app-manager/provisioning.js';
 import { ContainerRunner } from '../dist/app-manager/ContainerRunner.js';
@@ -188,3 +188,13 @@ test('adoption after a shell restart keeps the Terminal dialled at its private a
     runner.forceKill('com.aura.counter-4');
   }
 });
+
+test('D88 S1: every OS container drops NET_RAW; only a privileged or NET_RAW template keeps it', () => {
+  assert.deepEqual(rawSocketArgs(), ['--cap-drop', 'NET_RAW']);
+  assert.deepEqual(rawSocketArgs({ capabilities: ['SYS_ADMIN'] }), ['--cap-drop', 'NET_RAW']);
+  for (const spec of [{ privileged: true }, { capabilities: ['NET_RAW'] }, { capabilities: ['cap_net_raw'] }, { capabilities: ['ALL'] }]) {
+    assert.equal(rawSocketsRequested(spec), true, JSON.stringify(spec));
+    assert.deepEqual(rawSocketArgs(spec), [], JSON.stringify(spec));
+  }
+});
+
