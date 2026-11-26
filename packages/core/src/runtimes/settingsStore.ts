@@ -143,12 +143,20 @@ export class RuntimeSettingsStore {
     });
   }
 
-  /** `container` and the default can't be disabled (ARI §4.4). Running instances are the caller's check. */
+  /** Why `id` can't be disabled under `cur` (ARI §4.4: `container` and the default), or null. */
+  disableRefusal(id: string, cur: RuntimeSettingsRecord): RuntimeChangeError | null {
+    this.known(id);
+    if (this.registry.get(id)!.descriptor.alwaysEnabled) return new RuntimeChangeError('cannot-disable', `runtime ${id} cannot be disabled`);
+    if (cur.default === id) return new RuntimeChangeError('cannot-disable', `runtime ${id} is the default; choose another default first`);
+    return null;
+  }
+
+  /** `container` and the default can't be disabled (disableRefusal). Running instances are the caller's check. */
   setEnabled(id: string, on: boolean): Promise<RuntimeChange> {
     return this.update((cur) => {
       this.known(id);
-      if (!on && this.registry.get(id)!.descriptor.alwaysEnabled) throw new RuntimeChangeError('cannot-disable', `runtime ${id} cannot be disabled`);
-      if (!on && cur.default === id) throw new RuntimeChangeError('cannot-disable', `runtime ${id} is the default; choose another default first`);
+      const refusal = on ? null : this.disableRefusal(id, cur);
+      if (refusal) throw refusal;
       const enabled = on ? [...new Set([...cur.enabled, id])] : cur.enabled.filter((e) => e !== id);
       return { next: { ...cur, enabled } };
     });
