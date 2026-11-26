@@ -132,15 +132,21 @@ test/                   `pnpm --filter @aura/cli test` (unit), `sh test/smoke.sh
 
 ## Capabilities — `/workspace/.aura/capabilities.yaml`
 
-The registry is a single YAML file. The built-in defaults are seeded on the
-first `aura cap …` call. Edit the file to add custom capabilities, or use
-`aura cap registry add` for the common cases.
+The release registry is this YAML file in the release tree (same trust as the
+code). The shell resolves every install from it, or from a definition the owner
+added with `aura cap registry add <name> --source apt|npm --package … | --file def.yaml`
+(the owner approves it with the password; it is stored sealed and bound to its
+digest). A request names a capability, never a definition, and every install,
+update and remove asks the owner (`fresh`). Definitions are data, never shell
+(SF-2, `packages/core/src/capabilities/definition.ts`).
 
 Sources:
 
-- **apt** — `apt-get install <package>`, then symlink the binary into `/os/toolchain/bin/`.
-- **npm** — `npm install -g <package>`, then symlink.
-- **curl** — either a one-shot `install_cmd` (e.g. `curl … | bash`) or `url` + `extract` (`tar` / `zip`) for download-and-unpack.
+- **apt** — one Debian package, verified apt, then copied into `/os/toolchain/bin/`.
+- **npm** — `npm install -g -- <package>` from the default registry, then copied.
+- **steps** — structured steps the master runs as argv: `apt`, `download`/`extract`/`deb`
+  (https, pinned by sha256), `file`, `symlink`, `mkdir`, `readable`; writes only under
+  `/usr/local/bin`, `/usr/local/lib`, `/home/aura/.aura`.
 - **builtin** — no install step; the binary already exists (used for `aura` itself).
 
 State for "which is installed" lives in `/data/aura/state/capabilities.json` so

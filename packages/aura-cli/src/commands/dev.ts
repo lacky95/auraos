@@ -6,7 +6,7 @@ import { AppManifestSchema, AURA_CONTRACT, AURA_NPMRC, initRepo, needsNpmrc, new
 import { color, error, fail, info, ok, warn } from '../lib/format.js';
 import { CONTRACT_DOCS_HINT, DOCS_HINT, lintAppSources, lintContract, lintManifestKeys, type Finding } from '../lib/apphost-lint.js';
 import { promptText, promptChoice, promptConfirm, promptMultiSelect, PromptCancelled, BACK, type MultiSelectMode } from '../lib/prompts.js';
-import { ensureRegistry, loadRegistry, loadState, type CapabilityEntry } from '../lib/registry.js';
+import { fetchCapabilities, loadState } from '../lib/registry.js';
 import { api } from '../lib/client.js';
 import { inSandbox } from '../lib/identity.js';
 import {
@@ -396,8 +396,7 @@ async function runWizard(seed: { appId?: string; force?: boolean }): Promise<Sca
  * `tools[]`. Empty list is allowed — the schema default is [].
  */
 async function pickTools(prior?: string[]): Promise<string[] | typeof BACK> {
-  ensureRegistry();
-  const reg = loadRegistry();
+  const reg = { capabilities: await fetchCapabilities() };
 
   // Prefer the shell's view of installed state; fall back to local file. Also
   // pull /os/toolchain/bin via inspect-tools so we can surface system binaries
@@ -502,12 +501,12 @@ async function pickTools(prior?: string[]): Promise<string[] | typeof BACK> {
 
   info(`installing ${toInstall.length} cap${toInstall.length === 1 ? '' : 's'}…`);
   for (const name of toInstall) {
-    const entry = reg.capabilities[name] as CapabilityEntry | undefined;
-    if (!entry) { warn(`${name}: not in registry, skipping install`); continue; }
+    if (!reg.capabilities[name]) { warn(`${name}: not in registry, skipping install`); continue; }
     try {
+      // The shell resolves the definition from its registry (SF-2); the owner approves.
       const res = await api.post<{ ok: boolean; symlink?: string; version?: string | null; error?: string }>(
         '/api/admin/cap',
-        { action: 'install', name, entry },
+        { action: 'install', name },
       );
       if (!res?.ok) {
         warn(`${name}: install failed (${res?.error ?? 'unknown'}). Will land in manifest anyway — retry later with \`aura cap install ${name}\`.`);
