@@ -1,0 +1,233 @@
+---
+/**
+ * LoginKeyboard — the on-screen keyboard of the sign-in page.
+ *
+ * The login page keeps its strict CSP (nonce'd inline scripts only) and loads
+ * no desktop runtime, so the desktop keyboard (KeyboardOverlay: React island,
+ * KV, socket) can't run there. This one is a single inline script: the same
+ * QWERTZ / QWERTY / compact layouts (layouts.ts, read at render time), a ⌨
+ * button in the bottom-right corner (where the Dock has it), and keys that
+ * edit the focused username or password field in place with setRangeText, so
+ * the password stays masked. Input only ever goes into the fields: nothing is
+ * logged, stored or sent beyond the normal sign-in.
+ *
+ * While it is open the fields get inputmode="none", so a touch device's own
+ * keyboard stays away.
+ */
+import { IconManager } from '@aura/core';
+import { escapeJsonForScript } from '@aura/ui/lib/utils';
+import { LAYOUTS, displayFor } from './layouts.ts';
+
+interface Props {
+  nonce: string;
+}
+const { nonce } = Astro.props;
+
+// Keys that mean nothing in a sign-in form (modifiers, up/down) are left out.
+const DROP = new Set(['{ctrl}', '{meta}', '{alt}', '{arrowup}', '{arrowdown}']);
+const layouts = LAYOUTS.filter((l) => ['full', 'qwerty', 'compact'].includes(l.id)).map((l) => ({
+  id: l.id,
+  label: l.label,
+  layers: Object.fromEntries(Object.entries(l.layout).map(([name, rows]) =>
+    [name, rows.map((row) => row.split(' ').filter((tok) => tok && !DROP.has(tok)))])),
+  display: displayFor(l.layout),
+}));
+// No inline style attribute: the login CSP has no 'unsafe-inline' for styles.
+const icon = (name: string) => IconManager.renderIconSvg(name, { size: '1em', attrs: { 'aria-hidden': 'true' } });
+---
+<button id="lkb-btn" type="button" class="lkb-btn" aria-label="On-screen keyboard" title="On-screen keyboard"
+  aria-expanded="false" aria-controls="lkb" set:html={icon('keyboard')}></button>
+
+<div id="lkb" class="lkb" role="group" aria-label="On-screen keyboard" hidden>
+  <div class="lkb-head">
+    <span class="lkb-layouts" role="group" aria-label="Layout">
+      {layouts.map((l) => <button type="button" class="lkb-chip" data-layout={l.id} aria-pressed="false">{l.label}</button>)}
+    </span>
+    <button type="button" class="lkb-close" aria-label="Close keyboard" title="Close keyboard" set:html={icon('x')}></button>
+  </div>
+  <div class="lkb-keys"></div>
+</div>
+
+<script type="application/json" id="lkb-layouts" set:html={escapeJsonForScript(layouts)}></script>
+
+<style is:inline nonce={nonce}>
+  .lkb-btn {
+    position: fixed; right: 0; bottom: env(safe-area-inset-bottom, 0px); z-index: 11;
+    display: flex; align-items: center; justify-content: center;
+    width: auto; min-width: 44px; height: 44px; padding: 0 10px;
+    font-size: 1.2rem; color: var(--aura-color-text-dim, #9aa0a6);
+    background: transparent; border: 1px solid var(--aura-color-border, #333);
+  }
+  .lkb-btn:hover, .lkb-btn:focus-visible { color: var(--aura-color-primary, #7acc4d); outline: none; }
+  .lkb-btn[aria-expanded="true"] {
+    color: var(--aura-color-bg, #0b0d10); background: var(--aura-color-primary, #7acc4d); border-color: var(--aura-color-primary, #7acc4d);
+  }
+  /* Above the button row, like the docked desktop keyboard above the Dock. */
+  .lkb {
+    position: fixed; left: 0; right: 0; bottom: calc(44px + env(safe-area-inset-bottom, 0px)); z-index: 10;
+    max-height: 48vh; overflow: auto;
+    background: var(--aura-color-bg, #0b0d10);
+    border-top: 1px solid var(--aura-color-border, #333);
+    box-shadow: 0 -4px 18px rgba(0, 0, 0, 0.4);
+    font-family: var(--aura-font-mono, ui-monospace, monospace);
+    user-select: none; -webkit-user-select: none; touch-action: manipulation;
+  }
+  .lkb button {
+    width: auto; padding: 0; font: inherit; cursor: pointer;
+    color: var(--aura-color-text, #e6e8eb); background: transparent;
+    border: 1px solid var(--aura-color-border, #333);
+  }
+  .lkb-head { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-bottom: 1px solid var(--aura-color-border, #333); }
+  .lkb-layouts { display: flex; flex: 1; flex-wrap: wrap; gap: 3px; }
+  .lkb .lkb-chip {
+    height: 24px; padding: 0 8px; font-size: 0.68rem; letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--aura-color-text-dim, #9aa0a6);
+  }
+  .lkb .lkb-close { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 24px; }
+  .lkb-keys { padding: 4px; }
+  .lkb-row { display: flex; gap: 3px; margin-bottom: 3px; }
+  .lkb .lkb-key { flex: 1 1 0; min-width: 0; height: 42px; font-size: 0.9rem; }
+  .lkb .lkb-key.lkb-fn { flex-grow: 1.5; font-size: 0.68rem; text-transform: uppercase; color: var(--aura-color-text-dim, #9aa0a6); }
+  .lkb .lkb-key[data-key="{space}"] { flex-grow: 6; }
+  .lkb .lkb-chip[aria-pressed="true"],
+  .lkb .lkb-key[aria-pressed="true"],
+  .lkb .lkb-key:active {
+    color: var(--aura-color-bg, #0b0d10); background: var(--aura-color-primary, #7acc4d); border-color: var(--aura-color-primary, #7acc4d);
+  }
+  @media (pointer: coarse) { .lkb .lkb-key { height: 48px; } }
+  @media (max-width: 520px) { .lkb .lkb-key { height: 40px; font-size: 0.8rem; } .lkb-row { gap: 2px; } }
+</style>
+
+<script is:inline nonce={nonce}>
+  (() => {
+    const btn = document.getElementById('lkb-btn');
+    const kb = document.getElementById('lkb');
+    const form = document.getElementById('login');
+    if (!btn || !kb || !form) return;
+    const keysEl = kb.querySelector('.lkb-keys');
+    const layouts = JSON.parse(document.getElementById('lkb-layouts').textContent);
+    const fields = [...form.querySelectorAll('input:not([type=checkbox])')];
+    const NAMES = {
+      '{bksp}': 'Backspace', '{delete}': 'Delete', '{enter}': 'Sign in', '{tab}': 'Next field', '{space}': 'Space',
+      '{escape}': 'Close keyboard', '{shift}': 'Shift', '{lock}': 'Caps Lock', '{altgr}': 'AltGr',
+      '{numbers}': 'Numbers and symbols', '{abc}': 'Letters', '{arrowleft}': 'Cursor left', '{arrowright}': 'Cursor right',
+    };
+    let target = fields[0];
+    // Narrow screens start on the compact layout (the desktop keyboard's auto-fit).
+    let layout = layouts.find((l) => l.id === (innerWidth < 560 ? 'compact' : 'full')) || layouts[0];
+    let layer = 'default';
+    let shift = false;
+    let caps = false;
+
+    for (const f of fields) f.addEventListener('focus', () => { target = f; });
+
+    const layerName = () =>
+      (layer === 'altgr' || layer === 'numbers') && layout.layers[layer] ? layer
+      : (shift || caps) && layout.layers.shift ? 'shift'
+      : 'default';
+
+    function render() {
+      keysEl.replaceChildren(...layout.layers[layerName()].map((row) => {
+        const r = document.createElement('div');
+        r.className = 'lkb-row';
+        for (const tok of row) {
+          const k = document.createElement('button');
+          k.type = 'button';
+          k.tabIndex = -1;
+          k.className = 'lkb-key';
+          k.dataset.key = tok;
+          if (NAMES[tok]) { k.classList.add('lkb-fn'); k.setAttribute('aria-label', NAMES[tok]); }
+          k.textContent = layout.display[tok] ?? tok;
+          if ((tok === '{shift}' && shift) || (tok === '{lock}' && caps) || (tok === '{altgr}' && layer === 'altgr')) {
+            k.setAttribute('aria-pressed', 'true');
+          }
+          r.append(k);
+        }
+        return r;
+      }));
+      for (const c of kb.querySelectorAll('.lkb-chip')) c.setAttribute('aria-pressed', String(c.dataset.layout === layout.id));
+      if (!kb.hidden) document.body.style.paddingBottom = `${kb.offsetHeight + 60}px`;
+    }
+
+    // Replace the selection (or delete next to the caret) and tell the field, as typing would.
+    function edit(text, dir) {
+      const f = target;
+      let s = f.selectionStart ?? f.value.length;
+      let e = f.selectionEnd ?? s;
+      if (!text && s === e) {
+        if (dir < 0) s = Math.max(0, s - 1);
+        else e = Math.min(f.value.length, e + 1);
+        if (s === e) return;
+      }
+      f.setRangeText(text, s, e, 'end');
+      f.dispatchEvent(new InputEvent('input', {
+        bubbles: true,
+        inputType: text ? 'insertText' : dir < 0 ? 'deleteContentBackward' : 'deleteContentForward',
+        data: text || null,
+      }));
+    }
+
+    function move(dir) {
+      const f = target;
+      const s = f.selectionStart ?? 0;
+      const e = f.selectionEnd ?? s;
+      const p = s !== e ? (dir < 0 ? s : e) : Math.max(0, Math.min(f.value.length, s + dir));
+      f.setSelectionRange(p, p);
+    }
+
+    function press(tok) {
+      if (document.activeElement !== target) target.focus({ preventScroll: true });
+      switch (tok) {
+        case '{shift}': shift = !shift; break;
+        case '{lock}': caps = !caps; shift = false; break;
+        case '{altgr}': layer = layer === 'altgr' ? 'default' : 'altgr'; break;
+        case '{numbers}': layer = 'numbers'; break;
+        case '{abc}': layer = 'default'; break;
+        case '{escape}': setOpen(false); return;
+        case '{enter}': form.requestSubmit(); return;
+        case '{tab}': fields[(fields.indexOf(target) + 1) % fields.length].focus({ preventScroll: true }); return;
+        case '{bksp}': edit('', -1); return;
+        case '{delete}': edit('', 1); return;
+        case '{arrowleft}': move(-1); return;
+        case '{arrowright}': move(1); return;
+        default:
+          edit(tok === '{space}' ? ' ' : tok, 0);
+          // Shift and AltGr are one-shot; the numbers layer stays until ABC.
+          if (!shift && layer !== 'altgr') return;
+          shift = false;
+          if (layer === 'altgr') layer = 'default';
+      }
+      render();
+    }
+
+    function setOpen(open) {
+      kb.hidden = !open;
+      btn.setAttribute('aria-expanded', String(open));
+      for (const f of fields) {
+        if (open) f.setAttribute('inputmode', 'none');
+        else f.removeAttribute('inputmode');
+      }
+      if (!open) { document.body.style.paddingBottom = ''; return; }
+      render();
+      // A field that already has focus keeps the device keyboard until it is focused again.
+      const active = fields.includes(document.activeElement) ? document.activeElement : target;
+      active.blur();
+      active.focus({ preventScroll: true });
+    }
+
+    // Tapping the keyboard never takes focus away from the field.
+    for (const el of [btn, kb]) el.addEventListener('mousedown', (e) => e.preventDefault());
+    btn.addEventListener('click', () => setOpen(kb.hidden));
+    kb.addEventListener('click', (e) => {
+      const b = e.target.closest('button');
+      if (!b) return;
+      if (b.dataset.key) press(b.dataset.key);
+      else if (b.dataset.layout) {
+        layout = layouts.find((l) => l.id === b.dataset.layout) || layout;
+        layer = 'default';
+        shift = false;
+        render();
+      } else if (b.classList.contains('lkb-close')) setOpen(false);
+    });
+  })();
+</script>
