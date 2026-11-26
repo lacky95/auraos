@@ -180,6 +180,11 @@ RUN cp $(which git) /os/toolchain/bin/git && \
 # Debian-slim base rootfs for PRoot apps (shared, glibc-compatible)
 COPY --from=base-rootfs / /os/base-rootfs
 
+# The in-environment session launcher (stream J, D74): a static binary the
+# shell stages for the session broker (core SessionBroker.ts).
+COPY os/session-enter/ /os/session-enter/
+RUN cc -std=gnu11 -O2 -Wall -Wextra -Werror -static -o /os/session-enter/aura-session-enter /os/session-enter/session-enter.c
+
 # ─── Stage: deps ──────────────────────────────────────────────────────────────
 FROM base AS deps
 
@@ -292,6 +297,11 @@ RUN npm install -g @anthropic-ai/claude-code 2>/dev/null || true && \
 
 # Debian-slim PRoot base rootfs (glibc-compatible — same libc as host binaries)
 COPY --from=base-rootfs / /os/base-rootfs
+
+# The in-environment session launcher (stream J, D74; core SessionBroker.ts).
+# Without it (an image from before J) the shell compiles the same source once.
+COPY os/session-enter/ /os/session-enter/
+RUN cc -std=gnu11 -O2 -Wall -Wextra -Werror -static -o /os/session-enter/aura-session-enter /os/session-enter/session-enter.c
 
 # Master-container PATH. aura-shell is the OS itself, not a sandbox, so it
 # gets the whole toolchain instead of a per-app `tools[]` allowlist — see

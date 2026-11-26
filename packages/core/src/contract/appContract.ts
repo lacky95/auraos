@@ -92,11 +92,15 @@ export function contractFindings(m: ContractManifest): ContractFinding[] {
       out.push({ severity: 'warn', code: 'privileged-undeclared', path: `services.${i}`,
         message: `sidecar '${s.name}' asks for privileged, capabilities, devices or publish: declare the permission sidecars.privileged` });
     }
-    if (s.inheritDockerSocket && !d.docker) {
-      out.push({ severity: 'warn', code: 'docker-undeclared', path: `services.${i}.inheritDockerSocket`,
-        message: `sidecar '${s.name}' inherits the docker socket, which the app only has with "docker" in tools[]` });
+    if (s.inheritDockerSocket) {
+      out.push({ severity: 'warn', code: 'docker-socket-removed', path: `services.${i}.inheritDockerSocket`,
+        message: `sidecar '${s.name}' asks for the Docker socket: no sidecar gets it any more, and the sidecar is refused (use OS sidecars, sidecars.spawn)` });
     }
   });
+  if (d.docker) {
+    out.push({ severity: 'warn', code: 'docker-socket-removed', path: 'tools',
+      message: 'tools[] lists docker: apps get no Docker socket any more (the owner\'s `aura root` tab has it); drive containers through OS sidecars (sidecars.spawn)' });
+  }
   if ((m.services ?? []).length > 0 && !d.docker && !d.permissions.includes('sidecars.spawn')) {
     out.push({ severity: 'warn', code: 'sidecars-undeclared', path: 'services',
       message: 'services[] are declared, but neither the permission sidecars.spawn (OS sidecars) nor the docker tool (SDK sidecars) runs them' });

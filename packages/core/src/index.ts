@@ -17,6 +17,7 @@ export * from './app-manager/InstanceTokens.js';
 export * from './app-manager/SidecarManager.js';
 export * from './app-manager/DockerApi.js';
 export * from './app-manager/ExecBridge.js';
+export * from './app-manager/rootTabs.js';
 export * from './app-manager/outputLog.js';
 export * from './app-manager/BaseImage.js';
 export * from './app-manager/sidecar-spec.js';

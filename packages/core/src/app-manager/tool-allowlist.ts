@@ -123,12 +123,14 @@ export function toolsTrackInstalledCaps(tools: string[]): boolean {
 
 /**
  * Whether a `tools[]` grants access to a specific tool by name, honoring the
- * `'*'` (all) and `'#'` (all-except) markers. Used to gate side effects tied to
- * a particular tool — e.g. binding the docker socket when `docker` is granted.
+ * `'*'` (all) and `'#'` (all-except) markers. `docker` is never granted by a
+ * marker (stream J.7, D54/D55): only an explicit entry names it, and even
+ * that gives no Docker socket any more (spawn/socketArgs.ts).
  */
 export function toolsGrant(tools: string[], name: string, sidecars: SidecarMap = {}): boolean {
-  if (tools.includes('*')) return true;
   const bin = toolBinaryName(name);
+  if (bin === 'docker') return namedTools(tools).includes('docker');
+  if (tools.includes('*')) return true;
   const named = namedTools(tools);
   // A helper follows its owner's grant, never its own name.
   const probe = sidecarOwners(sidecars).get(bin) ?? bin;

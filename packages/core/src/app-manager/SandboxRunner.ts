@@ -4,7 +4,7 @@ import type { SpawnContext } from '../scopes/types.js';
 import type { ResourceUsage, SidecarInfo } from '../types/instance.js';
 import type { LifecycleStatus } from './lifecycleGate.js';
 import type { RuntimeCapabilities, RuntimeSettings } from '../runtimes/types.js';
-import type { EngineContainer } from './ExecBridge.js';
+import type { EngineContainer, ExecSession, SessionSpec } from './ExecBridge.js';
 import type { OutputLog } from './outputLog.js';
 
 /**
@@ -112,6 +112,16 @@ export interface SandboxRunner {
   engineContainer?(instanceId: string): EngineContainer | null;
   /** Phase 5 stream X: the instance's own output, for runtimes without an engine log. */
   outputLog?(instanceId: string): OutputLog | null;
+  /**
+   * Phase 5 stream J (D74, ARI §9.6): open a session INSIDE the running
+   * instance's environment (its namespaces, root filesystem and cgroup), with
+   * the session's own mount namespace, identity and home from `spec`. Never a
+   * new container, sidecar or replica. Only runtimes that declare
+   * `sessionExec` implement it; the kernel built `spec` and checked the
+   * capabilities, the runtime only executes it and fails closed on anything it
+   * can't enforce.
+   */
+  openSession?(instanceId: string, spec: SessionSpec, onOutput: (channel: 1 | 2, data: Buffer) => void): Promise<ExecSession>;
 
   /**
    * Optional — runners whose sandboxes outlive the shell process (currently

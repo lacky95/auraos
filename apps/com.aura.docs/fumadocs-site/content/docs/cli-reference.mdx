@@ -44,9 +44,10 @@ and asks you to pick one.
 
 | Command | What it does | Key flags |
 |---|---|---|
-| `aura jump` (alias `j`) | **Picker:** choose a running app or service and shell into its sandbox (proot or container) in this terminal. | `--no-services`, `--no-apps` (picker filters), `-m, --master` (the `aura-shell` master container) |
-| `aura jump <app\|inst>` | Straight into that sandbox — an app id (one running instance) or an instance id. | — |
-| `aura jump <app> --sidecar <name>` | Shell into a sidecar of the target (bash if the image has it, else sh). Without a target, `--sidecar` means a sidecar of the app you are in (`$APP_INSTANCE_ID`). | `-s, --sidecar <id>` (IDs from `aura get inst <id> sidecars`) |
+| `aura jump` (alias `j`) | **Picker:** choose a running app or service and open a session inside its real, running environment in this terminal. | `--no-services`, `--no-apps` (picker filters), `--home`, `-m, --master` (the `aura-shell` master container; only in an `aura root` tab or on the host) |
+| `aura jump <app\|inst>` | Straight in: an app id (one running instance) or an instance id. Your home there: `--home private` (default: your own home, as your user), `app` (the app's own home, as the app's identity: e.g. a login for the app), `ephemeral` (an empty home, gone when you leave; for apps you don't trust). | `--home private\|app\|ephemeral` |
+| `aura jump <app> --sidecar <name>` | Shell into a sidecar of the target (bash if the image has it, else sh), as the image's own user, never with your home (owner only). Without a target, `--sidecar` means a sidecar of the app you are in (`$APP_INSTANCE_ID`). | `-s, --sidecar <id>` (IDs from `aura get inst <id> sidecars`) |
+| `aura root` | In your System Terminal: a dedicated root session with the Docker socket, after your password approval (or `aura approve` on the host). Normal tabs never have the socket. `aura root -- <cmd…>` runs one command that way; `aura root ls`, `aura root end [inst]`. The security option `aura-root` can turn it off. | — |
 | `aura mount` | **Wizard:** pick a target app → instance → the set of apps mounted into it; unchecking detaches. Live, no restart. | — |
 | `aura mount add <app...>` | Mount apps into an instance (read-only by default). Default instance: `$APP_INSTANCE_ID`. More in [Connect](#connect). | `--wr`, `--data`, `--instance <id>` |
 | `aura cap grant` | **Picker:** choose an app, then check/uncheck the CLI tools (`tools[]`) it may use; running instances are refreshed. Named form: `aura grant caps <app> <cap…>`. | `-i` |
@@ -56,14 +57,22 @@ and asks you to pick one.
 | `aura status` | Health summary: shell, apps, capabilities, services, paths. | — |
 | `aura info` | Where am I? Execution context: layers (host / aura-shell / proot / container), OS, CPU, memory, namespaces, AuraOS env, mounts, tools. | `--json` |
 
-Jumping into a container sandbox or sidecar needs the docker CLI and socket in
-the calling sandbox — the Terminal app and the master shell have both.
+A jump enters the app's running container itself (its files, network and
+`/tmp`); only your session's home and identity differ. Nobody else sees your
+session: not the app, not other users. A session as yourself lists only your
+own processes (a limitation of the container runtime, see Core concepts → Jump
+sessions); to inspect the app's processes, jump with `--home app` (as the app). Jumping never adds you to the app's group: access to an app's
+files as yourself goes through an authorized mount. It goes through AuraOS, so no Docker access is needed anywhere: apps
+and Terminals have no Docker socket. A session with your private home runs the
+app's own code with your home: use `--home ephemeral` for apps you don't trust.
+Apps that still run as root, and PRoot apps, refuse `private` and `ephemeral`.
 
 ```bash
 aura jump                                     # picker over running apps + services
 aura jump io.lakner.hermes --sidecar runtime  # a sidecar of hermes
 aura jump --sidecar db                        # a sidecar of the app you are in
-aura jump -m                                  # the aura-shell master container
+aura jump com.aura.counter --home ephemeral   # an empty, throwaway home
+aura jump -m                                  # the aura-shell master container (root tab or host)
 ```
 
 ## Inspect
@@ -85,8 +94,8 @@ aura jump -m                                  # the aura-shell master container
 | `aura get themes [name]` | Theme presets; ACTIVE marks the dark/light slot in use. | `-o` |
 | `aura get perms [app]` | Declared manifest permissions per app. | `-o` |
 | `aura describe <resource> <name>` | Full YAML of one resource (`app`, `inst`, `sc`, `cap`, `svc`). `describe inst` includes its sidecars and mounts; `describe sc` the tools of an OS sidecar (`template`, `runtime`, `effective`). | `-o json`, `-i, --instance <id>` (the instance a sidecar belongs to; default `$APP_INSTANCE_ID`) |
-| `aura logs inst <name>` | Output of the instance itself (`docker logs` of its container; a PRoot instance's output is only in the shell log). | `-f, --follow`, `--tail <n>` |
-| `aura logs inst <name> -c <sidecar>` | Logs of an instance sidecar. Inside the app that owns an OS sidecar the CLI reads them through the OS API (no docker needed); everywhere else it runs `docker logs`. | `-c, --container <sidecar>`, `-f, --follow`, `--tail <n>` |
+| `aura logs inst <name>` | Output of the instance itself, through AuraOS (the container's log, or a PRoot instance's output). | `-f, --follow`, `--tail <n>` |
+| `aura logs inst <name> -c <sidecar>` | Logs of an instance sidecar, through AuraOS. | `-c, --container <sidecar>`, `-f, --follow`, `--tail <n>` |
 | `aura logs svc <name>` | Logs of a service — reads `/data/aura/state/services/<name>.log` (default: last 100 lines). | `-f, --follow`, `--tail <n>` |
 | `aura events` | Live stream of OS state changes (the OsEventBus SSE stream). | `-f, --filter <pattern>` — an exact type or a trailing `*`: `app:*`, `theme:*`, `activity:opened` |
 
@@ -171,16 +180,16 @@ aura rm port into-5173 -y                         # ids from: aura get ports
 
 | Command | What it does | Key flags |
 |---|---|---|
-| `aura exec inst <name>` | Interactive shell in the instance's sandbox. | — |
+| `aura exec inst <name>` | Interactive shell in the instance (the same session as `aura jump`). | `--home private\|app\|ephemeral` |
 | `aura exec inst <name> -c <sidecar>` | Shell into a sidecar of the instance. | `-c, --container <sidecar>` |
-| `aura exec inst <name> -- <cmd...>` | Run one command (in the sandbox, or in the sidecar with `-c`). Exit codes pass through. | `-c` |
+| `aura exec inst <name> -- <cmd...>` | Run one command (a session without a terminal, with the same `--home` rules; or in the sidecar with `-c`). Exit codes pass through. | `-c`, `--home` |
 | `aura open inst <name>` | Open a new window (activity) on a running instance. (`open act` works too.) | `-d, --data '<json>'` — passed to the app's `onActivityCreate` hook |
 | `aura mount ...` | Mount another app's files into this app's container, live and without a restart. Read-only by default. Container sandboxes only. | see below |
 | `aura port ...` | Expose an app's TCP port onto another app's loopback, or publish it on the host. | see below |
 | `aura data ...` | Query / write / watch app content providers via the OS data router. | see below |
 
 ```bash
-aura exec inst com.aura.terminal -- ls -la
+aura exec inst com.aura.counter -- ls -la
 aura exec inst io.lakner.hermes -c runtime -- hermes --version
 aura open inst com.aura.notepad -d '{"view":"x"}'
 ```

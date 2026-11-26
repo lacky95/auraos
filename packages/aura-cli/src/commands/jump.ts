@@ -4,7 +4,9 @@ import { spawn } from 'node:child_process';
 import { moveCursor, clearScreenDown } from 'node:readline';
 import { api } from '../lib/client.js';
 import { color, fail, info, ok, warn } from '../lib/format.js';
-import { enterSandbox, enterSidecar, syncDockerExecWinsize, setTerminalHost, callerHostLabel } from '../lib/enter-sandbox.js';
+import { existsSync } from 'node:fs';
+import { enterSandbox, enterSidecar, parseHomeMode, setTerminalHost, callerHostLabel } from '../lib/enter-sandbox.js';
+import type { HomeMode } from '../lib/exec-client.js';
 import { resolveInstance, resolveSidecar } from '../lib/resolve.js';
 import { sidecarId } from '../lib/resources.js';
 import { truncateAnsi } from '../lib/tui.js';
@@ -62,32 +64,37 @@ export function registerJump(program: Command): void {
   program
     .command('jump [target]')
     .alias('j')
-    .summary('Jump into an app sandbox or one of its sidecars (picker without a target).')
-    .description('Jump into a running app/service sandbox (proot or container) in this terminal. Without a target: interactive picker. With a target (app id or instance id): straight in; add --sidecar to enter one of its sidecars.')
+    .summary('Jump into a running app or one of its sidecars (picker without a target).')
+    .description('Open a session inside a running app\'s real environment in this terminal (D74). Your home there is --home private (default: your Private Home, as your user), app (the app\'s App Home, as the app\'s identity) or ephemeral (an empty home, gone on exit). Without a target: interactive picker. With a target (app id or instance id): straight in; add --sidecar to enter one of its sidecars (owner only, the image\'s user).')
     .option('-s, --sidecar <id>', 'Enter this sidecar of the target instead (IDs: aura get inst <id> sidecars)')
+    .option('--home <mode>', 'private (default) | app | ephemeral')
     .option('--no-services', 'Picker: hide services, show only user apps')
     .option('--no-apps',     'Picker: hide apps, show only services')
     .option('-m, --master',  'Skip the picker and jump straight into the aura-shell master container')
     .addHelpText('after', `
 Examples:
   aura jump                                   # picker
-  aura jump com.aura.terminal                 # app id (one running instance) or instance id
+  aura jump com.aura.counter                  # app id (one running instance) or instance id
+  aura jump io.lakner.improvementboard --home app   # the app's App Home, as the app (e.g. a login)
+  aura jump some.untrusted.app --home ephemeral
   aura jump io.lakner.hermes --sidecar runtime
   aura jump --sidecar db                      # a sidecar of the app you are in ($APP_INSTANCE_ID)
-  aura jump -m                                # master container
+  aura jump -m                                # master container (an \`aura root\` tab or the host only)
 `)
-    .action(async (target: string | undefined, opts: { services?: boolean; apps?: boolean; master?: boolean; sidecar?: string }) => {
+    .action(async (target: string | undefined, opts: { services?: boolean; apps?: boolean; master?: boolean; sidecar?: string; home?: string }) => {
+      const home = parseHomeMode(opts.home);
+      if (home && opts.sidecar) fail('--home does not apply to a sidecar: a sidecar session has the image\'s own user and home');
       if (!stdin.isTTY || !stdout.isTTY) {
         fail('aura jump needs a TTY (you piped/redirected stdio). For a one-off command use `aura exec inst <id> [-c <sidecar>] -- <cmd>`.');
       }
       if (opts.master) { enterMasterContainer(); return; }
-      if (target || opts.sidecar) { await jumpDirect(target, opts.sidecar); return; }
+      if (target || opts.sidecar) { await jumpDirect(target, opts.sidecar, home); return; }
       const instanceTargets = await collectTargets(opts.apps !== false, opts.services !== false);
       // Master is always offered (unless we're already inside it) — it's a
       // useful escape hatch even when no apps are running, so we don't
       // honour --no-apps / --no-services for it.
       const targets: JumpTarget[] = [];
-      if (!isInsideMaster()) targets.push({ kind: 'master', appName: 'MASTER', state: 'shell' });
+      if (!isInsideMaster() && hasDockerSocket()) targets.push({ kind: 'master', appName: 'MASTER', state: 'shell' });
       targets.push(...instanceTargets);
       if (targets.length === 0) {
         info('No running instances to jump into. Launch an app first.');
@@ -96,16 +103,16 @@ Examples:
       const pick = await pickInteractively(targets);
       if (!pick) { info('jump cancelled'); return; }
       if (pick.kind === 'master') { enterMasterContainer(); return; }
-      // Pull the app's tools + scope-correct sandbox paths from the
-      // registry-backed instance DTO (works for system/global/user scopes),
-      // rather than reading a hardcoded /workspace/apps manifest.
-      const dto = await api.get<{
-        launch?: { appDir?: string; instanceDataDir?: string; tools?: string[] };
-      }>(`/api/instances/${encodeURIComponent(pick.instanceId)}/status`);
-      const apps = await api.get<Array<{ manifest: { id: string; metadata?: Record<string, unknown> } }>>('/api/apps');
-      const app = apps.find(a => a.manifest.id === pick.appId);
-      enterSandbox(pick.instanceId, pick.appId, pick.port, dto.launch?.tools ?? [], pick.sandbox, undefined, { ...dto.launch, startDir: app && jumpWorkspace(app.manifest) });
+      await jumpInto(pick.instanceId, pick.appId, home);
     });
+}
+
+/** The session into an instance, landing in the app's workspace when it has one. */
+async function jumpInto(instanceId: string, appId: string, home: HomeMode | undefined): Promise<void> {
+  const apps = await api.get<Array<{ manifest: { id: string; metadata?: Record<string, unknown> } }>>('/api/apps');
+  const app = apps.find(a => a.manifest.id === appId);
+  const startDir = app && jumpWorkspace(app.manifest);
+  enterSandbox(instanceId, appId, { ...(startDir ? { startDir } : {}), ...(home ? { home } : {}) });
 }
 
 /**
@@ -113,29 +120,28 @@ Examples:
  * id, or an app id with exactly one running instance (lib/resolve.ts). With
  * only --sidecar, the sidecar belongs to the app the caller is in.
  */
-async function jumpDirect(target: string | undefined, sidecar: string | undefined): Promise<void> {
+async function jumpDirect(target: string | undefined, sidecar: string | undefined, home: HomeMode | undefined): Promise<void> {
   const token = target ?? procEnv['APP_INSTANCE_ID'];
   if (!token) fail('aura jump --sidecar <id> needs a target outside an app: aura jump <app|instance> --sidecar <id>');
   const inst = await resolveInstance(token);
   if (sidecar) {
     const sc = await resolveSidecar(inst.instanceId, sidecar);
-    enterSidecar(sc.id, `${inst.instanceId}/${sidecarId(sc)}`, undefined, { instanceId: inst.instanceId, service: sc.service || sc.id });
+    enterSidecar(inst.instanceId, sc.service || sc.id, `${inst.instanceId}/${sidecarId(sc)}`);
     return;
   }
-  const dto = await api.get<{
-    launch?: { appDir?: string; instanceDataDir?: string; tools?: string[] };
-  }>(`/api/instances/${encodeURIComponent(inst.instanceId)}/status`);
-  const apps = await api.get<Array<{ manifest: { id: string; metadata?: Record<string, unknown> } }>>('/api/apps');
-  const app = apps.find(a => a.manifest.id === inst.appId);
-  enterSandbox(inst.instanceId, inst.appId, inst.port, dto.launch?.tools ?? [], inst.sandbox, undefined, { ...dto.launch, startDir: app && jumpWorkspace(app.manifest) });
+  await jumpInto(inst.instanceId, inst.appId, home);
 }
 
-/** `docker exec -it aura-shell bash` — same TUI env passthrough we use for
- *  app containers in enter-sandbox.ts so claude/htop/vim render with the
- *  rich UI inside the master shell too. Requires the calling sandbox to
- *  have the docker CLI on PATH and /var/run/docker.sock bind-mounted —
- *  same prerequisites as jumping into any sibling container. */
+/** The Docker socket is here: an `aura root` tab (J.6) or the host. Nowhere else since stream J. */
+function hasDockerSocket(): boolean {
+  return existsSync('/var/run/docker.sock');
+}
+
+/** `docker exec -it aura-shell bash`: only where the socket is (an `aura root`
+ *  tab or the host), with the same TUI env passthrough as a jump so
+ *  claude/htop/vim render with the rich UI inside the master shell too. */
 function enterMasterContainer(): void {
+  if (!hasDockerSocket()) fail('aura jump -m needs the Docker socket: run it in an `aura root` tab, or on the host');
   const passthrough: Record<string, string> = {
     TERM:      procEnv['TERM']      ?? 'xterm-256color',
     COLORTERM: procEnv['COLORTERM'] ?? 'truecolor',
@@ -159,14 +165,17 @@ function enterMasterContainer(): void {
   const restoreHost = callerHostLabel();
   setTerminalHost(MASTER_CONTAINER);
   const child = spawn('docker', args, { stdio: 'inherit' });
-  syncDockerExecWinsize(child);
+  // docker reads the TTY size once at attach: nudge it so the remote pty gets ours.
+  child.once('spawn', () => { for (const ms of [120, 600, 2000]) setTimeout(() => { try { child.kill('SIGWINCH'); } catch { /* exited */ } }, ms); });
+  const onWinch = () => { try { child.kill('SIGWINCH'); } catch { /* exited */ } };
+  process.on('SIGWINCH', onWinch);
+  child.on('exit', () => process.removeListener('SIGWINCH', onWinch));
   child.on('exit', (code) => {
     setTerminalHost(restoreHost);
     ok(`shell exited (code ${code ?? 0})`); process.exit(code ?? 0);
   });
   child.on('error', (err) => fail(
-    `docker exec failed: ${err.message}\n` +
-    `  Hint: the calling sandbox needs both the docker CLI on PATH and a bound /var/run/docker.sock.`
+    `docker exec failed: ${err.message}`
   ));
 }
 

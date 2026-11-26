@@ -127,11 +127,12 @@ test('jump: private and ephemeral need session capabilities and a non-root targe
   const d = tmp();
   const r = resolver(d);
   const jump = (o) => req({ executionContext: 'jump', principal: OWNER, ...o });
-  // Today's runtimes declare no in-environment sessions: every jump fails closed.
+  // Stream J: the container runtime opens in-environment sessions; PRoot never (J.5): every PRoot jump fails closed.
+  assert.equal(CONTAINER.sessionExec && CONTAINER.privateHomeSession, true);
   for (const jumpHomeMode of ['private', 'app', 'ephemeral']) {
-    await assert.rejects(r.resolve(jump({ jumpHomeMode, runtime: CONTAINER })), (e) => e instanceof RuntimeCapabilityError && e.missing.includes('sessionExec'), jumpHomeMode);
-    await assert.rejects(r.resolve(jump({ jumpHomeMode, runtime: PROOT })), (e) => e instanceof RuntimeCapabilityError, `proot ${jumpHomeMode}`);
+    await assert.rejects(r.resolve(jump({ jumpHomeMode, runtime: PROOT })), (e) => e instanceof RuntimeCapabilityError && e.missing.includes('sessionExec'), `proot ${jumpHomeMode}`);
   }
+  assert.equal((await r.resolve(jump({ runtime: CONTAINER }))).kind, 'private');
   const priv = await r.resolve(jump({ runtime: SESSIONS }));
   assert.equal(priv.kind, 'private', 'the default mode is private');
   assert.equal(priv.uid, 1000);

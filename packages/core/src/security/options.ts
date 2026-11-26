@@ -184,10 +184,10 @@ export const SECURITY_OPTIONS: readonly SecurityOption[] = Object.freeze([
   {
     id: 'aura-root',
     title: 'Root tab (`aura root`)',
-    description: 'enabled (default): the owner can open a dedicated root tab with the Docker socket in that tab only, after '
-      + 'an approval, with a banner and an audit entry. disabled: `aura root` is refused (a Zero Trust installation turns it '
-      + 'off). Not yet available: it comes with the root tab (Phase 5, D55).',
-    type: 'enum', values: ['enabled', 'disabled'], default: 'enabled', source: 'reserved',
+    description: 'enabled (default): the owner can open a dedicated root tab (`aura root` in their own Terminal) with the '
+      + 'Docker socket in that tab\'s session only, after a password approval, audited. disabled: `aura root` is refused '
+      + '(a Zero Trust installation turns it off); a tab already open stays until it ends (`aura root end`).',
+    type: 'enum', values: ['enabled', 'disabled'], default: 'enabled', source: 'policy',
     restartRequired: false, change: 'fresh', since: '2026-11-26', phase: '5 (D55, P5-4)',
   },
   {

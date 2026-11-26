@@ -4,11 +4,9 @@
  * `aura.exec.v1`, shell server/exec-bridge.mjs) and the logs route. No
  * Docker socket in the caller, no dependency: Node 22's global WebSocket.
  *
- * Until 5-main the Docker paths stay as the fallback (lib/enter-sandbox.ts,
- * commands/verbs.ts): the API is used when it is available, and anything that
- * fails before the session is open (an older shell, a refusal, a runtime the
- * bridge cannot enter) falls back. AURA_EXEC_VIA picks one path for
- * comparisons: `api` (no fallback) or `docker` (no API).
+ * This is the only path (stream J, D36): the CLI never runs docker or proot
+ * for a jump, exec or logs. A session enters the running app environment
+ * with the requested home (`--home private|app|ephemeral`, D67, D74).
  */
 import process_ from 'node:process';
 import { shellIdentity, shellFetch } from './identity.js';
@@ -16,17 +14,16 @@ import { shellUrl } from './shell-url.js';
 
 export const EXEC_SUBPROTOCOL = 'aura.exec.v1';
 
-export type ExecVia = 'auto' | 'api' | 'docker';
-
-/** AURA_EXEC_VIA: `api`, `docker`, or unset/anything else for the default (API first, Docker fallback). */
-export function execVia(env: NodeJS.ProcessEnv = process.env): ExecVia {
-  const v = (env['AURA_EXEC_VIA'] ?? '').trim().toLowerCase();
-  return v === 'api' || v === 'docker' ? v : 'auto';
-}
+/** `aura jump --home` (D67). */
+export type HomeMode = 'private' | 'app' | 'ephemeral';
 
 export interface SessionRequest {
   instanceId: string;
   kind: 'jump' | 'exec';
+  /** Absent: the shell's default (private for a user). Never with a sidecar. */
+  home?: HomeMode;
+  /** A root tab (`aura root`): the single-use grant the approved request returned. */
+  root?: string;
   argv?: string[];
   tty: boolean;
   cwd?: string;
@@ -35,7 +32,7 @@ export interface SessionRequest {
 
 /** The session ended: its exit code (null when the shell could not read one). */
 export interface SessionEnded { opened: true; code: number | null }
-/** It never opened: why, so the caller can fall back. */
+/** It never opened (nothing ran): why. */
 export interface SessionRefused { opened: false; reason: string }
 
 /** The terminal env a session gets (the same four today's `docker exec` passed). */
@@ -129,6 +126,8 @@ export function runSession(req: SessionRequest, io: SessionIo = process_): Promi
         env: terminalEnv(),
         ...(req.argv ? { argv: req.argv } : {}),
         ...(req.cwd ? { cwd: req.cwd } : {}),
+        ...(req.home ? { home: req.home } : {}),
+        ...(req.root ? { root: req.root } : {}),
         ...(req.sidecar ? { sidecar: req.sidecar } : {}),
       });
     };
@@ -182,7 +181,7 @@ export interface LogsRequest { instanceId: string; tail?: string; follow?: boole
 
 /**
  * Print an instance's output through the logs route. False when the route is
- * not there or refused (the caller falls back); throws nothing.
+ * not there or refused; throws nothing.
  */
 export async function printLogs(req: LogsRequest): Promise<boolean> {
   const { stdout, stderr } = process_;

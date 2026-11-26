@@ -29,11 +29,15 @@ export interface ExecCreateSpec {
 export interface ExecInspect {
   Running: boolean;
   ExitCode: number | null;
+  /** The exec process's pid in the host's PID namespace (0 when not running). */
+  Pid?: number;
 }
 
 export interface ContainerInspect {
-  State?: { Running?: boolean; Paused?: boolean };
-  Config?: { Tty?: boolean };
+  /** The full container id. */
+  Id?: string;
+  State?: { Running?: boolean; Paused?: boolean; Pid?: number };
+  Config?: { Tty?: boolean; Env?: string[] };
 }
 
 export interface LogsQuery {
@@ -126,8 +130,11 @@ export class DockerApi implements EngineClient {
   }
 
   async execInspect(id: string): Promise<ExecInspect> {
-    const r = await this.json<{ Running?: boolean; ExitCode?: number | null }>('GET', `/exec/${encodeURIComponent(id)}/json`);
-    return { Running: r?.Running === true, ExitCode: typeof r?.ExitCode === 'number' ? r.ExitCode : null };
+    const r = await this.json<{ Running?: boolean; ExitCode?: number | null; Pid?: number }>('GET', `/exec/${encodeURIComponent(id)}/json`);
+    return {
+      Running: r?.Running === true, ExitCode: typeof r?.ExitCode === 'number' ? r.ExitCode : null,
+      ...(typeof r?.Pid === 'number' ? { Pid: r.Pid } : {}),
+    };
   }
 
   containerInspect(container: string): Promise<ContainerInspect> {

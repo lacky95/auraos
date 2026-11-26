@@ -2,24 +2,27 @@
 // real HTTP server, with the decision, the core bridge and the audit faked:
 // refused callers get no session, the owner gets a TTY round trip with
 // resize, signal, EOF and the exit code, the instance itself gets its own,
-// its sidecars' tokens and sidecar targets are the owner's only, and home
-// modes are refused (J). The real decision is in access-enforce.test.ts.
+// its sidecars' tokens and sidecar targets are the owner's only, a member's
+// own login reaches the kernel (D82), and the session caller handed to core
+// is the verified principal's (J: the home mode and identity are core's).
+// The real decision is in access-enforce.test.ts.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { parseSessionOpen } from '@aura/core';
+import { parseSessionOpen, sessionCallerOf } from '@aura/core';
 import { attachExecBridge, EXEC_SUBPROTOCOL } from '../server/exec-bridge.mjs';
 import { execCaller } from '../src/lib/instanceAuth.ts';
 
 type Principal = Record<string, unknown> & { kind: string };
+const GRANT = 'g'.repeat(32);
 const owner: Principal = { kind: 'user', userId: 'u1', role: 'owner', sessionId: 's1', verification: 'verified' };
 const self: Principal = { kind: 'instance', appId: 'com.acme.notes', instanceId: 'com.acme.notes-1', userId: 'u1', verification: 'verified' };
 
 interface Rig {
   url: string;
   audits: Array<{ action: string; detail: Record<string, unknown>; outcome?: string }>;
-  opened: Array<{ instanceId: string; req: Record<string, unknown> }>;
+  opened: Array<{ instanceId: string; req: Record<string, unknown>; caller: Record<string, unknown> }>;
   session: { inputs: string[]; resizes: number[][]; signals: string[]; eof: boolean; closed: boolean };
 }
 
@@ -33,9 +36,13 @@ async function rig(t: { after(fn: () => void): void }, who: { principal: Princip
       ? { outcome: 'allow', reason: who.reason } : { outcome: 'deny', reason: 'wrong-principal' }),
     appOf: async (id: string) => (id === 'no-such-1' ? null : 'com.acme.notes'),
     parseOpen: async (frame: unknown) => parseSessionOpen(frame),
+    callerOf: async (p: Parameters<typeof sessionCallerOf>[0], level: 'owner' | 'member' | 'self') => sessionCallerOf(p, level, 'default'),
+    consumeRoot: async (grant: string, userId: string, instanceId: string) => grant === GRANT && userId === 'u1' && instanceId === 'com.acme.notes-1',
     bridge: async () => ({
-      openSession: async (instanceId: string, req: Record<string, unknown>, onOutput: (ch: number, d: Buffer) => void) => {
-        opened.push({ instanceId, req });
+      openSession: async (instanceId: string, req: Record<string, unknown>, onOutput: (ch: number, d: Buffer) => void, caller: Record<string, unknown>) => {
+        // Core's rule (ExecBridge.sessionSpec): no human user, the app identity only.
+        if (!caller['user'] && req['home'] !== undefined && req['home'] !== 'app') throw Object.assign(new Error('a session without a human user runs as the app only'), { code: 'forbidden' });
+        opened.push({ instanceId, req, caller });
         let exit!: (code: number | null) => void;
         const exited = new Promise<number | null>((r) => { exit = r; });
         onOutput(1, Buffer.from('ready\n'));
@@ -135,6 +142,19 @@ test('owner: TTY round trip, resize, signal, exit code; audited with duration', 
   assert.equal(r.audits[1]!.detail['exitCode'], 7);
   assert.equal(typeof r.audits[1]!.detail['durationMs'], 'number');
   assert.equal(r.audits[1]!.detail['mode'], 'jump');
+  assert.equal(r.audits[0]!.detail['home'], 'private', 'a user\'s default home');
+  assert.deepEqual(r.opened[0]!.caller, { user: { userId: 'u1', role: 'owner' } });
+});
+
+test('a member\'s own login reaches the kernel as a member (its app.jump is core\'s check); never a sidecar', async (t) => {
+  const bob: Principal = { kind: 'user', userId: 'bob', role: 'member', sessionId: 's2', verification: 'verified' };
+  const r = await rig(t, { principal: bob, reason: null });
+  const res = await connect(r.url, '/api/instances/com.acme.notes-1/session', [open({ kind: 'exec', argv: ['id'], tty: false, home: 'ephemeral' })], { then: [JSON.stringify({ op: 'eof' })] });
+  assert.equal(res.status, 'closed');
+  assert.deepEqual(r.opened[0]!.caller, { user: { userId: 'bob', role: 'member' } });
+  assert.equal(r.audits[0]!.detail['home'], 'ephemeral');
+  const sc = await connect(r.url, '/api/instances/com.acme.notes-1/session', [open({ sidecar: 'db' })]);
+  assert.equal(sc.control[0]!['code'], 'forbidden');
 });
 
 test('the instance itself: non-TTY exec keeps stderr apart and ends on EOF', async (t) => {
@@ -146,14 +166,18 @@ test('the instance itself: non-TTY exec keeps stderr apart and ends on EOF', asy
   assert.equal(res.err, 'err\n');
   assert.deepEqual(res.control, [{ op: 'opened' }, { op: 'exit', code: 0 }]);
   assert.equal(r.session.eof, true);
+  assert.deepEqual(r.opened[0]!.caller, {}, 'the instance itself is no human user');
+  assert.equal(r.audits[0]!.detail['home'], 'app');
 });
 
-test('a sidecar session is the owner\'s only; home modes are J\'s; a bad open frame is refused', async (t) => {
+test('a sidecar session is the owner\'s only; the instance gets no Private Home; a bad open frame is refused', async (t) => {
   const r = await rig(t, { principal: self, reason: 'own-instance' });
   const sc = await connect(r.url, '/api/instances/com.acme.notes-1/session', [open({ sidecar: 'db' })]);
   assert.equal(sc.control[0]!['code'], 'forbidden');
   const home = await connect(r.url, '/api/instances/com.acme.notes-1/session', [open({ home: 'private' })]);
-  assert.equal(home.control[0]!['code'], 'capability-missing');
+  assert.equal(home.control[0]!['code'], 'forbidden');
+  const bad = await connect(r.url, '/api/instances/com.acme.notes-1/session', [open({ home: 'shared' })]);
+  assert.equal(bad.control[0]!['code'], 'bad-request');
   const junk = await connect(r.url, '/api/instances/com.acme.notes-1/session', ['not json']);
   assert.equal(junk.control[0]!['code'], 'bad-request');
   const binary = await connect(r.url, '/api/instances/com.acme.notes-1/session', [stdin('x')]);
@@ -162,6 +186,20 @@ test('a sidecar session is the owner\'s only; home modes are J\'s; a bad open fr
   const own = await rig(t, { principal: owner, reason: 'owner' });
   await connect(own.url, '/api/instances/com.acme.notes-1/session', [open({ sidecar: 'db', kind: 'exec', argv: ['psql'], tty: false })], { then: [JSON.stringify({ op: 'eof' })] });
   assert.equal(own.opened[0]!.req['sidecar'], 'db');
+});
+
+test('a root tab needs a valid grant at the owner level; audited root.ended (J.6)', async (t) => {
+  const r = await rig(t, { principal: owner, reason: 'owner' });
+  const bad = await connect(r.url, '/api/instances/com.acme.notes-1/session', [open({ root: 'x'.repeat(32) })]);
+  assert.equal(bad.control[0]!['code'], 'forbidden');
+  const res = await connect(r.url, '/api/instances/com.acme.notes-1/session', [open({ root: GRANT })], { then: [stdin('exit\r')] });
+  assert.equal(res.status, 'closed');
+  assert.deepEqual(r.opened[0]!.caller, { user: { userId: 'u1', role: 'owner' }, root: true });
+  assert.ok(r.audits.some((a) => a.action === 'root.ended'));
+  const selfRig = await rig(t, { principal: self, reason: 'own-instance' });
+  const notOwner = await connect(selfRig.url, '/api/instances/com.acme.notes-1/session', [open({ root: GRANT })]);
+  assert.equal(notOwner.control[0]!['code'], 'forbidden', 'the instance itself never gets root');
+  assert.equal(selfRig.opened.length, 0);
 });
 
 test('a client that goes away ends the session', async (t) => {

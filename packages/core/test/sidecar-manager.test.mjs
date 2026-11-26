@@ -280,12 +280,12 @@ test("an app-managed container of the same name is never touched — unless the 
   assert.equal(d.containers.get(`aura-${INST}--box`).labels['aura.managed'], 'os');
 });
 
-test('the docker socket is forwarded only with the docker tool', async (t) => {
+test('the docker socket is never forwarded to a sidecar (J.7)', async (t) => {
   const d = fakeDocker(t);
   const svc = [{ name: 'sock', image: 'x:1', inheritDockerSocket: true, command: [], env: {}, volumes: [] }];
-  await assert.rejects(fixture(t, { services: svc }).mgr.spawn(INST, { template: 'sock' }, { instanceId: INST }), /does not grant docker/);
-  await fixture(t, { services: svc, tools: ['docker'] }).mgr.spawn(INST, { template: 'sock' }, { instanceId: INST });
-  assert.ok(d.containers.get(`aura-${INST}--sock`).args.includes('/var/run/docker.sock:/var/run/docker.sock'));
+  await assert.rejects(fixture(t, { services: svc }).mgr.spawn(INST, { template: 'sock' }, { instanceId: INST }), /no sidecar gets the Docker socket/);
+  await assert.rejects(fixture(t, { services: svc, tools: ['docker'] }).mgr.spawn(INST, { template: 'sock' }, { instanceId: INST }), /no sidecar gets the Docker socket/);
+  assert.equal(d.containers.get(`aura-${INST}--sock`), undefined);
 });
 
 test('a sidecar caller manages only its own subtree; sidecars.manageAll lifts that', async (t) => {

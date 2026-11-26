@@ -81,7 +81,8 @@ test('runner capabilities declare today honestly', () => {
   const container = ContainerRunner.prototype.capabilities.call({});
   assert.deepEqual(container, {
     // Stream A (P5-3): --user, cap-drop ALL, no-new-privileges for runAs: app.
-    isolation: 'namespace', privateHomeSession: false, sessionExec: false, identity: 'enforced', readOnlyBinds: true,
+    // Stream J (D74): sessions inside the running container, the Private Home in the session's namespace only.
+    isolation: 'namespace', privateHomeSession: true, sessionExec: true, identity: 'enforced', readOnlyBinds: true,
     mounts: true, portExpose: true, sidecars: true, warmPool: true, survivesShellRestart: true,
   });
 });

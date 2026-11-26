@@ -11,11 +11,10 @@
  */
 import { holdsInstanceIdentity, shellFetch } from '../lib/identity.js';
 import type { Command } from 'commander';
-import { spawn } from 'node:child_process';
 import { api, shellUrl, subscribeEvents } from '../lib/client.js';
 import { color, fail, table } from '../lib/format.js';
-import { enterSidecar } from '../lib/enter-sandbox.js';
-import { execVia, printLogs } from '../lib/exec-client.js';
+import { enterSidecar, parseHomeMode } from '../lib/enter-sandbox.js';
+import { printLogs } from '../lib/exec-client.js';
 import { BACK, PromptCancelled, promptConfirm, promptMultiSelect } from '../lib/prompts.js';
 import { parseOutput, renderDocument, renderObjects, type OutputFormat } from '../lib/output.js';
 import { ownersOf, resolveInstance, resolveSidecar } from '../lib/resolve.js';
@@ -278,16 +277,19 @@ function targetedCaps(def: ResourceDef, verb: string, app: string | undefined, n
 
 // ─── exec / logs ────────────────────────────────────────────────────────────
 
-async function execCmd(resource: string, name: string, cmd: string[], opts: { container?: string }): Promise<void> {
+async function execCmd(resource: string, name: string, cmd: string[], opts: { container?: string; home?: string }): Promise<void> {
   const def = resourceOrFail(resource, 'exec');
   if (def.name === 'sidecars') fail('use: aura exec inst <instanceId> -c <sidecar> [-- cmd…]');
+  const home = parseHomeMode(opts.home);
+  if (home && opts.container) fail('--home does not apply to a sidecar');
   const inst = await resolveInstance(name);
   if (opts.container) {
     const sc = await resolveSidecar(inst.instanceId, opts.container);
-    enterSidecar(sc.id, `${inst.instanceId}/${sidecarId(sc)}`, cmd, { instanceId: inst.instanceId, service: sc.service || sc.id });
+    enterSidecar(inst.instanceId, sc.service || sc.id, `${inst.instanceId}/${sidecarId(sc)}`, cmd);
     return;
   }
-  await dispatch(['inst', 'shell', inst.instanceId, ...(cmd.length ? ['-c', shQuote(cmd)] : [])]);
+  // `aura exec` = a non-interactive jump (J.4): the same session and home rules.
+  await dispatch(['inst', 'shell', inst.instanceId, ...(cmd.length ? ['-c', shQuote(cmd)] : []), ...(home ? ['--home', home] : [])]);
 }
 
 async function logsCmd(resource: string, name: string, opts: { container?: string; follow?: boolean; tail?: string }): Promise<void> {
@@ -297,49 +299,13 @@ async function logsCmd(resource: string, name: string, opts: { container?: strin
   }
   if (def.name === 'sidecars') fail('use: aura logs inst <instanceId> -c <sidecar>');
   const inst = await resolveInstance(name);
-  // Phase 5 X: the shell's logs route first (no docker socket needed); the
-  // paths below stay as the fallback until 5-main (AURA_EXEC_VIA, lib/exec-client.ts).
-  const via = execVia();
-  if (via !== 'docker') {
-    const sc = opts.container ? await resolveSidecar(inst.instanceId, opts.container) : null;
-    const printed = await printLogs({
-      instanceId: inst.instanceId, ...(opts.tail ? { tail: opts.tail } : {}), ...(opts.follow ? { follow: true } : {}),
-      ...(sc ? { sidecar: sc.service || sc.id } : {}),
-    });
-    if (printed) return;
-    if (via === 'api') fail(`the shell's logs route refused or is missing for ${inst.instanceId}`);
-  }
-  if (!opts.container) {
-    // The app's own output. A container instance's stdout/stderr are what
-    // `docker logs` holds; a PRoot instance has no container — its output
-    // only goes into the shell's log, prefixed with [<instanceId>].
-    if (inst.sandbox !== 'container') {
-      fail(`${inst.instanceId} runs in a PRoot sandbox — its output is in the shell log: docker logs aura-shell 2>&1 | grep '\\[${inst.instanceId}\\]'`);
-    }
-    return dockerLogs(`aura-${inst.instanceId}`, opts);
-  }
-  const sc = await resolveSidecar(inst.instanceId, opts.container);
-  // Inside the app that owns an OS sidecar: the OS reads the logs, no docker needed.
-  if (sc.managedBy === 'os' && !opts.follow && holdsInstanceIdentity(inst.instanceId)) {
-    const q = opts.tail ? `?tail=${encodeURIComponent(opts.tail)}` : '';
-    const out = await sidecarApi<{ stdout: string; stderr: string }>('GET', inst.instanceId, `/${encodeURIComponent(sc.service)}/logs${q}`);
-    process.stdout.write(out.stdout);
-    process.stderr.write(out.stderr);
-    return;
-  }
-  return dockerLogs(sc.id, opts);
-}
-
-/** `docker logs` passthrough (needs the docker CLI + socket in the caller). */
-async function dockerLogs(container: string, opts: { follow?: boolean; tail?: string }): Promise<void> {
-  const args = ['logs', ...(opts.tail ? ['--tail', opts.tail] : []), ...(opts.follow ? ['-f'] : []), container];
-  const child = spawn('docker', args, { stdio: 'inherit' });
-  await new Promise<void>((resolveP) => {
-    child.on('exit', (code) => { process.exitCode = code ?? 0; resolveP(); });
-    child.on('error', (err) => fail(
-      `docker logs failed: ${err.message}\n  Hint: reading container logs needs the docker CLI and a bound /var/run/docker.sock.`,
-    ));
+  // Through the shell's logs route only (stream J, D36): no docker in the caller.
+  const sc = opts.container ? await resolveSidecar(inst.instanceId, opts.container) : null;
+  const printed = await printLogs({
+    instanceId: inst.instanceId, ...(opts.tail ? { tail: opts.tail } : {}), ...(opts.follow ? { follow: true } : {}),
+    ...(sc ? { sidecar: sc.service || sc.id } : {}),
   });
+  if (!printed) fail(`the shell's logs route refused or is missing for ${inst.instanceId}${sc ? `/${sidecarId(sc)}` : ''}`);
 }
 
 // ─── start / restart / rm by id ─────────────────────────────────────────────
@@ -704,13 +670,15 @@ export function registerVerbs(program: Command): void {
     .command('exec <resource> <name> [cmd...]')
     .description('Shell into an instance (or one of its sidecars with -c); run a command after --.')
     .option('-c, --container <sidecar>', 'Target a sidecar of the instance (ID from: aura get inst <id> sidecars)')
+    .option('--home <mode>', 'private (default) | app | ephemeral (as aura jump)')
     .addHelpText('after', resourcesLine('exec') + examples([
-      'aura exec inst com.aura.terminal',
-      'aura exec inst com.aura.terminal -- ls -la',
+      'aura exec inst com.aura.counter',
+      'aura exec inst com.aura.counter -- ls -la',
+      'aura exec inst com.aura.counter --home app -- id',
       'aura exec inst io.lakner.hermes -c runtime',
       'aura exec inst io.lakner.hermes -c runtime -- hermes --version',
     ]))
-    .action(async (resource: string, name: string, cmd: string[], opts: { container?: string }) => {
+    .action(async (resource: string, name: string, cmd: string[], opts: { container?: string; home?: string }) => {
       await execCmd(resource, name, cmd, opts);
     });
 

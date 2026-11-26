@@ -396,6 +396,14 @@ const routes: RouteAccessManifest['routes'] = {
   '/api/admin/identity/check': { methods: { GET: ownerManages('The identity registry and account invariants (D70, D83), by id only: an owner view.') } },
   // Phase 5 stream A (P5-3): the privilege review and the per-installation runAs flip.
   '/api/admin/identity/privilege-review': { methods: { GET: ownerManages('The app privilege review (P5-3): runAs, app identities and elevated needs; read-only, an owner view.') } },
+  // Stream J.6 (P5-4, D55): the root tab's single-use grant (fresh approval), the open tabs, End.
+  '/api/admin/root': {
+    methods: {
+      GET: ownerManages('The open root tabs (`aura root`): never persisted; an owner view.'),
+      POST: ownerManages('A single-use grant for a root tab in the owner\'s own System Terminal: approved with the password (fresh); refused while the `aura-root` switch is disabled. Audited root.granted.'),
+      DELETE: ownerManages('Ends the root tabs of an instance (End): the session hangs up, the socket goes with its namespace.'),
+    },
+  },
   '/api/admin/apps/run-as': {
     methods: { POST: ownerManages('Flips how an installation\'s processes run (app identity or root): the owner decides with the password (fresh).') },
   },
@@ -482,12 +490,12 @@ const routes: RouteAccessManifest['routes'] = {
   '/api/instances/[instanceId]/mounts/[mountId]': {
     methods: { DELETE: rule(INSTANCE, 'instance', { targetPermissions: ['apps.mount'], guard: 'target-permissions' }) },
   },
-  // Phase 5 stream X: `aura exec` and `aura logs` through the shell (the WS
-  // session is the `exec-bridge` surface). `guard: 'rule'`: refused in every
-  // mode, since exec runs as root in the app container.
+  // Phase 5 streams X and J: `aura exec` and `aura logs` through the shell (the
+  // WS session is the `exec-bridge` surface). `guard: 'rule'`: refused in every
+  // mode, since exec enters the running app environment.
   '/api/instances/[instanceId]/exec': {
     methods: { POST: rule(INSTANCE, 'instance', { guard: 'rule', ...why(
-      'The owner (the CLI through the trusted Terminal, D29, or the host operator) or the instance itself by its own token. Runs argv in the app\'s container as root (5-pre2, X); `sidecar` in the body is the owner\'s only (the handler). Audited as instance.exec.') }) },
+      'The owner (the CLI through the trusted Terminal, D29, or the host operator) or the instance itself by its own token. A non-interactive session in the running app environment (J, D74): `home` private|ephemeral as the user, app as the app identity (the instance itself: app only); `sidecar` in the body is the owner\'s only (the handler). Audited as instance.exec.') }) },
   },
   '/api/instances/[instanceId]/logs': {
     methods: { GET: rule(INSTANCE, 'instance', { guard: 'rule', ...why(
@@ -711,16 +719,9 @@ const routes: RouteAccessManifest['routes'] = {
 };
 
 // ── reserved: Phase 5 routes, denied until their stream implements them ────
+// (Stage 1, phase5-plan.md §4 item 5: each stream moved its row into `routes`; the last, J's root tab, is there.)
 
-const notYet = (stream: string, target: AccessTarget, methods: readonly RouteMethod[]) => ({
-  methods: on(methods, rule([], target, why(`Phase 5 stream ${stream}: reserved, denied until the route is implemented and its rule set here.`))),
-});
-
-/** Stage 1 (phase5-plan.md §4 item 5): each stream adds its file and moves its row into `routes`. */
-const reserved: RouteAccessManifest['reserved'] = {
-  // J: the root tab (`aura root`, P5-4).
-  '/api/admin/root': notYet('J', 'system', ['GET', 'POST']),
-};
+const reserved: RouteAccessManifest['reserved'] = {};
 
 export const ROUTE_ACCESS_MANIFEST: RouteAccessManifest = {
   groups,

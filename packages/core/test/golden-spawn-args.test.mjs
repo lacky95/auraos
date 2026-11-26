@@ -135,22 +135,16 @@ const FIXTURES = [
   },
 ];
 
-/** Normalise run-specific values; the docker-socket pair is checked separately. */
+/** Normalise run-specific values; the docker socket is checked separately (never bound, J.7). */
 function norm(value) {
   // Long values (the synthesised start scripts) are pinned by their digest.
   return JSON.parse(JSON.stringify(value).split(TMP).join('<TMP>'), (_k, v) =>
     typeof v === 'string' && v.length > 200 ? `<sha256:${createHash('sha256').update(v).digest('hex')}>` : v);
 }
-function stripSocket(argv, flagged) {
-  const out = [];
-  let found = false;
-  for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === '-v' && argv[i + 1] === `${SOCKET}:${SOCKET}`) { found = true; i++; continue; }
-    if (argv[i] === `--bind=${SOCKET}:${SOCKET}`) { found = true; continue; }
-    out.push(argv[i]);
-  }
-  assert.equal(found, flagged && existsSync(SOCKET), 'docker socket is bound exactly when granted and present');
-  return out;
+function noSocket(argv) {
+  const found = argv.some((a, i) => (a === '-v' && argv[i + 1] === `${SOCKET}:${SOCKET}`) || a === `--bind=${SOCKET}:${SOCKET}` || String(a).includes(SOCKET));
+  assert.equal(found, false, 'stream J.7: no sandbox gets the Docker socket, whatever tools[] says (`*`, `docker`)');
+  return argv;
 }
 
 async function containerArgv(fx) {
@@ -160,8 +154,7 @@ async function containerArgv(fx) {
   const instanceId = `${m.id}-1`;
   const ctx = { appDir, instanceDataDir: join(dataDir, 'scopes', 'users', 'default', 'apps', m.id, instanceId), ...fx.ctx };
   const argv = runner.buildDockerArgs(instanceId, m.id, 4321, m, `aura-${instanceId}`, ctx, fx.contextEnv, fx.volumes, fx.term ?? null);
-  const granted = (m.tools ?? []).some((t) => t === '*' || t === 'docker');
-  return norm(stripSocket(argv, granted));
+  return norm(noSocket(argv));
 }
 
 /** The app identity a PRoot fixture without one runs as (PRoot refuses root, R2). */

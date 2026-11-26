@@ -403,6 +403,40 @@ Moving tool state from your Private Home into an App Home is explicit:
 reset <app>` empties an App Home; `aura rm app <app> --delete-home` deletes an
 app's App Homes with it (by default they are kept).
 
+Where a home lives on disk is an internal detail of AuraOS, not an interface:
+don't build on the physical paths. They may contain user ids; ids are
+identifiers, not secrets, and you may see your own, but no other user can
+inspect your sessions, their mounts or your home.
+
+## Jump sessions
+
+`aura jump <app>` (and `aura exec`) opens a session **inside the app's real,
+running environment**: its container, files, network and `/tmp`. Only three
+things are the session's own: its mount namespace, its identity and its home.
+
+| `--home` | Runs as | Home |
+|---|---|---|
+| `private` (default) | you | your Private Home |
+| `ephemeral` | you | an empty home, gone when the session ends |
+| `app` | the app's identity (authorized and audited) | the app's App Home |
+
+Sessions are isolated in both directions: the app can't see, read, trace or
+signal a session, and no user can see another user's session (processes,
+command lines, environment, mounts, home). A session never gains the app's
+group or any capability; access to an app's files as yourself goes through an
+authorized mount.
+
+**Runtime limitation (container runtime, Linux):** a session as yourself
+(`private`, `ephemeral`) lists only its own processes. Linux shows a process
+list either per process owner or to everyone in the PID namespace, so showing
+you the app's processes would also show you other users' sessions; isolation
+between users wins. Inspect the app's processes with `--home app`. This is a
+limitation of the runtime, not of the session model: a permission-controlled,
+read-only view of an app's processes may come later through the diagnostics
+and runtime inspection mechanisms. PRoot apps have no sessions at all, and an
+app that still runs as root accepts only `--home app`. `aura root` opens a
+separate root tab in your own Terminal.
+
 ## Scopes
 
 Every installed app belongs to a **scope** that determines where it

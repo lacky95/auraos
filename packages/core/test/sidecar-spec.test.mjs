@@ -83,9 +83,9 @@ test('privileged / publish need sidecars.privileged even when the template decla
   assert.deepEqual(resolveSidecarSpec({ template: 'pub' }, ctx({ can })).publish, [{ host: 8080, container: 80 }]);
 });
 
-test('the docker socket only if the app itself holds the docker tool', () => {
-  rejects(() => resolveSidecarSpec({ template: 'sock' }, ctx()), 403, /does not grant docker/);
-  assert.equal(resolveSidecarSpec({ template: 'sock' }, ctx({ hasDockerTool: true })).inheritDockerSocket, true);
+test('no sidecar gets the docker socket, even when the app lists docker (J.7)', () => {
+  rejects(() => resolveSidecarSpec({ template: 'sock' }, ctx()), 403, /no sidecar gets the Docker socket/);
+  rejects(() => resolveSidecarSpec({ template: 'sock' }, ctx({ hasDockerTool: true })), 403, /no sidecar gets the Docker socket/);
 });
 
 test('volumes: per sidecar by default, per template when shared, legacy per-app volume wins; overrides refused', () => {
