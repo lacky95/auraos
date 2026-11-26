@@ -1,25 +1,30 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, symlinkSync, unlinkSync, lstatSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { execSync } from 'node:child_process';
-import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
+import { parse as parseYaml } from 'yaml';
 import {
   detectSidecars, readSidecarMap, setSidecars,
   readLinkage, stageLibs, setLibs, readLibMap, orphanedLibs, toolchainLibFor,
 } from '@aura/core';
-// @ts-expect-error  bundled-as-text by esbuild (loader: { '.yaml': 'text' })
-import REGISTRY_DEFAULTS_YAML from '../registry-defaults.yaml';
+import { api } from './client.js';
 
-export type CapabilitySource = 'apt' | 'npm' | 'curl' | 'builtin';
+/**
+ * Capability definitions are the shell's (SF-2): the release tree's
+ * `.aura/capabilities.yaml` plus the entries the owner added through
+ * `/api/admin/cap-registry`. Installs name a capability; the shell resolves
+ * and runs its definition. This file reads the same registry for listings
+ * when the shell is unreachable, and the `services:` section for
+ * `aura service`.
+ */
+export type CapabilitySource = 'apt' | 'npm' | 'steps' | 'builtin';
 
 export interface CapabilityEntry {
   source: CapabilitySource;
   package?: string;
   binary?: string;
   binary_path?: string;
-  url?: string;
-  extract?: 'tar' | 'zip';
-  binary_in_archive?: string;
-  install_cmd?: string;
+  /** source `steps`: structured install steps the shell runs (core capabilities/definition.ts). */
+  steps?: unknown[];
   /**
    * Extra files this capability needs beside its main binary. Usually
    * unnecessary — helpers named `<binary>-*` in the tool's own directory are
@@ -56,14 +61,9 @@ const REGISTRY_PATH = process.env['AURA_REGISTRY_PATH'] ?? '/workspace/.aura/cap
 const STATE_PATH    = process.env['AURA_STATE_PATH']    ?? '/data/aura/state/capabilities.json';
 const TOOLCHAIN_BIN = join(process.env['AURA_TOOLCHAIN_DIR'] ?? '/os/toolchain', 'bin');
 
-export function ensureRegistry(): void {
-  if (existsSync(REGISTRY_PATH)) return;
-  mkdirSync(dirname(REGISTRY_PATH), { recursive: true });
-  writeFileSync(REGISTRY_PATH, REGISTRY_DEFAULTS_YAML as unknown as string);
-}
-
+/** The registry file as this process sees it (read-only; empty when it is not mounted here). */
 export function loadRegistry(): Registry {
-  if (!existsSync(REGISTRY_PATH)) ensureRegistry();
+  if (!existsSync(REGISTRY_PATH)) return { capabilities: {}, services: {} };
   const text = readFileSync(REGISTRY_PATH, 'utf-8');
   const parsed = parseYaml(text) as Partial<Registry> | null;
   return {
@@ -72,9 +72,15 @@ export function loadRegistry(): Registry {
   };
 }
 
-export function saveRegistry(reg: Registry): void {
-  mkdirSync(dirname(REGISTRY_PATH), { recursive: true });
-  writeFileSync(REGISTRY_PATH, stringifyYaml(reg));
+export interface ResolvedEntry { definition: CapabilityEntry; origin: 'release' | 'owner'; digest: string }
+
+/** The capabilities the shell installs (release + the owner's), or the local file's when the shell is unreachable. */
+export async function fetchCapabilities(): Promise<Record<string, CapabilityEntry>> {
+  try {
+    const r = await api.get<{ registry?: Record<string, ResolvedEntry> }>('/api/admin/cap');
+    if (r.registry) return Object.fromEntries(Object.entries(r.registry).map(([n, e]) => [n, e.definition]));
+  } catch { /* fall back to the file */ }
+  return loadRegistry().capabilities;
 }
 
 export function loadState(): State {
@@ -174,31 +180,6 @@ export async function installCapability(name: string, entry: CapabilityEntry): P
       let version: string | null = null;
       try { version = sh(`npm view ${entry.package} version`); } catch { /* ignore */ }
       return { symlink: link, version, sidecars };
-    }
-    case 'curl': {
-      if (entry.install_cmd) {
-        sh(entry.install_cmd);
-        const binPath = entry.binary_path && existsSync(entry.binary_path) ? entry.binary_path : which(binaryName);
-        if (!binPath) throw new Error(`curl install for ${name} finished but binary missing (set binary_path in registry)`);
-        const sidecars = linkWithSidecars(binPath, binaryName, entry);
-        return { symlink: link, version: null, sidecars };
-      }
-      if (entry.url) {
-        const tmp = `/tmp/aura-cap-${name}-${Date.now()}`;
-        mkdirSync(tmp, { recursive: true });
-        const archive = join(tmp, 'archive');
-        sh(`curl -fsSL -o ${archive} '${entry.url}'`);
-        if (entry.extract === 'tar') sh(`tar -xf ${archive} -C ${tmp}`);
-        else if (entry.extract === 'zip') sh(`unzip -q ${archive} -d ${tmp}`);
-        else sh(`install -m 0755 ${archive} ${link}`); // raw binary
-        if (entry.binary_in_archive) {
-          const extracted = join(tmp, entry.binary_in_archive);
-          if (!existsSync(extracted)) throw new Error(`Expected ${extracted} after extracting`);
-          sh(`install -m 0755 ${extracted} ${link}`);
-        }
-        return { symlink: link, version: null };
-      }
-      throw new Error(`Registry entry ${name}: curl source needs either 'install_cmd' or 'url'`);
     }
     default:
       throw new Error(`Unknown source type for ${name}: ${entry.source}`);

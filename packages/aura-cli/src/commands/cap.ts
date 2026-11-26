@@ -1,11 +1,11 @@
 import type { Command } from 'commander';
 import { color, fail, info, ok, table, warn } from '../lib/format.js';
+import { readFileSync } from 'node:fs';
+import { parse as parseYaml } from 'yaml';
 import {
-  ensureRegistry,
-  loadRegistry,
+  fetchCapabilities,
   loadState,
-  saveRegistry,
-  type CapabilityEntry,
+  type ResolvedEntry,
   type State,
 } from '../lib/registry.js';
 import { api } from '../lib/client.js';
@@ -133,8 +133,7 @@ function grantSummary(tools: string[]): string {
 /** Available tools = installed caps ∪ /os/toolchain/bin binaries, plus
  *  not-yet-installed registry caps (so the picker can surface them). */
 async function gatherAvailableTools(): Promise<Array<{ name: string; installed: boolean; desc: string }>> {
-  ensureRegistry();
-  const reg = loadRegistry();
+  const reg = { capabilities: await fetchCapabilities() };
   const out = new Map<string, { installed: boolean; desc: string }>();
   try {
     const [capRes, toolsRes] = await Promise.all([
@@ -266,8 +265,7 @@ export function registerCap(program: Command): void {
     .option('--available', 'Show only NOT installed capabilities')
     .description('List capabilities from the registry with install status and which apps declare them.')
     .action(async (opts: { installed?: boolean; available?: boolean }) => {
-      ensureRegistry();
-      const reg = loadRegistry();
+      const reg = { capabilities: await fetchCapabilities() };
       // Prefer the shell's view of state (it's the writer; when this CLI runs
       // inside a PRoot the local /data bind has shown stale reads in practice).
       // Fall back to the local file if the shell is unreachable so `cap list`
@@ -305,10 +303,9 @@ export function registerCap(program: Command): void {
 
   cap
     .command('install <name...>')
-    .description('Install one or more capabilities (apt/npm/curl per registry entry) into the shared toolchain.')
+    .description('Install one or more capabilities from the registry into the shared toolchain (the owner approves each).')
     .action(async (names: string[]) => {
-      ensureRegistry();
-      const reg = loadRegistry();
+      const reg = { capabilities: await fetchCapabilities() };
       // Always route install through the shell. The CLI is most often invoked
       // from inside a PRoot terminal where apt-key/gnupg are unavailable and
       // /os/toolchain isn't bind-mounted — letting the shell do it sidesteps
@@ -317,9 +314,11 @@ export function registerCap(program: Command): void {
         const entry = reg.capabilities[name];
         if (!entry) { fail(`Unknown capability: ${name}. See \`aura cap registry show\`.`); }
         info(`Installing ${color.bold(name)} (source=${entry.source}) via shell …`);
+        // The shell resolves the definition from its own registry (SF-2) and
+        // asks the owner; this request only names the capability.
         const res = await api.post<{ ok: boolean; symlink?: string; version?: string | null; sidecars?: string[]; libs?: string[]; libsMissing?: string[]; error?: string }>(
           '/api/admin/cap',
-          { action: 'install', name, entry },
+          { action: 'install', name },
         );
         if (!res?.ok) fail(`install ${name} failed: ${res?.error ?? 'unknown error'}`);
         // Name the helpers explicitly: they are what makes a multi-file tool
@@ -354,8 +353,7 @@ export function registerCap(program: Command): void {
       'running apps see the new binaries without a respawn.',
     )
     .action(async (names: string[], opts: { yes?: boolean; dryRun?: boolean; force?: boolean }) => {
-      ensureRegistry();
-      const reg = loadRegistry();
+      const reg = { capabilities: await fetchCapabilities() };
       // Trust the shell for install state — same reasoning as `cap list`:
       // when the CLI runs inside a sliced-bind sandbox the local /data read
       // can lag the actual toolchain.
@@ -412,7 +410,7 @@ export function registerCap(program: Command): void {
         try {
           const res = await api.post<{ ok: boolean; symlink?: string; version?: string | null; sidecars?: string[]; libs?: string[]; libsMissing?: string[]; error?: string }>(
             '/api/admin/cap',
-            { action: 'install', name, entry, force: opts.force === true },
+            { action: 'install', name, force: opts.force === true },
           );
           if (!res?.ok) {
             failed++;
@@ -501,13 +499,11 @@ export function registerCap(program: Command): void {
     .command('remove <name>')
     .description('Uninstall a capability + remove it from every app manifest that declares it.')
     .action(async (name: string) => {
-      ensureRegistry();
-      const reg = loadRegistry();
-      const entry = reg.capabilities[name];
-      if (!entry) fail(`Unknown capability: ${name}`);
+      const reg = { capabilities: await fetchCapabilities() };
+      if (!reg.capabilities[name]) fail(`Unknown capability: ${name}`);
       const res = await api.post<{ ok: boolean; error?: string }>(
         '/api/admin/cap',
-        { action: 'remove', name, entry },
+        { action: 'remove', name },
       );
       if (!res?.ok) fail(`remove ${name} failed: ${res?.error ?? 'unknown error'}`);
       // Strip the cap from every manifest that still declares it. Routes
@@ -578,8 +574,7 @@ export function registerCap(program: Command): void {
     .command('info <name>')
     .description('Print registry entry + install status + apps declaring this capability.')
     .action(async (name: string) => {
-      ensureRegistry();
-      const reg = loadRegistry();
+      const reg = { capabilities: await fetchCapabilities() };
       const entry = reg.capabilities[name];
       if (!entry) fail(`Unknown capability: ${name}`);
       const state = loadState();
@@ -592,39 +587,42 @@ export function registerCap(program: Command): void {
       console.log(JSON.stringify({ registry: entry, installed: installed ?? false, declaredBy }, null, 2));
     });
 
-  const registry = cap.command('registry').description('Inspect or edit the capabilities registry YAML.');
+  const registry = cap.command('registry').description('Inspect the capability registry, or add your own capability definitions (the owner approves).');
   registry
     .command('show')
-    .description('Print the current registry contents.')
-    .action(() => {
-      ensureRegistry();
-      console.log(JSON.stringify(loadRegistry(), null, 2));
+    .description('Print every capability the shell installs: the release registry and the ones you added.')
+    .action(async () => {
+      const r = await api.get<{ registry: Record<string, ResolvedEntry> }>('/api/admin/cap');
+      console.log(JSON.stringify(r.registry, null, 2));
     });
   registry
     .command('add <name>')
-    .requiredOption('--source <type>', 'apt | npm | curl | builtin')
+    .option('--source <type>', 'apt | npm | builtin (for steps, use --file)')
     .option('--package <pkg>',  'Package name (for apt or npm sources)')
     .option('--binary <bin>',   'Binary name to expose in /os/toolchain/bin/', '')
-    .option('--url <url>',      'Download URL (for curl source)')
-    .description('Add a new capability to the registry YAML.')
-    .action((name: string, opts: { source: string; package?: string; binary?: string; url?: string }) => {
-      ensureRegistry();
-      const reg = loadRegistry();
-      const entry: CapabilityEntry = { source: opts.source as CapabilityEntry['source'], binary: opts.binary || name };
-      if (opts.package) entry.package = opts.package;
-      if (opts.url)     entry.url = opts.url;
-      reg.capabilities[name] = entry;
-      saveRegistry(reg);
-      ok(`added ${name} to registry`);
+    .option('--binary-path <path>', 'Absolute path of the installed binary')
+    .option('--file <path>',    'A YAML or JSON file with the whole definition (e.g. source: steps)')
+    .description('Add a capability definition to the registry. The owner approves it with the password; installing it asks again.')
+    .action(async (name: string, opts: { source?: string; package?: string; binary?: string; binaryPath?: string; file?: string }) => {
+      let definition: Record<string, unknown>;
+      if (opts.file) {
+        definition = parseYaml(readFileSync(opts.file, 'utf-8')) as Record<string, unknown>;
+      } else {
+        if (!opts.source) fail('--source or --file is required');
+        definition = { source: opts.source, binary: opts.binary || name };
+        if (opts.package) definition['package'] = opts.package;
+        if (opts.binaryPath) definition['binary_path'] = opts.binaryPath;
+      }
+      const r = await api.post<{ ok: boolean; digest?: string; changed?: boolean; error?: string; message?: string }>('/api/admin/cap-registry', { name, definition });
+      if (!r?.ok) fail(`registry add ${name} failed: ${r?.message ?? r?.error ?? 'unknown error'}`);
+      ok(`${r.changed ? 'added' : 'unchanged:'} ${name} (digest ${r.digest?.slice(0, 12)}…)`);
     });
   registry
     .command('remove <name>')
-    .description('Remove a capability definition from the registry YAML.')
-    .action((name: string) => {
-      ensureRegistry();
-      const reg = loadRegistry();
-      delete reg.capabilities[name];
-      saveRegistry(reg);
+    .description('Remove a capability definition you added (the owner approves).')
+    .action(async (name: string) => {
+      const r = await api.del<{ ok: boolean; error?: string; message?: string }>(`/api/admin/cap-registry?name=${encodeURIComponent(name)}`);
+      if (!r?.ok) fail(`registry remove ${name} failed: ${r?.message ?? r?.error ?? 'unknown error'}`);
       ok(`removed ${name} from registry`);
     });
 }

@@ -55,50 +55,41 @@ capabilities:
     package: gh
     binary: gh
     description: GitHub CLI
+  # Install definitions are data (SF-2): a fixed set of structured steps the
+  # master runs as argv, never a shell command. Downloads are https and pinned
+  # by sha256. Writes land under /usr/local/bin, /usr/local/lib or
+  # /home/aura/.aura. See packages/core/src/capabilities/definition.ts.
   linux-coreutils:
-    source: curl
-    install_cmd: >-
-      set -e
-
-      export DEBIAN_FRONTEND=noninteractive
-
-      apt-get update -qq
-
-      apt-get install -y -q --no-install-recommends \
-        iputils-ping iputils-tracepath traceroute curl wget iproute2 dnsutils \
-        netcat-openbsd socat net-tools tcpdump mtr-tiny whois \
-        rsync tree psmisc strace unzip zip xz-utils
-      cat > /usr/local/bin/linux-coreutils <<'EOF'
-
-      #!/bin/sh
-
-      # linux-coreutils — AuraOS capability shim. The tools below are this
-
-      # capability's sidecars; granting `linux-coreutils` puts them on PATH.
-
-      tools="ping tracepath traceroute curl wget ip ss dig nslookup host nc
-      socat netstat ifconfig route arp tcpdump mtr mtr-packet whois rsync tree
-      killall pstree fuser strace unzip zip xz"
-
-      case "${1:---help}" in
-        -h|--help)
-          echo "linux-coreutils: network + core utilities bundled as one AuraOS capability."
-          echo "Run 'linux-coreutils --check' to verify each tool resolves on PATH."
-          echo "Tools:"
-          for t in $tools; do echo "  $t"; done ;;
-        --check)
-          rc=0
-          for t in $tools; do
-            if p=$(command -v "$t" 2>/dev/null); then printf 'ok       %-12s %s\n' "$t" "$p"
-            else printf 'MISSING  %s\n' "$t"; rc=1; fi
-          done
-          exit $rc ;;
-        *) echo "usage: linux-coreutils [--help|--check]" >&2; exit 2 ;;
-      esac
-
-      EOF
-
-      chmod 755 /usr/local/bin/linux-coreutils
+    source: steps
+    steps:
+      - apt: [iputils-ping, iputils-tracepath, traceroute, curl, wget, iproute2, dnsutils,
+          netcat-openbsd, socat, net-tools, tcpdump, mtr-tiny, whois, rsync, tree, psmisc,
+          strace, unzip, zip, xz-utils]
+      - file:
+          path: /usr/local/bin/linux-coreutils
+          mode: "0755"
+          content: |
+            #!/bin/sh
+            # linux-coreutils — AuraOS capability shim. The tools below are this
+            # capability's sidecars; granting `linux-coreutils` puts them on PATH.
+            tools="ping tracepath traceroute curl wget ip ss dig nslookup host nc
+            socat netstat ifconfig route arp tcpdump mtr mtr-packet whois rsync tree
+            killall pstree fuser strace unzip zip xz"
+            case "${1:---help}" in
+              -h|--help)
+                echo "linux-coreutils: network + core utilities bundled as one AuraOS capability."
+                echo "Run 'linux-coreutils --check' to verify each tool resolves on PATH."
+                echo "Tools:"
+                for t in $tools; do echo "  $t"; done ;;
+              --check)
+                rc=0
+                for t in $tools; do
+                  if p=$(command -v "$t" 2>/dev/null); then printf 'ok       %-12s %s\n' "$t" "$p"
+                  else printf 'MISSING  %s\n' "$t"; rc=1; fi
+                done
+                exit $rc ;;
+              *) echo "usage: linux-coreutils [--help|--check]" >&2; exit 2 ;;
+            esac
     binary_path: /usr/local/bin/linux-coreutils
     binary: linux-coreutils
     sidecars:
@@ -135,276 +126,206 @@ capabilities:
       ip/ss, dig, nc, socat, tcpdump, mtr, whois, rsync, tree, psmisc, strace,
       zip/unzip, xz
   adb:
-    source: curl
-    install_cmd: >-
-      set -e
-
-      command -v unzip >/dev/null 2>&1 || { apt-get update -qq && apt-get
-      install -y -q unzip; }
-
-      t=$(mktemp -d)
-
-      curl -fsSL -o "$t/pt.zip"
-      https://dl.google.com/android/repository/platform-tools-latest-linux.zip
-
-      unzip -q "$t/pt.zip" -d "$t"
-
-      rm -rf /usr/local/lib/android-sdk-platform-tools
-
-      mv "$t/platform-tools" /usr/local/lib/android-sdk-platform-tools
-
-      chmod +x /usr/local/lib/android-sdk-platform-tools/adb
-      /usr/local/lib/android-sdk-platform-tools/fastboot
-
-      rm -rf "$t"
+    source: steps
+    steps:
+      - apt: [unzip]
+      - extract:
+          url: https://dl.google.com/android/repository/platform-tools_r37.0.3-linux.zip
+          sha256: 214548146cadb2ca3508143d8a1d4be4c59de5bb837253e3ede89ed74cf450d1
+          format: zip
+          subdir: platform-tools
+          to: /usr/local/lib/android-sdk-platform-tools
     binary_path: /usr/local/lib/android-sdk-platform-tools/adb
     binary: adb
-    description: Android Debug Bridge — Google platform-tools (has `adb pair` for
+    description: Android Debug Bridge — Google platform-tools r37.0.3 (has `adb pair` for
       wireless debugging)
   bun:
-    source: curl
-    install_cmd: curl -fsSL https://bun.sh/install | bash
-    binary_path: /root/.bun/bin/bun
+    source: steps
+    steps:
+      - apt: [unzip]
+      - extract:
+          url: https://github.com/oven-sh/bun/releases/download/bun-v1.4.5/bun-linux-x64.zip
+          sha256: 94559b3b528995a49452f9f2404cec74f2efd7d06e0a000a8cd214b02c3666eb
+          format: zip
+          subdir: bun-linux-x64
+          to: /usr/local/lib/bun
+    binary_path: /usr/local/lib/bun/bun
     binary: bun
-    description: Bun JavaScript runtime
+    description: Bun JavaScript runtime (1.4.5)
   oras:
-    source: curl
-    install_cmd: curl -fsSL
-      https://github.com/oras-project/oras/releases/download/v1.2.0/oras_1.2.0_linux_amd64.tar.gz
-      | tar -xz -C /usr/local/bin oras
+    source: steps
+    steps:
+      - extract:
+          url: https://github.com/oras-project/oras/releases/download/v1.2.0/oras_1.2.0_linux_amd64.tar.gz
+          sha256: 5b3f1cbb86d869eee68120b9b45b9be983f3738442f87ee5f06b00edd0bab336
+          format: tar.gz
+          members: [oras]
+          to: /usr/local/bin
     binary_path: /usr/local/bin/oras
     binary: oras
     description: OCI Registry As Storage client — transport for Nexus app publish/install
   zot:
-    source: curl
-    install_cmd: curl -fsSL
-      https://github.com/project-zot/zot/releases/download/v2.1.7/zot-linux-amd64-minimal
-      -o /usr/local/bin/zot && chmod +x /usr/local/bin/zot
+    source: steps
+    steps:
+      - download:
+          url: https://github.com/project-zot/zot/releases/download/v2.1.7/zot-linux-amd64-minimal
+          sha256: ec67564967159adc0c45a7198c112803b2acc9fbd86b1c36806698d959dd087d
+          to: /usr/local/bin/zot
+          mode: "0755"
     binary_path: /usr/local/bin/zot
     binary: zot
     description: OCI Distribution registry server — backs the com.aura.registry Nexus store
   code-server:
-    source: curl
-    install_cmd: >-
-      set -e
-
-      VERSION=4.137.0
-
-      DEST=/home/aura/.aura/code-server
-
-      if [ ! -x "$DEST/$VERSION/bin/code-server" ]; then
-        rm -rf "$DEST/$VERSION"; mkdir -p "$DEST/$VERSION"
-        curl -fsSL "https://github.com/coder/code-server/releases/download/v$VERSION/code-server-$VERSION-linux-amd64.tar.gz" | tar -xz -C "$DEST/$VERSION" --strip-components=1
-      fi
-
-      ln -sfn "$DEST/$VERSION" "$DEST/current"
-
-      mkdir -p "$DEST/data" "$DEST/extensions" "$DEST/run"
-
-      chmod -R a+rX "$DEST/$VERSION"
-
-      printf '#!/bin/sh\nexec
-      /home/aura/.aura/code-server/current/bin/code-server "$@"\n' >
-      /usr/local/bin/code-server
-
-      chmod 755 /usr/local/bin/code-server
+    source: steps
+    steps:
+      - extract:
+          url: https://github.com/coder/code-server/releases/download/v4.137.0/code-server-4.137.0-linux-amd64.tar.gz
+          sha256: 9303165b7fd43532091922f77e2f119ff2fa109c6b6f1c3c966fb02f3d6d9c8b
+          format: tar.gz
+          strip: 1
+          to: /home/aura/.aura/code-server/4.137.0
+          unless_exists: /home/aura/.aura/code-server/4.137.0/bin/code-server
+      - symlink: { target: /home/aura/.aura/code-server/4.137.0, path: /home/aura/.aura/code-server/current }
+      - mkdir: [/home/aura/.aura/code-server/data, /home/aura/.aura/code-server/extensions, /home/aura/.aura/code-server/run]
+      - readable: /home/aura/.aura/code-server/4.137.0
+      - file:
+          path: /usr/local/bin/code-server
+          mode: "0755"
+          content: |
+            #!/bin/sh
+            exec /home/aura/.aura/code-server/current/bin/code-server "$@"
     binary_path: /usr/local/bin/code-server
     binary: code-server
     description: VS Code in the browser — standalone release in the shared home;
       shim lands on PATH in granted sandboxes
   nvm:
-    source: curl
-    install_cmd: >-
-      set -e
-
-      VERSION=v0.40.8
-
-      export NVM_DIR=/home/aura/.aura/nvm
-
-      # The installer appends a loader to a shell rc file it picks itself. The
-
-      # shim is the entrypoint here, so send that edit to /dev/null.
-
-      export PROFILE=/dev/null
-
-      mkdir -p "$NVM_DIR"
-
-      curl -fsSL
-      "https://raw.githubusercontent.com/nvm-sh/nvm/$VERSION/install.sh" | bash
-
-      chmod -R a+rX "$NVM_DIR"
-
-      cat > /usr/local/bin/nvm <<'EOF'
-
-      #!/bin/sh
-
-      # nvm — AuraOS capability shim. nvm is a shell function; this runs it in
-
-      # a subshell, which is fine for everything that mutates $NVM_DIR and
-
-      # impossible for anything that mutates the caller's environment.
-
-      NVM_DIR="${NVM_DIR:-/home/aura/.aura/nvm}"
-
-      export NVM_DIR
-
-      if [ ! -s "$NVM_DIR/nvm.sh" ]; then
-        echo "nvm: $NVM_DIR/nvm.sh is missing — run 'aura cap install nvm' on the master." >&2
-        exit 1
-      fi
-
-      case "${1:-}" in
-        use|deactivate|unload)
-          echo "nvm: '$1' changes the calling shell, which a shim cannot do." >&2
-          echo "Run this instead:  eval \"\$(nvm-env)\" && nvm $*" >&2
-          echo "Or make it the default for new shells:  nvm alias default <version>" >&2
-          exit 2 ;;
-      esac
-
-      . "$NVM_DIR/nvm.sh" --no-use
-
-      # Without this guard a failed source falls through to a PATH lookup,
-
-      # which finds this shim again and forks until the sandbox gives up.
-
-      # POSIX `command -v` prints a bare name for a function, a path for a file.
-
-      if [ "$(command -v nvm)" != "nvm" ]; then
-        echo "nvm: sourcing $NVM_DIR/nvm.sh did not define the nvm function." >&2
-        exit 1
-      fi
-
-      nvm "$@"
-
-      EOF
-
-      chmod 755 /usr/local/bin/nvm
-
-      cat > /usr/local/bin/nvm-env <<'EOF'
-
-      #!/bin/sh
-
-      # nvm-env — AuraOS helper. Prints the lines that load the REAL nvm
-
-      # function into the CURRENT shell, so `nvm use` works there.
-
-      #   eval "$(nvm-env)"
-
-      cat <<'ENVEOF'
-
-      export NVM_DIR="/home/aura/.aura/nvm"
-
-      [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-
-      ENVEOF
-
-      EOF
-
-      chmod 755 /usr/local/bin/nvm-env
+    source: steps
+    steps:
+      - mkdir: [/home/aura/.aura/nvm]
+      # nvm itself is three files of its release; installed node versions in
+      # /home/aura/.aura/nvm stay where they are.
+      - extract:
+          url: https://github.com/nvm-sh/nvm/archive/refs/tags/v0.40.8.tar.gz
+          sha256: 7c5b2c4c78e6447b518860ead1f365056e9a03b3562903439bb401607b05a2ef
+          format: tar.gz
+          strip: 1
+          members: [nvm-0.40.8/nvm.sh, nvm-0.40.8/nvm-exec, nvm-0.40.8/bash_completion]
+          to: /home/aura/.aura/nvm
+      - readable: /home/aura/.aura/nvm
+      - file:
+          path: /usr/local/bin/nvm
+          mode: "0755"
+          content: |
+            #!/bin/sh
+            # nvm — AuraOS capability shim. nvm is a shell function; this runs it in
+            # a subshell, which is fine for everything that mutates $NVM_DIR and
+            # impossible for anything that mutates the caller's environment.
+            NVM_DIR="${NVM_DIR:-/home/aura/.aura/nvm}"
+            export NVM_DIR
+            if [ ! -s "$NVM_DIR/nvm.sh" ]; then
+              echo "nvm: $NVM_DIR/nvm.sh is missing — run 'aura cap install nvm' on the master." >&2
+              exit 1
+            fi
+            case "${1:-}" in
+              use|deactivate|unload)
+                echo "nvm: '$1' changes the calling shell, which a shim cannot do." >&2
+                echo "Run this instead:  eval \"\$(nvm-env)\" && nvm $*" >&2
+                echo "Or make it the default for new shells:  nvm alias default <version>" >&2
+                exit 2 ;;
+            esac
+            . "$NVM_DIR/nvm.sh" --no-use
+            # Without this guard a failed source falls through to a PATH lookup,
+            # which finds this shim again and forks until the sandbox gives up.
+            # POSIX `command -v` prints a bare name for a function, a path for a file.
+            if [ "$(command -v nvm)" != "nvm" ]; then
+              echo "nvm: sourcing $NVM_DIR/nvm.sh did not define the nvm function." >&2
+              exit 1
+            fi
+            nvm "$@"
+      - file:
+          path: /usr/local/bin/nvm-env
+          mode: "0755"
+          content: |
+            #!/bin/sh
+            # nvm-env — AuraOS helper. Prints the lines that load the REAL nvm
+            # function into the CURRENT shell, so `nvm use` works there.
+            #   eval "$(nvm-env)"
+            cat <<'ENVEOF'
+            export NVM_DIR="/home/aura/.aura/nvm"
+            [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+            ENVEOF
     binary_path: /usr/local/bin/nvm
     binary: nvm
     sidecars:
       - /usr/local/bin/nvm-env
-    description: Node Version Manager — node versions shared via
+    description: Node Version Manager (v0.40.8) — node versions shared via
       /home/aura/.aura/nvm; `eval "$(nvm-env)"` for a real `nvm use`
   asdf:
-    source: curl
-    install_cmd: >-
-      set -e
-
-      VERSION=0.20.0
-
-      DEST=/home/aura/.aura/asdf
-
-      if [ ! -x "$DEST/$VERSION/asdf" ]; then
-        rm -rf "$DEST/$VERSION"; mkdir -p "$DEST/$VERSION"
-        curl -fsSL "https://github.com/asdf-vm/asdf/releases/download/v$VERSION/asdf-v$VERSION-linux-amd64.tar.gz" | tar -xz -C "$DEST/$VERSION"
-      fi
-
-      ln -sfn "$DEST/$VERSION" "$DEST/current"
-
-      mkdir -p "$DEST/data"
-
-      chmod -R a+rX "$DEST/$VERSION"
-
-      cat > /usr/local/bin/asdf <<'EOF'
-
-      #!/bin/sh
-
-      # asdf — AuraOS capability shim. Pins the data dir to the shared home so
-
-      # plugins and installed versions outlive the sandbox, then hands off to
-
-      # the real static binary.
-
-      ASDF_DATA_DIR="${ASDF_DATA_DIR:-/home/aura/.aura/asdf/data}"
-
-      export ASDF_DATA_DIR
-
-      exec /home/aura/.aura/asdf/current/asdf "$@"
-
-      EOF
-
-      chmod 755 /usr/local/bin/asdf
-
-      cat > /usr/local/bin/asdf-env <<'EOF'
-
-      #!/bin/sh
-
-      # asdf-env — AuraOS helper. Prints the lines that put asdf's shim dir on
-
-      # PATH in the CURRENT shell, which is what makes an installed `node` or
-
-      # `go` runnable. The asdf shim itself cannot do it.
-
-      #   eval "$(asdf-env)"
-
-      cat <<'ENVEOF'
-
-      export ASDF_DATA_DIR="/home/aura/.aura/asdf/data"
-
-      export PATH="$ASDF_DATA_DIR/shims:$PATH"
-
-      ENVEOF
-
-      EOF
-
-      chmod 755 /usr/local/bin/asdf-env
+    source: steps
+    steps:
+      - extract:
+          url: https://github.com/asdf-vm/asdf/releases/download/v0.20.0/asdf-v0.20.0-linux-amd64.tar.gz
+          sha256: 9c25e1af7cc4c9d59ff3736eba14fd000480c32929258f80d8c5a8b290ebee14
+          format: tar.gz
+          to: /home/aura/.aura/asdf/0.20.0
+          unless_exists: /home/aura/.aura/asdf/0.20.0/asdf
+      - symlink: { target: /home/aura/.aura/asdf/0.20.0, path: /home/aura/.aura/asdf/current }
+      - mkdir: [/home/aura/.aura/asdf/data]
+      - readable: /home/aura/.aura/asdf/0.20.0
+      - file:
+          path: /usr/local/bin/asdf
+          mode: "0755"
+          content: |
+            #!/bin/sh
+            # asdf — AuraOS capability shim. Pins the data dir to the shared home so
+            # plugins and installed versions outlive the sandbox, then hands off to
+            # the real static binary.
+            ASDF_DATA_DIR="${ASDF_DATA_DIR:-/home/aura/.aura/asdf/data}"
+            export ASDF_DATA_DIR
+            exec /home/aura/.aura/asdf/current/asdf "$@"
+      - file:
+          path: /usr/local/bin/asdf-env
+          mode: "0755"
+          content: |
+            #!/bin/sh
+            # asdf-env — AuraOS helper. Prints the lines that put asdf's shim dir on
+            # PATH in the CURRENT shell, which is what makes an installed `node` or
+            # `go` runnable. The asdf shim itself cannot do it.
+            #   eval "$(asdf-env)"
+            cat <<'ENVEOF'
+            export ASDF_DATA_DIR="/home/aura/.aura/asdf/data"
+            export PATH="$ASDF_DATA_DIR/shims:$PATH"
+            ENVEOF
     binary_path: /usr/local/bin/asdf
     binary: asdf
     sidecars:
       - /usr/local/bin/asdf-env
-    description: asdf version manager (Go) — plugins/versions shared via
+    description: asdf version manager (0.20.0, Go) — plugins/versions shared via
       /home/aura/.aura/asdf; `eval "$(asdf-env)"` puts its shims on PATH
   sshpass:
     source: apt
     binary: sshpass
     package: sshpass
   argocd:
-    source: curl
-    install_cmd: curl -fsSL
-      https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
-      -o /usr/local/bin/argocd && chmod +x /usr/local/bin/argocd
+    source: steps
+    steps:
+      - download:
+          url: https://github.com/argoproj/argo-cd/releases/download/v3.6.3/argocd-linux-amd64
+          sha256: 3750cd7ed2a2ef05c640344b86f29aa99c9783e847c8f326c81e3900ad39412b
+          to: /usr/local/bin/argocd
+          mode: "0755"
     binary_path: /usr/local/bin/argocd
     binary: argocd
-    description: Argo CD CLI — manage Argo CD apps, clusters and repos (GitOps)
+    description: Argo CD CLI (v3.6.3) — manage Argo CD apps, clusters and repos (GitOps)
   glab:
-    source: curl
-    install_cmd: >-
-      set -e
-
-      export DEBIAN_FRONTEND=noninteractive
-
-      V=$(curl -fsSL "https://gitlab.com/api/v4/projects/gitlab-org%2Fcli/releases/permalink/latest" | sed -n 's/.*"tag_name":"v\([^"]*\)".*/\1/p')
-
-      curl -fsSL -o /tmp/glab.deb "https://gitlab.com/gitlab-org/cli/-/releases/v${V}/downloads/glab_${V}_linux_amd64.deb"
-
-      apt-get install -y -q /tmp/glab.deb
-
-      rm -f /tmp/glab.deb
+    source: steps
+    steps:
+      - deb:
+          url: https://gitlab.com/gitlab-org/cli/-/releases/v1.133.0/downloads/glab_1.133.0_linux_amd64.deb
+          sha256: 0e957310c6cb5f324a82d335c46d58ffc165e00eacc66ca4eb338d061db93929
     binary_path: /usr/bin/glab
     binary: glab
-    description: GitLab CLI (official .deb via apt)
+    description: GitLab CLI (v1.133.0, official .deb via apt)
 services:
   sshd:
     source: apt

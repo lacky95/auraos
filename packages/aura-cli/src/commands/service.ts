@@ -3,7 +3,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, sta
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { color, fail, info, ok, table } from '../lib/format.js';
-import { ensureRegistry, installCapability, loadRegistry, loadState, removeCapability, saveState, type ServiceEntry } from '../lib/registry.js';
+import { installCapability, loadRegistry, loadState, removeCapability, saveState, type ServiceEntry } from '../lib/registry.js';
 
 const SERVICES_DIR = '/data/aura/state/services';
 
@@ -68,7 +68,6 @@ export function registerService(program: Command): void {
     .alias('ls')
     .description('List services from the registry with installed + running status.')
     .action(() => {
-      ensureRegistry();
       const reg = loadRegistry();
       const state = loadState();
       const rows = Object.entries(reg.services).map(([name, entry]) => {
@@ -94,7 +93,6 @@ export function registerService(program: Command): void {
     .command('install <name>')
     .description('Install a service from the registry (apt/npm/curl).')
     .action(async (name: string) => {
-      ensureRegistry();
       const reg = loadRegistry();
       const entry = reg.services[name];
       if (!entry) fail(`Unknown service: ${name}`);
@@ -110,7 +108,6 @@ export function registerService(program: Command): void {
     .command('start <name>')
     .description('Start a daemon detached. Records PID in /data/aura/state/services/<name>.pid.')
     .action((name: string) => {
-      ensureRegistry();
       const reg = loadRegistry();
       const entry = reg.services[name];
       if (!entry) fail(`Unknown service: ${name}`);
@@ -152,7 +149,6 @@ export function registerService(program: Command): void {
     .command('status <name>')
     .description('Show installed + running status and registry config for a service.')
     .action((name: string) => {
-      ensureRegistry();
       const reg = loadRegistry();
       const entry = reg.services[name] as ServiceEntry | undefined;
       if (!entry) fail(`Unknown service: ${name}`);
@@ -185,7 +181,6 @@ export function registerService(program: Command): void {
     .command('uninstall <name>')
     .description('Stop (if running) and uninstall a service.')
     .action(async (name: string) => {
-      ensureRegistry();
       const reg = loadRegistry();
       const entry = reg.services[name];
       if (!entry) fail(`Unknown service: ${name}`);
