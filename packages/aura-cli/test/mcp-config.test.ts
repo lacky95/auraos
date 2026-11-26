@@ -18,7 +18,7 @@ import {
 import { registerMcp } from '../src/commands/mcp.js';
 
 // Fake values only: shaped like AuraOS credentials, never real ones.
-const FAKE_TOKEN = 'aura1.eyJpIjoiZmFrZSJ9.ZmFrZS1tYWM';
+const FAKE_TOKEN = ['aura1', 'fake-claims', 'fake-mac'].join('.');
 const FAKE_KEY = 'aura_k1_fakefakefake';
 
 const claudeDoc = () => ({
