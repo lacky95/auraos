@@ -50,6 +50,7 @@ import { dirname, join } from 'node:path';
 import type { AppRegistry } from './AppRegistry.js';
 import type { ContainerRunner } from './ContainerRunner.js';
 import { BASE_IMAGE } from './BaseImage.js';
+import { rawSocketArgs } from './spawn/networkArgs.js';
 
 const HELPER_IMAGE = BASE_IMAGE;
 const SHARED_NETWORK = process.env['AURA_DOCKER_NETWORK'] ?? 'aura-net';
@@ -263,6 +264,7 @@ export class PortManager {
       args = [
         'create', '--name', containerName,
         '--network', `container:${containerNameFor(ownerInstanceId)}`,
+        ...rawSocketArgs(),
         '--restart', 'unless-stopped',
         ...labels,
         ...env,
@@ -278,6 +280,7 @@ export class PortManager {
       args = [
         'create', '--name', containerName,
         '--network', SHARED_NETWORK,
+        ...rawSocketArgs(),
         '-p', `${bindAddr}:${port}:5000`,
         '--restart', 'unless-stopped',
         ...labels,

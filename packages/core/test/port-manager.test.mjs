@@ -69,4 +69,5 @@ test('into forwarding still joins the target namespace without publishing a host
   const create = calls.find(args => args[0] === 'create');
   assert.equal(create[create.indexOf('--network') + 1], 'container:aura-test.target');
   assert.equal(create.includes('-p'), false);
+  assert.equal(create[create.indexOf('--cap-drop') + 1], 'NET_RAW', 'no raw sockets in the target namespace (D88 S1)');
 });

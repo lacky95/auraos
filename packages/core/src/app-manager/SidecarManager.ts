@@ -12,6 +12,7 @@ import { MOUNT_ROOT_PATH } from './MountManager.js';
 import type { PermissionManager } from '../permissions/PermissionManager.js';
 import type { AppManifest } from '../types/manifest.js';
 import { toolsGrant } from './tool-allowlist.js';
+import { rawSocketArgs } from './spawn/networkArgs.js';
 import {
   MY_TOOLS_PATH, SHARED_HOME_PATH, listToolchainBinaries, provisionAllowlist, readSidecarMap, toolchainMirrorBin,
 } from './tool-provision.js';
@@ -550,7 +551,7 @@ export class SidecarManager {
     if (existsSync(marker) || existsSync(before)) return;
     // aura.mount=1 keeps the throwaway out of sidecar listings; aura.parent
     // lets the reaper remove it if the instance dies mid-seed.
-    const args = ['run', '--rm', '--network', rt.network, '--label', 'aura.mount=1', '--label', `aura.parent=${instanceId}`,
+    const args = ['run', '--rm', '--network', rt.network, ...rawSocketArgs(spec), '--label', 'aura.mount=1', '--label', `aura.parent=${instanceId}`,
       ...this.volumeArgs(spec),
       ...Object.entries(env).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
       ...(spec.user ? ['--user', spec.user] : []),
@@ -596,6 +597,8 @@ export class SidecarManager {
     const manifest = this.opts.registry.getById(appId);
     const a: string[] = [
       'create', '--name', container, '--network', rt.network, '--restart', spec.restart,
+      // No raw sockets unless the template's reviewed privileged/NET_RAW asks (spawn/networkArgs.ts, D88 S1).
+      ...rawSocketArgs(spec),
       '--label', `aura.parent=${instanceId}`,
       '--label', `aura.app=${appId}`,
       '--label', `aura.service=${spec.name}`,
