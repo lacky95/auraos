@@ -20,7 +20,7 @@ import { cleanNotice, patchOpensFlight, noticeClearsOnOpen } from './flight-noti
 import { ACTIVITY_STATE_MAX_BYTES, FLIGHT_MODES } from '../types/activity.js';
 import { OsEventBus } from '../ipc/OsEventBus.js';
 import { AppRegistry } from './AppRegistry.js';
-import { toolsTrackInstalledCaps } from './tool-allowlist.js';
+import { toolsTrackInstalledCaps } from '../capabilities/tool-allowlist.js';
 import { SHARED_HOME_PATH, toolchainMirrorBin } from './tool-provision.js';
 import { readLibMap, replaceLibFile, restoreLibsFromStore, toolchainLibFor, toolchainMirrorLib } from './tool-libs.js';
 import { legacySharedHomeDir, masterHomeDir, userHomeDir } from '../scopes/home.js';
@@ -55,7 +55,7 @@ import { grantedContextEnv, liveGrantedContextDeps, type GrantedContextDeps } fr
 import { ContextStore } from '../context/ContextStore.js';
 import { CredentialVault } from '../context/CredentialVault.js';
 import { migratePhase5Context } from '../context/migratePhase5.js';
-import { scanContractSources } from '../contract/sourceScan.js';
+import type { ContextMigrationDeps } from '../context/migratePhase5.js';
 import { defaultKv } from '@aura/kv-store';
 import { appOwnershipSpecs, applyAppOwnership } from '../identity/appOwnership.js';
 import { RuntimeCapabilityError } from '../runtimes/types.js';
@@ -183,6 +183,8 @@ export class AppManager {
   private readonly identities: SpawnIdentityProvider;
   /** Stream C: which Context keys a start gets (declared AND granted, context/grantedContext.ts). */
   private readonly context: GrantedContextDeps;
+  /** Stream C: the Context migration's app-source scanner, from the composition point (opts.contractScan). */
+  private readonly contractScan: NonNullable<ConstructorParameters<typeof AppManager>[0]['contractScan']> | null;
   private instances = new Map<string, AppInstance>();
   private nextInstanceNum = new Map<string, number>();
   private activities = new Map<string, AppActivity>();
@@ -255,6 +257,13 @@ export class AppManager {
     identities?: SpawnIdentityProvider;
     /** Stream C: the granted-Context lookups; default GrantStore, the system Context and the vault. */
     context?: GrantedContextDeps;
+    /**
+     * Stream C: the app-source scanner of the one-time Context migration
+     * (System Management's `scanContractSources`), handed in by the composition
+     * point (the shell's kernel init until Phase 6 `bootSystem()`), so Execution
+     * never imports the contract module (D97). Absent: the migration waits.
+     */
+    contractScan?: (appDir: string, manifest: AppManifest, keys: readonly string[]) => ReturnType<ContextMigrationDeps['scan']>;
     /** More runtimes next to the built-in ones (ARI; tests register a fake one). */
     runtimes?: RuntimeModule[];
     /** The Runtime Settings store; default: the sealed record in Valkey. */
@@ -318,6 +327,7 @@ export class AppManager {
       },
     );
     // Stream C (Q7): only declared AND granted Context keys reach an app; personal keys from its user's vault (D56).
+    this.contractScan = opts.contractScan ?? null;
     this.context = opts.context ?? (() => {
       const auth = async () => (await import('../auth/services.js')).getAuthServices();
       return liveGrantedContextDeps({
@@ -616,6 +626,12 @@ export class AppManager {
    * already granted (no broadcast fallback).
    */
   private async migrateContext(): Promise<void> {
+    const contractScan = this.contractScan;
+    if (!contractScan) {
+      // Never recorded without the scan: the report would miss source readers for good.
+      console.warn('[AppManager] context migration waits: no contract scanner was handed in (initAppManager opts.contractScan)');
+      return;
+    }
     try {
       const auth = (await import('../auth/services.js')).getAuthServices();
       const r = await migratePhase5Context({
@@ -629,7 +645,7 @@ export class AppManager {
         })),
         scan: (app, keys) => {
           const m = this.registry.getById(app.appId);
-          return m ? scanContractSources(app.dir, m, keys) : [];
+          return m ? contractScan(app.dir, m, keys) : [];
         },
         audit: (entry) => auth.audit.record(entry),
       });

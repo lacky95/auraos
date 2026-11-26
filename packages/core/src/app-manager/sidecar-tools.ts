@@ -1,4 +1,4 @@
-import { TOOL_MARKERS, resolveToolBinaries, toolBinaryName, type SidecarMap } from './tool-allowlist.js';
+import { TOOL_MARKERS, resolveToolBinaries, toolBinaryName, type SidecarMap } from '../capabilities/tool-allowlist.js';
 
 /**
  * The tools an OS sidecar with its OWN allowlist dir gets (template

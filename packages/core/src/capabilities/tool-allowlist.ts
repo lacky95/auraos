@@ -1,4 +1,9 @@
 /**
+ * Capability grants (System Management, owned by `capabilities`): a leaf
+ * module, pure functions with no imports, so Execution (runners, sidecars,
+ * provisioning) and System Management (the app contract) share one rule
+ * without a module cycle (D97).
+ *
  * Resolve a manifest `tools[]` allowlist into the concrete set of toolchain
  * binary names to provision into an instance's `/aura/my-tools` dir.
  *

@@ -30,7 +30,7 @@ import {
   unlinkSync, writeFileSync,
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join } from 'node:path';
-import { resolveToolBinaries, type SidecarMap } from './tool-allowlist.js';
+import { resolveToolBinaries, type SidecarMap } from '../capabilities/tool-allowlist.js';
 import {
   INSTANCE_LIB_DIR, libsForBinaries, materialiseLibs, readLibMap, toolchainLibFor,
   toolchainMirrorLib,

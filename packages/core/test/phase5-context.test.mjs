@@ -239,3 +239,16 @@ test('migration: an owner vault entry that exists is kept; missing apps and keys
   assert.equal(await grants.get({ kind: 'app', id: 'io.lakner.callgemini' }, contextReadPermission('GEMINI_API_KEY')), null);
   assert.ok(PHASE5_CONTEXT_MIGRATION.continuity.length > 0);
 });
+
+test("5-main (D97): the kernel gets the migration's source scanner from the composition point; without one the migration waits", async () => {
+  const { AppManager } = await import("../dist/app-manager/AppManager.js");
+  // No scanner: nothing is read or recorded (the report would miss source readers for good).
+  const fake = { contractScan: null, dataDir: "/nonexistent", registry: { getAll() { throw new Error("must not run"); } } };
+  await AppManager.prototype.migrateContext.call(fake);
+  // The shell's kernel init hands it in; core's app-manager never imports the contract module.
+  const mw = readFileSync(new URL("../../shell/src/middleware.ts", import.meta.url), "utf8");
+  assert.match(mw, /contractScan: core\.scanContractSources/);
+  const am = readFileSync(new URL("../src/app-manager/AppManager.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(am, /from '\.\.\/contract\//);
+  assert.ok(existsSync(new URL("../dist/capabilities/tool-allowlist.js", import.meta.url)), "tool-allowlist lives in capabilities");
+});

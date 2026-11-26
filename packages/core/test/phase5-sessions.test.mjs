@@ -28,7 +28,7 @@ import { ProotRunner } from '../dist/app-manager/ProotRunner.js';
 import { kernelHomeResolver } from '../dist/homes/HomeResolver.js';
 import { HomeDeniedError } from '../dist/homes/types.js';
 import { RuntimeCapabilityError } from '../dist/runtimes/types.js';
-import { toolsGrant } from '../dist/app-manager/tool-allowlist.js';
+import { toolsGrant } from '../dist/capabilities/tool-allowlist.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, '..', '..', '..');

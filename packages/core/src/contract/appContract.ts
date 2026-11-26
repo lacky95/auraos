@@ -20,7 +20,7 @@
  * refuses an unknown major `auraContract` with a clear message.
  */
 import type { AppManifest } from '../types/manifest.js';
-import { toolsGrant } from '../app-manager/tool-allowlist.js';
+import { toolsGrant } from '../capabilities/tool-allowlist.js';
 
 /** The contract this AuraOS implements. The SDK exports the same value (`AURA_CONTRACT`). */
 export const AURA_CONTRACT = 1;

@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   resolveToolBinaries, toolsGrant, sidecarNames,
-} from '../dist/app-manager/tool-allowlist.js';
+} from '../dist/capabilities/tool-allowlist.js';
 import {
   detectSidecars, readSidecarMap, writeSidecarMap, setSidecars,
   listToolchainBinaries, SIDECAR_MANIFEST,
