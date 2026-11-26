@@ -32,7 +32,7 @@ import { patchLevel, sourceOpenDetails, sourceOpenLevel } from './approvals/disp
 import { installGate, runInstall } from './approvals/nexus.ts';
 import { json, type ApprovalServiceDeps } from './approvals/service.ts';
 import { parseIdentity } from './nexusIdentity.js';
-import { TERMINAL_APP_ID } from '../../server/terminal-embed.mjs';
+import { TERMINAL_APP_ID } from '../../server/session-hosts.mjs';
 
 /** The app a registry knows, with where it lives. */
 export type ScopedApp = AppManifest & { scopeId: core.ScopeId; appDir: string };

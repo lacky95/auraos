@@ -8,7 +8,7 @@ import { localSystemId } from '@aura/core/system-identity';
 import { isIP } from 'node:net';
 import { loadAppHostServices, type AppHostServices } from '../../../server/app-host-auth.mjs';
 import { gatewayClaimOf, ownerSsrClaimOf, ownerUiActs, ownerUiApp } from '../../../server/gateway-identity.mjs';
-import { SESSION_HOST_APPS } from '../../../server/terminal-embed.mjs';
+import { SESSION_HOST_APPS } from '../../../server/session-hosts.mjs';
 import type { AccessTarget, AccessVia, VerifiedIdentity } from './types.ts';
 
 /**

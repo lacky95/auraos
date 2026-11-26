@@ -1,4 +1,4 @@
-import { TERMINAL_APP_ID } from '../../../server/terminal-embed.mjs';
+import { TERMINAL_APP_ID } from '../../../server/session-hosts.mjs';
 import { ROUTE_METHODS } from './types.ts';
 import type { AccessLevel, AccessRule, AccessTarget, RouteAccessManifest, RouteMethod } from './types.ts';
 

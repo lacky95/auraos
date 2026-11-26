@@ -27,17 +27,10 @@
  * of this file see the same grants and apps.
  */
 import { RELAY_CLAIM_HEADER } from '@aura/core/relay-claim';
+import { SESSION_HOST_APPS, TERMINAL_APP_ID } from './session-hosts.mjs';
 
-export const TERMINAL_APP_ID = 'com.aura.terminal';
-/**
- * D69 (stream T): the apps whose instances are each ONE user's session host
- * (core homes/plan.ts TERMINAL_SESSION_APPS). Their upstreams are reached
- * only by a caller acting for the instance's user (lib/access/decide.ts
- * `sessionHostReachable`), and their instances and sessions are listed only
- * to that user. The one list for the shell's TS and plain-ESM sides.
- * @type {ReadonlySet<string>}
- */
-export const SESSION_HOST_APPS = new Set([TERMINAL_APP_ID]);
+// The ids live in a dependency-free leaf (session-hosts.mjs); re-exported for this module's importers.
+export { TERMINAL_APP_ID, SESSION_HOST_APPS };
 export const OPEN_TERMINAL_ACTION = 'aura.intent.action.OPEN_TERMINAL';
 /** Query parameter naming the App Host label that frames an `embed=1` page. */
 export const EMBEDDER_PARAM = '_aura_embedder';
