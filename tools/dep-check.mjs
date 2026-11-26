@@ -38,6 +38,9 @@ const RULES = {
   'package-internals': 'A package reaches another workspace package only through its declared entry points (package.json `exports`), never by a relative path, `src/` or `dist/`.',
   'sdk-core': '@aura/app-sdk imports @aura/core only through its declared entry points and only for types or the declared leaf subpaths (never the kernel root at runtime).',
   'server-webshell': 'The server layer of @aura/shell (API routes, middleware, server/, and the lib modules they reach) never imports Web Shell code (components, layouts, stores, desktop pages) or UI libraries.',
+  'foundation-leaf': 'Foundation modules of @aura/core (sector map in packages/core/AGENTS.md) import no other sector at runtime, except the barrel (src/index.ts) and the composition root (src/system/bootstrap.ts).',
+  'kernel-presentation': 'Kernel sectors never import presentation-contract modules (theme, layout, keymap) at runtime.',
+  'agents-docs': 'Every AGENTS.md has a sibling CLAUDE.md that is exactly `@AGENTS.md`; the chain of AGENTS.md files from the root to any directory stays under 28 KiB (Codex stops adding files at project_doc_max_bytes, 32 KiB by default); the sector map in packages/core/AGENTS.md names every core module exactly once.',
 };
 
 const UI_PACKAGES = /^(react|react-dom|@aura\/ui|nanostores|@nanostores\/.*|simple-keyboard.*|socket\.io-client|@astrojs\/react|lucide-react)(\/|$)/;
@@ -315,6 +318,58 @@ for (const e of edges) {
   if (from.pkg === 'shell' && (from.layer === 'server' || from.layer === 'shared') && !e.type) {
     const toWeb = e.to && files.get(e.to)?.layer === 'webshell' && isWebshellFile(e.to);
     if (toWeb || (e.ext && UI_PACKAGES.test(e.spec))) add('server-webshell', where, { from: e.from, line: e.line, detail: e.spec });
+  }
+}
+
+// ── docs alignment and sector rules (D97 addendum) ─────────────────────────
+
+const KERNEL_SECTORS = new Set(['foundation', 'execution', 'identity-security', 'resource', 'communication', 'system-management']);
+const COMPOSITION_EXEMPT = new Set(['core/src/index.ts', 'core/src/system/bootstrap.ts']);
+function listAgentsDocs() {
+  const git = spawnSync('git', ['-C', ROOT, 'ls-files', '-z', '--cached', '--others', '--exclude-standard'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  const all = git.status === 0 ? git.stdout.split('\0').filter(Boolean) : [];
+  return all.filter((f) => /(^|\/)AGENTS\.md$/.test(f) && !f.startsWith('os/home-seed/') && existsSync(join(ROOT, f)));
+}
+for (const doc of listAgentsDocs()) {
+  const sib = join(ROOT, dirname(doc), 'CLAUDE.md');
+  if (!existsSync(sib)) add('agents-docs', `${doc} has no sibling CLAUDE.md`, { from: doc, line: 1, detail: 'add CLAUDE.md containing only @AGENTS.md' });
+  else if (readFileSync(sib, 'utf8').trim() !== '@AGENTS.md') add('agents-docs', `${dirname(doc) === '.' ? '' : dirname(doc) + '/'}CLAUDE.md is not @AGENTS.md`, { from: doc, line: 1, detail: 'CLAUDE.md must contain only @AGENTS.md' });
+}
+const CHAIN_BUDGET = 28 * 1024;
+const docs = listAgentsDocs();
+// The app template is seeded into each new app, where it is that app's root file; its chain here is not a repo chain.
+for (const doc of docs.filter((d) => !d.startsWith('packages/aura-cli/src/templates/'))) {
+  let bytes = 0;
+  const parts = dirname(doc) === '.' ? [] : dirname(doc).split('/');
+  for (let i = 0; i <= parts.length; i++) {
+    const f = join(ROOT, ...parts.slice(0, i), 'AGENTS.md');
+    if (existsSync(f)) bytes += statSync(f).size;
+  }
+  if (bytes > CHAIN_BUDGET) add('agents-docs', `${doc} chain is ${bytes} bytes (budget ${CHAIN_BUDGET})`, { from: doc, line: 1, detail: 'Codex drops the most specific files first: shorten a level' });
+}
+const sectorOf = new Map();
+const kernelDoc = join(ROOT, 'packages/core/AGENTS.md');
+if (existsSync(kernelDoc)) {
+  const block = readFileSync(kernelDoc, 'utf8').match(/```text dep-check:sectors\n([\s\S]*?)```/);
+  if (!block) add('agents-docs', 'packages/core/AGENTS.md has no dep-check:sectors block', { from: 'core/AGENTS.md', line: 1, detail: '' });
+  else {
+    for (const line of block[1].split('\n')) {
+      const m = line.match(/^\s*([a-z-]+):\s*(.*)$/); if (!m) continue;
+      for (const mod of m[2].split(/\s+/).filter(Boolean)) {
+        if (sectorOf.has(`core/${mod}`)) add('agents-docs', `core/${mod} is in two sectors`, { from: 'core/AGENTS.md', line: 1, detail: '' });
+        sectorOf.set(`core/${mod}`, m[1]);
+      }
+    }
+    const actual = new Set(coreFiles.map((r) => files.get(r).module));
+    for (const m of actual) if (!sectorOf.has(m)) add('agents-docs', `${m} has no sector in packages/core/AGENTS.md`, { from: 'core/AGENTS.md', line: 1, detail: 'add it to the dep-check:sectors block' });
+    for (const m of sectorOf.keys()) if (!actual.has(m)) add('agents-docs', `packages/core/AGENTS.md names ${m}, which does not exist`, { from: 'core/AGENTS.md', line: 1, detail: 'remove or rename it in the dep-check:sectors block' });
+    for (const e of coreRuntime) {
+      const a = files.get(e.from).module, b = files.get(e.to).module;
+      const sa = sectorOf.get(a), sb = sectorOf.get(b);
+      if (!sa || !sb || a === b) continue;
+      if (sa === 'foundation' && sb !== 'foundation' && !COMPOSITION_EXEMPT.has(e.from)) add('foundation-leaf', `${e.from} -> ${e.to}`, { from: e.from, line: e.line, detail: `${a} (foundation) imports ${b} (${sb})` });
+      if (KERNEL_SECTORS.has(sa) && sb === 'presentation-contracts' && !COMPOSITION_EXEMPT.has(e.from)) add('kernel-presentation', `${e.from} -> ${e.to}`, { from: e.from, line: e.line, detail: `${a} (${sa}) imports ${b}` });
+    }
   }
 }
 
