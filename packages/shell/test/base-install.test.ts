@@ -59,6 +59,8 @@ let audits: Array<{ action: string; opts: any; actor: any }>;
 const audit = (i = 0) => audits[i] as { action: string; opts: any; actor: any };
 const argsOf = (i: number) => (runs[i] as { args: readonly string[] }).args;
 let failWith: string | null;
+let devices: string[];
+let devicesFail: string | null;
 
 function deps(): BaseInstallDeps {
   const owner: OwnerActionDeps = {
@@ -80,6 +82,11 @@ function deps(): BaseInstallDeps {
       return `ran ${args[2]}`;
     },
     stageResolvConf: () => true,
+    ensureDevices: (root) => {
+      devices.push(root);
+      if (devicesFail) throw new Error(devicesFail);
+      return [];
+    },
     exists: () => true,
     baseRootfs: '/os/base-rootfs',
   };
@@ -91,6 +98,8 @@ beforeEach(() => {
   runs = [];
   audits = [];
   failWith = null;
+  devices = [];
+  devicesFail = null;
 });
 
 const post = (body?: unknown, headers: Record<string, string> = {}) => ({
@@ -123,6 +132,7 @@ test('the owner in the desktop: the built-in list, as argv to chroot apt-get, si
   assert.equal(r.status, 200);
   assert.deepEqual(r.body.packages, SORTED);
   assert.deepEqual(runs, [{ file: 'chroot', args: UPDATE }, { file: 'chroot', args: INSTALL(SORTED) }]);
+  assert.deepEqual(devices, ['/os/base-rootfs'], 'the chroot\'s /dev nodes are ensured once, before apt');
   for (const { args } of runs) assert.ok(!args.some((a) => INSECURE.test(a)), `no insecure apt flag in ${args.join(' ')}`);
   assert.equal(audits.length, 1);
   assert.equal(audit().action, BASE_INSTALL_AUDIT_ACTION);
@@ -276,6 +286,20 @@ test('a failed signature check fails the request with a diagnostic and an audit 
   assert.equal(runs.length, 1, 'stopped at the failed update, nothing retried');
   assert.equal(audit().opts.outcome, 'failed');
   assert.deepEqual(audit().opts.detail.packages, SORTED);
+});
+
+test('the chroot /dev nodes are ensured after the approval and before apt; a refusal fails closed, audited, nothing runs', async () => {
+  caller = TERMINAL;
+  const r = await read(await postBaseInstall(post({ packages: ['curl'] }), deps()));
+  assert.equal(r.status, 202);
+  assert.deepEqual(devices, [], 'nothing is touched before the owner decides');
+  devicesFail = 'chroot devices: refusing /os/base-rootfs/dev/null: a symlink, not a device';
+  caller = OWNER;
+  const f = await read(await postBaseInstall(post(), deps()));
+  assert.equal(f.status, 500);
+  assert.match(f.body.error, /refusing .*a symlink/);
+  assert.equal(runs.length, 0, 'apt never runs without the devices');
+  assert.equal(audit().opts.outcome, 'failed');
 });
 
 test('no shell: the live runner passes argv to the program as is', () => {

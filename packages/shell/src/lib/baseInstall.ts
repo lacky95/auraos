@@ -11,7 +11,10 @@
  * base-rootfs is a complete Debian filesystem with its own apt config and the
  * Debian archive keyring, so apt verifies every signature as usual: the
  * route never turns that off, and a failed verification fails the request
- * (D94 G8). resolv.conf is copied in first so DNS works inside the chroot.
+ * (D94 G8). resolv.conf is copied in first so DNS works inside the chroot,
+ * and `<rootfs>/dev/{null,zero,random,urandom}` are made the right character
+ * devices (lib/chrootDevices.ts: mknod by argv, symlinks refused, a wrong
+ * node replaced atomically): apt cannot verify without `/dev/null`.
  *
  * It runs as root in the master (D8/D30), so (SF-1):
  *   - the body may only name packages: each one a Debian package name (no
@@ -33,6 +36,7 @@ import { dirname, join } from 'node:path';
 import type { ApprovalLevel } from '@aura/core';
 import { auditOwner, ownerAction, type OwnerActor } from './approvals/admin.ts';
 import { json } from './approvals/service.ts';
+import { ensureChrootDevices } from './chrootDevices.ts';
 
 /** The built-in list (the Dockerfile's base-rootfs stage installs the same at build). */
 export const BASE_ESSENTIALS: readonly string[] = [
@@ -67,6 +71,8 @@ export interface BaseInstallDeps {
   run: RunCommand;
   /** Stages the master's resolv.conf into the chroot; returns whether it did. */
   stageResolvConf(baseRootfs: string): boolean;
+  /** Makes `<rootfs>/dev/{null,zero,random,urandom}` the right devices (fails closed); returns what it changed. */
+  ensureDevices(baseRootfs: string): string[];
   exists(path: string): boolean;
   baseRootfs: string;
 }
@@ -94,6 +100,7 @@ export function liveBaseInstallDeps(): BaseInstallDeps {
       copyFileSync('/etc/resolv.conf', dst);
       return true;
     },
+    ensureDevices: (baseRootfs) => ensureChrootDevices(baseRootfs, runArgv),
     exists: existsSync,
     baseRootfs: process.env['AURA_BASE_ROOTFS'] ?? '/os/base-rootfs',
   };
@@ -180,6 +187,7 @@ export async function postBaseInstall(ctx: Ctx, deps: BaseInstallDeps = liveBase
   const detail = { operation: BASE_INSTALL_AUDIT_ACTION, packages, level };
   try {
     if (deps.stageResolvConf(baseRootfs)) log.push('staged /etc/resolv.conf for chroot DNS');
+    log.push(...deps.ensureDevices(baseRootfs));
     log.push(deps.run('chroot', [baseRootfs, 'apt-get', ...APT_VERIFY_ARGS, 'update', '-qq'], { timeoutMs: 60_000 }));
     log.push(deps.run('chroot', [
       baseRootfs, 'apt-get', ...APT_VERIFY_ARGS, 'install', '-y', '-q', '--no-install-recommends', '--', ...packages,
