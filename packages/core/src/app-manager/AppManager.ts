@@ -1515,7 +1515,7 @@ export class AppManager {
       this.runnerOf(instanceId).onExit(instanceId, (code) => this.handleUnexpectedExit(instanceId, appId, code));
       return instanceId;
     } catch (err) {
-      this.ports.release(port);
+      this.releasePort(port, instanceId);
       this.transition(instanceId, appId, 'error', null, String(err));
       throw err;
     }
@@ -1667,7 +1667,7 @@ export class AppManager {
     await this.runnerOf(instanceId).kill(instanceId, reason === 'restart'
       ? { keep: { services: keepServicesOf(this.registry.getById(appId)) } }
       : {});
-    if (port) this.ports.release(port);
+    if (port) this.releasePort(port, instanceId);
     this.transition(instanceId, appId, 'destroyed', null);
 
     // Clear instance after destroy
@@ -1732,7 +1732,7 @@ export class AppManager {
     this.portExpose.removeAll(instanceId);
     this.sidecarParking.unpark(instanceId); // a kill keeps nothing
     const killed = this.runnerOf(instanceId).forceKill(instanceId);
-    if (port) this.ports.release(port);
+    if (port) this.releasePort(port, instanceId);
     if (killed) {
       this.fsm.set(instanceId, 'destroyed');
       OsEventBus.emit('app:stateChanged', { instanceId, appId, state: 'destroyed', port: null });
@@ -2569,7 +2569,7 @@ export class AppManager {
           inst.port  = null;
           inst.error = 'reconciled: backing process disappeared';
           this.fsm.set(inst.instanceId, 'error');
-          if (releasedPort) this.ports.release(releasedPort);
+          if (releasedPort) this.releasePort(releasedPort, inst.instanceId);
           this.providers.unregisterInstance(inst, this.registry.getById(inst.appId));
           this.interfaces.unregisterInstance(inst);
           this.purgeActivitiesOfInstance(inst.instanceId);
@@ -2796,9 +2796,20 @@ export class AppManager {
     };
   }
 
+  /**
+   * Give a port back to the allocator, unless another tracked instance still
+   * holds it: survivors adopted from older builds can share one (reserved once,
+   * at adoption), and freeing it with the first of them let a new spawn take a
+   * port that is still in use.
+   */
+  private releasePort(port: number, instanceId: string): void {
+    for (const i of this.instances.values()) if (i.instanceId !== instanceId && i.port === port) return;
+    this.ports.release(port);
+  }
+
   private handleUnexpectedExit(instanceId: string, appId: string, code: number | null): void {
     const port = this.runnerOf(instanceId).getPort(instanceId);
-    if (port) this.ports.release(port);
+    if (port) this.releasePort(port, instanceId);
     const inst = this.instances.get(instanceId);
     if (inst) {
       this.providers.unregisterInstance(inst, this.registry.getById(appId));
