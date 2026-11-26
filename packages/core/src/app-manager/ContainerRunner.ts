@@ -17,6 +17,7 @@ import type { RuntimeCapabilities } from '../runtimes/types.js';
 import { MOUNT_ROOT_PATH } from './MountManager.js';
 import { KEEP_RESTART_LABEL, keptAcrossRestart, type KeepSiblings } from './sidecarParking.js';
 import type { SandboxExecOpts, SandboxRunner, SandboxRunnerOpts } from './SandboxRunner.js';
+import type { EngineContainer } from './ExecBridge.js';
 import type { ResourceUsage, SidecarInfo } from '../types/instance.js';
 import { SIDECAR_PS_FORMAT, USAGE_STATS_FORMAT, parseSidecarPs, parseUsageStats } from './sidecars.js';
 import type { InstanceSpawnContext } from './SandboxRunner.js';
@@ -1450,6 +1451,12 @@ export class ContainerRunner implements SandboxRunner {
     return execFileAsync('docker', ['exec', '-w', `/workspace/apps/${c.appId}`, ...envFlags, this.containerName(instanceId), ...argv], {
       timeout: opts.timeoutMs ?? 120_000, maxBuffer: 16 * 1024 * 1024,
     });
+  }
+
+  /** The exec bridge's target (SandboxRunner `engineContainer`): the app container, in its app dir. */
+  engineContainer(instanceId: string): EngineContainer | null {
+    const c = this.containers.get(instanceId);
+    return c ? { container: this.containerName(instanceId), workdir: `/workspace/apps/${c.appId}` } : null;
   }
 
   isRunning(instanceId: string): boolean {

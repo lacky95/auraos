@@ -10,6 +10,7 @@ import { prootContextBinds } from './spawn/contextArgs.js';
 import { prootSocketBinds } from './spawn/socketArgs.js';
 import type { RuntimeCapabilities } from '../runtimes/types.js';
 import type { SandboxExecOpts, SandboxRunner, SandboxRunnerOpts } from './SandboxRunner.js';
+import { OutputLog } from './outputLog.js';
 import type { SpawnContext } from '../scopes/types.js';
 import { ContextStore } from '../context/ContextStore.js';
 import { VolumeStore, type VolumeEntry } from '../context/VolumeStore.js';
@@ -60,8 +61,17 @@ interface SpawnedApp {
 
 const execFileAsync = promisify(execFile);
 
+/** How many instances' output rings a runner keeps (running ones always). */
+const OUTPUT_LOGS_KEPT = 64;
+
 export class ProotRunner implements SandboxRunner {
   private processes = new Map<string, SpawnedApp>();
+  /**
+   * Each instance's own output (`aura logs`, GET /api/instances/:id/logs):
+   * PRoot has no engine log. Kept past the exit for a crash's last words,
+   * replaced on the next spawn, and bounded to the newest OUTPUT_LOGS_KEPT.
+   */
+  private outputs = new Map<string, OutputLog>();
   private baseRootfs: string;
   private toolchainDir: string;
   private appsDir: string;
@@ -250,14 +260,23 @@ export class ProotRunner implements SandboxRunner {
 
     const provision = new ProvisionWatch();
     const tail = new OutputTail();
+    const output = new OutputLog();
+    this.outputs.delete(instanceId);
+    this.outputs.set(instanceId, output);
+    for (const id of this.outputs.keys()) {
+      if (this.outputs.size <= OUTPUT_LOGS_KEPT) break;
+      if (!this.processes.has(id) && id !== instanceId) this.outputs.delete(id);
+    }
     child.stdout?.on('data', (d) => {
       provision.observe(d.toString());
       tail.push(d.toString());
+      output.push('out', d.toString());
       process.stdout.write(`[${instanceId}] ${d}`);
     });
     child.stderr?.on('data', (d) => {
       provision.observe(d.toString());
       tail.push(d.toString());
+      output.push('err', d.toString());
       process.stderr.write(`[${instanceId}] ${d}`);
     });
     // An app that dies while booting used to surface only as "did not become
@@ -567,6 +586,11 @@ export class ProotRunner implements SandboxRunner {
     spawned.process.removeAllListeners('exit');
     killProcessGroup(spawned.process.pid, 'SIGKILL');
     return true;
+  }
+
+  /** The instance's output ring (SandboxRunner `outputLog`). */
+  outputLog(instanceId: string): OutputLog | null {
+    return this.outputs.get(instanceId) ?? null;
   }
 
   /**
