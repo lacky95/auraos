@@ -185,6 +185,9 @@ export async function postEnabled(ctx: Ctx, id: string | undefined, on: boolean,
   if (rid instanceof Response) return rid;
   let stopInstances = false;
   if (!on) {
+    // A runtime that can never be disabled says so first, not "stop its instances".
+    const refusal = deps.mgr.runtimeSettings.disableRefusal(rid, await deps.mgr.runtimeSettings.get());
+    if (refusal) return errorResponse(refusal);
     const body = await readBody(ctx);
     stopInstances = !(body instanceof Response) && body['stopInstances'] === true;
   }

@@ -183,6 +183,10 @@ test('a change from Settings needs the owner\'s password (fresh); the operator a
 });
 
 test('disable: refused while instances run unless stopInstances; container and the default cannot be disabled', async () => {
+  instances.push({ instanceId: 'io.ex.box-1', appId: 'io.ex.box', state: 'resumed', sandbox: 'container', runtimeSource: 'manifest' });
+  const never = await read(await postEnabled(req('POST', {}), 'container', false, deps()));
+  assert.deepEqual([never.status, never.body.error], [409, 'cannot-disable'], 'cannot-disable, not instances-running, while container instances run');
+  instances.pop();
   const refused = await read(await postEnabled(req('POST', {}), 'proot', false, deps()));
   assert.deepEqual([refused.status, refused.body.error, refused.body.instances], [409, 'instances-running', ['io.ex.kept-1']]);
   const ok = await read(await postEnabled(req('POST', { stopInstances: true }), 'proot', false, deps()));
