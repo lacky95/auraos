@@ -46,6 +46,10 @@ through `KeyboardOverlay.astro`.
   select), Enter (newline, or implicit form submit), Ctrl+A.
 - xterm.js (`.xterm-helper-textarea`) gets only key events: it turns
   `keydown`/`keypress` into terminal data itself.
+- On a text target (field, contenteditable, xterm) the receiver cancels the
+  `keypress` default after the app's listeners ran: WebKit (Safari, iPad)
+  runs Space's default for untrusted events too and scrolled the page by a
+  screen. With nothing editable focused the keypress is left alone.
 
 ### Limits
 
