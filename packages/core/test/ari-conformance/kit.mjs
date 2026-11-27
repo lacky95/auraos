@@ -243,6 +243,23 @@ export function describeRuntime(name, makeModule, harness = {}) {
     assert.throws(() => requirePrivateHomeIsolation('org.k.app', { services: [{ name: 'web', image: 'x:1' }] }, m), shape(['services[web].network']));
   });
 
+  // D107 S2: where a runtime can give a Private Home, as derived constraints (no behaviour change).
+  test(`[ARI ${name}] storage.privateHome (D107 S2): constraints {session, instance}, derived from the capabilities; support follows session`, () => {
+    const m = makeModule();
+    for (const settings of settingsList()) {
+      const caps = m.capabilities(settings);
+      const f = moduleFeatures(m, settings).find((x) => x.id === 'storage.privateHome');
+      assert.deepEqual(Object.keys(f.constraints ?? {}).sort(), ['instance', 'session']);
+      assert.equal(f.constraints.session, caps.privateHomeSession === true);
+      assert.equal(f.support, f.constraints.session ? 'supported' : 'unsupported');
+      // instance: a user environment's needs (a namespace boundary at least) under an enforced identity.
+      const instance = caps.isolation !== 'remote' && ['namespace', 'vm'].includes(caps.isolation) && caps.identity === 'enforced';
+      assert.equal(f.constraints.instance, instance);
+      // PRoot-class isolation or an unenforced identity never holds a Private Home in an instance.
+      if (caps.isolation === 'ptrace' || caps.isolation === 'none' || caps.identity !== 'enforced') assert.equal(f.constraints.instance, false);
+    }
+  });
+
   // Phase 6 D-M: the mounts group is the mechanism only; its shape is the contract.
   test(`[ARI ${name}] mounts (D-M): present exactly with mount.attach; attach/detach/table/verify/rootOf are functions`, () => {
     const m = makeModule();

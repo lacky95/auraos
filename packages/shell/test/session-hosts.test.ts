@@ -11,7 +11,10 @@ test('the shell\'s system app ids equal the kernel\'s', () => {
   assert.equal(shell.TERMINAL_APP_ID, kernel.TERMINAL_APP_ID);
   assert.equal(shell.AURASHELLD_APP_ID, kernel.AURASHELLD_APP_ID);
   assert.equal(shell.SETTINGS_APP_ID, kernel.SETTINGS_APP_ID);
-  assert.deepEqual([...shell.SESSION_HOST_APPS].sort(), [...kernel.SESSION_HOST_APP_IDS].sort());
+  // D107 S1: the kernel's one predicate; the shell's app-keyed copy names the same session hosts.
+  for (const appId of ['com.aura.terminal', 'com.aura.aurashelld', 'com.aura.settings', 'com.aura.terminalx', 'io.x', ...shell.SESSION_HOST_APPS]) {
+    assert.equal(shell.SESSION_HOST_APPS.has(appId), kernel.isUserEnvironment({ appId }), appId);
+  }
   assert.deepEqual([...shell.OWNER_AGENT_APPS].sort(), [...kernel.OWNER_AGENT_APP_IDS].sort());
   for (const [id, app] of [['com.aura.terminal-2', 'com.aura.terminal'], ['com.aura.terminal', 'com.aura.terminal'],
     ['com.aura.terminalx-1', 'com.aura.terminal'], ['io.x-1', 'com.aura.terminal']] as const) {

@@ -31,10 +31,11 @@ import type { SidecarInfo } from '../types/instance.js';
 import type { LifecycleStatus } from '../app-manager/lifecycleGate.js';
 import type { ResolvedSidecarSpec } from '../app-manager/sidecar-spec.js';
 import {
-  CATEGORY_OF_CODE, RUNTIME_ID_PATTERN, RuntimeModuleError, RuntimeFeatureError,
+  CATEGORY_OF_CODE, RUNTIME_ID_PATTERN, RuntimeModuleError, RuntimeFeatureError, missingCapabilities,
   type RuntimeCapabilities, type RuntimeRefusal, type RuntimeRefusalCode, type RuntimeSettings,
 } from './types.js';
 import { refuseUnknownMajor } from '../contract/types.js';
+import { requestNeeds } from './requirements.js';
 
 /** The contract major this kernel implements (ARI §4.3, like `auraContract`). */
 export const ARI_VERSION = 1;
@@ -226,7 +227,16 @@ const FEATURE_OF_CAPS: Record<RuntimeFeatureId, (c: RuntimeCapabilities) => Omit
   'tools.liveGrant': (c) => ({ support: yes(c.hostFilesystem), applyMode: 'live' }),
   'tools.liveRevoke': (c) => ({ support: yes(c.hostFilesystem), applyMode: 'live' }),
   'tools.inheritance': (c) => ({ support: yes(c.sidecars && c.hostFilesystem), applyMode: 'live' }),
-  'storage.privateHome': (c) => ({ support: yes(c.privateHomeSession) }),
+  // D107 S2: where a Private Home can be: `session`, bound in a session's own mount namespace
+  // (`privateHomeSession`; jump); `instance`, an instance that is its user's environment, as that user
+  // (the `user-environment` needs, under an enforced identity). Derived; `support` still follows `session`.
+  'storage.privateHome': (c) => ({
+    support: yes(c.privateHomeSession),
+    constraints: {
+      session: c.privateHomeSession,
+      instance: missingCapabilities(c, { ...requestNeeds('user-environment'), identity: 'enforced' }).length === 0,
+    },
+  }),
   'storage.sharedHome': (c) => ({ support: yes(c.appHome) }),
   'storage.persistent': (c) => ({ support: yes(c.hostFilesystem) }),
   'mount.attach': (c) => ({ support: yes(c.mounts), applyMode: 'live' }),

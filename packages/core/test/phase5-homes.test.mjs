@@ -107,23 +107,24 @@ test('fail closed: no installation, no identity, a bad id', async () => {
     (e) => e.reason === 'identity-unresolved');
 });
 
-test('terminal-session: the user\'s own Private Home on a namespace runtime; never PRoot, never another user or an app uid', async () => {
+// D107 S2: `user-environment`; `terminal-session` is its read alias for one release (same rules).
+for (const executionContext of ['user-environment', 'terminal-session']) test(`${executionContext}: the user's own Private Home on a namespace runtime; never PRoot, never another user or an app uid`, async () => {
   const d = tmp();
   const r = resolver(d);
-  const h = await r.resolve(req({ executionContext: 'terminal-session', userId: 'default', principal: OWNER, appIdentity: { uid: 0, gid: 0 } }));
+  const h = await r.resolve(req({ executionContext, userId: 'default', principal: OWNER, appIdentity: { uid: 0, gid: 0 } }));
   assert.equal(h.kind, 'private');
   assert.equal(h.volumeSubpath, 'aura/home/default');
   assert.equal(owner(h.hostPath), '1000:1000', 'created lazily for its user');
   assert.equal(mode(h.hostPath), 0o700);
-  const asUser = await r.resolve(req({ executionContext: 'terminal-session', userId: 'default', principal: OWNER, appIdentity: { uid: 1000, gid: 1000 } }));
+  const asUser = await r.resolve(req({ executionContext, userId: 'default', principal: OWNER, appIdentity: { uid: 1000, gid: 1000 } }));
   assert.equal(asUser.hostPath, h.hostPath);
-  await assert.rejects(r.resolve(req({ executionContext: 'terminal-session', userId: 'default', principal: OWNER, appIdentity: { uid: 0, gid: 0 }, runtime: PROOT })),
+  await assert.rejects(r.resolve(req({ executionContext, userId: 'default', principal: OWNER, appIdentity: { uid: 0, gid: 0 }, runtime: PROOT })),
     (e) => e instanceof RuntimeCapabilityError && e.missing.includes('isolation'));
-  await assert.rejects(r.resolve(req({ executionContext: 'terminal-session', userId: 'default', principal: MEMBER, appIdentity: { uid: 0, gid: 0 } })),
+  await assert.rejects(r.resolve(req({ executionContext, userId: 'default', principal: MEMBER, appIdentity: { uid: 0, gid: 0 } })),
     (e) => e.reason === 'not-authorized');
-  await assert.rejects(r.resolve(req({ executionContext: 'terminal-session', userId: 'default', principal: OWNER, appIdentity: APP })),
+  await assert.rejects(r.resolve(req({ executionContext, userId: 'default', principal: OWNER, appIdentity: APP })),
     (e) => e.reason === 'not-authorized', 'an app identity never gets a Private Home');
-  await assert.rejects(r.resolve(req({ executionContext: 'terminal-session', userId: 'default' })), (e) => e.reason === 'user-required');
+  await assert.rejects(r.resolve(req({ executionContext, userId: 'default' })), (e) => e.reason === 'user-required');
 });
 
 test('jump: private and ephemeral need session capabilities and a non-root target; app needs authorization (D74, D79, J.5)', async () => {
