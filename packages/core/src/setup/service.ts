@@ -29,6 +29,14 @@
  *                    `needs-setup` body. The engine's own maintenance start
  *                    (reason `setup` while `initializing`) is the exception
  *
+ *   P8 (change.ts) changePlan (the grantDigest diff, §5.5 compatibility,
+ *                    data that stays behind), the last applied configuration
+ *                    and its explicit restore (decision 13), the user's own
+ *                    Private Home revocation, and the update re-resolution
+ *                    `onManifestChanged` (renames, `onMigrateConfig` fail
+ *                    closed, `repair-required` on invalid values, a new
+ *                    required field or a dropped profile)
+ *
  * Decision 3: no profile picked for the caller, except "exactly one
  * feasible input-free profile" (`autoSelectableProfile`); otherwise
  * `profile-required`. Requests never grant before the approval; on its
@@ -58,6 +66,14 @@ import { autoSelectableProfile, profileOptions, resolveEffective } from './resol
 import type { DesiredRead } from './store.js';
 import { generateSetupSecrets, setupConfigView, sidecarSetupValues, vaultSecretReader } from './values.js';
 import { blockingDecision, BlockingWatcher } from './blocking.js';
+import {
+  compatibilityIssues, dataStaysBehind, DATA_STAYS_NOTE, fieldScopesOf, grantDiff, migrateDesired, RESTORE_NOTICE,
+  type FieldScopes, type HomePrivateGrantView, type LastAppliedView, type ManifestChangeOutcome, type SetupChangePlan,
+} from './change.js';
+import { grantBearingOf } from './digest.js';
+import { HOME_PRIVATE_AUDIT } from './homeEnvironment.js';
+import { HOME_PRIVATE_PERMISSION, homePrivateSidecarPermission } from './contracts.js';
+import { NO_MAINTENANCE_HINT } from './hooks.js';
 
 /** Init attempts of one run (a kernel restart during `initializing` retries, then `setup-failed`). */
 export const MAX_INIT_ATTEMPTS = 3;
@@ -106,6 +122,11 @@ function fieldDecls(m: SetupAppManifest): Record<string, FieldDecl> {
 const emptyDesired = (setupVersion: number): DesiredConfig => ({
   v: 1, setupVersion, profile: null, values: {}, secrets: {}, overrides: {}, updatedAt: new Date(0).toISOString(), updatedBy: 'kernel',
 });
+
+const SIDECAR_RE = /^[a-z][a-z0-9-]{0,47}$/;
+const actorUser = (actor: SetupActor, ownerId: string): string => (actor.kind === 'operator' ? ownerId : actor.userId);
+/** The blocking codes a lost authorization, policy or feature gives (blocked, never a repair). */
+const AUTHZ_CODES: ReadonlySet<string> = new Set(['requirement-unauthorized', 'policy-refused', 'requirement-unsupported']);
 
 const updatedByOf = (actor: SetupActor): string => (actor.kind === 'operator' ? 'operator' : `user:${actor.userId}`);
 const attributionOf = (actor: SetupActor): ChangeAttribution => (actor.kind === 'operator' ? { kind: 'operator' } : { kind: 'user', userId: actor.userId });
@@ -229,6 +250,12 @@ export class SetupService implements SetupEngine {
     const desired = structuredClone(ctx.desired.value ?? emptyDesired(version));
     const user = ctx.userDesired.value ? structuredClone(ctx.userDesired.value) : null;
     const userDesired: DesiredConfig = user ?? emptyDesired(desired.setupVersion);
+    if (repair && ctx.m.setup && desired.setupVersion !== version) {
+      // P8: a repair after a `setup.version` change keeps the stored values under their new names.
+      const at = this.now().toISOString();
+      Object.assign(desired, migrateDesired(desired, ctx.m.setup, at).desired);
+      Object.assign(userDesired, migrateDesired(userDesired, ctx.m.setup, at).desired);
+    }
     if (repair) { desired.setupVersion = version; userDesired.setupVersion = version; }
     const decls = fieldDecls(ctx.m);
     if (proposal.profile !== undefined) desired.profile = proposal.profile;
@@ -417,11 +444,14 @@ export class SetupService implements SetupEngine {
     return { status: 'refused', state: this.viewOf(ctx, r), error };
   }
 
-  private async changeLocked(ctx: Ctx, proposal: SetupProposal, actor: SetupActor, mode: 'values' | 'setup' | 'reconfigure' | 'repair'): Promise<SetupOutcome> {
+  private async changeLocked(
+    ctx: Ctx, proposal: SetupProposal, actor: SetupActor, mode: 'values' | 'setup' | 'reconfigure' | 'repair',
+    explicit?: { desired: DesiredConfig; userDesired: DesiredConfig | null },
+  ): Promise<SetupOutcome> {
     if (ctx.state === 'initializing') {
       return this.refused(ctx, setupError('setup-required', `${ctx.appId} is initializing; wait for it, then change the setup`, { state: 'initializing', target: ctx.appId }));
     }
-    const { desired, userDesired } = this.proposed(ctx, proposal, updatedByOf(actor), mode === 'repair');
+    const { desired, userDesired } = explicit ?? this.proposed(ctx, proposal, updatedByOf(actor), mode === 'repair');
     await this.bindAsked(ctx, desired, userDesired);
     // Decision 3: only exactly one feasible input-free profile is ever picked for the caller.
     if ((ctx.m.profiles ?? []).length && desired.profile === null) {
@@ -433,6 +463,9 @@ export class SetupService implements SetupEngine {
     const dry = await this.resolveCurrent(ctx, desired, userDesired);
     const hard = this.hardBlockers(ctx, dry);
     if (hard.length) return this.refused(ctx, refusalOf(hard), dry);
+    // P8 (§5.5): per-user values never become installation values; no shared instance with per-user secrets.
+    const compat = compatibilityIssues({ to: dry.requested, desired, userDesired, scopes: this.scopes(ctx, dry) });
+    if (compat.length) return this.refused(ctx, compat[0]!, dry);
     const dryPayload = setupApplyPayload(dry, ctx.m);
     if (mode === 'values' && (dryPayload || (ctx.summary?.grantDigest && dry.grantDigest !== ctx.summary.grantDigest))) {
       return this.refused(ctx, setupError('setup-blocked', `this change of ${ctx.appId} changes what it may do (${dryPayload ? 'it adds privileges' : 'its privilege-bearing part'}); `
@@ -568,7 +601,7 @@ export class SetupService implements SetupEngine {
       }
       default:
         if (!actor) return { status: 'unchanged', state: this.viewOf(ctx) };
-        return this.changeLocked(ctx, {}, actor, 'setup');
+        return this.changeLocked(ctx, {}, actor, ctx.state === 'repair-required' ? 'repair' : 'setup');
     }
   }
 
@@ -677,6 +710,7 @@ export class SetupService implements SetupEngine {
       return this.failInit(now, summary, again.effective ? setupError('setup-failed', `the configuration of ${ctx.appId} changed while it initialized; apply it again`, { target: ctx.appId }) : refusalOf(again.blocking), again);
     }
     const ready = await this.deps.states.markReady(ctx.installationId, summary, { configDigest: effective.configDigest, grantDigest: effective.grantDigest, profile: effective.profile });
+    await this.keepApplied(now, effective);
     this.consumed.delete(ctx.installationId);
     this.effective.set(ctx.appId, again.effective);
     this.blocks.delete(ctx.appId);
@@ -860,11 +894,234 @@ export class SetupService implements SetupEngine {
     }));
   }
 
+  // ── P8: configuration and change management (change.ts) ──────────────────
+
+  /** Every field's scope (resolution first, then every declared field). */
+  private scopes(ctx: Ctx, r: Pick<Resolution, 'fields'>): FieldScopes {
+    return fieldScopesOf(r, fieldDecls(ctx.m));
+  }
+
+  /** Decision 13: the configuration a run just made `ready` is kept for an explicit restore. Never fails the run. */
+  private async keepApplied(ctx: Ctx, effective: EffectiveConfig): Promise<void> {
+    const desired = ctx.desired.value;
+    if (!desired) return;
+    try {
+      await this.deps.store.writeApplied(ctx.installationId, {
+        v: 1, desired, userDesired: ctx.userDesired.value, userId: ctx.userId, profile: effective.profile,
+        configDigest: effective.configDigest, grantDigest: effective.grantDigest, appliedAt: this.now().toISOString(),
+      });
+    } catch (err) {
+      console.warn(`[setup] the applied configuration of ${ctx.appId} could not be kept: ${(err as Error).message}`);
+    }
+  }
+
+  async changePlan(appId: string, proposal: SetupProposal): Promise<SetupChangePlan> {
+    const ctx = await this.ctx(appId);
+    if (!ctx.declares) {
+      return {
+        appId, from: null, to: { profile: null, configDigest: '', grantDigest: '' }, unchanged: true, valuesOnly: false,
+        grantDiff: { added: [], removed: [], changed: false }, approval: null, compatibility: [], blocking: [], dataStaysBehind: [], note: DATA_STAYS_NOTE,
+      };
+    }
+    const { desired, userDesired } = this.proposed(ctx, proposal, 'kernel');
+    await this.bindAsked(ctx, desired, userDesired);
+    if ((ctx.m.profiles ?? []).length && desired.profile === null) {
+      const ports = await this.deps.resolverPorts({ appId, installationId: ctx.installationId, userId: ctx.userId, manifest: ctx.m, approved: NONE });
+      const auto = autoSelectableProfile(ctx.m, ports, { appId, installationId: ctx.installationId, userId: ctx.userId, desired, userDesired });
+      if (auto) desired.profile = auto;
+    }
+    const to = await this.resolveCurrent(ctx, desired, userDesired);
+    const from = ctx.desired.value ? await this.resolveCurrent(ctx, ctx.desired.value, ctx.userDesired.value) : null;
+    const s = ctx.summary;
+    const approval = setupApplyPayload(to, ctx.m);
+    const unchanged = ctx.state === 'ready' && to.effective !== null && to.configDigest === s?.configDigest && !approval;
+    return {
+      appId,
+      from: from ? { profile: from.profile, configDigest: s?.configDigest ?? null, grantDigest: s?.grantDigest ?? null } : null,
+      to: { profile: to.profile, configDigest: to.configDigest, grantDigest: to.grantDigest },
+      unchanged,
+      valuesOnly: !unchanged && !approval && !!s?.grantDigest && to.grantDigest === s.grantDigest,
+      grantDiff: grantDiff(from ? grantBearingOf(from.requested) : null, grantBearingOf(to.requested)),
+      approval,
+      compatibility: compatibilityIssues({ to: to.requested, desired, userDesired, scopes: this.scopes(ctx, to) }),
+      blocking: this.hardBlockers(ctx, to),
+      dataStaysBehind: dataStaysBehind(this.deps.appName(appId) ?? appId, from?.requested ?? null, to.requested),
+      note: DATA_STAYS_NOTE,
+    };
+  }
+
+  async lastApplied(appId: string): Promise<LastAppliedView | null> {
+    const ctx = await this.ctx(appId);
+    if (!ctx.declares) return null;
+    const snap = await this.deps.store.readApplied(ctx.installationId);
+    if (!snap || snap.userId !== ctx.userId) return null;
+    return {
+      appId, profile: snap.profile, configDigest: snap.configDigest, appliedAt: snap.appliedAt,
+      current: ctx.state === 'ready' && ctx.summary?.configDigest === snap.configDigest,
+      values: { ...snap.desired.values, ...(snap.userDesired?.values ?? {}) },
+      secretFields: [...new Set([...Object.keys(snap.desired.secrets), ...Object.keys(snap.userDesired?.secrets ?? {})])].sort(),
+      notice: RESTORE_NOTICE,
+    };
+  }
+
+  async restoreLast(appId: string, actor: SetupActor): Promise<SetupOutcome & { notice: string }> {
+    const first = await this.ctx(appId);
+    if (!first.declares) return { status: 'unchanged', state: this.viewOf(first), notice: RESTORE_NOTICE };
+    const o = await this.serial(first.installationId, async () => {
+      const ctx = await this.ctx(appId);
+      const snap = await this.deps.store.readApplied(ctx.installationId);
+      if (!snap || snap.userId !== ctx.userId) {
+        return this.refused(ctx, setupError('setup-required', `${appId} has no applied configuration to restore`, { state: ctx.state, target: appId, hint: `set it up: aura app setup ${appId}` }));
+      }
+      if (ctx.state === 'ready' && ctx.summary?.configDigest === snap.configDigest) return { status: 'unchanged' as const, state: this.viewOf(ctx) };
+      // The snapshot replaces the desired records; it is revalidated like any change (current grants, policy, features).
+      const at = this.now().toISOString();
+      const by = updatedByOf(actor);
+      const version = ctx.m.setup?.version ?? 0;
+      const stamp = (d: DesiredConfig): DesiredConfig => {
+        const c = structuredClone(d);
+        const m = ctx.m.setup && c.setupVersion !== version ? migrateDesired(c, ctx.m.setup, at).desired : c;
+        return { ...m, updatedAt: at, updatedBy: by };
+      };
+      const desired = stamp(snap.desired);
+      const userDesired = snap.userDesired ? stamp(snap.userDesired)
+        : ctx.userDesired.value ? { ...emptyDesired(desired.setupVersion), updatedAt: at, updatedBy: by } : null;
+      return this.changeLocked(ctx, {}, actor, 'reconfigure', { desired, userDesired });
+    });
+    return { ...o, notice: RESTORE_NOTICE };
+  }
+
+  async homePrivateGrants(appId: string, actor: SetupActor): Promise<HomePrivateGrantView[]> {
+    if (!this.deps.manifest(appId)) throw fail('setup-blocked', `${appId} is not installed`, { target: appId });
+    const held = (await this.deps.grants.homePrivateHeld?.({ appId, userId: actorUser(actor, this.deps.ownerId) })) ?? [];
+    const prefix = `${HOME_PRIVATE_PERMISSION}.sidecar:`;
+    return [...held].sort().map((permission) => (permission.startsWith(prefix) ? { permission, sidecar: permission.slice(prefix.length) } : { permission }));
+  }
+
+  async revokeHomePrivate(appId: string, actor: SetupActor, opts: { sidecar?: string } = {}): Promise<{ revoked: string[]; state: SetupStateView }> {
+    if (!this.deps.manifest(appId)) throw fail('setup-blocked', `${appId} is not installed`, { target: appId });
+    const revoke = this.deps.grants.revokeHomePrivate;
+    if (!revoke) throw fail('setup-blocked', 'revoking a Private Home grant is not available on this AuraOS', { target: appId });
+    if (opts.sidecar !== undefined && !SIDECAR_RE.test(opts.sidecar)) throw fail('config-invalid', 'invalid sidecar name', { target: appId });
+    // Only the acting user's own home: the grant's scope is their user id (the host operator acts for the owner, D50).
+    const userId = actorUser(actor, this.deps.ownerId);
+    const held = (await this.deps.grants.homePrivateHeld?.({ appId, userId })) ?? [];
+    const perms = opts.sidecar !== undefined ? [homePrivateSidecarPermission(opts.sidecar)]
+      : [HOME_PRIVATE_PERMISSION, ...held.filter((p) => p !== HOME_PRIVATE_PERMISSION).sort()];
+    const revoked: string[] = [];
+    for (const permission of perms) if (await revoke({ appId, userId, permission })) revoked.push(permission);
+    if (revoked.length) {
+      void this.audit({
+        by: attributionOf(actor) as Parameters<SetupEngineDeps['audit']>[0]['by'], action: HOME_PRIVATE_AUDIT.revoked, target: `app:${appId}`, outcome: 'ok',
+        detail: { user: userId, permissions: revoked, cause: 'user' },
+      });
+      // D107: a revoked Private Home blocks the app (workloads stopped, sessions ended), never App Home.
+      await this.recheck(appId);
+    }
+    return { revoked, state: await this.state(appId) };
+  }
+
+  async onManifestChanged(appId: string): Promise<ManifestChangeOutcome> {
+    const first = await this.ctx(appId).catch(() => null);
+    if (!first?.declares) return { status: 'unchanged', state: first ? this.viewOf(first) : null };
+    return this.serial(first.installationId, async () => this.manifestChangedLocked(await this.ctx(appId)));
+  }
+
+  /** `ready`/`blocked` → `repair-required` (stopped; the gate refuses until a repair). */
+  private async toRepair(ctx: Ctx, s: InstallationSetupSummary, error: SetupErrorBody, renamed: Array<{ from: string; to: string }> = []): Promise<ManifestChangeOutcome> {
+    const body: SetupErrorBody = { ...error, state: 'repair-required' };
+    const next = await this.deps.states.transition(ctx.installationId, s, 'repair-required', { error: body });
+    this.effective.delete(ctx.appId);
+    const name = this.deps.appName(ctx.appId) ?? ctx.appId;
+    this.blocks.set(ctx.appId, setupGateBlock(ctx.appId, 'repair-required', 'repair-required', `${name}'s setup needs repair: ${body.message}`, `aura app setup ${ctx.appId} --resume`));
+    this.emit(ctx, s.state, next);
+    await this.deps.stopWorkloads(ctx.appId).catch((err) => console.warn(`[setup] stopping ${ctx.appId} failed: ${(err as Error).message}`));
+    return { status: 'repair-required', state: this.viewOf(this.withSummary(ctx, next)), error: body, ...(renamed.length ? { renamed } : {}) };
+  }
+
+  private async manifestChangedLocked(ctx: Ctx): Promise<ManifestChangeOutcome> {
+    // Only a configuration that ran (or ran and was blocked) is re-resolved; any other state is finished by its setup run.
+    if (!ctx.summary || (ctx.state !== 'ready' && ctx.state !== 'blocked')) return { status: 'not-ready', state: this.viewOf(ctx) };
+    const s = ctx.summary;
+    const appId = ctx.appId;
+    const version = ctx.m.setup?.version ?? 0;
+    let desired = ctx.desired.value;
+    let user = ctx.userDesired.value;
+    let renamed: Array<{ from: string; to: string }> = [];
+    if (ctx.m.setup && desired && desired.setupVersion !== version) {
+      const from = desired.setupVersion;
+      if (from > version) {
+        return this.toRepair(ctx, s, setupError('repair-required', `the stored values of ${appId} were written for setup version ${from}, newer than its version ${version}: set it up again`, { manifestField: 'setup.version' }));
+      }
+      if (needsHooks(ctx.m)) {
+        // `onMigrateConfig` runs in a maintenance start (reserved reason `migrate`, app-manager/maintenance.ts) that this
+        // release can't run: fail closed, nothing written, never `ready` (the repair renames declaratively with the owner).
+        return this.toRepair(ctx, s, setupError('repair-required', `${appId} changed its setup version (${from} → ${version}); its migration hook can't run on this AuraOS, so its values were not migrated`, {
+          manifestField: 'setup.version', hint: `repair it: aura app setup ${appId} --resume (${NO_MAINTENANCE_HINT})`,
+        }));
+      }
+      const at = this.now().toISOString();
+      const mig = migrateDesired(desired, ctx.m.setup, at);
+      const umig = user ? migrateDesired(user, ctx.m.setup, at) : null;
+      renamed = [...mig.renamed, ...(umig?.renamed ?? [])];
+      const w = await this.deps.store.update({ installationId: ctx.installationId }, () => mig.desired);
+      if (!w.ok) throw fail('setup-blocked', `the setup of ${appId} changed meanwhile; try again`, { target: appId });
+      if (umig) {
+        const u = await this.deps.store.update({ installationId: ctx.installationId, userId: ctx.userId }, () => ({ ...umig.desired, profile: null, overrides: {} }));
+        if (!u.ok) throw fail('setup-blocked', `the setup of ${appId} changed meanwhile; try again`, { target: appId });
+      }
+      desired = mig.desired;
+      user = umig?.desired ?? null;
+    }
+    const cur: Ctx = { ...ctx, desired: { ...ctx.desired, value: desired }, userDesired: { ...ctx.userDesired, value: user } };
+    const r = await this.resolveCurrent(cur, desired, user);
+    const migrated = renamed.length ? { renamed } : {};
+    if (r.effective && r.configDigest === s.configDigest && r.grantDigest === s.grantDigest) {
+      if (ctx.state === 'blocked') await this.recheckLocked(cur);
+      return { status: 'unchanged', state: this.viewOf(await this.ctx(appId), r), ...migrated };
+    }
+    if (!r.effective) {
+      const dropped = r.blocking.find((b) => b.error === 'unknown-profile');
+      if (dropped) {
+        const suggest = (await this.profiles(appId)).filter((p) => p.available).map((p) => p.id);
+        return this.toRepair(cur, s, setupError('profile-required', `the update of ${appId} dropped its operating profile ${desired?.profile ?? ''}: select a profile`, {
+          manifestField: 'profiles', ...(suggest.length ? { suggest } : {}),
+        }), renamed);
+      }
+      const grantable = (p: string) => this.deps.grants.grantable(p);
+      const config = r.blocking.filter((b) => !AUTHZ_CODES.has(b.error));
+      if (config.length) return this.toRepair(cur, s, refusalOf(config), renamed);
+      if (r.blocking.every((b) => approvable(b, grantable))) {
+        // New privileges: never held before the owner's `app.setup.apply`; the repair asks for it.
+        return this.toRepair(cur, s, setupError('setup-blocked', `the update of ${appId} asks for more privileges (${missingAuthorizations(r).join(', ')}): approve them`, {
+          missing: missingAuthorizations(r), hint: `aura app setup ${appId} --resume`,
+        }), renamed);
+      }
+      // A lost authorization, policy or feature: blocked (D107 rule), never another configuration.
+      await this.recheckLocked(cur);
+      const after = await this.ctx(appId);
+      return { status: after.state === 'blocked' ? 'blocked' : 'not-ready', state: this.viewOf(after, r), ...migrated };
+    }
+    // Valid with the same privileges or fewer: re-validate the new digests in a run (init again; `ready` only by markReady).
+    if (needsHooks(ctx.m) && !this.deps.maintenance()) {
+      return this.toRepair(cur, s, setupError('repair-required', `${appId}'s configuration changed with its update; its setup hooks can't run on this AuraOS`, { hint: NO_MAINTENANCE_HINT }), renamed);
+    }
+    const configuring = await this.deps.states.transition(ctx.installationId, s, 'configuring', { step: 'values', attempt: 0, approvalId: null });
+    this.emit(cur, s.state, configuring);
+    this.effective.delete(appId);
+    const o = await this.initialize(this.withSummary(cur, configuring), configuring, r, 'migrate');
+    return {
+      status: o.status === 'ready' ? 'migrated' : 'not-ready', state: o.state, ...migrated, ...(o.error ? { error: o.error } : {}),
+    };
+  }
+
   // ── lifecycle ─────────────────────────────────────────────────────────────
 
   start(): void {
     if (this.watcher) return;
-    this.watcher = new BlockingWatcher({ recheck: (appId) => this.recheck(appId), appIds: () => this.declaringApps() });
+    this.watcher = new BlockingWatcher({
+      recheck: (appId) => this.recheck(appId), appIds: () => this.declaringApps(), manifestChanged: (appId) => this.onManifestChanged(appId),
+    });
     this.watcher.start();
     void this.recover().catch((err) => console.warn(`[setup] recovery failed: ${(err as Error).message}`));
   }

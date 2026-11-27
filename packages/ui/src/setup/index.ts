@@ -33,3 +33,6 @@ export type { ConnectionTestProps } from './connectionTest.js';
 export { renderApprovalSummary, setupApprovalItems, setupApprovalNeedsPassword } from './approvalSummary.js';
 export type { ApprovalSummaryProps, SetupApprovalItem } from './approvalSummary.js';
 export { renderProgress } from './progress.js';
+// P8: change management (the change plan, the last applied configuration, the Private Home grants).
+export { renderChangePlan, renderLastApplied, renderPrivateHomeGrants, grantItemText } from './changePlan.js';
+export type { ChangePlanProps, LastAppliedProps, PrivateHomeGrantsProps } from './changePlan.js';

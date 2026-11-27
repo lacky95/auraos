@@ -26,6 +26,7 @@ import type { CredentialVault } from '../context/CredentialVault.js';
 import type { OperationalBlock } from '../contract/types.js';
 import type { SetupConfigStore } from './store.js';
 import type { SetupStateMachine } from './state.js';
+import type { SetupChangeContract } from './change.js';
 import type {
   EffectiveConfig, ResolverPorts, SetupActor, SetupApplyPayload, SetupManifestView, SetupServiceContract, SetupStateEvent,
 } from './contracts.js';
@@ -88,6 +89,14 @@ export interface SetupGrantWriter {
   grantContext(g: { appId: string; installationId: string; key: string; by: ChangeAttribution }): Promise<void>;
   /** Is this permission one the GrantStore holds (privileged)? Plain ones are covered by the approval's digest. */
   grantable(permission: string): boolean;
+  /**
+   * P8: revoke one `home.private[.sidecar:<n>]` grant of the app in `userId`'s
+   * own scope (the user revokes their own Private Home; the admin grants
+   * route can't). True when a grant was removed. Absent: refused (503-like).
+   */
+  revokeHomePrivate?(g: { appId: string; userId: string; permission: string }): Promise<boolean>;
+  /** P8: the `home.private[.sidecar:<n>]` permissions the app holds in `userId`'s scope. */
+  homePrivateHeld?(g: { appId: string; userId: string }): Promise<string[]>;
 }
 
 export interface SetupEngineDeps {
@@ -97,7 +106,7 @@ export interface SetupEngineDeps {
   manifest(appId: string): SetupAppManifest | null;
   /** The app's current installation (ensured), or null when it has none. */
   installation(appId: string): Promise<{ installationId: string } | null>;
-  store: Pick<SetupConfigStore, 'read' | 'update'>;
+  store: Pick<SetupConfigStore, 'read' | 'update' | 'readApplied' | 'writeApplied'>;
   states: Pick<SetupStateMachine, 'state' | 'begin' | 'transition' | 'progress' | 'markReady' | 'desired'>;
   resolverPorts(q: ResolverPortsQuery): Promise<ResolverPorts>;
   approvals: SetupApprovals;
@@ -154,7 +163,7 @@ export interface SetupGate {
   stop(): void;
 }
 
-export type SetupEngine = SetupGate & SetupServiceContract;
+export type SetupEngine = SetupGate & SetupServiceContract & SetupChangeContract;
 
 /** The approval payload's privilege lists as the engine builds them (re-exported for tests). */
 export type SetupAdds = SetupApplyPayload['adds'];

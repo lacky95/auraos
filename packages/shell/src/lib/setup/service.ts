@@ -12,10 +12,15 @@
  * (contract/types.ts `setupEngineMissing`).
  */
 import * as core from '@aura/core';
-import type { OperationalState, SetupServiceContract } from '@aura/core';
+import type { OperationalState, SetupChangeContract, SetupServiceContract } from '@aura/core';
 
 /** The setup engine of the running kernel, or null when it has none. */
 export function liveSetupService(): SetupServiceContract | null {
+  try { return core.getAppManager().setup ?? null; } catch { return null; }
+}
+
+/** The change operations of the same engine (P8, core setup/change.ts), or null when it has none. */
+export function liveSetupChange(): SetupChangeContract | null {
   try { return core.getAppManager().setup ?? null; } catch { return null; }
 }
 

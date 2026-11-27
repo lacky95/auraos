@@ -307,16 +307,57 @@ test('profile ls: availability and reasons; -o json is the ProfileOption list', 
 test('profile use: shows what the plan adds, then reconfigures with the profile', async () => {
   const plan = {
     approval: { adds: { permissions: [], tools: [], context: [], homePrivate: true, homePrivateSidecars: ['terminal'] } },
+    grantDiff: { added: ['home:private'], removed: ['home:app'], changed: true }, compatibility: [],
+    dataStaysBehind: [{ kind: 'app-home', where: 'Mailer\'s App Home', why: 'kept, not copied' }],
+    note: 'Data stays where it is: nothing is copied, moved or re-owned by this change. Copying is a separate, explicit action.',
   };
   const seen = await fakeShell((r) => {
-    if (r.url === `${BASE}/plan`) return [200, plan];
+    if (r.url === `${BASE}/change`) return [200, plan];
     if (r.url === `${BASE}/reconfigure`) return [202, outcome('on-hold', { approvalId: APR })];
     return [404, {}];
   });
   const r = await run('profile', 'use', APP, 'personal-private');
   assert.equal(r.code, EXIT_ON_HOLD);
   assert.match(r.out, /Private Home for sidecar terminal/);
+  assert.match(r.out, /- home:app/);
+  assert.match(r.out, /Stays behind \(not copied\):\n  · Mailer's App Home: kept, not copied/);
   assert.deepEqual(seen.find((s) => s.url === `${BASE}/reconfigure`)?.body, { profile: 'personal-private' });
+});
+
+// ── P8: restore-last, the Private Home revocation ───────────────────────────
+
+test('config restore-last: shows what is restored and that data is not rolled back, then posts restore (on hold → 75)', async () => {
+  const notice = 'Restoring the last applied configuration does not roll back app data or anything the app did outside AuraOS.';
+  const seen = await fakeShell((r) => {
+    if (r.method === 'GET' && r.url === `${BASE}/restore`) {
+      return [200, { lastApplied: { appId: APP, profile: 'personal', configDigest: 'd', appliedAt: '2026-11-27T00:00:00Z', current: false, values: {}, secretFields: [], notice }, notice }];
+    }
+    if (r.method === 'POST' && r.url === `${BASE}/restore`) return [202, outcome('on-hold', { approvalId: APR, notice })];
+    return [404, {}];
+  });
+  const r = await run('config', 'restore-last', APP);
+  assert.equal(r.code, EXIT_ON_HOLD);
+  assert.match(r.out, /does not roll back app data/);
+  assert.match(r.out, /profile personal/);
+  assert.deepEqual(seen.map((s) => `${s.method} ${s.url}`), [`GET ${BASE}/restore`, `POST ${BASE}/restore`]);
+
+  await fakeShell((rq) => (rq.method === 'GET' ? [200, { lastApplied: null, notice }] : [404, {}]));
+  assert.equal((await run('config', 'restore-last', APP)).code, EXIT_NEEDS_SETUP);
+});
+
+test('config revoke-private-home: DELETE (all, or --sidecar); blocked state shown; a refusal → its exit code', async () => {
+  const seen = await fakeShell((r) => {
+    if (r.method === 'DELETE' && r.url.startsWith(`${BASE}/home-private`)) return [200, { revoked: ['home.private'], state: state({ state: 'blocked' }) }];
+    return [404, {}];
+  });
+  const r = await run('config', 'revoke-private-home', APP);
+  assert.equal(r.code, null);
+  assert.match(r.out, /revoked home\.private; com\.example\.mailer is blocked/);
+  await run('config', 'revoke-private-home', APP, '--sidecar', 'terminal');
+  assert.deepEqual(seen.map((s) => s.url), [`${BASE}/home-private`, `${BASE}/home-private?sidecar=terminal`]);
+
+  await fakeShell(() => [409, { error: 'setup-blocked', category: 'needs-setup', message: 'not available' }]);
+  assert.equal((await run('config', 'revoke-private-home', APP)).code, EXIT_NEEDS_SETUP);
 });
 
 // ── dev validate and get apps ───────────────────────────────────────────────

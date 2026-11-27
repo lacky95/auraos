@@ -25,6 +25,13 @@
  * keeps the records with the reserved installation; delete-app-data calls
  * `forgetInstallation`, which revokes the trusted handles through the vault
  * port, then deletes every record of the installation.
+ *
+ * P8 (owner decision 13): `app:config:<installationId>:applied` holds the
+ * last successfully applied configuration (`AppliedSnapshot`: both desired
+ * records + the digests `ready` was validated with), written by the engine
+ * when a run reaches `ready`, read only for an explicit restore. Same seal
+ * (`app-config` subkey, the key in the MAC), CAS, handles only; deleted (its
+ * handles revoked) with the installation's records.
  */
 import type { Redis } from '@aura/kv-store';
 import { SealedPolicyRecord } from '../security/SealedPolicyRecord.js';
@@ -33,6 +40,7 @@ import type { CredentialVault } from '../context/CredentialVault.js';
 import { FIELD_NAME_RE, type ConfigValue, type ConfigValues } from '../config/schema.js';
 import { HOME_ENVIRONMENTS, PROFILE_ID_RE } from '../types/setupManifest.js';
 import { configRecordKey, SETUP_AUDIT_ACTIONS, type DesiredConfig, type DesiredOverrides } from './contracts.js';
+import { appliedRecordKey, type AppliedSnapshot } from './change.js';
 
 /** Installation ids are UUIDs; user ids follow the vault's rule. Neither may hold `:` or a glob character. */
 const INSTALLATION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -129,6 +137,29 @@ export function parseDesiredConfig(raw: unknown, user = false): DesiredConfig | 
   };
 }
 
+const DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
+const SNAPSHOT_KEYS = new Set(['v', 'desired', 'userDesired', 'userId', 'profile', 'configDigest', 'grantDigest', 'appliedAt']);
+
+/** The last-applied snapshot, or null when `raw` is not a valid one (both records parsed strictly). */
+export function parseAppliedSnapshot(raw: unknown): AppliedSnapshot | null {
+  if (!plainObject(raw) || !Object.keys(raw).every((k) => SNAPSHOT_KEYS.has(k))) return null;
+  const r = raw as Record<string, unknown>;
+  if (r['v'] !== 1) return null;
+  const desired = parseDesiredConfig(r['desired']);
+  const userDesired = r['userDesired'] === null ? null : parseDesiredConfig(r['userDesired'], true);
+  if (!desired || (r['userDesired'] !== null && !userDesired)) return null;
+  if (typeof r['userId'] !== 'string' || !USER_ID_RE.test(r['userId'])) return null;
+  const profile = r['profile'];
+  if (profile !== null && (typeof profile !== 'string' || !PROFILE_ID_RE.test(profile))) return null;
+  if (typeof r['configDigest'] !== 'string' || !DIGEST_RE.test(r['configDigest'])) return null;
+  if (typeof r['grantDigest'] !== 'string' || !DIGEST_RE.test(r['grantDigest'])) return null;
+  if (typeof r['appliedAt'] !== 'string' || Number.isNaN(Date.parse(r['appliedAt']))) return null;
+  return {
+    v: 1, desired, userDesired, userId: r['userId'], profile: profile as string | null,
+    configDigest: r['configDigest'], grantDigest: r['grantDigest'], appliedAt: r['appliedAt'],
+  };
+}
+
 /** Sorted keys at every level, so equal records give equal bytes. */
 function canon(v: unknown): string {
   if (Array.isArray(v)) return `[${v.map(canon).join(',')}]`;
@@ -162,6 +193,7 @@ export function vaultHandleRevoker(vault: Pick<CredentialVault, 'resolve' | 'rem
 export class SetupConfigStore {
   /** One sealed record per key: each keeps its own report-once memory. */
   private readonly records = new Map<string, SealedPolicyRecord<DesiredConfig>>();
+  private readonly applied = new Map<string, SealedPolicyRecord<AppliedSnapshot>>();
 
   constructor(private readonly opts: SetupConfigStoreOptions) {}
 
@@ -181,6 +213,42 @@ export class SetupConfigStore {
       this.records.set(key, r);
     }
     return r;
+  }
+
+  private appliedRecord(installationId: string): SealedPolicyRecord<AppliedSnapshot> {
+    checkRef({ installationId });
+    const key = appliedRecordKey(installationId);
+    let r = this.applied.get(key);
+    if (!r) {
+      const onTampered = this.opts.onTampered;
+      r = new SealedPolicyRecord<AppliedSnapshot>({
+        key, purpose: 'app-config', identityKeyFile: this.opts.identityKeyFile, redis: this.opts.redis,
+        parse: (raw) => parseAppliedSnapshot(raw),
+        canonical: (value) => canon([key, 1, value]),
+        ...(onTampered ? { onTampered: () => onTampered({ installationId }) } : {}),
+      });
+      this.applied.set(key, r);
+    }
+    return r;
+  }
+
+  /** The last applied configuration (decision 13), or null (none, or tampered: never restored from an unverified record). */
+  async readApplied(installationId: string): Promise<AppliedSnapshot | null> {
+    const record = this.appliedRecord(installationId);
+    record.assertKey();
+    return (await record.read()).value;
+  }
+
+  /** Replace the last applied configuration (the engine, when a run reached `ready`). Refuses an invalid snapshot before writing. */
+  async writeApplied(installationId: string, next: AppliedSnapshot): Promise<boolean> {
+    const record = this.appliedRecord(installationId);
+    const valid = parseAppliedSnapshot(next);
+    if (!valid) throw new SetupStoreError('invalid-record', 'not a valid applied-configuration snapshot (secrets must be vault handles)');
+    for (let i = 0; i < 8; i++) {
+      const cur = await record.read();
+      if (await record.compareAndSet(cur.stored, valid)) return true;
+    }
+    return false;
   }
 
   /**
@@ -266,6 +334,22 @@ export class SetupConfigStore {
       }
     }
     for (const ref of refs) this.records.delete(configRecordKey(ref.installationId, ref.userId));
+    // P8: the last applied snapshot (its handles too: an old one may no longer be in a desired record).
+    const snap = this.appliedRecord(installationId);
+    for (let attempt = 0; ; attempt++) {
+      const cur = await snap.read();
+      if (cur.stored === null) break;
+      const handles = [
+        ...Object.values(cur.value?.desired.secrets ?? {}).map((h) => [ownerUserId, h] as const),
+        ...Object.values(cur.value?.userDesired?.secrets ?? {}).map((h) => [cur.value!.userId, h] as const),
+      ];
+      if (handles.length && !this.opts.revokeHandle) throw new SetupStoreError('invalid-record', 'no vault port to revoke the setup secrets');
+      for (const [u, h] of handles) await this.opts.revokeHandle!(u, h);
+      revoked += handles.length;
+      if (await snap.compareAndDelete(cur.stored)) { records++; break; }
+      if (attempt >= 8) throw new SetupStoreError('conflict', 'a setup record kept changing while it was deleted');
+    }
+    this.applied.delete(appliedRecordKey(installationId));
     return { records, revoked };
   }
 }

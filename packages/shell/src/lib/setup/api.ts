@@ -23,6 +23,14 @@
  *
  * The engine creates every approval (decision 9); this layer never asks for
  * one, never consumes one and never decides what is privileged.
+ *
+ * P8 (core setup/change.ts `SetupChangeContract`): `changePlan` (POST
+ * …/setup/change: the privilege diff, §5.5 compatibility, data that stays
+ * behind; writes nothing), `lastApplied` / `restore` (GET|POST
+ * …/setup/restore, decision 13: revalidated like any change; the answer
+ * carries the notice that app data is not rolled back), `homePrivate` /
+ * `revokeHomePrivate` (GET|DELETE …/setup/home-private[?sidecar=<n>]: the
+ * acting user's OWN Private Home grants; the admin grants route can't).
  */
 import * as core from '@aura/core';
 import type { APIContext } from 'astro';
@@ -33,15 +41,19 @@ import { resolveCaller } from '../auth.ts';
 import { bearerToken, isTrustedOwnerAgent, type ResolvedPrincipal } from '../access/identify.ts';
 import { shellOwner } from '../appHostHandoff.ts';
 import { approvalsChanged, json } from '../approvals/service.ts';
-import { liveSetupService, SETUP_UNAVAILABLE } from './service.ts';
+import type { SetupChangeContract } from '@aura/core';
+import { liveSetupChange, liveSetupService, SETUP_UNAVAILABLE } from './service.ts';
 
 /** The engine call a route makes. */
-export type SetupOp = 'state' | 'profiles' | 'plan' | 'values' | 'setValues' | 'apply' | 'resume' | 'repair' | 'reconfigure' | 'secrets' | 'askSecret';
+export type SetupOp = 'state' | 'profiles' | 'plan' | 'values' | 'setValues' | 'apply' | 'resume' | 'repair' | 'reconfigure' | 'secrets' | 'askSecret'
+  | 'changePlan' | 'lastApplied' | 'restore' | 'homePrivate' | 'revokeHomePrivate';
 
 /** The calls that change something (the desktop's Origin for a cookie caller). */
-const CHANGES: ReadonlySet<SetupOp> = new Set(['setValues', 'apply', 'resume', 'repair', 'reconfigure', 'askSecret']);
-/** The calls that take a proposal (`plan` only by POST). `resume` takes none: it continues the recorded run. */
-const PROPOSES: ReadonlySet<SetupOp> = new Set(['plan', 'setValues', 'apply', 'repair', 'reconfigure']);
+const CHANGES: ReadonlySet<SetupOp> = new Set(['setValues', 'apply', 'resume', 'repair', 'reconfigure', 'askSecret', 'restore', 'revokeHomePrivate']);
+/** The calls that take a proposal (`plan` only by POST). `resume` and `restore` take none: they continue a recorded run or a recorded configuration. */
+const PROPOSES: ReadonlySet<SetupOp> = new Set(['plan', 'setValues', 'apply', 'repair', 'reconfigure', 'changePlan']);
+/** The P8 calls (SetupChangeContract). */
+const CHANGE_OPS: ReadonlySet<SetupOp> = new Set(['changePlan', 'lastApplied', 'restore', 'homePrivate', 'revokeHomePrivate']);
 
 export type RouteCtx = Pick<APIContext, 'request' | 'cookies' | 'params'> & { clientAddress?: string };
 
@@ -50,6 +62,8 @@ type SetupManifestLite = Pick<AppManifest, 'id'> & { setup?: AppManifest['setup'
 
 export interface SetupRouteDeps {
   service(): SetupServiceContract | null;
+  /** P8: the change operations of the same engine (absent or null: those routes answer 503). */
+  change?(): SetupChangeContract | null;
   resolve(request: Request): Promise<ResolvedPrincipal>;
   /** The installed app's parsed manifest, or null when there is no such app. */
   manifest(appId: string): SetupManifestLite | null;
@@ -61,6 +75,7 @@ export interface SetupRouteDeps {
 export function liveSetupRouteDeps(): SetupRouteDeps {
   return {
     service: liveSetupService,
+    change: liveSetupChange,
     resolve: (request) => resolveCaller(request),
     manifest: (appId) => (core.getAppManager().getManifest(appId) as SetupManifestLite | undefined) ?? null,
     trustedTerminal: (p) => isTrustedOwnerAgent(p, core.getAppManager()),
@@ -255,6 +270,7 @@ export async function handleSetup(ctx: RouteCtx, op: SetupOp, deps: SetupRouteDe
 
   const svc = deps.service();
   if (!svc) return json(SETUP_UNAVAILABLE, 503);
+  if (CHANGE_OPS.has(op)) return handleChange(ctx, op, appId, proposal, actor, deps);
   try {
     switch (op) {
       case 'state': return json(await svc.state(appId));
@@ -275,10 +291,36 @@ export async function handleSetup(ctx: RouteCtx, op: SetupOp, deps: SetupRouteDe
         return json(asked, 202);
       }
       default: {
-        const o = await (op === 'resume' ? svc.resume(appId, actor) : svc[op](appId, proposal, actor));
+        const o = await (op === 'resume' ? svc.resume(appId, actor) : svc[op as 'setValues' | 'apply' | 'repair' | 'reconfigure'](appId, proposal, actor));
         if (o.status === 'on-hold') approvalsChanged();
         return json(o, outcomeStatus(o));
       }
+    }
+  } catch (err) {
+    return thrownResponse(err);
+  }
+}
+
+/** The P8 operations (core setup/change.ts). */
+async function handleChange(ctx: RouteCtx, op: SetupOp, appId: string, proposal: SetupProposal, actor: SetupActor, deps: SetupRouteDeps): Promise<Response> {
+  const ch = deps.change?.() ?? null;
+  if (!ch) return json(SETUP_UNAVAILABLE, 503);
+  try {
+    switch (op) {
+      case 'changePlan': return json(await ch.changePlan(appId, proposal));
+      case 'lastApplied': return json({ lastApplied: await ch.lastApplied(appId), notice: core.RESTORE_NOTICE });
+      case 'restore': {
+        const o = await ch.restoreLast(appId, actor);
+        if (o.status === 'on-hold') approvalsChanged();
+        return json(o, outcomeStatus(o));
+      }
+      case 'homePrivate': return json(await ch.homePrivateGrants(appId, actor));
+      case 'revokeHomePrivate': {
+        // `?sidecar=<n>` revokes one sidecar's grant; without it the Private Home with every sidecar grant. The engine checks the name.
+        const sidecar = new URL(ctx.request.url).searchParams.get('sidecar');
+        return json(await ch.revokeHomePrivate(appId, actor, sidecar !== null ? { sidecar } : {}));
+      }
+      default: return json({ error: 'invalid-op' }, 400);
     }
   } catch (err) {
     return thrownResponse(err);

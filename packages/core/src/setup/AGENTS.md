@@ -15,13 +15,15 @@ The sector rules are in `packages/core/AGENTS.md`. Design: D108 (`app-profiles-s
 - **`service.ts`** (P3): `SetupService`, the engine (`SetupServiceContract` + the `SetupGate` AppManager asks). Proposals are resolved before any write; `configuring` writes step + record first; added privileges → one `app.setup.apply` (requester = the actor) bound to both digests; on consumption grants via the existing paths; init in the maintenance start; `ready` only by `markReady`.
 - **`ports.ts`** (P3, types only): `SetupEngineDeps`, the P9 `HomeEnvironmentPort`, `SetupGate`/`SetupEngine`. Wired by `system/compose.ts` `createSetupEngine` into AppManager `opts.setup`; the shell uses `getAppManager().setup`.
 - **`approval.ts`**, **`hooks.ts`**, **`blocking.ts`** (P3): the approval payload and display (wording = @aura/ui `approvalSummary.ts`); `onSetup`/`onValidate` through the frozen `MaintenanceStarter` (none → fail closed); `blocked` on a lost grant, policy or feature, back to `ready` with the same digests.
-- **`homeEnvironment.ts`** (P9, D107-a): the Private Home as home environment. `grantHomePrivate` (on the home user's `app.setup.apply`), `homePrivateAuthorized` (pure, P1 `isAuthorized`; facts from `loadHomePrivateFacts`), `privateHomeSpawnPort` (AppManager `privateHome`), `privateHomeTeardown` (revocation; never reconfigures).
+- **`change.ts`** (P8): change plan, `setup.renames`, applied snapshot, `SetupChangeContract`.
+- **`homeEnvironment.ts`** (P9, D107-a): the Private Home as home environment. `grantHomePrivate` (on the home user's `app.setup.apply`), `homePrivateAuthorized` (pure), `privateHomeSpawnPort` (AppManager `privateHome`), `privateHomeTeardown` (revocation; never reconfigures).
 - **`index.ts`**: the module's public surface, re-exported by the core barrel. Named exports only; one region per work package.
 - Related leaves: `config/schema.ts` (the field model) and `types/setupManifest.ts` (the manifest blocks).
 
 ## State it owns
 
 - `app:config:<installationId>` and `app:config:<installationId>:u:<userId>`: the desired configuration (shared with D107-a), kernel-owned, MAC-sealed, CAS. No shell writes (D97).
+- `app:config:<installationId>:applied`: the last applied configuration (P8).
 - The `setup` summary on `apphost:install:<installationId>`, written only through `AppHostRegistry` (CAS).
 
 ## Invariants
