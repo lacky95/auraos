@@ -24,7 +24,7 @@
  */
 import * as core from '@aura/core';
 import type { APIContext } from 'astro';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { CallerPrincipal } from './access/identify.ts';
 import { auditOwner, ownerAction, type OwnerActionDeps, type OwnerActor } from './approvals/admin.ts';
@@ -213,7 +213,7 @@ export async function postSystemPatches(ctx: RouteCtx, deps: SystemPatchDeps): P
   }
 }
 
-function builderInput(deps: SystemPatchDeps, release: ReleaseInfo, rev: string, jobId: string, o: { validateOnly?: boolean; imageChangeApproved?: boolean; expectSeriesDigest?: string }): core.systemPatches.BuilderInput {
+function builderInput(deps: SystemPatchDeps, release: ReleaseInfo, rev: string, jobId: string, o: { validateOnly?: boolean; imageChangeApproved?: boolean; expectSeriesDigest?: string; expectInputsFile?: string }): core.systemPatches.BuilderInput {
   return {
     auraRoot: deps.auraRoot, dataDir: deps.dataDir, dataVolume: deps.dataVolume(),
     // The base commit is in the mirror already: the builder re-verifies it there (D71), no network.
@@ -308,7 +308,8 @@ async function activate(ctx: RouteCtx, deps: SystemPatchDeps, release: ReleaseIn
   const sessions = E.endsSessions(binding);
   const when = body.when === 'now' ? 'now' : 'next-start';
   const highRisk = [
-    ...(binding.rebuildsImage ? [{ item: 'Rebuilds the AuraOS images', why: 'the series changes the Dockerfile or the files the images copy; the image build runs after this approval', added: true }] : []),
+    ...(binding.rebuildsImage ? [{ item: `Rebuilds the AuraOS images (${binding.imageFiles.join(', ') || 'Dockerfile'})`, why: 'the series changes the Dockerfile or the files the images copy; the image build runs after this approval, from base images pinned by digest', added: true }] : []),
+    ...(!binding.rebuildsImage && binding.imageFiles.length ? [{ item: `Changes image-related files (${binding.imageFiles.join(', ')})`, why: 'the images do not copy them, so they stay as they are', added: true }] : []),
     ...(sessions.length ? [{ item: `Active Terminal sessions end when this activates (${sessions.join(', ')})`, why: when === 'now' ? 'you chose to activate now' : 'it activates on the next start unless you choose now (D35)', added: true }] : []),
     { item: 'Locally modified AuraOS', why: 'the running release will no longer be the maintainer-signed one (D71)', added: true },
   ];
@@ -326,8 +327,12 @@ async function activate(ctx: RouteCtx, deps: SystemPatchDeps, release: ReleaseIn
   if (actor instanceof Response) return actor;
   const n = E.markApproved(deps.dataDir, rev);
   const jobId = newJobId();
+  // The approved build must resolve exactly the approved inputs (from the APPROVED payload, not the job file).
+  const expectInputsFile = join(deps.dataDir, JOBS, `${jobId}.approved-inputs.json`);
+  mkdirSync(dirname(expectInputsFile), { recursive: true });
+  writeFileSync(expectInputsFile, `${JSON.stringify(binding.buildInputs, null, 2)}\n`, { mode: 0o600 });
   void (async () => {
-    const run = await deps.runBuilder(builderInput(deps, release, rev, jobId, { imageChangeApproved: binding.rebuildsImage, expectSeriesDigest: v.series.digest }));
+    const run = await deps.runBuilder(builderInput(deps, release, rev, jobId, { imageChangeApproved: binding.rebuildsImage, expectSeriesDigest: v.series.digest, expectInputsFile }));
     if (run.code !== 0) {
       await deps.audit(actor, core.PATCH_AUDIT_ACTIONS.activationFailed, { target: 'system', outcome: 'failed', detail: { rev, step: (run.result?.['step'] as string) ?? 'build', reason: String(run.result?.['error'] ?? run.code).slice(0, 300) } });
       return;

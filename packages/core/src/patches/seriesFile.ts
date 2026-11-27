@@ -1,19 +1,26 @@
 /**
- * The series file (`aura-patches.yaml`), checked and written without any
+ * The series file (`aura-patches.json`, and the old `aura-patches.yaml`), checked and written without any
  * dependency (Phase 7b). PORTABLE: like `digest.ts`, `validate.ts` and
  * `apply.ts`, this module imports only `node:` builtins and types, so the
  * release builder (`os/release/series-slot.mjs`) and the installer run THIS
  * source directly with Node's type stripping, from the trusted side, before
  * anything is built: one library for the kernel and the builder (D68, D36).
  *
- * `normalizeSeriesDoc` checks a parsed document (v2, or v1 read as v2);
- * `series.ts` parses YAML for it (`parseSeries`), the builder parses JSON.
- * `formatSeriesText` writes v2 as JSON, which is YAML too: every reader
- * reads it, with or without a YAML parser.
+ * The file (owner 2026-11-27): `aura-patches.json`, v2, written as JSON by
+ * every save. The old `aura-patches.yaml` (Track P v1 and 7a v2, written by
+ * the `yaml` package) is still READ: the kernel and the CLI parse it with the
+ * full YAML parser (`series.ts`), the builder and the installer with
+ * `parseSavedYaml` below, a small reader for exactly the subset those saves
+ * produced. The next save of a repository writes `aura-patches.json` and
+ * removes `aura-patches.yaml` in the same commit (the one-time migration).
+ *
+ * `normalizeSeriesDoc` checks a parsed document (v2, or v1 read as v2).
  */
 import type { PatchTarget, Series, SeriesBase, SeriesPatch } from './types.js';
 
-export const SERIES_FILE = 'aura-patches.yaml';
+export const SERIES_FILE = 'aura-patches.json';
+/** The series file before 7b (YAML): read, never written; the next save migrates it. */
+export const LEGACY_SERIES_FILE = 'aura-patches.yaml';
 export const PATCHES_DIR = 'patches';
 
 const COMMIT_RE = /^[0-9a-f]{7,64}$/;
@@ -127,11 +134,200 @@ export function formatSeriesText(s: Series): string {
   return `${JSON.stringify(doc, null, 2)}\n`;
 }
 
-/** The series file read without a YAML parser (the builder, the installer): JSON only. */
-export function parseSeriesJson(text: string): Series {
+export const SAVED_FORM_HINT = `save the series once with \`aura system patch save\` (or \`aura dev patch save\`), which writes ${SERIES_FILE}, `
+  + `or write ${SERIES_FILE} yourself: JSON with v: 2, target, base { commit }, patches [{ file, subject, sha256, enabled }] (Docs: System patches)`;
+
+/** The series file read without a YAML library (the builder, the installer): `.json`, or the old saved YAML form. */
+export function parseSeriesFile(name: string, text: string): Series {
   let doc: unknown;
-  try { doc = JSON.parse(text); } catch {
-    throw new Error(`${SERIES_FILE} is not in the saved form (JSON): save it with \`aura system patch save\` (or \`aura dev patch save\`)`);
+  if (name === SERIES_FILE) {
+    try { doc = JSON.parse(text); } catch (e) { throw new Error(`${SERIES_FILE} is not valid JSON (${(e as Error).message}): ${SAVED_FORM_HINT}`); }
+  } else {
+    try { doc = parseSavedYaml(text); } catch (e) {
+      throw new Error(`${LEGACY_SERIES_FILE} is not in the form AuraOS saves (${(e as Error).message}): ${SAVED_FORM_HINT}`);
+    }
   }
   return normalizeSeriesDoc(doc);
+}
+
+/** @deprecated name: `parseSeriesFile(SERIES_FILE, text)`. */
+export const parseSeriesJson = (text: string): Series => parseSeriesFile(SERIES_FILE, text);
+
+// ─── the old saved YAML form ────────────────────────────────────────────────
+//
+// What `yaml.stringify` wrote for a series (Track P v1 and 7a v2): block
+// mappings and sequences (2-space indent, `- key: value` items), `[]`/`{}`,
+// plain, single- and double-quoted scalars, the quoted and plain ones folded
+// over several lines (continuation lines indented deeper), `#` comments.
+// Anything else (anchors, tags, block scalars, flow collections with content)
+// is refused: such a file was not written by AuraOS.
+
+interface Line { indent: number; text: string; no: number }
+
+const fail = (no: number, what: string): never => { throw new Error(`line ${no}: ${what}`); };
+
+function decodeDouble(raw: string, no: number): string {
+  let out = '';
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i]!;
+    if (c !== '\\') { out += c; continue; }
+    const n = raw[++i];
+    const simple: Record<string, string> = { n: '\n', t: '\t', r: '\r', '"': '"', '\\': '\\', '/': '/', '0': '\0', a: '\x07', b: '\b', e: '\x1b', f: '\f', v: '\v', ' ': ' ', N: '\u0085', _: '\u00a0' };
+    if (n === undefined) fail(no, 'a dangling escape');
+    if (simple[n!] !== undefined) { out += simple[n!]; continue; }
+    const len = n === 'x' ? 2 : n === 'u' ? 4 : n === 'U' ? 8 : 0;
+    if (!len) fail(no, `an unknown escape \\${n}`);
+    const hex = raw.slice(i + 1, i + 1 + len);
+    if (!/^[0-9a-fA-F]+$/.test(hex) || hex.length !== len) fail(no, 'a bad escape');
+    out += String.fromCodePoint(parseInt(hex, 16));
+    i += len;
+  }
+  return out;
+}
+
+/** Folds the lines of a multi-line flow scalar: one line break → a space, an empty line → a newline. */
+function fold(parts: string[]): string {
+  if (parts.length === 1) return parts[0]!;
+  let out = '';
+  let pendingBreaks = 0;
+  for (let i = 0; i < parts.length; i++) {
+    const p = i === 0 ? parts[i]!.replace(/[ \t]+$/, '') : i === parts.length - 1 ? parts[i]!.replace(/^[ \t]+/, '') : parts[i]!.trim();
+    if (i > 0 && p === '' && i < parts.length - 1) { pendingBreaks++; continue; }
+    if (i > 0) out += pendingBreaks ? '\n'.repeat(pendingBreaks) : ' ';
+    pendingBreaks = 0;
+    out += p;
+  }
+  return out;
+}
+
+/** A scalar that starts at `first` (the text after `key: ` or `- `), with its continuation lines. */
+function scalar(first: string, more: Line[], no: number): unknown {
+  const q = first[0];
+  if (q === '"' || q === "'") {
+    const parts = [first.slice(1)];
+    for (const l of more) parts.push(l.text);
+    let body = parts.join('\n');
+    // The closing quote: the last unescaped one (double) / not doubled (single).
+    if (q === '"') {
+      let end = -1;
+      for (let i = 0; i < body.length; i++) { if (body[i] === '\\') { i++; continue; } if (body[i] === '"') { end = i; break; } }
+      if (end < 0) fail(no, 'an unterminated double-quoted string');
+      if (body.slice(end + 1).trim() && !body.slice(end + 1).trim().startsWith('#')) fail(no, 'text after a quoted string');
+      body = body.slice(0, end);
+      // `\` at a line end joins without a space.
+      const lines = body.split('\n');
+      const joined: string[] = [];
+      for (const l of lines) {
+        if (joined.length && /(^|[^\\])(\\\\)*\\$/.test(joined[joined.length - 1]!)) { joined[joined.length - 1] = joined[joined.length - 1]!.slice(0, -1) + l.replace(/^[ \t]+/, ''); continue; }
+        joined.push(l);
+      }
+      return decodeDouble(fold(joined), no);
+    }
+    let end = -1;
+    for (let i = 0; i < body.length; i++) { if (body[i] === "'") { if (body[i + 1] === "'") { i++; continue; } end = i; break; } }
+    if (end < 0) fail(no, 'an unterminated single-quoted string');
+    if (body.slice(end + 1).trim() && !body.slice(end + 1).trim().startsWith('#')) fail(no, 'text after a quoted string');
+    return fold(body.slice(0, end).split('\n')).replace(/''/g, "'");
+  }
+  if (/^[&*!|>%@`]/.test(first)) fail(no, `unsupported YAML (${first[0]})`);
+  if (first === '[]') { if (more.length) fail(no, 'text after []'); return []; }
+  if (first === '{}') { if (more.length) fail(no, 'text after {}'); return {}; }
+  if (first.startsWith('[') || first.startsWith('{')) fail(no, 'a flow collection with content');
+  const text = fold([first.replace(/\s+#.*$/, ''), ...more.map((l) => l.text.replace(/\s+#.*$/, ''))]);
+  if (more.length === 0) {
+    if (text === 'true' || text === 'false') return text === 'true';
+    if (text === 'null' || text === '~' || text === '') return null;
+    if (/^-?(0|[1-9][0-9]*)$/.test(text)) return Number(text);
+  }
+  return text;
+}
+
+const KEY_RE = /^([A-Za-z0-9_.-]+):(?:\s+(.*))?$/;
+
+/** Parses the old saved YAML form into plain data; throws on anything else. */
+export function parseSavedYaml(text: string): unknown {
+  const lines: Line[] = [];
+  text.replace(/\r\n/g, '\n').split('\n').forEach((raw, i) => {
+    if (raw.trim() === '') { lines.push({ indent: -1, text: '', no: i + 1 }); return; }
+    if (/^\s*#/.test(raw) || raw.trim() === '---' || raw.trim() === '...') return;
+    if (/\t/.test(raw.match(/^\s*/)![0])) fail(i + 1, 'a tab in the indentation');
+    lines.push({ indent: raw.length - raw.trimStart().length, text: raw.trim(), no: i + 1 });
+  });
+  let pos = 0;
+  const skipBlank = () => { while (pos < lines.length && lines[pos]!.indent < 0) pos++; };
+
+  /** Continuation lines of a scalar whose key sits at column `col`: deeper, or blank inside. */
+  function continuation(col: number): Line[] {
+    const out: Line[] = [];
+    while (pos < lines.length) {
+      const l = lines[pos]!;
+      if (l.indent >= 0 && l.indent <= col) break;
+      if (l.indent < 0) {
+        let k = pos;
+        while (k < lines.length && lines[k]!.indent < 0) k++;
+        if (k >= lines.length || lines[k]!.indent <= col) break;
+      }
+      out.push(l.indent < 0 ? { ...l, text: '' } : l);
+      pos++;
+    }
+    return out;
+  }
+
+  function value(rest: string | undefined, col: number, no: number): unknown {
+    if (rest !== undefined && rest !== '' && !rest.startsWith('#')) return scalar(rest, continuation(col), no);
+    skipBlank();
+    const next = lines[pos];
+    if (!next || next.indent < col || (next.indent === col && !next.text.startsWith('- '))) return null;
+    return block(next.indent);
+  }
+
+  function mapping(col: number, firstEntry?: { key: string; rest: string | undefined; no: number }): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    const add = (key: string, rest: string | undefined, no: number) => {
+      if (Object.prototype.hasOwnProperty.call(out, key)) fail(no, `the key ${key} twice`);
+      out[key] = value(rest, col, no);
+    };
+    if (firstEntry) add(firstEntry.key, firstEntry.rest, firstEntry.no);
+    for (;;) {
+      skipBlank();
+      const l = lines[pos];
+      if (!l || l.indent < col) return out;
+      if (l.indent > col) fail(l.no, 'unexpected indentation');
+      if (l.text.startsWith('- ')) return out;
+      const m = KEY_RE.exec(l.text);
+      if (!m) fail(l.no, 'not a "key: value" line');
+      pos++;
+      add(m![1]!, m![2], l.no);
+    }
+  }
+
+  function sequence(col: number): unknown[] {
+    const out: unknown[] = [];
+    for (;;) {
+      skipBlank();
+      const l = lines[pos];
+      if (!l || l.indent !== col || !(l.text.startsWith('- ') || l.text === '-')) {
+        if (l && l.indent > col) fail(l.no, 'unexpected indentation');
+        return out;
+      }
+      pos++;
+      const rest = l.text === '-' ? '' : l.text.slice(2).trim();
+      const m = KEY_RE.exec(rest);
+      if (m) out.push(mapping(col + 2, { key: m[1]!, rest: m[2], no: l.no }));
+      else out.push(value(rest || undefined, col, l.no));
+    }
+  }
+
+  function block(col: number): unknown {
+    skipBlank();
+    const l = lines[pos];
+    if (!l) return null;
+    return l.text.startsWith('- ') || l.text === '-' ? sequence(col) : mapping(col);
+  }
+
+  skipBlank();
+  const doc = block(0);
+  skipBlank();
+  if (pos < lines.length) fail(lines[pos]!.no, 'text after the document');
+  return doc;
 }

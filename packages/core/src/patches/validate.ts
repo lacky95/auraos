@@ -126,7 +126,7 @@ function pathProblem(p: string): PatchFinding['code'] | null {
   if (parts.some((s) => s === '..' || s === '\0')) return 'path-escape';
   if (parts.some((s) => s === '.git')) return 'git-internal';
   if (parts[parts.length - 1] === '.gitmodules') return 'submodule';
-  if (p === 'aura-patches.yaml' || parts[0] === 'patches' && parts.length > 1 && p.endsWith('.patch')) return 'series-file';
+  if (p === 'aura-patches.yaml' || p === 'aura-patches.json' || parts[0] === 'patches' && parts.length > 1 && p.endsWith('.patch')) return 'series-file';
   return null;
 }
 

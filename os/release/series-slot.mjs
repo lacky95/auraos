@@ -72,23 +72,21 @@ export function storeRev(store, ref = ACTIVE_REF) {
  */
 export async function readSeriesInput(input) {
   const L = await patchLib();
-  let text;
   let read;
   let rev = null;
   if (input?.dir) {
-    const f = join(input.dir, L.SERIES_FILE);
-    if (!existsSync(f)) throw new SeriesSlotError('series-missing', `${f} does not exist`);
-    text = readFileSync(f, 'utf8');
     read = (file) => { try { return readFileSync(join(input.dir, file), 'utf8'); } catch { return null; } };
   } else if (input?.store && input.rev) {
     rev = gitOk(input.store, ['rev-parse', '--verify', `${input.rev}^{commit}`]).trim();
-    text = gitOk(input.store, ['show', `${rev}:${L.SERIES_FILE}`]);
     read = (file) => { const r = git(input.store, ['show', `${rev}:${file}`]); return r.code ? null : r.out; };
   } else {
     throw new SeriesSlotError('usage', 'a series is { dir } or { store, rev }');
   }
+  // aura-patches.json; before its one-time migration, the old saved YAML form.
+  const name = [L.SERIES_FILE, L.LEGACY_SERIES_FILE].find((n) => read(n) !== null);
+  if (!name) throw new SeriesSlotError('series-missing', `no ${L.SERIES_FILE} in ${input.dir ?? `${input.store} at ${rev.slice(0, 12)}`}: ${L.SAVED_FORM_HINT}`);
   let series;
-  try { series = L.parseSeriesJson(text); } catch (e) { throw new SeriesSlotError('series-invalid', e.message); }
+  try { series = L.parseSeriesFile(name, read(name)); } catch (e) { throw new SeriesSlotError('series-invalid', e.message); }
   if (series.target.kind !== 'system') throw new SeriesSlotError('series-invalid', `the series targets ${series.target.kind} ${series.target.appId ?? ''}, not the system`);
   const refused = [];
   const flags = [];
@@ -198,9 +196,9 @@ export function importStore({ store, dir, source, by }) {
   } else {
     gitOk(store, ['init', '-q', '-b', 'main'], { env });
     mkdirSync(join(store, 'patches'), { recursive: true });
-    spawnSync('cp', ['-p', join(dir, 'aura-patches.yaml'), store]);
+    for (const n of ['aura-patches.json', 'aura-patches.yaml']) if (existsSync(join(dir, n))) spawnSync('cp', ['-p', join(dir, n), store]);
     spawnSync('sh', ['-c', 'cp -p "$1"/patches/*.patch "$2"/patches/ 2>/dev/null || true', 'sh', dir, store]);
-    gitOk(store, ['add', '-A', '--', 'aura-patches.yaml', 'patches'], { env });
+    gitOk(store, ['add', '-A', '--', 'patches', ...['aura-patches.json', 'aura-patches.yaml'].filter((n) => existsSync(join(store, n)))], { env });
     gitOk(store, ['commit', '-q', '-m', `install: imported from ${source} by the operator\n\n${by}`], { env });
   }
   return gitOk(store, ['rev-parse', 'HEAD']).trim();
@@ -210,4 +208,18 @@ export function importStore({ store, dir, source, by }) {
 export function markInstalled({ store, rev }) {
   gitOk(store, ['update-ref', `${APPROVED_REF_PREFIX}1`, rev]);
   gitOk(store, ['update-ref', ACTIVE_REF, rev]);
+}
+
+/** Paths of a series that feed the AuraOS images (the Dockerfile, .dockerignore, os/): named in every approval. */
+export async function imageInputPaths(patches) {
+  const L = await patchLib();
+  return L.touchedPaths(patches.filter((p) => p.enabled !== false))
+    .filter((p) => /^Dockerfile(\.|$)/.test(p) || p === '.dockerignore' || p.startsWith('os/'));
+}
+
+/** Paths of a series that change what `pnpm install` reads (manifests, lockfile, workspace, npm/pnpm config, pnpmfile). */
+export async function dependencyInputPaths(patches) {
+  const L = await patchLib();
+  return L.touchedPaths(patches.filter((p) => p.enabled !== false))
+    .filter((p) => /(^|\/)(package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|\.npmrc|\.pnpmfile\.cjs|\.pnpmfile\.mjs)$/.test(p));
 }

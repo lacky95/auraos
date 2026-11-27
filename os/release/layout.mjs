@@ -59,6 +59,8 @@ export function layout(dataRoot) {
     jobFiles: (job) => { assertJobId(job); return p(`${JOBS_DIR}/${job}.d`); },
     snapshots: p(SNAPSHOTS_DIR),
     pnpmStore: p(PNPM_STORE_DIR),
+    // Phase 7b: the store of unapproved (validate-only) builds; approved builds never read it.
+    pnpmStoreUnapproved: p(`${PNPM_STORE_DIR}-unapproved`),
     series: p(SYSTEM_SERIES_FILE),
     seriesStore: p(SYSTEM_SERIES_DIR),
   };

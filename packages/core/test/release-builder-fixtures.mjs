@@ -24,7 +24,14 @@ if (a[0] === 'inspect') { console.log('running'); exit(0); }
 if (a[0] === 'exec') exit(a.join(' ').includes('credentialsImported') ? 1 : 0);
 if (a[0] === 'pull') exit(0);
 if (a[0] === 'buildx' && a[1] === 'version') exit(env('FAKE_NO_BUILDX') ? 1 : 0);
-if (a[0] === 'image' && a[1] === 'inspect') exit(has(a[a.length - 1]) ? 0 : 1);
+if (a[0] === 'image' && a[1] === 'inspect') {
+  const t = a[a.length - 1];
+  if (!has(t)) exit(1);
+  if (a.includes('{{.Id}}')) console.log('sha256:' + require('node:crypto').createHash('sha256').update(t).digest('hex'));
+  exit(0);
+}
+// The registry manifest of a base image (metadata only): its bytes change with FAKE_BASE_V.
+if (a[0] === 'buildx' && a[1] === 'imagetools') { console.log(JSON.stringify({ ref: a[a.length - 1], v: env('FAKE_BASE_V', '1') })); exit(0); }
 if (a[0] === 'image' && a[1] === 'rm') exit(0);
 if (a[0] === 'volume' && a[1] === 'inspect') {
   if (a.includes('-f')) { process.stdout.write(env('FAKE_DATA_ROOT', '') + '\\n'); exit(env('FAKE_DATA_ROOT') ? 0 : 1); }

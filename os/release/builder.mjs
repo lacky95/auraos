@@ -39,7 +39,7 @@
 //                     [--keys DIR]... [--key FILE]... [--pin ID]... [--composition desktop|server]
 //                     [--infra FILE] [--first-install] [--job ID]
 //                     [--series-dir DIR | --series-store DIR --series-rev REV | --no-series]
-//                     [--validate-only] [--image-change-approved] [--expect-series-digest D]
+//                     [--validate-only] [--image-change-approved] [--expect-series-digest D] [--expect-inputs FILE]
 //   builder.mjs series-plan --series-dir DIR [--commit SHA]   (Phase 7b: what an operator authorizes)
 //   builder.mjs series-import --data-root D --series-dir DIR --digest D [--source S] [--ref R] [--by TEXT]
 //   (build … --series-store S --series-rev R --mark-installed: an install-time series, approved + active on success)
@@ -57,12 +57,12 @@ import {
 } from '../release-verify.mjs';
 import { renameDurable, writeFileDurable, writeJsonDurable } from './durable.mjs';
 import { LockError, acquireLock, lockStatus } from './lock.mjs';
-import { imageFingerprint, satisfiesNode, targetsOf } from './images.mjs';
+import { imageFingerprint, parseDockerfile, satisfiesNode, targetsOf } from './images.mjs';
 import {
   COMPLETE_MARKER, RELEASE_RECORD, STAGING_PREFIX, assertReleaseId, layout, newJobId, subpathOf,
 } from './layout.mjs';
 import {
-  EMPTY_SERIES_DIGEST, SeriesSlotError, applyToStaging, importStore, markInstalled, readSeriesInput, seriesForBuild, seriesIdentity, touchedComponents,
+  EMPTY_SERIES_DIGEST, SeriesSlotError, applyToStaging, dependencyInputPaths, imageInputPaths, importStore, markInstalled, readSeriesInput, seriesForBuild, seriesIdentity, touchedComponents,
 } from './series-slot.mjs';
 
 export const RELEASE_RECORD_VERSION = 1;
@@ -283,6 +283,60 @@ export function buildContainerArgs({ name, image, dataVolume, stagingSub, storeS
   return a;
 }
 
+/**
+ * The resolved inputs of a build (Phase 7b binding): lockfile digest, the package manager pin, the
+ * Node versions of both images, the image ids, and, when the series changes the images, the
+ * digest of every external base image the Dockerfile names (local RepoDigests, else the registry
+ * manifest through buildx imagetools: metadata only, nothing runs).
+ */
+export async function resolveInputs({ docker, staging, images, node, rebuildsImage = false, pinBases = false }) {
+  const pkg = readJson(join(staging, 'package.json')) ?? {};
+  const imageId = async (ref) => {
+    const r = await run(docker, ['image', 'inspect', '--format', '{{.Id}}', ref]);
+    return r.code ? null : (r.out.trim().split('\n').pop() || null);
+  };
+  const from = {};
+  if (pinBases) {
+    const stages = parseDockerfile(readFileSync(join(staging, 'Dockerfile'), 'utf8'));
+    const names = new Set(stages.map((x) => x.name));
+    for (const ref of [...new Set(stages.map((x) => x.base).filter((b) => b && !names.has(b) && b !== 'scratch' && !b.includes('$')))].sort()) {
+      let digest = null;
+      if (/@sha256:[0-9a-f]{64}$/.test(ref)) digest = ref.slice(ref.indexOf('@') + 1);
+      if (!digest) {
+        const r = await run(docker, ['image', 'inspect', '--format', '{{json .RepoDigests}}', ref]);
+        try { const d = JSON.parse(r.out.trim().split('\n').pop() || '[]')[0]; if (!r.code && d) digest = d.slice(d.indexOf('@') + 1); } catch { /* not local */ }
+      }
+      if (!digest) {
+        const r = await run(docker, ['buildx', 'imagetools', 'inspect', '--raw', ref]);
+        if (!r.code && r.out.trim()) digest = `sha256:${createHash('sha256').update(r.out.trim()).digest('hex')}`;
+      }
+      from[ref] = digest;
+    }
+  }
+  return {
+    lockfileHash: existsSync(join(staging, 'pnpm-lock.yaml')) ? sha256File(join(staging, 'pnpm-lock.yaml')) : null,
+    packageManager: typeof pkg.packageManager === 'string' ? pkg.packageManager : null,
+    node: { base: node.base ?? null, shell: node.shell ?? null },
+    images: { base: await imageId(images.base), shell: await imageId(images.shell) },
+    rebuildsImage,
+    from,
+  };
+}
+
+/** What differs between approved and resolved inputs (empty: the same build). */
+export function inputsDiff(want, got) {
+  const out = [];
+  const cmp = (k, a, b) => { if ((a ?? null) !== (b ?? null)) out.push(`${k} ${a ?? 'none'} → ${b ?? 'none'}`); };
+  cmp('lockfile', want.lockfileHash, got.lockfileHash);
+  cmp('packageManager', want.packageManager, got.packageManager);
+  cmp('node(base)', want.node?.base, got.node?.base);
+  cmp('node(shell)', want.node?.shell, got.node?.shell);
+  // Reused images must be the very same; images the series rebuilds are pinned by their bases.
+  if (!want.rebuildsImage) { cmp('image(base)', want.images?.base, got.images?.base); cmp('image(shell)', want.images?.shell, got.images?.shell); }
+  for (const [ref, d] of Object.entries(want.from ?? {})) cmp(`base image ${ref}`, d, got.from?.[ref]);
+  return out;
+}
+
 const touchedNote = (series) => (series.touched?.length ? ` (system patches touch ${series.touched.map((t) => t.component).join(', ')})` : '');
 const shortHash = (o) => createHash('sha256').update(JSON.stringify(o)).digest('hex').slice(0, 8);
 
@@ -463,6 +517,9 @@ export async function build(o) {
         flags: read.flags,
         touched,
         rebuildsImage,
+        // Owner 2026-11-27: Dockerfile and image changes are named in the approval and the install prompt.
+        imageFiles: await imageInputPaths(read.patches),
+        touchesDependencies: touched.length > 0 && (await dependencyInputPaths(read.patches)).length > 0,
       };
     }
     job.series = series.order.length || series.disabled?.length ? { digest: series.digest, rev: series.rev ?? null, patches: series.order.length, rebuildsImage } : null;
@@ -534,6 +591,19 @@ export async function build(o) {
     }
     done('base-check', `base ${node.base}, shell ${node.shell}, required ${required ?? 'any'}`);
 
+    // Phase 7b: the RESOLVED build inputs. A validation records them; the approved build of the same
+    // series must resolve to exactly the same (owner 2026-11-27: mutable dependencies or base images
+    // never silently change an approved build).
+    const inputs = await resolveInputs({ docker, staging, images, node, rebuildsImage, pinBases: rebuildsImage });
+    if (o.validateOnly && rebuildsImage) {
+      const loose = Object.entries(inputs.from).filter(([, d]) => !d).map(([r]) => r);
+      if (loose.length) refuse('base-image-unpinned', `cannot pin the base image(s) ${loose.join(', ')} by digest: an image-changing series is validated only with pinned bases`);
+    }
+    if (o.expectInputs) {
+      const diff = inputsDiff(o.expectInputs, inputs);
+      if (diff.length) refuse('build-inputs-moved', `the build resolved other inputs than the approved ones: ${diff.join('; ')}`);
+    }
+
     // 8.–10. throwaway container: deps, build, check
     mkdirSync(L.pnpmStore, { recursive: true });
     // dataSubpath: where dataRoot sits inside the volume ('' = its root; a scratch dir in e2e checks).
@@ -547,7 +617,10 @@ export async function build(o) {
       publicSub = sub(join(jobFiles, 'public'));
       env.NODE_EXTRA_CA_CERTS = '/etc/aura/build-infra/ca.pem';
     }
-    const base = { image: images.shell, dataVolume: o.dataVolume, stagingSub: sub(staging), storeSub: sub(L.pnpmStore), publicSub, limits: o.limits };
+    // An unapproved series (validate-only) never writes the pnpm store approved builds use.
+    const store = o.validateOnly ? L.pnpmStoreUnapproved : L.pnpmStore;
+    mkdirSync(store, { recursive: true });
+    const base = { image: images.shell, dataVolume: o.dataVolume, stagingSub: sub(staging), storeSub: sub(store), publicSub, limits: o.limits };
     const shName = (s) => `aura-release-${s}-${jobId.toLowerCase()}`;
 
     begin('deps');
@@ -558,7 +631,13 @@ export async function build(o) {
       // Registry access: the default bridge (never aura-net), credentials only as a 0400 file, removed after the run.
       let secretsSub = null;
       const depEnv = { ...env };
-      const npmrc = [infra.secrets.infra_npmrc, infra.secrets.infra_proxy].filter(Boolean);
+      // Unapproved code never runs while the network or a credential is there: the fetch skips every
+      // lifecycle script (AURA_BUILD_IGNORE_SCRIPTS), then they run offline in their own container.
+      if (o.validateOnly) depEnv.AURA_BUILD_IGNORE_SCRIPTS = '1';
+      // ...and a series that changes what the install reads (package manifests, lockfile, workspace, npm or
+      // pnpm config) gets no registry credential at all: its fetch runs anonymously or fails clearly.
+      const noCreds = o.validateOnly && series.touchesDependencies === true;
+      const npmrc = noCreds ? [] : [infra.secrets.infra_npmrc, infra.secrets.infra_proxy].filter(Boolean);
       if (npmrc.length) {
         const sd = join(jobFiles, 'secrets');
         mkdirSync(sd, { recursive: true, mode: 0o700 });
@@ -574,11 +653,19 @@ export async function build(o) {
       try {
         const online = await run(docker, [...buildContainerArgs({ ...base, secretsSub, name: shName('deps'), network: 'bridge', env: depEnv }), 'os/release/build.sh', 'deps'],
           { timeoutMs: timeouts.deps, name: shName('deps') });
-        if (online.code) throw new BuildError('deps', `pnpm install --frozen-lockfile failed: ${online.out.trim().split('\n').slice(-6).join(' / ')}`);
+        if (online.code) {
+          throw new BuildError('deps', `pnpm install --frozen-lockfile failed${noCreds && infra.secrets.infra_npmrc ? ' (an unapproved series that changes dependency inputs is fetched WITHOUT registry credentials)' : ''}: ${online.out.trim().split('\n').slice(-6).join(' / ')}`);
+        }
       } finally {
         removeTree(join(jobFiles, 'secrets'));
       }
       depsDetail = 'fetched through the registry (default bridge network)';
+      if (o.validateOnly) {
+        const sc = await run(docker, [...buildContainerArgs({ ...base, name: shName('scripts'), network: 'none', env }), 'os/release/build.sh', 'scripts'],
+          { timeoutMs: timeouts.deps, name: shName('scripts') });
+        if (sc.code) throw new BuildError('deps', `the install scripts failed (offline, no credentials): ${sc.out.trim().split('\n').slice(-6).join(' / ')}`);
+        depsDetail += '; install scripts offline, without credentials (unapproved series)';
+      }
     }
     done('deps', depsDetail);
 
@@ -609,7 +696,7 @@ export async function build(o) {
       // Nothing is finalized; the approved activation builds again with the same inputs.
       removeTree(staging);
       job.validated = { id, commit: sel.commit, version, composition, provenance: provenanceOf({ channel, signed: channel === 'signed' && sel.signed === true, seriesLength: series.order.length }),
-        series: { ...series, binding: { ...series.binding, composition } }, images };
+        series: { ...series, binding: { ...series.binding, composition } }, images, inputs };
       for (const k of ['manifest', 'finalize', 'gc']) step(k, 'skipped', 'validation only');
       finalized = true;
       return finish({ ok: true, id, reused: false, validated: job.validated });
@@ -654,7 +741,8 @@ export async function build(o) {
       },
       images,
       node,
-      lockfileHash: existsSync(join(staging, 'pnpm-lock.yaml')) ? sha256File(join(staging, 'pnpm-lock.yaml')) : null,
+      lockfileHash: inputs.lockfileHash,
+      inputs,
       infraDigest: infra.digest,
       auraContract: readVersionConst(staging, 'packages/core/src/contract/appContract.ts', 'AURA_CONTRACT'),
       ari: readVersionConst(staging, 'packages/core/src/runtimes/ari.ts', 'ARI_VERSION'),
@@ -759,6 +847,7 @@ export async function main(argv = process.argv.slice(2)) {
           validateOnly: a['validate-only'] === true,
           imageChangeApproved: a['image-change-approved'] === true,
           expectSeriesDigest: typeof a['expect-series-digest'] === 'string' ? a['expect-series-digest'] : undefined,
+          expectInputs: typeof a['expect-inputs'] === 'string' ? JSON.parse(readFileSync(a['expect-inputs'], 'utf8')) : undefined,
         });
         // Install-time patches: the operator-authorized store revision becomes approved and active.
         const sa = seriesArg(a);
@@ -776,8 +865,10 @@ export async function main(argv = process.argv.slice(2)) {
         const read = await readSeriesInput({ dir: a['series-dir'] });
         const commit = typeof a.commit === 'string' ? a.commit : read.series.base.commit;
         const { digest } = await seriesIdentity(read, commit);
+        const imageFiles = await imageInputPaths(read.patches);
         jsonOut({
           ok: true, digest, base: read.series.base, buildsOn: commit, rebased: commit !== read.series.base.commit,
+          imageFiles, changesImages: imageFiles.length > 0,
           patches: read.patches.map((p) => ({
             file: p.file, subject: p.subject, sha256: p.sha256, enabled: p.enabled,
             files: p.validation.files.map((x) => ({ path: x.path, status: x.status, added: x.addedBytes })),

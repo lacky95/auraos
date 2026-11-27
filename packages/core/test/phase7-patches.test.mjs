@@ -14,6 +14,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { stringify as stringifyYaml } from 'yaml';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -54,8 +55,8 @@ test('series v2: saves target, sha256 and enabled; a v1 file reads as v2; the ne
   const u = upstreamWithPatches();
   const store = join(u.root, 'store');
   const saved = saveSeries(store, { target: APP, base: { repository: u.repo, commit: u.base }, patches: u.patches, message: 's' });
-  const text = readFileSync(join(store, 'aura-patches.yaml'), 'utf8');
-  assert.match(text, /^  "v": 2,$/m, 'v2, written as JSON (YAML too; the builder reads it without a YAML parser)');
+  const text = readFileSync(join(store, 'aura-patches.json'), 'utf8');
+  assert.match(text, /^  "v": 2,$/m, 'v2, written as aura-patches.json (7b)');
   assert.match(text, /"kind": "app"/);
   assert.equal(saved.series.patches.every((p) => /^[0-9a-f]{64}$/.test(p.sha256) && p.enabled === true), true);
   assert.deepEqual(parseSeries(formatSeries(saved.series)), saved.series, 'round trip');
@@ -68,6 +69,31 @@ test('series v2: saves target, sha256 and enabled; a v1 file reads as v2; the ne
   // A recorded sha256 that does not match the file is refused.
   writeFileSync(join(store, saved.series.patches[0].file), u.patches[0].content.replace('one patched', 'one tampered'));
   assert.throws(() => readPatches(store, saved.series), /does not match its sha256/);
+});
+
+test('series file: the old aura-patches.yaml (Track P v1) is read; the next save migrates it to aura-patches.json in one commit; old revisions stay readable', () => {
+  const u = upstreamWithPatches();
+  const store = join(u.root, 'store');
+  mkdirSync(join(store, 'patches'), { recursive: true });
+  // Exactly what Track P's save wrote (yaml.stringify of v1), with a folded long subject like live's repos.
+  const subject = 'Drop removed getAppBasePath import: apps are served from /, so deep links start at /#/';
+  writeFileSync(join(store, 'patches', '0001-a.patch'), u.patches[0].content);
+  writeFileSync(join(store, 'aura-patches.yaml'), stringifyYaml({ app: 'io.test.app', base: { repository: u.repo, commit: u.base }, patches: [{ file: 'patches/0001-a.patch', subject }] }));
+  git(store, 'init', '-q', '-b', 'main');
+  git(store, 'add', '-A');
+  git(store, '-c', 'user.name=t', '-c', 'user.email=t@x.invalid', 'commit', '-qm', 'track p');
+  const old = git(store, 'rev-parse', 'HEAD');
+  const v1 = readSeries(store);
+  assert.deepEqual([v1.target, v1.patches[0].subject], [{ kind: 'app', appId: 'io.test.app' }, subject]);
+  assert.equal(loadSeries(store, old).patches.length, 1);
+  const saved = saveSeries(store, { target: APP, base: { repository: u.repo, commit: u.base }, patches: u.patches, message: 'next save' });
+  assert.equal(existsSync(join(store, 'aura-patches.yaml')), false);
+  assert.ok(existsSync(join(store, 'aura-patches.json')));
+  assert.deepEqual(git(store, 'show', '--name-status', '--format=', 'HEAD').split('\n').filter((l) => /aura-patches/.test(l)).sort(),
+    ['A\taura-patches.json', 'D\taura-patches.yaml']);
+  assert.match(git(store, 'log', '-1', '--format=%B'), /Migrated aura-patches\.yaml to aura-patches\.json/);
+  assert.equal(readSeries(store, old).patches[0].subject, subject, 'a revision from before the migration still reads');
+  assert.equal(readSeries(store, saved.commit).v, 2);
 });
 
 test('series digest: stable across YAML form and subjects; changes with order, a flag, a byte, the base or the target', () => {
@@ -87,9 +113,13 @@ test('series digest: stable across YAML form and subjects; changes with order, a
   const store = join(u.root, 'store');
   const s = saveSeries(store, { target: APP, base: { repository: u.repo, commit: u.base }, patches: u.patches, message: 's' });
   const first = loadSeries(store, s.commit).digest;
-  const yaml = readFileSync(join(store, 'aura-patches.yaml'), 'utf8').replace(/subject: .*/g, 'subject: "renamed"');
-  writeFileSync(join(store, 'aura-patches.yaml'), `# reformatted\n${yaml}`);
-  git(store, 'commit', '-qam', 'reformat');
+  // The same series in the old YAML form, re-formatted and with other subjects: same digest.
+  const doc = JSON.parse(readFileSync(join(store, 'aura-patches.json'), 'utf8'));
+  for (const p of doc.patches) p.subject = 'renamed';
+  git(store, 'rm', '-q', 'aura-patches.json');
+  writeFileSync(join(store, 'aura-patches.yaml'), `# reformatted\n${stringifyYaml(doc)}`);
+  git(store, 'add', 'aura-patches.yaml');
+  git(store, 'commit', '-qm', 'reformat');
   assert.equal(loadSeries(store, 'HEAD').digest, first);
 });
 

@@ -9,7 +9,7 @@
  * the running release, in its own process.
  *
  *   <data>/patches/system/                   the store: a git repository (git history = the first registry)
- *     aura-patches.yaml, patches/*.patch     the series (v2, target system), one commit per revision
+ *     aura-patches.json, patches/*.patch     the series (v2, target system), one commit per revision
  *     refs/aura/active                       the revision the running release carries
  *     refs/aura/approved/<n>                 revisions an owner approval or the operator authorized
  *   <data>/aura/workspaces/<userId>/system/<n>/   a writable checkout: release commit + the active series (the
@@ -284,6 +284,8 @@ export interface ValidatedSeries {
   disabled?: Array<{ file: string; sha256: string; subject: string }>;
   touched?: TouchedComponent[];
   rebuildsImage?: boolean;
+  /** Series paths that feed the images (Dockerfile, .dockerignore, os/). */
+  imageFiles?: string[];
   binding?: PatchBinding;
   flags?: Array<{ file: string; code: string; message: string }>;
 }
@@ -295,6 +297,17 @@ export interface ValidatedSeries {
  * components the series touches. Recomputed from the STORE at `rev` and
  * compared with what the builder validated: any difference refuses.
  */
+/** The resolved build inputs of a validation (builder resolveInputs): what the approved build must resolve to again. */
+export interface BuildInputs {
+  lockfileHash: string | null;
+  packageManager: string | null;
+  node: { base: string | null; shell: string | null };
+  images: { base: string | null; shell: string | null };
+  rebuildsImage: boolean;
+  /** External base images of the Dockerfile → digest (pinned when the series changes the images). */
+  from: Record<string, string | null>;
+}
+
 export interface SystemPatchBinding {
   releaseId: string;
   commit: string;
@@ -304,9 +317,13 @@ export interface SystemPatchBinding {
   series: PatchBinding;
   components: TouchedComponent[];
   rebuildsImage: boolean;
+  /** The series paths that feed the images: shown in the approval (owner 2026-11-27). */
+  imageFiles: string[];
+  /** Owner 2026-11-27: the resolved inputs (lockfile, package manager, Node, image ids, base image digests). */
+  buildInputs: BuildInputs;
 }
 
-export function systemPatchBinding(input: { dataDir: string; rev: string; validated: { id: string; commit: string; version: string | null; provenance: string; composition: string; series: ValidatedSeries } }): SystemPatchBinding {
+export function systemPatchBinding(input: { dataDir: string; rev: string; validated: { id: string; commit: string; version: string | null; provenance: string; composition: string; series: ValidatedSeries; inputs?: BuildInputs } }): SystemPatchBinding {
   const loaded = loadSeries(storeDir(input.dataDir), resolveRev(input.dataDir, input.rev));
   if (!loaded) throw new SystemPatchError('no-series', `revision ${input.rev} holds no series`);
   const v = input.validated;
@@ -314,10 +331,16 @@ export function systemPatchBinding(input: { dataDir: string; rev: string; valida
   if (`sha256:${binding.seriesDigest}` !== v.series.digest || v.series.rev !== input.rev) {
     throw new SystemPatchError('binding-mismatch', 'the validated build is not of this revision: validate again');
   }
+  if (!v.inputs) throw new SystemPatchError('binding-mismatch', 'the validation recorded no build inputs: validate again');
+  if (v.series.rebuildsImage && Object.values(v.inputs.from).some((d) => !d)) {
+    throw new SystemPatchError('binding-mismatch', 'a base image of the changed Dockerfile is not pinned by digest: validate again');
+  }
   return {
     releaseId: v.id, commit: v.commit, version: v.version, provenance: v.provenance, composition: v.composition,
     series: binding, components: (v.series.touched ?? []).map(({ component, kind, modules, built, deployed }) => ({ component, kind, ...(modules?.length ? { modules } : {}), built: built ?? null, deployed: deployed ?? true })),
     rebuildsImage: v.series.rebuildsImage === true,
+    imageFiles: v.series.imageFiles ?? [],
+    buildInputs: v.inputs,
   };
 }
 
@@ -336,6 +359,12 @@ export function approvalDetails(b: SystemPatchBinding, view: SeriesView): string
     ...enabled.map((p, i) => `Patch ${i + 1}: ${p.subject} (${p.file})${p.flags.length ? ` [${p.flags.join('; ')}]` : ''}`),
     ...view.patches.filter((p) => !p.enabled).map((p) => `Disabled: ${p.subject} (${p.file})`),
     `Components: ${b.components.map((c) => `${c.component}${c.modules?.length ? ` (${c.modules.join(', ')})` : ''}${c.deployed === false ? ' (not deployed in this composition)' : ''}`).join(', ') || 'none'}`,
+    b.rebuildsImage
+      ? `Images: REBUILT from the patched ${b.imageFiles.join(', ') || 'Dockerfile'} after this approval; base images pinned: ${Object.entries(b.buildInputs.from).map(([r, d]) => `${r}@${(d ?? '').slice(0, 19)}`).join(', ')}`
+      : b.imageFiles.length
+        ? `Images: unchanged (the series touches ${b.imageFiles.join(', ')}, which the images do not copy)`
+        : 'Images: unchanged (no Dockerfile or os/ change)',
+    `Build inputs: lockfile ${(b.buildInputs.lockfileHash ?? 'none').replace(/^sha256:/, '').slice(0, 12)}, ${b.buildInputs.packageManager ?? 'pnpm (unpinned)'}, Node ${b.buildInputs.node.shell ?? '?'}`,
     `Composition: ${b.composition}`,
     `After activation: AuraOS ${b.version ?? 'main'}, locally modified (${enabled.length} system patch${enabled.length === 1 ? '' : 'es'}, series ${b.series.seriesDigest.slice(0, 7)}), based on ${b.provenance === 'locally-modified' && b.version ? `signed ${b.version}` : 'an unsigned revision'}`,
   ];
@@ -442,6 +471,8 @@ export interface BuilderInput {
   validateOnly?: boolean;
   imageChangeApproved?: boolean;
   expectSeriesDigest?: string;
+  /** A JSON file with the approved BuildInputs (builder --expect-inputs). */
+  expectInputsFile?: string;
   infraFile?: string;
 }
 
@@ -457,6 +488,7 @@ export function builderArgs(i: BuilderInput): string[] {
     ...(i.validateOnly ? ['--validate-only'] : []),
     ...(i.imageChangeApproved ? ['--image-change-approved'] : []),
     ...(i.expectSeriesDigest ? ['--expect-series-digest', i.expectSeriesDigest] : []),
+    ...(i.expectInputsFile ? ['--expect-inputs', i.expectInputsFile] : []),
     ...(i.infraFile ? ['--infra', i.infraFile] : []),
   ];
 }

@@ -79,7 +79,7 @@ function seriesOn(srcDir, commit, edits) {
     writeFileSync(join(dir, 'patches', f), content);
     return { file: `patches/${f}`, subject: edits[i][0], sha256: createHash('sha256').update(content).digest('hex'), enabled: true };
   });
-  writeFileSync(join(dir, 'aura-patches.yaml'), `${JSON.stringify({ v: 2, target: { kind: 'system' }, base: { commit }, patches }, null, 2)}\n`);
+  writeFileSync(join(dir, 'aura-patches.json'), `${JSON.stringify({ v: 2, target: { kind: 'system' }, base: { commit }, patches }, null, 2)}\n`);
   return dir;
 }
 
@@ -105,6 +105,7 @@ test('--patches: validated and authorized before any build; the patched first re
   const digest = /unattended: authorize the series with --accept-patches (sha256:[0-9a-f]{64})/.exec(r1.out)?.[1];
   assert.ok(digest, r1.out);
   assert.match(r1.out, /patch +probe: patched/);
+  assert.match(r1.out, /images +unchanged \(the series touches no Dockerfile or os\/ file\)/);
   assert.doesNotMatch(r1.calls, /builder\.mjs build /, 'nothing built before the authorization');
   // A wrong digest: refused before any build.
   const r2 = install([...base, '--accept-patches', `sha256:${'0'.repeat(64)}`]);
@@ -142,6 +143,15 @@ test('--patches: a series on another base aborts; a refused or failing series le
   const r = install(['--source', `file://${src.dir}`, '--trusted-key', keyFile, '--patches', other, '--accept-patches', 'sha256:00']);
   assert.equal(r.status, 3, r.out);
   assert.match(r.out, /is based on [0-9a-f]{40}, not on the selected release/);
+  // No series file in the saved form: the operator is told how to produce it.
+  const empty = tmp('aura-inst-noseries-');
+  const r0 = install(['--source', `file://${src.dir}`, '--trusted-key', keyFile, '--patches', empty, '--accept-patches', 'sha256:00']);
+  assert.equal(r0.status, 3, r0.out);
+  assert.match(r0.out, /has no aura-patches\.json: save the series once with 'aura system patch save'/);
+  // An image-changing series is named as such in the authorization prompt.
+  const img = seriesOn(src.dir, src.commit, [['image', 'os/base/x', 'patched base\n']]);
+  const ri = install(['--source', `file://${src.dir}`, '--trusted-key', keyFile, '--patches', img]);
+  assert.match(ri.out, /IMAGES +the series changes what the AuraOS images are built from[\s\S]*os\/base\/x/);
   const anchor = seriesOn(src.dir, src.commit, [['key', 'os/release-keys/evil.pub', 'x\n']]);
   const r2 = install(['--source', `file://${src.dir}`, '--trusted-key', keyFile, '--patches', anchor, '--accept-patches', 'sha256:00']);
   assert.equal(r2.status, 3, r2.out);
@@ -156,7 +166,7 @@ test('--patches: a series on another base aborts; a refused or failing series le
   assert.equal(r3.status, 1, r3.out);
   assert.match(r3.out, /store is kept for inspection/);
   assert.equal(existsSync(join(f2.data, 'aura/release/pointer.json')), false, 'no active release');
-  assert.ok(existsSync(join(f2.data, 'patches/system/aura-patches.yaml')));
+  assert.ok(existsSync(join(f2.data, 'patches/system/aura-patches.json')));
 });
 
 test('--check-only: a green preflight writes nothing', () => {

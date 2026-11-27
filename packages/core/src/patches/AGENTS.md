@@ -6,7 +6,7 @@ Sector rules: `packages/core/AGENTS.md`. The ONE patch series library (D68): the
 
 - **Entry point:** `index.ts`. Leaf: `types.ts` (PatchTarget, PatchBinding, Series, ApplyResult, audit actions).
 - **Portable modules:** `seriesFile.ts`, `digest.ts`, `validate.ts`, `apply.ts` import only `node:` builtins and `import type`. The release builder (`os/release/series-slot.mjs`) and `install.sh` run them **from source with Node's type stripping**, before anything is built. Keep them so: no value import of another module, no `.js` value specifier, no enum/namespace/parameter properties (`release-series.test.mjs` checks the imports).
-- **The series file is written as JSON** (valid YAML): the builder reads it without a YAML parser; `series.ts` still reads YAML (v1 files and hand-written ones).
+- **The series file is `aura-patches.json`** (owner 2026-11-27). The old `aura-patches.yaml` stays readable: `series.ts` with the YAML library, the builder and installer with `parseSavedYaml` (only the subset AuraOS's saves wrote; its equality with the YAML library is tested). `saveSeries` migrates: it writes the JSON file and removes the YAML one in the same commit (`phase7-patches.test.mjs`).
 
 ## State it owns
 

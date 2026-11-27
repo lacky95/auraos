@@ -63,7 +63,7 @@ export interface PatchLimits {
   maxPatchBytes: number;
 }
 
-// ─── the series file (aura-patches.yaml v2; seriesFile.ts reads and writes it) ─
+// ─── the series file (aura-patches.json v2; the old aura-patches.yaml is read too: seriesFile.ts) ─
 
 /** What a series applies to. */
 export interface SeriesBase {

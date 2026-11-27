@@ -37,7 +37,7 @@
 #   --keep-bootstrap-credentials   keep <state-dir>/credentials after the install (D94 O3)
 #   --node-image IMAGE       the Node image the helpers run in when the host has no node >= 20
 #   --yes, --unattended      never ask; refuse instead of prompting
-#   --patches DIR|GIT-URL    install-time system patches (D68, Phase 7b): the series (aura-patches.yaml in
+#   --patches DIR|GIT-URL    install-time system patches (D68, Phase 7b): the series (aura-patches.json in
 #                            the saved form + patches/) is validated, shown and authorized BEFORE anything
 #                            is built; the first release is built with it (locally-modified, based on the
 #                            verified release); the series and its git history become the system patch store
@@ -495,7 +495,9 @@ install_patches() {
       PSRC=$(printf '%s' "$PATCHES" | sed 's#://[^/@]*@#://#') ;;
     *)
       mkdir -p "$SDIR/patches"
-      cp -p "$PATCHES/aura-patches.yaml" "$SDIR/" 2>/dev/null || die 3 "$PATCHES has no aura-patches.yaml"
+      found=
+      for n in aura-patches.json aura-patches.yaml; do [ -f "$PATCHES/$n" ] && { cp -p "$PATCHES/$n" "$SDIR/"; found=$n; }; done
+      [ -n "$found" ] || die 3 "$PATCHES has no aura-patches.json: save the series once with 'aura system patch save' (it writes aura-patches.json), or write aura-patches.json yourself (JSON: v 2, target, base.commit, patches with file, subject, sha256, enabled; Docs: System patches)"
       for p in "$PATCHES"/patches/*.patch; do [ -f "$p" ] && cp -p "$p" "$SDIR/patches/"; done
       PSRC=$(abspath "$PATCHES") ;;
   esac
@@ -515,6 +517,12 @@ install_patches() {
   sed -n -e 's/^ *"subject": "\(.*\)",$/  patch   \1/p' -e 's/^ *"enabled": false,*$/          (disabled)/p' "$TMP/plan.json" | tee -a "$LOG"
   grep -A1 '"flags": \[' "$TMP/plan.json" | sed -n 's/^ *"\(.*\)"$/  flag    \1/p' | tee -a "$LOG"
   say "  ($node_lines patch file(s); the first release will be locally-modified, based on signed $REL_VERSION, never shown as signed)"
+  if grep -q '"changesImages": true' "$TMP/plan.json"; then
+    say "  IMAGES  the series changes what the AuraOS images are built from (they are rebuilt from the patched files after your authorization):"
+    sed -n '/"imageFiles": \[/,/\]/s/^ *"\([^"]*\)",\{0,1\}$/          \1/p' "$TMP/plan.json" | tee -a "$LOG"
+  else
+    say "  images  unchanged (the series touches no Dockerfile or os/ file)"
+  fi
   say "  series digest $DIGEST"
   HEX=${DIGEST#sha256:}
   if [ -n "$ACCEPT_PATCHES" ]; then

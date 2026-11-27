@@ -34,17 +34,29 @@ Activation is always yours.
 
 1. **Validate, unprivileged.** The release and the whole series are built and
    checked (`server.mjs --check`) in throwaway containers: no Docker socket,
-   no home, no secrets. A patch that does not apply, a failed build or check
-   stops here; the running release is untouched.
+   no home, no AuraOS secrets, no writable system path, and a pnpm store of
+   its own. While the dependency fetch has the network, no install script
+   runs (they run afterwards, offline); a series that changes package
+   manifests, the lockfile or npm/pnpm config gets no registry credential.
+   A patch that does not apply, a failed build or check stops here; the
+   running release is untouched. The validation records the **resolved build
+   inputs**: the lockfile digest, the pnpm version, the Node versions and
+   image ids, and, when the series changes the images, every base image by
+   digest.
 2. **Your approval of the exact diff, with your password.** The dialog shows
    the base release, the series revision and digest, the ordered patches and
    their flags (binary, mode, image or dependency changes), the components the
-   series touches, and the full diff. A desktop session alone is not enough;
+   series touches, an **Images** line (unchanged, or rebuilt from the named
+   Dockerfile and `os/` files with the pinned base images), the build inputs,
+   and the full diff. A desktop session alone is not enough;
    on the host, `aura approve <id>` works too. The approval binds that exact
    revision, base, order, enabled flags and composition: any change needs a
    new approval.
 3. **The approved build.** Only now is an image rebuilt if the series changes
    the Dockerfile or the files the images copy ("Rebuilds the AuraOS images").
+   It must resolve exactly the approved inputs: a moved base image tag, another
+   Node or pnpm, or a different reused image stops it (`build-inputs-moved`)
+   before anything is finalized.
 4. **The switch.** Atomic, with a data snapshot, writes held until the new
    release is healthy, and an **automatic rollback** if it is not.
    A series that touches the Terminal warns that active sessions end; by
@@ -95,13 +107,14 @@ never changed.
 ## Install-time patches
 
 ```sh
-sh install.sh --patches ./my-series                # a directory: aura-patches.yaml + patches/
+sh install.sh --patches ./my-series                # a directory: aura-patches.json + patches/
 sh install.sh --patches https://git.example/p.git \
   --patches-ref <40-hex commit> --accept-patches <series digest>   # unattended
 ```
 
 The upstream release is verified first; then the series is validated and
-shown (source, pinned commit, patches, flags, **series digest**) and you
+shown (source, pinned commit, patches, flags, whether it changes the AuraOS
+images and which files, **series digest**) and you
 authorize it by typing the start of the digest, or with `--accept-patches`
 unattended. Nothing is built before that. The first release is built with the
 series (locally modified, based on the verified release); the series and its
@@ -111,8 +124,15 @@ stops with no active release and keeps the store for inspection; it never
 falls back to an unpatched install on its own. `--config` and `--patches`
 combine; `--developer --patches` is refused.
 
-The series file is written by `aura system patch save` as JSON (which is also
-YAML); the installer reads only that saved form.
+## The series file
+
+Every save writes **`aura-patches.json`**: `v: 2`, the target, the base commit
+and the ordered patches, each with its `sha256` and `enabled` flag. Series
+saved before (`aura-patches.yaml`, app patches from `aura dev patch`) keep
+working: AuraOS reads them, and the next save of that repository writes
+`aura-patches.json` and removes the old file in the same commit. The
+installer reads `aura-patches.json` (and the old file in the form AuraOS wrote
+it); anything else stops the install with how to produce the saved form.
 
 ## Where things are
 

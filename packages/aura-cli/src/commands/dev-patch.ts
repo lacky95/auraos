@@ -5,7 +5,7 @@
  *        a writable workspace at /mnt/aura/work/<app>: the upstream base plus
  *        the saved series, one commit per patch
  *   aura dev patch save -m <msg>     commit work in the workspace, then save the
- *        series (patches/NNNN-*.patch + aura-patches.yaml, one commit) into the
+ *        series (patches/NNNN-*.patch + aura-patches.json, one commit) into the
  *        patch repo /data/patches/<installationId>/
  *   aura dev patch list [app]        the series, the saved and the active revision
  *   aura dev patch remote [url]      the patch repo's remote (`--push` to share)
@@ -541,7 +541,7 @@ export function registerDevPatch(dev: Command): void {
     .command('save')
     .option('-m, --message <msg>', 'Commit message for uncommitted changes (the patch subject)')
     .option('-C, --workspace <dir>', 'The workspace (default: the one this directory is in)')
-    .description('Commit the workspace and save its patches + aura-patches.yaml as one commit in the patch repo.')
+    .description('Commit the workspace and save its patches + aura-patches.json as one commit in the patch repo.')
     .action(async (o: { message?: string; workspace?: string }) => {
       const ws = findWorkspace(o.workspace ?? process.cwd());
       if (!ws) fail('not in a patch workspace — cd to /mnt/aura/work/<app> (aura dev patch start <app>)');

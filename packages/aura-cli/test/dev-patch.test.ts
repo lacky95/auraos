@@ -223,7 +223,7 @@ test('dev status resolves the installation from a subdirectory of the app and fr
   assert.deepEqual(seen[0]!.body, { app: 'io.test.fromdir' });
 });
 
-test('patch start + save: patches/NNNN-*.patch and aura-patches.yaml in one patch-repo commit', async () => {
+test('patch start + save: patches/NNNN-*.patch and aura-patches.json in one patch-repo commit', async () => {
   const w = world();
   await fakeShell(w.routes);
   const { ws, saved } = await savedChange(w);
@@ -233,8 +233,8 @@ test('patch start + save: patches/NNNN-*.patch and aura-patches.yaml in one patc
   assert.equal(saved.repo, repo);
   assert.deepEqual(saved.files, ['patches/0001-Status-shows-busy.patch']);
   assert.deepEqual(git(repo, 'show', '--name-only', '--format=', 'HEAD').split('\n').sort(),
-    ['aura-patches.yaml', 'patches/0001-Status-shows-busy.patch']);
-  const yaml = readFileSync(join(repo, 'aura-patches.yaml'), 'utf-8');
+    ['aura-patches.json', 'patches/0001-Status-shows-busy.patch']);
+  const yaml = readFileSync(join(repo, 'aura-patches.json'), 'utf-8');
   assert.match(yaml, /^  "v": 2,$/m, 'series v2 (Phase 7a), written as JSON (7b: YAML too, readable without a YAML parser)');
   const doc = JSON.parse(yaml);
   assert.equal(doc.target.appId, APP);
@@ -296,7 +296,7 @@ test('update: a compatible upstream keeps the patch and installs; a conflict nam
   const text = readFileSync(join(w.wsRoot, String(installedN), 'status.js'), 'utf-8');
   assert.match(text, /"busy"/);
   assert.match(text, /"v2"/);
-  assert.match(readFileSync(join(repo, 'aura-patches.yaml'), 'utf-8'), new RegExp(`"commit": "${compatible}"`), 'the series moved to the new base');
+  assert.match(readFileSync(join(repo, 'aura-patches.json'), 'utf-8'), new RegExp(`"commit": "${compatible}"`), 'the series moved to the new base');
   const activations = seen.filter((r) => r.url === `/api/apps/${APP}/activate`).length;
   const head = git(repo, 'rev-parse', 'HEAD');
 
@@ -474,7 +474,7 @@ test('the patch repo is the installation\'s, bound from the volume (no AURA_PATC
   try {
     await savedChange(w);
     assert.equal(bindsOf[INST], 1, 'this Terminal bound the patch repo through the mount API');
-    assert.ok(existsSync(join(volumeRepo, 'aura-patches.yaml')), 'saved into the volume dir, not the Terminal\'s /data');
+    assert.ok(existsSync(join(volumeRepo, 'aura-patches.json')), 'saved into the volume dir, not the Terminal\'s /data');
     assert.ok(!existsSync(join(TEST_ROOT, 'patches', w.installationId)), 'nothing under the test override root');
 
     // Another Terminal of the same user (the first one is gone): the same series.

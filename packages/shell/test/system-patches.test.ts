@@ -11,7 +11,7 @@
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as core from '@aura/core';
@@ -24,6 +24,7 @@ process.env['AURA_DATA_DIR'] = data;
 const git = (dir: string, ...a: string[]) => execFileSync('git', ['-C', dir, '-c', 'user.name=t', '-c', 'user.email=t@x.invalid', ...a], { encoding: 'utf8' }).trim();
 let commit = '';
 const RID = '0.1.0-abcdef123456-0000aaaa';
+const INPUTS = { lockfileHash: 'sha256:aa', packageManager: 'pnpm@12.18.0', node: { base: 'v22.23.5', shell: 'v22.23.5' }, images: { base: 'sha256:b', shell: 'sha256:s' }, rebuildsImage: false, from: {} };
 
 before(() => {
   const src = mkdtempSync(join(tmpdir(), 'aura-sp-src-'));
@@ -125,7 +126,8 @@ test('activate: only a finished validation of the running release; the approved 
     mkdirSync(join(data, 'aura/release/jobs'), { recursive: true });
     writeFileSync(join(data, 'aura/release/jobs', `${v.job}.json`), JSON.stringify({
       phase, validated: { id: RID, commit, version: '0.1.0', provenance: 'locally-modified', composition: 'desktop',
-        series: { digest: `sha256:${digest}`, rev, base: { commit, version: '0.1.0' }, order: [], touched: [{ component: 'core', kind: 'package', modules: ['probe'], built: true, deployed: true }], rebuildsImage: false }, ...extra },
+        series: { digest: `sha256:${digest}`, rev, base: { commit, version: '0.1.0' }, order: [], touched: [{ component: 'core', kind: 'package', modules: ['probe'], built: true, deployed: true }], rebuildsImage: false, imageFiles: [] },
+        inputs: INPUTS, ...extra },
     }));
   };
   job('running');
@@ -142,6 +144,8 @@ test('activate: only a finished validation of the running release; the approved 
   assert.equal(full.validateOnly, undefined);
   assert.equal(full.expectSeriesDigest, `sha256:${digest}`);
   assert.equal(full.rev, rev);
+  // The approved build gets the APPROVED inputs to resolve again (owner 2026-11-27).
+  assert.deepEqual(JSON.parse(readFileSync(full.expectInputsFile!, 'utf8')), INPUTS);
   const failed = audits.find((x) => x.action === 'patch.activation-failed');
   assert.match(String(failed?.detail?.['reason']), /Phase 6 U/);
   assert.equal(core.systemPatches.storeRef(data, core.systemPatches.ACTIVE_REF), null, 'refs/aura/active moves only after an activation');

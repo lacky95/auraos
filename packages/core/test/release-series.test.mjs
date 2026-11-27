@@ -7,7 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { parse as yamlParse, stringify as yamlStringify } from 'yaml';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { ROOT, commitAll, git, release, throwawayKey, tmp, trustOf, write } from './release-fixtures.mjs';
@@ -61,7 +62,7 @@ function seriesDir(commit, patches, { disabled = [] } = {}) {
     v: 2, target: { kind: 'system' }, base: { commit },
     patches: patches.map((p, i) => ({ file: p.file, subject: `p${i}`, sha256: sha(p.content), enabled: !disabled.includes(i) })),
   };
-  writeFileSync(join(dir, 'aura-patches.yaml'), `${JSON.stringify(doc, null, 2)}\n`);
+  writeFileSync(join(dir, 'aura-patches.json'), `${JSON.stringify(doc, null, 2)}\n`);
   return dir;
 }
 
@@ -161,14 +162,16 @@ test('refused content never reaches a tree: the trust anchor, a changed byte, an
   writeFileSync(join(dir, p[0].file), `${p[0].content}\n`);
   assert.equal((await err(s.go({ series: { dir } }))).code, 'series-invalid');
   const app = seriesDir(s.src.commit, p);
-  const doc = JSON.parse(readFileSync(join(app, 'aura-patches.yaml'), 'utf8'));
+  const doc = JSON.parse(readFileSync(join(app, 'aura-patches.json'), 'utf8'));
   doc.target = { kind: 'app', appId: 'io.x.y' };
-  writeFileSync(join(app, 'aura-patches.yaml'), JSON.stringify(doc));
+  writeFileSync(join(app, 'aura-patches.json'), JSON.stringify(doc));
   assert.equal((await err(s.go({ series: { dir: app } }))).code, 'series-invalid');
-  // A hand-written YAML series is not the saved form.
+  // YAML that AuraOS never wrote (flow mappings with content) is refused with how to produce the saved form.
   const yml = seriesDir(s.src.commit, p);
+  rmSync(join(yml, 'aura-patches.json'));
   writeFileSync(join(yml, 'aura-patches.yaml'), 'v: 2\ntarget: { kind: system }\n');
-  assert.match((await err(s.go({ series: { dir: yml } }))).message, /saved form/);
+  const ey = await err(s.go({ series: { dir: yml } }));
+  assert.match(ey.message, /not in the form AuraOS saves[\s\S]*aura system patch save[\s\S]*aura-patches\.json/);
 });
 
 test('a disabled patch is not applied and changes the identity; all disabled builds the upstream tree (upstream-signed)', async () => {
@@ -198,9 +201,87 @@ test('build isolation: validate-only finalizes nothing; an image-changing series
   assert.equal(job.phase, 'validated');
   assert.equal((await err(s.go({ series: { dir } }))).code, 'image-change-unapproved');
   assert.equal((await err(s.go({ series: { dir }, imageChangeApproved: true, expectSeriesDigest: 'sha256:00' }))).code, 'series-moved');
-  const r = await s.go({ series: { dir }, imageChangeApproved: true, expectSeriesDigest: v.validated.series.digest });
+  // Owner 2026-11-27: the base images of the changed Dockerfile are pinned by digest in the validation...
+  assert.deepEqual(Object.keys(v.validated.inputs.from).sort(), ['node:22.23.5-bookworm', 'node:22.23.5-bookworm-slim']);
+  assert.ok(Object.values(v.validated.inputs.from).every((d) => /^sha256:[0-9a-f]{64}$/.test(d)));
+  assert.deepEqual(v.validated.series.imageFiles, ['os/base/x']);
+  // ...and an approved build that resolves another base image is refused.
+  const moved = await err(s.go({ series: { dir }, imageChangeApproved: true, expectSeriesDigest: v.validated.series.digest, expectInputs: v.validated.inputs }, { FAKE_BASE_V: '2' }));
+  assert.equal(moved.code, 'build-inputs-moved');
+  assert.match(moved.message, /base image node:22\.23\.5-bookworm/);
+  const r = await s.go({ series: { dir }, imageChangeApproved: true, expectSeriesDigest: v.validated.series.digest, expectInputs: v.validated.inputs });
   assert.equal(r.id, v.id);
   assert.notEqual(r.release.images.base, v.validated.images.base, 'the approved build has its own image');
+  assert.deepEqual(r.release.inputs.from, v.validated.inputs.from);
+});
+
+test('binding: an approved build that resolves another Node, package manager or reused image is refused', async () => {
+  const s = setup();
+  await s.go({ firstInstall: true });
+  const dir = seriesDir(s.src.commit, makePatches(s.src.dir, s.src.commit, [probeEdit('inputs')]));
+  const v = await s.go({ series: { dir }, validateOnly: true });
+  const want = v.validated.inputs;
+  assert.equal(want.rebuildsImage, false);
+  assert.match(want.images.shell, /^sha256:/);
+  assert.deepEqual(want.from, {}, 'unchanged images: the reused image ids are the pin');
+  const e = await err(s.go({ series: { dir }, expectInputs: want }, { FAKE_NODE: 'v22.24.0' }));
+  assert.equal(e.code, 'build-inputs-moved');
+  assert.match(e.message, /node\(base\) v22\.23\.5 → v22\.24\.0/);
+  assert.equal((await err(s.go({ series: { dir }, expectInputs: { ...want, images: { ...want.images, shell: 'sha256:00' } } }))).code, 'build-inputs-moved');
+  assert.equal((await s.go({ series: { dir }, expectInputs: want })).ok, true);
+});
+
+test('isolation: an unapproved series is installed without its scripts while networked, gets credentials only when it changes no dependency input, and never touches the approved store', async () => {
+  const s = setup();
+  await s.go({ firstInstall: true });
+  const npmrc = join(tmp('aura-npmrc-'), 'npmrc');
+  writeFileSync(npmrc, '//registry.example/:_authToken=CANARY-TOKEN\n', { mode: 0o600 });
+  const infra = { digest: null, secrets: { infra_npmrc: npmrc } };
+  const runs = async (series) => {
+    const before = s.fake.calls().length;
+    const v = await s.go({ series: { dir: series }, validateOnly: true, infra }, { FAKE_OFFLINE_RC: '1' });
+    assert.equal(v.validated.id.length > 0, true);
+    return s.fake.calls().slice(before).split('\n').filter((l) => l.startsWith('docker run --rm --name aura-release-'));
+  };
+  const src = await runs(seriesDir(s.src.commit, makePatches(s.src.dir, s.src.commit, [probeEdit('iso')])));
+  for (const l of src) {
+    assert.doesNotMatch(l, /docker\.sock|\s-v\s/, 'no socket, no host bind');
+    assert.match(l, /volume-subpath=aura\/pnpm-store-unapproved/, 'the unapproved store only');
+    if (!/--network none/.test(l)) assert.match(l, /AURA_BUILD_IGNORE_SCRIPTS=1/, `no script runs while networked: ${l}`);
+    if (/target=\/run\/aura-build/.test(l)) assert.match(l, /build\.sh deps$/, 'credentials only for the script-less fetch');
+  }
+  const scripts = src.find((l) => /build\.sh scripts$/.test(l));
+  assert.match(scripts, /--network none/);
+  assert.doesNotMatch(scripts, /target=\/run\/aura-build/);
+  assert.ok(src.some((l) => /target=\/run\/aura-build/.test(l)), 'a source-only series may fetch with the registry credentials (scripts off)');
+  // A series that changes package.json: the fetch gets no credentials at all.
+  const dep = await runs(seriesDir(s.src.commit, makePatches(s.src.dir, s.src.commit, [['deps', (d) => write(d, 'packages/core/package.json', '{"name":"@aura/core","x":1}\n')]])));
+  assert.ok(dep.every((l) => !/target=\/run\/aura-build/.test(l)), 'no credentials for a dependency-changing unapproved series');
+  assert.ok(!existsSync(join(s.L.pnpmStore, 'x')) && existsSync(s.L.pnpmStoreUnapproved));
+});
+
+test('the old saved YAML form (Track P v1, 7a v2) reads like the yaml library reads it; the builder accepts it', async () => {
+  const subjects = ['plain subject', 'Drop removed getAppBasePath import: apps are served from /, so deep links start at /#/',
+    "it's \"quoted\" and # hashed", '123', 'true', '- dash', 'ünïcödé ✓', 'x'.repeat(150), 'a: b', '  lead', 'tab\there', 'trail '];
+  const v1 = { app: 'io.x.app', base: { repository: 'https://gitlab.example/x.git', commit: '0d207495b02abe11e3b6a10ab09a832b17e8b5e3' },
+    patches: subjects.map((subject, i) => ({ file: `patches/000${i}-x.patch`, subject })) };
+  const v2 = { v: 2, target: { kind: 'app', appId: 'io.x.app', scope: 'user' }, base: { commit: '1'.repeat(40), path: 'apps/x' },
+    patches: subjects.map((subject, i) => ({ file: `patches/000${i}-y.patch`, subject, sha256: 'a'.repeat(64), enabled: i % 2 === 0 })) };
+  const LIB = await SLOT.patchLib();
+  for (const doc of [v1, v2, { app: 'io.x.app', base: { commit: 'abcdef1' }, patches: [] }]) {
+    const text = yamlStringify(doc);
+    assert.deepEqual(LIB.parseSavedYaml(text), yamlParse(text), text);
+  }
+  assert.throws(() => LIB.parseSavedYaml('a: &x 1\n'), /unsupported/);
+  // The builder reads a store revision that still has the old file name.
+  const s = setup();
+  const p = makePatches(s.src.dir, s.src.commit, [probeEdit('legacy')]);
+  const dir = seriesDir(s.src.commit, p);
+  const doc = JSON.parse(readFileSync(join(dir, 'aura-patches.json'), 'utf8'));
+  rmSync(join(dir, 'aura-patches.json'));
+  writeFileSync(join(dir, 'aura-patches.yaml'), yamlStringify(doc));
+  const r = await s.go({ series: { dir } });
+  assert.match(readFileSync(join(s.L.release(r.id), 'packages/core/src/probe/probe.ts'), 'utf8'), /"legacy"/);
 });
 
 test('V: a build or check failure with a series names the touched components', async () => {
@@ -221,9 +302,11 @@ test('series-plan: what the operator authorizes, with the digest the build will 
   const r = await s.go({ series: { dir } });
   assert.equal(plan.digest, r.release.series.digest);
   assert.deepEqual(plan.patches[0].files.map((f) => f.path), ['packages/core/src/probe/probe.ts']);
+  assert.deepEqual([plan.changesImages, plan.imageFiles], [false, []]);
   const bad = spawnSync(process.execPath, [join(ROOT, 'os/release/builder.mjs'), 'series-plan', '--series-dir', tmp('aura-empty-')], { encoding: 'utf8' });
   assert.equal(bad.status, 3);
   assert.equal(JSON.parse(bad.stdout).code, 'series-missing');
+  assert.match(JSON.parse(bad.stdout).error, /aura system patch save/);
 });
 
 test('componentOf maps paths to the components of release.json', () => {

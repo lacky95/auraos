@@ -3,7 +3,7 @@
  * of a base commit, in a small git repository of its own (the patch repo).
  *
  *   <patch repo>/
- *     aura-patches.yaml        v: 2, target, base { repository, commit, path?, release? },
+ *     aura-patches.json        v: 2 (JSON; the old aura-patches.yaml is read until the next save migrates it), target, base { repository, commit, path?, release? },
  *                              patches[{ file, subject, sha256, enabled }]
  *     patches/0001-<slug>.patch  `git format-patch` output, applied in order
  *
@@ -37,9 +37,9 @@ import { parse } from 'yaml';
 import { MOUNT_ROOT_PATH, PATCHES_DIR_NAME, WORK_DIR_NAME } from '../app-manager/contracts.js';
 import { amApply } from './apply.js';
 import { seriesDigest, sha256Hex } from './digest.js';
-import { formatSeriesText, normalizeSeriesDoc, PATCHES_DIR, SERIES_FILE } from './seriesFile.js';
+import { formatSeriesText, LEGACY_SERIES_FILE, normalizeSeriesDoc, PATCHES_DIR, SERIES_FILE } from './seriesFile.js';
 
-export { PATCHES_DIR, SERIES_FILE };
+export { LEGACY_SERIES_FILE, PATCHES_DIR, SERIES_FILE };
 import type { ApplyResult, PatchTarget, Series, SeriesBase, SeriesPatch } from './types.js';
 import { validatePatch, type PatchValidation } from './validate.js';
 
@@ -119,12 +119,17 @@ export const formatSeries = (s: Series): string => formatSeriesText(s);
 
 /** The series in a patch repo, at `rev` (a commit) or in the work tree. null: no series yet. */
 export function readSeries(repoDir: string, rev?: string): Series | null {
-  if (rev) {
-    const text = tryGitRaw(repoDir, ['show', `${rev}:${SERIES_FILE}`]);
-    return text === null ? null : parseSeries(text);
+  // aura-patches.json (7b on); before the one-time migration, the old aura-patches.yaml (full YAML parser).
+  for (const name of [SERIES_FILE, LEGACY_SERIES_FILE]) {
+    if (rev) {
+      const text = tryGitRaw(repoDir, ['show', `${rev}:${name}`]);
+      if (text !== null) return parseSeries(text);
+      continue;
+    }
+    const p = join(repoDir, name);
+    if (existsSync(p)) return parseSeries(readFileSync(p, 'utf-8'));
   }
-  const p = join(repoDir, SERIES_FILE);
-  return existsSync(p) ? parseSeries(readFileSync(p, 'utf-8')) : null;
+  return null;
 }
 
 function tryGitRaw(cwd: string, args: string[]): string | null {
@@ -294,13 +299,16 @@ export function saveSeries(repoDir: string, input: { target: PatchTarget; base: 
   }
   for (const p of input.patches) writeFileSync(join(repoDir, p.file), p.content);
   writeFileSync(join(repoDir, SERIES_FILE), formatSeries(series));
-  git(repoDir, ['add', '-A', '--', SERIES_FILE, PATCHES_DIR]);
+  // The one-time migration: the old YAML file goes in the same commit that writes the JSON one.
+  const migrated = existsSync(join(repoDir, LEGACY_SERIES_FILE));
+  if (migrated) rmSync(join(repoDir, LEGACY_SERIES_FILE));
+  git(repoDir, ['add', '-A', '--', SERIES_FILE, PATCHES_DIR, ...(migrated ? [LEGACY_SERIES_FILE] : [])]);
   const staged = tryGitRaw(repoDir, ['diff', '--cached', '--name-only']);
   if (!fresh && !staged?.trim()) {
     return { commit: git(repoDir, ['rev-parse', 'HEAD']).trim(), changed: false, series };
   }
   try {
-    git(repoDir, [...identityArgs(repoDir), 'commit', '-q', '-m', input.message]);
+    git(repoDir, [...identityArgs(repoDir), 'commit', '-q', '-m', migrated ? `${input.message}\n\nMigrated ${LEGACY_SERIES_FILE} to ${SERIES_FILE} (7b).` : input.message]);
   } catch (err) {
     throw new SeriesError(`commit in ${repoDir} failed: ${gitError(err)}`);
   }

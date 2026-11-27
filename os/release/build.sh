@@ -7,7 +7,10 @@
 # comes from the release being built (it is verified, but not yet approved
 # code: that is why it runs here and nowhere else).
 #
-#   build.sh deps [--offline]   pnpm install --frozen-lockfile (offline: from the store only)
+#   build.sh deps [--offline]   pnpm install --frozen-lockfile (offline: from the store only);
+#                               AURA_BUILD_IGNORE_SCRIPTS=1: no lifecycle script runs (an unapproved
+#                               series' fetch with the network and credentials, Phase 7b)
+#   build.sh scripts            pnpm rebuild: the skipped scripts, run offline without credentials
 #   build.sh build              every package, the shell bundle (AURA_COMPOSITION), the system apps
 #   build.sh check              node packages/shell/server.mjs --check (loads the build, no kernel)
 #
@@ -22,8 +25,13 @@ case $step in
   deps)
     offline=
     [ "${1:-}" = --offline ] && offline=--offline
+    scripts=
+    [ "${AURA_BUILD_IGNORE_SCRIPTS:-}" = 1 ] && scripts="--ignore-scripts --ignore-pnpmfile"
     # shellcheck disable=SC2086
-    exec pnpm install --frozen-lockfile --store-dir /pnpm-store --config.confirmModulesPurge=false $offline
+    exec pnpm install --frozen-lockfile --store-dir /pnpm-store --config.confirmModulesPurge=false $offline $scripts
+    ;;
+  scripts)
+    exec pnpm rebuild --store-dir /pnpm-store
     ;;
   build)
     echo "[release] building packages (composition ${AURA_COMPOSITION:-desktop})"

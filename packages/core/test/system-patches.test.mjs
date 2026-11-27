@@ -57,7 +57,7 @@ test('start: a workspace from the mirror at the release commit; reused; save mak
   assert.match(S.seriesDiff(data, saved.rev), /\+export const PROBE = "patched";/);
   assert.equal(S.seriesLog(data)[0].subject, 'first (owner)');
   // The store's file is the saved form (JSON), readable without a YAML parser.
-  JSON.parse(readFileSync(join(S.storeDir(data), 'aura-patches.yaml'), 'utf8'));
+  JSON.parse(readFileSync(join(S.storeDir(data), 'aura-patches.json'), 'utf8'));
 });
 
 test('save refuses the trust anchor (D71), and nothing is recorded', () => {
@@ -107,7 +107,8 @@ test('binding: recomputed from the store; a validated build of another revision 
   const validated = {
     id: '0.1.0-abcdef123456-00000000', commit: up.commit, version: '0.1.0', provenance: 'locally-modified', composition: 'desktop',
     series: { digest: `sha256:${loadedDigest}`, rev, base: { commit: up.commit, version: '0.1.0' }, order: [],
-      touched: [{ component: 'core', kind: 'package', modules: ['probe'], built: true, deployed: true }, { component: 'com.aura.terminal', kind: 'app', built: true, deployed: true }], rebuildsImage: false },
+      touched: [{ component: 'core', kind: 'package', modules: ['probe'], built: true, deployed: true }, { component: 'com.aura.terminal', kind: 'app', built: true, deployed: true }], rebuildsImage: false, imageFiles: [] },
+    inputs: { lockfileHash: 'sha256:' + 'c'.repeat(64), packageManager: 'pnpm@12.18.0', node: { base: 'v22.23.5', shell: 'v22.23.5' }, images: { base: 'sha256:b', shell: 'sha256:s' }, rebuildsImage: false, from: {} },
   };
   const b = S.systemPatchBinding({ dataDir: data, rev, validated });
   assert.equal(b.series.seriesRev, rev);
@@ -115,7 +116,15 @@ test('binding: recomputed from the store; a validated build of another revision 
   assert.equal(b.series.baseCommit, up.commit);
   assert.deepEqual(S.endsSessions(b), ['com.aura.terminal']);
   assert.deepEqual(S.endsSessions({ ...b, components: [], rebuildsImage: true }), ['the AuraOS images']);
+  assert.deepEqual(b.buildInputs, validated.inputs, 'the resolved build inputs are part of the binding (owner 2026-11-27)');
+  assert.throws(() => S.systemPatchBinding({ dataDir: data, rev, validated: { ...validated, inputs: undefined } }), (e) => e.code === 'binding-mismatch');
+  const img = { ...validated, series: { ...validated.series, rebuildsImage: true, imageFiles: ['Dockerfile', 'os/base/x'] }, inputs: { ...validated.inputs, rebuildsImage: true, from: { 'node:22': null } } };
+  assert.throws(() => S.systemPatchBinding({ dataDir: data, rev, validated: img }), (e) => /not pinned/.test(e.message));
+  const pinned = S.systemPatchBinding({ dataDir: data, rev, validated: { ...img, inputs: { ...img.inputs, from: { 'node:22': 'sha256:' + 'd'.repeat(64) } } } });
+  assert.ok(S.approvalDetails(pinned, view).some((l) => /^Images: REBUILT from the patched Dockerfile, os\/base\/x after this approval; base images pinned: node:22@sha256:d/.test(l)));
   const lines = S.approvalDetails(b, view);
+  assert.ok(lines.includes('Images: unchanged (no Dockerfile or os/ change)'));
+  assert.ok(lines.some((l) => /^Build inputs: lockfile cccccccccccc, pnpm@12\.18\.0, Node v22\.23\.5$/.test(l)));
   assert.ok(lines.some((l) => /^Base release: 0\.1\.0/.test(l)));
   assert.ok(lines.some((l) => /core \(probe\)/.test(l)));
   assert.ok(lines.some((l) => /locally modified .* based on signed 0\.1\.0/.test(l)));
