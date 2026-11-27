@@ -380,6 +380,11 @@ export class AppManager {
       // Live OS sidecars that inherit the app's mounts (set below; the
       // callback only runs after construction).
       fanoutTargets: (instanceId) => this.osSidecars.fanoutTargets(instanceId),
+      // Who a consumer runs as (its latched identity), so a work/patches dir created for it is its own.
+      consumerIdentity: (instanceId) => {
+        const inst = this.instances.get(instanceId);
+        return inst?.uid && inst?.gid ? { uid: inst.uid, gid: inst.gid } : null;
+      },
     });
     this.portExpose  = new PortManager({
       dataDir:  opts.dataDir,

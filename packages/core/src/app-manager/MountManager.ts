@@ -72,7 +72,7 @@
  * never made into a sidecar.
  */
 import { execFileSync, execSync } from 'node:child_process';
-import { mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chownSync, existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { AppRegistry } from './AppRegistry.js';
 import type { ScopeRegistry } from '../scopes/ScopeRegistry.js';
@@ -242,6 +242,13 @@ interface MountManagerOpts {
   fanoutTargets?(instanceId: string): FanoutTarget[];
   /** The target app's effective source mode; absent → every source is open. */
   sourceMode?(targetAppId: string): 'closed' | 'open';
+  /**
+   * The Linux identity a consumer instance runs as (a non-root app uid or a
+   * session host's user, P5-2/P5-3/stream T); null for root. A `work` or
+   * `patches` source this manager creates for that consumer is handed to it,
+   * so its always-rw mount is writable by the process that uses it.
+   */
+  consumerIdentity?(instanceId: string): { uid: number; gid: number } | null;
 }
 
 export class MountManager {
@@ -565,7 +572,21 @@ export class MountManager {
     const srcShell = this.resolveSource(spec.targetAppId, kind, kind === 'patches' ? spec.patches : spec.workspace);
     // A data dir only appears once the target has spawned — create it so a
     // data mount of a fresh target binds an empty dir instead of failing.
-    if (KIND_POLICY[kind].createsSource) { try { mkdirSync(srcShell, { recursive: true }); } catch { /* mount will report */ } }
+    if (KIND_POLICY[kind].createsSource) {
+      try {
+        const existed = existsSync(srcShell);
+        const first = mkdirSync(srcShell, { recursive: true });
+        // A fresh `work`/`patches` dir belongs to the consumer that writes it (never an existing one, never `data`).
+        const who = !existed && first && (kind === 'work' || kind === 'patches') ? this.opts.consumerIdentity?.(parentOfConsumer(instanceId)) ?? null : null;
+        // Only the consumer's own levels: `workspaces/<user>/<installation>/<n>`, `patches/<installation>`; the
+        // shared roots (`aura/workspaces`, `aura/patches`) stay the shell's even when this call created them.
+        const top = kind === 'work' ? dirname(dirname(srcShell)) : srcShell;
+        if (who && first) {
+          const stop = first.length > top.length ? first : top;
+          for (let d = srcShell; d.length >= stop.length; d = dirname(d)) chownSync(d, who.uid, who.gid);
+        }
+      } catch { /* mount will report */ }
+    }
     const dirName  = this.dirName(spec.targetAppId, kind);
     const root     = this.rootFor(instanceId, consumerDataDir);
     if (KIND_POLICY[kind].needsMountRoot && root.containerDir !== MOUNT_ROOT_PATH) {
