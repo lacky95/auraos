@@ -104,7 +104,7 @@ test('the close routes answer what the close did; Stop is the lifecycle stop and
 });
 
 test('the desktop asks only on a user close: chrome and layout close yes, an agent\'s closeWindow no', () => {
-  const page = readFileSync(new URL('../src/pages/index.astro', import.meta.url), 'latin1');
+  const page = readFileSync(new URL('../src/desktop-pages/index.astro', import.meta.url), 'latin1');
   assert.match(page, /if \(action === 'close'\)\s+\{ e\.preventDefault\(\); closeView_\(viewId, \{ user: true \}\); \}/);
   assert.match(page, /close: \(viewId\) => closeView_\(viewId, \{ user: true \}\)/);
   assert.match(page, /registerUiCommand\('closeWindow',\s+\(\{ viewId \}\) => \{ const v = needView\(viewId\); closeView_\(v\.viewId\);/);
