@@ -1,7 +1,7 @@
 import type { APIRoute } from 'astro';
 // Namespace import: the running shell may cache an older core build.
 import * as core from '@aura/core';
-import { errorResponse, jsonResponse } from '../../../../lib/appResponse.js';
+import { errorResponse, jsonResponse, failureResponse } from '../../../../lib/appResponse.js';
 import { readJson } from '../../../../lib/notificationCaller.js';
 import { authenticate } from '../../../../lib/auth.js';
 
@@ -21,7 +21,7 @@ import { authenticate } from '../../../../lib/auth.js';
  * client-reported unlock — the lock screen has no PIN, so this is NOT an
  * authentication boundary (privacy against glances only).
  */
-export const POST: APIRoute = async ({ request }) => {
+export const POST: APIRoute = async ({ request, locals }) => {
   const body = await readJson(request);
   if (body instanceof Response) return body;
   const lock = body['lock'];
@@ -42,6 +42,6 @@ export const POST: APIRoute = async ({ request }) => {
     });
     return jsonResponse(s, 201);
   } catch (err) {
-    return errorResponse(`client session: ${(err as Error).message}`, 500);
+    return failureResponse({ request, locals }, err, { what: 'client session', status: 500 });
   }
 };

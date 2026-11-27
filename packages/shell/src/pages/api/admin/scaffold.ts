@@ -10,6 +10,7 @@ import {
   changedSinceApproval, revalidationRefusal, validateScaffold, type CreateFile, type CreateScope,
 } from '../../../lib/approvals/appCreate.ts';
 import { handOwnAppSourceToOwner } from '../../../lib/identityReports.ts';
+import { refuseReleaseWrite } from '../../../lib/releaseReadOnly.ts';
 
 /**
  * Server-side app scaffolding.
@@ -89,6 +90,9 @@ export const POST: APIRoute = async (ctx) => {
   const env = { appsDir: resolveScopeAppsDir, exists: existsSync };
   const v = validateScaffold(body as unknown as Record<string, unknown>, env);
   if ('status' in v) return json(v.body, v.status);
+  // D34: the system scope of a release is read-only; nothing to ask the owner.
+  const readOnly = refuseReleaseWrite(v.dest, `Creating ${v.appId} in the ${v.scope} scope`);
+  if (readOnly) return readOnly;
   const admin = await ownerAction(ctx, v.request);
   if (admin instanceof Response) return admin;
   // …and revalidate the approved request in full right before it executes: anything that fails now, or

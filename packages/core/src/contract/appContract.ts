@@ -21,7 +21,7 @@
  * activation, at registry load (listed `incompatible`, never started) and by
  * `aura dev validate` (an error). Everything else here is reported only.
  */
-import type { AppManifest } from '../types/manifest.js';
+import { closestPermission, isKnownPermission, type AppManifest } from '../types/manifest.js';
 import { toolsGrant } from '../capabilities/tool-allowlist.js';
 import { AURA_CONTRACT, contractRefusal, declaredSetupKeys, operationalBlock, type ContractStatus } from './types.js';
 
@@ -49,7 +49,7 @@ export interface ContractDeclarations {
   privileged: boolean;
 }
 
-type ContractManifest = Pick<AppManifest, 'auraContract' | 'permissions' | 'tools' | 'services' | 'consumes'> & { context?: string[]; setup?: unknown; profiles?: unknown };
+type ContractManifest = Pick<AppManifest, 'auraContract' | 'permissions' | 'tools' | 'services' | 'consumes'> & { context?: string[]; setup?: unknown; profiles?: unknown; ports?: AppManifest['ports'] };
 
 const PRIVILEGED_SIDECAR = (s: AppManifest['services'][number]): boolean =>
   s.privileged === true || (s.capabilities?.length ?? 0) > 0 || (s.devices?.length ?? 0) > 0 || (s.publish?.length ?? 0) > 0;
@@ -114,6 +114,20 @@ export function contractFindings(m: ContractManifest): ContractFinding[] {
   if ((m.services ?? []).length > 0 && !d.docker && !d.permissions.includes('sidecars.spawn')) {
     out.push({ severity: 'warn', code: 'sidecars-undeclared', path: 'services',
       message: 'services[] are declared, but neither the permission sidecars.spawn (OS sidecars) nor the docker tool (SDK sidecars) runs them' });
+  }
+  // D105 Pass B: a permission AuraOS does not know grants nothing (a typo, most often).
+  d.permissions.forEach((p, i) => {
+    if (isKnownPermission(p)) return;
+    const near = closestPermission(p);
+    out.push({ severity: 'warn', code: 'permission-unknown', path: `permissions.${i}`,
+      message: `permissions[${i}] '${p}' is not a known permission, so it grants nothing${near ? ` — did you mean '${near}'?` : ' (docs: Permissions)'}` });
+  });
+  // D105 Pass B: without apps.port the OS ignores ports{} at every start (it only logged it).
+  const ports = m.ports;
+  if (ports && ((ports.exposes?.length ?? 0) > 0 || (ports.hostPublish?.length ?? 0) > 0) && !d.permissions.includes('apps.port')) {
+    const id = (m as { id?: string }).id ?? '<app>';
+    out.push({ severity: 'warn', code: 'ports-undeclared', path: 'ports',
+      message: `ports{} is ignored: the app does not declare 'apps.port' — add it to permissions[] (or the owner runs: aura grant perms ${id} apps.port)` });
   }
   if (d.context.length > 0 && new Set(d.context).size !== d.context.length) {
     out.push({ severity: 'info', code: 'context-duplicate', path: 'context', message: 'context[] lists a key twice' });

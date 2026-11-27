@@ -147,10 +147,8 @@ export async function postAppCheckout(ctx: Ctx, deps: CheckoutDeps = liveCheckou
   const def = deps.scopes().find((s) => s.id === t.scope)!;
   const already = deps.isCheckout(t.appDir);
   if (!already && deps.sourceMode(def, manifest) === 'closed') {
-    return json({
-      error: 'source-closed',
-      message: `${t.appId} is a closed install: its source is read-only. Patch it (\`aura dev patch start ${t.appId}\`), or the owner opens it (\`aura dev open ${t.appId}\`).`,
-    }, 409);
+    // The one source-closed text (core sourceClosedBody), also what a write that hits EROFS says.
+    return json(core.sourceClosedBody(t.appId), 409);
   }
   const installationId = await deps.installationId(t.appId, t.scope).catch(() => null);
   if (!installationId) {

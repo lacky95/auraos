@@ -23,7 +23,8 @@ import * as core from '@aura/core';
 import type { AccessPrincipal, ApprovalLevel, InstallBinding, InstallRecord, NexusProgressEvent, PermissionDiff } from '@aura/core';
 import { installDisplay, installLevel } from './display.ts';
 import { actionGate, json, presentedApproval, requesterSummary, type ApprovalServiceDeps } from './service.ts';
-import { errorResponse } from '../appResponse.js';
+import { errorResponse, legacyErrorBody } from '../appResponse.js';
+import { nexusFailure, nexusFailureBody } from '../nexusErrors.ts';
 
 type InstallGenerator = AsyncGenerator<NexusProgressEvent, InstallRecord | null, { approve: boolean } | void>;
 
@@ -133,6 +134,8 @@ export async function runInstall(
   it: InstallGenerator,
   gate: ReturnType<typeof installGate>,
   errorStatus: (ev: Extract<NexusProgressEvent, { type: 'error' }>) => number = () => 500,
+  /** The request, so a failure is worded for its reader (D105 Pass B: whole to the owner, redacted to anyone else). */
+  reader?: { request: Request; locals?: App.Locals },
 ): Promise<Response> {
   try {
     let cursor = await it.next();
@@ -151,13 +154,16 @@ export async function runInstall(
         await gate.auditRefused(ev.body, ev.action ?? 'nexus.install');
         return errorResponse(422, ev.body);
       }
-      if (ev.type === 'error') return json({ error: ev.message }, errorStatus(ev));
+      if (ev.type === 'error') return errorResponse(ev.message, errorStatus(ev));
       if (ev.type === 'install.done') { await gate.grantContext(); await gate.auditExecution(); return json({ ok: true, record: ev.record }); }
       cursor = await it.next();
     }
     if (cursor.value) { await gate.grantContext(); await gate.auditExecution(); }
     return json({ ok: true, record: cursor.value });
   } catch (err) {
-    return json({ error: (err as Error).message }, 500);
+    // D105 Pass B (review row 29): 422 manifest-invalid, 403 registry-login, 409 scope-immutable, … instead of a 500.
+    if (reader) return nexusFailure(reader, err);
+    const { status, body } = nexusFailureBody(err, 'app');
+    return errorResponse(status, legacyErrorBody(body));
   }
 }

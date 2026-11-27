@@ -33,6 +33,7 @@ export * from './app-hosts/auraChannel.js';
 export { RELAY_CLAIM_HEADER, RELAY_CLAIM_TTL_S, relayKey, verifyRelayClaim, type RelayClaim } from './app-hosts/relayClaim.js';
 export type * from './app-hosts/contracts.js';
 export type * from './errors/contracts.js';
+export { AuraError, auraErrorOf, sourceClosedBody } from './errors/auraError.js';
 export * from './app-hosts/AppHostRegistry.js';
 export * from './app-hosts/lifecycle.js';
 export * from './app-hosts/manifestHostGuard.js';
@@ -100,6 +101,8 @@ export type {
   AppRootExecutionPolicy, ExecutionApproval, ExecutionApprovedVia, ExecutionBinding, ExecutionConfig, ExecutionDecision, ExecutionRequest,
 } from './identity/execution.js';
 export { renderIdentityFiles, identityFilesSubpath, isNonRootIdentity } from './runtimes/spawn/identityArgs.js';
+// Phase 6 L: the release this process serves (Normal layout), and whether a path lies in a release tree (D80).
+export { runningRelease, inReleaseTree } from './runtimes/spawn/systemTreeArgs.js';
 export * from './homes/importReport.js';
 export * from './homes/importMarkers.js';
 export * from './homes/plan.js';

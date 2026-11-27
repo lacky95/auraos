@@ -44,7 +44,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -348,4 +348,70 @@ test('build and provision container argv match golden/build-args.json (D106 limi
     assert.fail(`recorded a new golden file at ${BUILD_GOLDEN}: review and commit it`);
   }
   assert.deepEqual(out, JSON.parse(readFileSync(BUILD_GOLDEN, 'utf-8')));
+});
+
+// Phase 6 L (owner question f, D80): the Normal layout. The shell runs from a release
+// (os/release-entry.sh: /workspace → /releases/<id>), so every piece of the AuraOS tree a
+// container sees (packages, root files, .aura, bashrc, a system app's source, node_modules)
+// is a read-only volume-subpath of the data volume under releases/<id>/, never a host bind
+// of AURA_HOST_WORKSPACE, whatever the caller asks (a system app's own source included).
+// Recorded in golden/spawn-args-normal.json (written on the first run).
+const NORMAL_GOLDEN = join(dirname(fileURLToPath(import.meta.url)), 'golden', 'spawn-args-normal.json');
+const RELEASE_ID = '0.1.0-0123456789ab-cafebabe';
+function normalRunner() {
+  const rel = join(TMP, 'releases', RELEASE_ID);
+  mkdirSync(rel, { recursive: true });
+  writeFileSync(join(rel, '.complete'), '');
+  const ws = join(TMP, 'ws-release');
+  if (!existsSync(ws)) symlinkSync(rel, ws);
+  const saved = { dir: process.env['AURA_WORKSPACE_DIR'], host: process.env['AURA_HOST_WORKSPACE'] };
+  process.env['AURA_WORKSPACE_DIR'] = ws;
+  process.env['AURA_HOST_WORKSPACE'] = '/host/checkout-never-used';
+  try { return new ContainerRunner(opts); } finally {
+    for (const [k, v] of [['AURA_WORKSPACE_DIR', saved.dir], ['AURA_HOST_WORKSPACE', saved.host]]) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  }
+}
+
+test('Normal layout: container and build argv match golden/spawn-args-normal.json; the release is only ever read-only', () => {
+  const runner = normalRunner();
+  const out = {};
+  for (const name of ['system-default', 'user-tools-token-owner-preview', 'system-terminal-session-user']) {
+    const fx = FIXTURES.find((f) => f.name === name);
+    const appDir = typeof fx.appDir === 'function' ? fx.appDir() : fx.appDir;
+    const m = manifest(fx.manifest);
+    const instanceId = `${m.id}-1`;
+    const ctx = { appDir, instanceDataDir: join(dataDir, 'scopes', 'users', 'default', 'apps', m.id, instanceId), contextEnv: { ...fx.contextEnv }, ...fx.ctx };
+    out[name] = norm(noSocket(runner.buildDockerArgs(instanceId, m.id, 4321, m, `aura-${instanceId}`, ctx, fx.volumes, fx.term ?? null)));
+  }
+  const buildDir = join(dataDir, 'scopes', 'users', 'default', 'apps', 'io.golden.build');
+  mkdirSync(buildDir, { recursive: true });
+  out['build:default'] = norm(runner.buildAppArgs('io.golden.build', buildDir));
+  out['build:system'] = norm(runner.buildAppArgs('org.golden.system', '/workspace/apps/org.golden.system'));
+  out['provision:default:astro'] = norm(runner.provisionAppArgs('io.golden.build', buildDir, 'astro'));
+  out['sidecarRuntime.systemTree'] = runner.sidecarRuntime().systemTree;
+
+  for (const [name, argv] of Object.entries(out)) {
+    if (!Array.isArray(argv)) continue;
+    const flat = argv.join(' ');
+    assert.ok(!flat.includes('/host/checkout-never-used'), `${name}: no host checkout path in the Normal layout`);
+    for (let i = 0; i < argv.length; i++) {
+      if (argv[i] === '-v') assert.ok(!/^\/(workspace|host)\b/.test(argv[i + 1]) && !argv[i + 1].includes(':/workspace/'), `${name}: no host bind of the tree: ${argv[i + 1]}`);
+      if (argv[i] === '--mount' && argv[i + 1].includes(`volume-subpath=releases/${RELEASE_ID}`)) {
+        assert.ok(argv[i + 1].endsWith(',readonly'), `${name}: a release mount is read-only (D80): ${argv[i + 1]}`);
+      }
+    }
+  }
+  assert.ok(out['system-default'].includes(`type=volume,source=golden_app-data,target=/workspace/apps/org.golden.system,volume-subpath=releases/${RELEASE_ID}/apps/org.golden.system,readonly`),
+    'a system app source comes from the release, read-only');
+  assert.ok(out['system-default'].includes(`type=volume,source=golden_app-data,target=/workspace/node_modules,volume-subpath=releases/${RELEASE_ID}/node_modules,readonly`),
+    "the release's own node_modules");
+  assert.deepEqual(out['sidecarRuntime.systemTree'], { kind: 'release', releaseId: RELEASE_ID, dataVolume: 'golden_app-data' });
+
+  if (!existsSync(NORMAL_GOLDEN)) {
+    writeFileSync(NORMAL_GOLDEN, `${JSON.stringify(out, null, 2)}\n`);
+    assert.fail(`recorded a new golden file at ${NORMAL_GOLDEN}: review and commit it`);
+  }
+  assert.deepEqual(out, JSON.parse(readFileSync(NORMAL_GOLDEN, 'utf-8')));
 });

@@ -277,6 +277,19 @@ test('workspace: reconcile adopts a live checkout bind as the workspace kind and
   assert.deepEqual(fresh.reconcile(new Set()), { adopted: 0, reaped: 1 }, 'a dead instance\'s bind is reaped');
 });
 
+test('D80 (Phase 6 L): outside Developer Mode, reconcile revokes a surviving checkout bind and a writable built-in source', async (t) => {
+  const w = world(t);
+  await w.mm.addWorkspace(INST);
+  await w.mm.add(INST, { targetAppId: 'com.aura.docs', mode: 'rw' });
+  await w.mm.add(INST, { targetAppId: 'io.shop.app', mode: 'rw' });
+  const fresh = new MountManager({ ...w.mm.opts, developerMode: () => false });
+  assert.deepEqual(fresh.reconcile(new Set([INST])), { adopted: 1, reaped: 2 });
+  assert.deepEqual(fresh.workspaceMounts(), [], 'no checkout bind survives the switch');
+  assert.deepEqual(fresh.list(INST).map((m) => [m.id, m.mode]), [['io.shop.app', 'rw']], 'a normal app\'s writable source stays');
+  assert.equal(w.kernel.has(join(w.mountRootDir(INST), 'workspace')), false);
+  assert.equal(w.kernel.has(join(w.mountRootDir(INST), 'com.aura.docs')), false);
+});
+
 // ── Track P: closed sources and patch workspaces ────────────────────────────
 
 test('a closed install mounts its source read-only; a writable request is refused', async (t) => {
@@ -305,6 +318,24 @@ test('a writable declaration of an app that is closed since comes back read-only
   await w.mm.rebindTarget('io.shop.app');
   assert.equal(w.mm.list(INST)[0].mode, 'ro');
   assert.equal(w.decls(INST)[0].mode, 'ro');
+});
+
+// Phase 6 L (D80): a release tree is never writable through a mount, in any mode.
+test('a release tree: a writable source mount is refused, a declaration comes back read-only, read-only works', async (t) => {
+  const w = world(t);
+  const rel = join(w.dataDir, 'releases', '0.1.0-0123456789ab-cafebabe', 'apps', 'com.aura.docs');
+  fs.mkdirSync(rel, { recursive: true });
+  const registry = w.mm.opts.registry;
+  w.mm.opts.registry = { getById: (id) => (id === 'com.aura.docs' ? { id, appDir: rel, scopeId: 'system' } : registry.getById(id)) };
+  await assert.rejects(w.mm.add(INST, { targetAppId: 'com.aura.docs', mode: 'rw' }), /refusing a writable mount: com\.aura\.docs's source is part of a release, which is read-only/);
+  assert.equal(w.kernel.size, 0, 'nothing bound');
+  const m = await w.mm.add(INST, { targetAppId: 'com.aura.docs' });
+  assert.equal(w.kernel.get(m.hostDest), 'ro');
+  await w.mm.remove(INST, 'com.aura.docs');
+  // A declaration from before (a writable mount of the checkout's app, now served from a release) re-binds read-only.
+  const d = await w.mm.add(INST, { targetAppId: 'com.aura.docs', mode: 'rw' }, { origin: 'restored', persist: false });
+  assert.equal(d.mode, 'ro');
+  assert.equal(w.kernel.get(d.hostDest), 'ro');
 });
 
 test('a workspace binds writable at /mnt/aura/work/<app> in the calling consumer only', async (t) => {

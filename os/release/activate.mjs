@@ -416,8 +416,18 @@ export function switchTo(dataRoot, { to, jobId, snapshot: snapId = null, now = n
   if (ptr.current === to) refuse('already-current', `release ${to} is already current`);
   // The hold first: a crash between the two leaves the OLD release held, which the owner sees and accepts.
   holdWrites(dataRoot, { jobId, from: ptr.current, to, snapshot: snapId, now });
-  const next = { v: 1, current: to, previous: ptr.current, switchedAt: nowIso(now), jobId };
-  writeJsonDurable(L.pointer, next);
+  return writePointer(dataRoot, { current: to, previous: ptr.current, jobId, now });
+}
+
+/**
+ * The ONE pointer writer (temp + fsync + rename, durable.mjs): the updater's switch and revert and the host
+ * recovery (os/release-ctl.sh use|rollback) all write pointer.json through it. The caller holds the lock.
+ */
+export function writePointer(dataRoot, { current, previous = null, jobId, now = new Date() }) {
+  assertReleaseId(current);
+  if (previous !== null) assertReleaseId(previous);
+  const next = { v: 1, current, previous, switchedAt: nowIso(now), jobId };
+  writeJsonDurable(layout(dataRoot).pointer, next);
   return next;
 }
 
@@ -428,9 +438,7 @@ export function revert(dataRoot, { jobId, now = new Date() }) {
   if (!ptr?.current) refuse('no-release', 'no pointer');
   if (!ptr.previous) refuse('no-previous', 'there is no previous release to go back to');
   if (!readRelease(dataRoot, ptr.previous)) refuse('previous-missing', `the previous release ${ptr.previous} is not complete`);
-  const next = { v: 1, current: ptr.previous, previous: null, switchedAt: nowIso(now), jobId };
-  writeJsonDurable(layout(dataRoot).pointer, next);
-  return next;
+  return writePointer(dataRoot, { current: ptr.previous, previous: null, jobId, now });
 }
 
 export function holdWrites(dataRoot, { jobId, from = null, to = null, snapshot: snapId = null, now = new Date() }) {

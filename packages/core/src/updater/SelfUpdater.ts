@@ -1164,7 +1164,7 @@ interface ReleaseScriptInput {
   from: string; to: string; restoreSnapshot: string | null; fromImage: string; toImage: string;
   project: string; composeFile: string; workDir: string; confirmInsecure: string;
   /** Tests: the data root, the activation module, the shell's base URL, the health budget and poll (s). */
-  dataDir?: string; activate?: string; shellUrl?: string; healthBudget?: number; poll?: number;
+  dataDir?: string; activate?: string; releaseCtl?: string; shellUrl?: string; healthBudget?: number; poll?: number;
 }
 
 /** Render the release program (exported for tests, like renderUpdaterScript: it is generated shell). */
@@ -1198,6 +1198,7 @@ TO_IMAGE=${JSON.stringify(o.toImage)}
 CONFIRM_INSECURE=${JSON.stringify(o.confirmInsecure)}
 TRUSTED="$DATA/releases/$FROM"
 ACT=${JSON.stringify(act)}
+RELEASE_CTL=${JSON.stringify(o.releaseCtl ?? '/os/release-ctl.sh')}
 SHELL_URL=${JSON.stringify(url)}
 HEALTH="$SHELL_URL/api/auth/status"
 PROJECT=${JSON.stringify(o.project)}
@@ -1216,14 +1217,15 @@ ping_ok() { [ "$(curl -s -o /dev/null -w '%{http_code}' -m 8 "$HEALTH" 2>/dev/nu
 shell_running() { [ "$(docker inspect -f '{{.State.Running}}' aura-shell 2>/dev/null || echo false)" = true ]; }
 running_image() { docker inspect -f '{{.Config.Image}}' aura-shell 2>/dev/null || echo none; }
 
-# Start the master container on the release the pointer names: a plain start
-# when the image is the same (release-entry.sh reads the pointer), a recreate
-# with the release's image when it differs (stream L: the release compose
-# file reads AURA_SHELL_IMAGE).
+# Start the master container on the release the pointer names. compose.env has
+# one writer, the image's os/release-ctl.sh (stream L): "env <id>" for the
+# release, then a plain start when the image is the same (release-entry.sh
+# reads the pointer), else "up" (a recreate from the release's own compose file).
 start_shell() {
-  local img="$1"
+  local img="$1" id="$2"
+  "$RELEASE_CTL" env "$id" >>"$LOGFILE" 2>&1 || { HEALTH_REASON="release-ctl.sh env $id failed"; return 1; }
   if [ -n "$img" ] && [ "$(running_image)" != "$img" ]; then
-    AURA_SHELL_IMAGE="$img" docker compose -p "$PROJECT" -f "$COMPOSE_FILE" --project-directory "$WS" up -d --no-build --force-recreate aura-os 2>&1 | tee -a "$LOGFILE" | tail -3
+    "$RELEASE_CTL" up 2>&1 | tee -a "$LOGFILE" | tail -3
   else
     docker start aura-shell >/dev/null 2>&1
   fi
@@ -1316,7 +1318,7 @@ fi
 
 step start running
 SINCE=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
-start_shell "$TO_IMAGE"
+start_shell "$TO_IMAGE" "$TO"
 step start done "$(running_image)"
 step health running
 say verifying "waiting for $TO to become healthy (budget \${BUDGET}s)"
@@ -1354,7 +1356,7 @@ act restore --snapshot "$SNAP" >/dev/null || { step rollback failed "snapshot re
 act release-hold >/dev/null
 SINCE=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
 FAILED_REASON="$HEALTH_REASON"
-start_shell "$FROM_IMAGE"
+start_shell "$FROM_IMAGE" "$FROM"
 if wait_healthy "$SINCE"; then
   step rollback done "$FROM restored with its data ($SNAP)"
   step complete done "finished — $TO rolled back"

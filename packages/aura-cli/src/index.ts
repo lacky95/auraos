@@ -1,5 +1,5 @@
 import { VERSION, buildProgram, isVersionRequest } from './program.js';
-import { errorJson, exitCodeOf, wantsJsonErrors } from './lib/client.js';
+import { errorJson, exitCodeOf, readOnlyError, wantsJsonErrors } from './lib/client.js';
 import { EXIT_USAGE, agentUnavailableText, parseInvocation } from './lib/invocation.js';
 
 const args = process.argv.slice(2);
@@ -13,7 +13,8 @@ if (isVersionRequest(args)) {
     process.stderr.write(agentUnavailableText(invocation));
     process.exit(EXIT_USAGE);
   }
-  program.parseAsync(process.argv).catch((err: Error) => {
+  program.parseAsync(process.argv).catch((caught: Error) => {
+    const err = readOnlyError(caught) ?? caught;
     console.error(wantsJsonErrors(process.argv.slice(2)) ? errorJson(err) : err.message);
     process.exit(exitCodeOf(err));
   });

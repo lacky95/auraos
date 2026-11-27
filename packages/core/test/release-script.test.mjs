@@ -65,6 +65,8 @@ case "$*" in
   *) : ;;
 esac`);
   put('curl', 'echo 200');
+  // os/release-ctl.sh (stream L, the one compose.env writer): env <id> / up are logged.
+  put('release-ctl.sh', `echo "$*" >> ${dir}/ctl.log`);
   return dir;
 }
 
@@ -86,7 +88,7 @@ function run(data, { mode = 'release', from = AID, to = BID, restoreSnapshot = n
   }));
   const script = renderReleaseScript({
     jobFile, logFile: join(work, 'job.log'), jobId: JOB, mode, from, to, restoreSnapshot, fromImage: 'aura-shell:same', toImage: 'aura-shell:same',
-    confirmInsecure: '', dataDir: data, activate: ACT, shellUrl: 'http://shell.invalid', healthBudget: 4, poll: 1,
+    confirmInsecure: '', dataDir: data, activate: ACT, releaseCtl: join(work, 'bin', 'release-ctl.sh'), shellUrl: 'http://shell.invalid', healthBudget: 4, poll: 1,
   });
   const file = join(work, 'run.sh');
   writeFileSync(file, script);
@@ -97,7 +99,8 @@ function run(data, { mode = 'release', from = AID, to = BID, restoreSnapshot = n
     execFileSync('bash', [file], { stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000, env: { ...process.env, ...env, PATH: `${bin}:${process.env.PATH}` } });
   } catch (e) { status = e.status ?? 1; }
   const job = JSON.parse(readFileSync(jobFile, 'utf8'));
-  return { status, job, step: (k) => job.steps.find((s) => s.key === k), log: readFileSync(join(work, 'job.log'), 'utf8') };
+  const ctl = existsSync(join(bin, 'ctl.log')) ? readFileSync(join(bin, 'ctl.log'), 'utf8') : '';
+  return { status, job, ctl, step: (k) => job.steps.find((s) => s.key === k), log: readFileSync(join(work, 'job.log'), 'utf8') };
 }
 
 const pointer = (data) => JSON.parse(readFileSync(LAYOUT.layout(data).pointer, 'utf8'));
@@ -115,6 +118,7 @@ test('release: lock, verify, stop, snapshot, switch (held), start, health, accep
   assert.ok(r.job.snapshot && existsSync(join(data, 'aura/release/snapshots', r.job.snapshot, 'snapshot.json')));
   assert.equal(existsSync(LAYOUT.layout(data).lock), false);
   assert.ok(!r.job.steps.some((s) => s.status === 'running'));
+  assert.equal(r.ctl.trim(), `env ${BID}`, 'compose.env through release-ctl.sh; same image: a plain start, no up');
 });
 
 test('boot-fails-before-writes: automatic rollback, release AND data (the marker key is gone)', () => {
