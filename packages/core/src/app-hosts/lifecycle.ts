@@ -8,6 +8,11 @@
  *   keep-data uninstall               reserved: routes off, labels held
  *   delete app data                   retired: labels tombstoned for good
  *   clone, copy, another publisher    a new installation with fresh hosts
+ *
+ * Grants follow the installation (Hotfix 2, S1, until grants are bound to the
+ * installation id): deleting an app's data, and any new installation that
+ * replaces an earlier one of the same id and scope, revoke the grants given
+ * to that id in that scope, before the new installation exists.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -62,6 +67,11 @@ function readManifestHostNames(manifestPath: string): string[] {
   } catch { return []; }
 }
 
+export interface AppHostLifecycleOpts {
+  /** Revoke the grants given to `appId` in install scope `scope` (GrantStore `revokeAppScope`). */
+  revokeAppGrants?: (appId: string, scope: ScopeId) => Promise<unknown>;
+}
+
 export class AppHostLifecycle {
   /** `<scope>/<appId>` whose files an install is landing right now. */
   private readonly landing = new Set<string>();
@@ -76,7 +86,17 @@ export class AppHostLifecycle {
   constructor(
     private readonly registry: AppHostStore,
     private readonly guard: ManifestHostGuard | null = null,
+    private readonly opts: AppHostLifecycleOpts = {},
   ) {}
+
+  /**
+   * The app under `appId` in `scope` is gone or another app now: what was
+   * granted to that id there must not pass on. Throws when it cannot, so the
+   * caller stops before the next app is installed under the id.
+   */
+  async revokeGrants(appId: string, scope: ScopeId): Promise<void> {
+    await this.opts.revokeAppGrants?.(appId, scope);
+  }
 
   /**
    * An install owns the app's record from its restore check until
@@ -113,14 +133,21 @@ export class AppHostLifecycle {
     if (!bound) {
       const reserved = await this.matchingReserved(app);
       if (reserved && sameAppSource(reserved.source, app.source)) return this.reactivated(reserved, app);
+      // The first installation keeps what was granted before installations
+      // existed; one after an earlier (retired) installation does not.
+      if ((await this.registry.listInstallations(app.appId)).some((i) => i.scope === app.scope)) {
+        await this.revokeGrants(app.appId, app.scope);
+      }
       return this.registry.createInstallation({ ...app, userId: APP_HOST_DEFAULT_USER });
     }
     if (bound.state === 'reserved') {
       if (bound.originId === app.originId && sameAppSource(bound.source, app.source)) return this.reactivated(bound, app);
+      await this.revokeGrants(app.appId, app.scope);
       return this.registry.createInstallation({ ...app, userId: bound.userId, replaces: bound.installationId });
     }
     // Active. Two different known origins are two different apps.
     if (bound.originId && app.originId && bound.originId !== app.originId) {
+      await this.revokeGrants(app.appId, app.scope);
       await this.registry.reserve(bound.installationId);
       return this.registry.createInstallation({ ...app, userId: bound.userId, replaces: bound.installationId });
     }
@@ -212,6 +239,11 @@ export class AppHostLifecycle {
     await this.noteOverlay(linked);
   }
 
+  /** The installation `appId` is bound to in `scope` (any state), or null. */
+  boundInstallation(appId: string, scope: ScopeId): Promise<AppInstallation | null> {
+    return this.registry.findInstallation(appId, scope);
+  }
+
   /** Keep-data uninstall. */
   async reserveApp(appId: string, scope: ScopeId): Promise<void> {
     const i = await this.registry.findInstallation(appId, scope);
@@ -223,6 +255,7 @@ export class AppHostLifecycle {
   async retireApp(appId: string, scope: ScopeId): Promise<string[]> {
     const ids: string[] = [];
     if (scope === 'user') this.overlays.delete(appId);
+    await this.revokeGrants(appId, scope);
     for (const i of await this.registry.listInstallations(appId)) {
       if (i.scope !== scope || i.state === 'retired') continue;
       await this.registry.retire(i.installationId);

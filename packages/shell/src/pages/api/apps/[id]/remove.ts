@@ -1,5 +1,5 @@
 import type { APIRoute } from 'astro';
-import { getAppManager, removeInstalledApp } from '@aura/core';
+import { getAppManager, removeInstalledApp, SystemAppRemovalError } from '@aura/core';
 import { defaultKv } from '@aura/kv-store';
 import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
 
@@ -12,6 +12,9 @@ import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
  * This is "Delete app data" (D20): the app's data, trash copies and kept
  * data go too, and its App Host labels are tombstoned. The CLI and the
  * Settings UI both confirm with that wording before calling here.
+ *
+ * A built-in system app is refused (409, D1): its code is the AuraOS repo's
+ * and its data stays. Disabling it is the way to switch it off.
  */
 
 const APP_ID_RE = /^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/;
@@ -35,6 +38,7 @@ async function deleteApp(appId: string | undefined): Promise<Response> {
   try {
     result = await removeInstalledApp(appId);
   } catch (err) {
+    if (err instanceof SystemAppRemovalError) return errorResponse(err.message, 409);
     return errorResponse(`Could not delete ${appId}: ${(err as Error).message}`, 500);
   }
   if (!result.removed) {

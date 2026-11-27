@@ -109,7 +109,12 @@ export const POST: APIRoute = async (context) => {
     admin = decided;
   }
 
-  const results: Array<{ appId: string; scope: core.ScopeId; originId: string | null; previous: string | null; changed: boolean; skipped?: string }> = [];
+  const results: Array<{
+    appId: string; scope: core.ScopeId; originId: string | null; previous: string | null; changed: boolean; skipped?: string;
+    installationId?: string | null; previousInstallationId?: string | null; note?: string;
+  }> = [];
+  const installationOf = async (appId: string, scope: core.ScopeId) =>
+    (await core.getAppHostServices().registry.findInstallation(appId, scope).catch(() => null))?.installationId ?? null;
   for (const t of targets) {
     if (!t.mutable) {
       results.push({ appId: t.appId, scope: t.scope, originId: t.originId, previous: t.originId, changed: false,
@@ -123,9 +128,23 @@ export const POST: APIRoute = async (context) => {
       continue;
     }
     try {
+      const before = await installationOf(t.appId, t.scope);
       const r = core.setOriginIdInFile(path, { mode, ...(body.originId ? { originId: body.originId } : {}) });
-      results.push({ appId: t.appId, scope: t.scope, originId: r.originId, previous: r.previous, changed: r.changed });
-      if (r.changed && t.active) { try { ctx.mgr.reloadManifest(t.appId); } catch { /* watcher reconciles */ } }
+      const row: (typeof results)[number] = { appId: t.appId, scope: t.scope, originId: r.originId, previous: r.previous, changed: r.changed };
+      results.push(row);
+      if (r.changed) {
+        // The manifest changed in place (no install): re-read it, then bring the
+        // installation in line now, not at the next shell start (D2). A new
+        // origin is another app: a new installation, the grants revoked.
+        if (t.active) { try { ctx.mgr.reloadManifest(t.appId); } catch { /* watcher reconciles */ } }
+        const hostError = await ctx.mgr.syncAppHost(t.appId, t.scope);
+        row.previousInstallationId = before;
+        row.installationId = await installationOf(t.appId, t.scope);
+        if (hostError) row.note = `the installation follows at the next shell start (${hostError})`;
+        else if (before && row.installationId && row.installationId !== before) {
+          row.note = `new installation ${row.installationId}: grants given to ${t.appId} were revoked; patches and workspaces stay with the previous installation ${before}`;
+        }
+      }
       if (r.changed && mode === 'reassign') {
         await auditOwner(admin, 'app.origin-reassign', {
           target: `app:${t.appId}`, detail: { scope: t.scope, from: r.previous, to: r.originId },
