@@ -44,7 +44,8 @@ key).
 - AuraOS refuses an app built for a newer major than it implements, with
   one message: "<app> is built for Aura contract N; this AuraOS implements 1.
   Update AuraOS or install a version built for contract 1." Installing,
-  updating or activating a patch of it answers 422 `contract-unsupported`; an
+  updating or activating a patch of it answers 422 `contract-unsupported`
+  (the audit log records it as `app.contract-refused` with `stage: install`); an
   app already on disk is listed `incompatible` (`aura get apps`, Settings →
   Apps) and never started; `aura dev validate` reports it as an error. An
   app without `auraContract` still installs and runs. A future break means
@@ -229,7 +230,7 @@ answer). The older classes (`StorageError`, `UserError`, `NotificationsError`,
 |---|---|
 | `aura dev validate <dir>` | the schema, the App Host checks and the contract checks, with `file:line` |
 | `aura get apps -o wide` | the `CONTRACT` each app was built for |
-| `aura admin contract-report [--datadir]` | per app: contract, declarations, undeclared use (source and access-report signals), raw Context reads, and with `--datadir` the writes outside `dataDir` |
+| `aura admin contract-report [--datadir]` | per app: contract, declarations, undeclared use (source and access-report signals), raw Context reads, and with `--datadir` the writes outside `dataDir`. The summary counts every app AuraOS refuses to start as `incompatible` (built for a newer contract, or declaring `setup`/`profiles`), and `incompatibleBy` splits it by cause (`contract`, `setup`); `unknownContract` is the same number under its old name, **deprecated**, kept for one release |
 | `aura admin access-report` | the runtime counters `contract\|<signal>\|<app>` among the rest |
 
 The contract report's source checks are a text scan: they find the usual

@@ -291,6 +291,8 @@ export function printAccessReport(report: unknown): void {
 interface ContractReportBody {
   contract: number;
   summary: Record<string, number>;
+  /** Why the `incompatible` apps are refused (shells before owner decision 11 send none). */
+  incompatibleBy?: { contract: number; setup: number };
   apps: Array<{
     appId: string; scope: string;
     contract: { version: number | null; status: string };
@@ -298,6 +300,8 @@ interface ContractReportBody {
     source: Array<{ file: string; line: number; code: string; message: string }>;
     signals: Record<string, number>;
     readsRawContext: boolean;
+    /** The start gate's refusal code, when AuraOS never starts the app. */
+    blocked?: string;
     dataDir?: { outside: boolean; home: string; installFolder: { writes: string[] }; containerLayer: Array<{ instanceId: string; writes?: string[]; error?: string }> };
   }>;
 }
@@ -310,7 +314,8 @@ export function printContractReport(report: unknown): void {
   console.log(table(r.apps.map((a) => ({
     APP: a.appId,
     SCOPE: a.scope,
-    CONTRACT: a.contract.version === null ? color.yellow('none') : a.contract.status === 'current' ? String(a.contract.version) : color.red(`${a.contract.version} incompatible`),
+    CONTRACT: a.blocked === 'setup-unsupported' ? color.red(`${a.contract.version ?? 'none'} incompatible (setup)`)
+      : a.contract.version === null ? color.yellow('none') : a.contract.status === 'current' ? String(a.contract.version) : color.red(`${a.contract.version} incompatible`),
     FINDINGS: String(a.findings.length + a.source.length),
     'RAW-CONTEXT': a.readsRawContext ? color.yellow('yes') : '-',
     SIGNALS: Object.entries(a.signals).map(([k, n]) => `${k}=${n}`).join(' ') || '-',
@@ -327,7 +332,9 @@ export function printContractReport(report: unknown): void {
     console.log(`\n${color.bold(a.appId)}`);
     for (const l of lines) console.log(`  ${l}`);
   }
-  console.log(`\ncontract ${r.contract}: ${Object.entries(r.summary ?? {}).map(([k, n]) => `${k}=${n}`).join(' ')}`);
+  const by = r.incompatibleBy && r.incompatibleBy.contract + r.incompatibleBy.setup > 0
+    ? ` (incompatible: contract=${r.incompatibleBy.contract} setup=${r.incompatibleBy.setup})` : '';
+  console.log(`\ncontract ${r.contract}: ${Object.entries(r.summary ?? {}).map(([k, n]) => `${k}=${n}`).join(' ')}${by}`);
 }
 
 // ─── aura admin notif … ─────────────────────────────────────────────────────

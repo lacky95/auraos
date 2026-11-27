@@ -243,7 +243,8 @@ export type NexusProgressEvent =
   | { type: 'publish.start' }
   | { type: 'publish.progress';   message: string }
   | { type: 'publish.done';       ref: string }
-  | { type: 'error';              code: string; message: string; /** A D105 body (`AuraErrorBody`) to answer as is (the start gate). */ body?: AuraErrorBody };
+  | { type: 'error';              code: string; message: string; /** A D105 body (`AuraErrorBody`) to answer as is (the start gate). */ body?: AuraErrorBody;
+                                  /** With `body`: the install action it refused (`nexus.install`, `nexus.update`, `app.patch.activate`). */ action?: string };
 
 /**
  * A registry credential for pulling one image on behalf of one installed app

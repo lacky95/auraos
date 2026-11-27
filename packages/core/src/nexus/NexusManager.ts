@@ -460,7 +460,7 @@ export class NexusManager {
       const blocked = operationalBlock(manifest);
       if (blocked) {
         unmark();
-        yield { type: 'error', code: blocked.error, message: blocked.message, body: blocked };
+        yield { type: 'error', code: blocked.error, message: blocked.message, body: blocked, action: opts.action ?? 'nexus.install' };
         throw new OperationalBlockError(blocked);
       }
 

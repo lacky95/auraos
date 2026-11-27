@@ -359,7 +359,7 @@ export class AppManager {
       // The start gate (D48, D108): the same audit style as a refused runtime module (`runtime.module-refused`).
       onBlocked: (b) => {
         void new AdminAudit(() => defaultRedis()).record({
-          by: { kind: 'system' }, action: CONTRACT_AUDIT_ACTIONS.refused, target: `app:${b.target}`, outcome: 'failed', detail: { code: b.error, reason: b.message },
+          by: { kind: 'system' }, action: CONTRACT_AUDIT_ACTIONS.refused, target: `app:${b.target}`, outcome: 'failed', detail: { code: b.error, reason: b.message, stage: 'load' },
         }).catch(() => undefined);
       },
     });

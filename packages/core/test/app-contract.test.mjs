@@ -179,6 +179,7 @@ test('install and patch activation refuse an app built for a newer contract: err
     catch (e) { error = e.message; }
     const ev = events.find((e) => e.type === 'error');
     assert.equal(ev?.code, 'contract-unsupported', action ?? 'install');
+    assert.equal(ev.action, action ?? 'nexus.install', 'the event names the refused install action (its audit row, owner decision 11)');
     assert.equal(ev.message, `io.shop.app is built for Aura contract ${AURA_CONTRACT + 1}; this AuraOS implements ${AURA_CONTRACT}. Update AuraOS or install a version built for contract ${AURA_CONTRACT}.`);
     assert.equal(error, ev.message);
     assert.deepEqual(asked, [], 'refused before the owner is asked');
