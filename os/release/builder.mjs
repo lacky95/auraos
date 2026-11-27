@@ -411,7 +411,7 @@ export async function build(o) {
     const stagedTree = gitTreeOfDir(staging);
     if (stagedTree !== sel.gitTree) refuse('tree-mismatch', `the staged tree ${stagedTree} is not the verified tree ${sel.gitTree}`);
     const pkg = readJson(join(staging, 'package.json')) ?? {};
-    const sourceComps = sourceComponents(staging);
+    let sourceComps = sourceComponents(staging);
     done('stage', `staged tree = verified tree ${sel.gitTree}`);
 
     // 5. series slot (D68, Phase 7b): the WHOLE series applied to the full source tree (D73),
@@ -446,6 +446,7 @@ export async function build(o) {
           throw e;
         }
       }
+      if (enabled.length) sourceComps = sourceComponents(staging);   // release.json describes the patched source
       const patched = imageFps(staging);
       rebuildsImage = Boolean(upstreamImages && patched && (upstreamImages.base !== patched.base || upstreamImages.shell !== patched.shell));
       const touched = await touchedComponents(read.patches, sourceComps);
