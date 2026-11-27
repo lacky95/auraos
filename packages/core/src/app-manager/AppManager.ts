@@ -60,6 +60,7 @@ import { defaultIdentityKeyFile } from '../auth/identityKey.js';
 import { HomeDeniedError, type HomeResolver, type ResolvedHome } from '../homes/types.js';
 import { kernelHomeResolver } from '../homes/HomeResolver.js';
 import { TERMINAL_SESSION_APPS } from '../homes/plan.js';
+import { requirePrivateHomeIsolation } from './privateHomeNetwork.js';
 import { appJumpPermission } from '../auth/GrantStore.js';
 import {
   APP_ROOT_EXECUTION_OPTION, RootExecutionError, executionConfigOf, executionDecision, type AppRootExecutionPolicy, type ExecutionApproval,
@@ -534,6 +535,8 @@ export class AppManager {
         return {
           appId: inst.appId, instanceDataDir: join(scope.dataDir, 'apps', inst.appId, instanceId),
           ...(inst.owner ? { owner: inst.owner } : {}),
+          // D107 / D9: an instance with a Private Home gets no sidecar on the shared network.
+          ...(this.instanceHomes.get(instanceId)?.kind === 'private' ? { privateHome: true, runtime: inst.sandbox } : {}),
           // P5-3: its latched identity, for the aura-base inheritHome sidecar policy.
           ...(inst.runAs === 'app' && inst.uid && inst.gid ? { identity: { uid: inst.uid, gid: inst.gid, range: 'app' as const } } : {}),
           // An approved root request: uid 0 without capabilities, the same for its aura-base inheritHome sidecar.
@@ -2492,6 +2495,9 @@ export class AppManager {
         + 'so this Terminal starts as root until the ownership apply (terminal-root-transition, stream T)');
       identity = { ...ROOT_SPAWN_IDENTITY, userId: identity.userId! };
     }
+    // D107 / D9: a Private Home only where network isolation is guaranteed: no sidecar on the shared
+    // network, and a runtime that isolates workloads per instance (privateHomeNetwork.ts). Fail closed.
+    if (home?.kind === 'private') requirePrivateHomeIsolation(appId, opts.manifest, opts.runtime.module, this.runtimes.list());
     // Stream C (Q7): the declared AND granted Context keys, the user's vault first.
     // A pool member is warmed for the user it is claimed by (poolHomeUser), like its home.
     const { env: contextEnv } = await grantedContextEnv({

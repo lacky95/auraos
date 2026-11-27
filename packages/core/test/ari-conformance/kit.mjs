@@ -222,6 +222,27 @@ export function describeRuntime(name, makeModule, harness = {}) {
     }
   });
 
+  // D107 / D9: a Private Home only where the runtime guarantees workload network isolation (the start gate).
+  test(`[ARI ${name}] Private Home gate (D9): allowed only where workloads are isolated per instance; refused (D105 shape) otherwise, and for a shared sidecar`, async () => {
+    const m = makeModule();
+    const { requirePrivateHomeIsolation } = await import('../../dist/app-manager/privateHomeNetwork.js');
+    const net = moduleFeatures(m, settingsList()[0]).find((x) => x.id === 'network.isolation');
+    const isolates = net.support === 'supported' && net.constraints?.workloadIsolation === 'instance';
+    const shape = (missing) => (e) => {
+      const r = runtimeRefusal(e);
+      assert.equal(e.code, 'feature-unsupported');
+      assert.equal(r?.category, 'unsupported-feature');
+      assert.deepEqual(r.missing, missing);
+      assert.equal(typeof r.hint, 'string');
+      return true;
+    };
+    const iso = { services: [{ name: 'db', image: 'x:1', network: 'instance' }, { name: 'home', image: 'x:1', inheritHome: true }] };
+    if (isolates) assert.doesNotThrow(() => requirePrivateHomeIsolation('org.k.app', iso, m));
+    else assert.throws(() => requirePrivateHomeIsolation('org.k.app', iso, m), shape(['network.isolation.instance']));
+    // A sidecar on the shared network is never allowed with a Private Home, whatever the runtime.
+    assert.throws(() => requirePrivateHomeIsolation('org.k.app', { services: [{ name: 'web', image: 'x:1' }] }, m), shape(['services[web].network']));
+  });
+
   // Phase 6 D-M: the mounts group is the mechanism only; its shape is the contract.
   test(`[ARI ${name}] mounts (D-M): present exactly with mount.attach; attach/detach/table/verify/rootOf are functions`, () => {
     const m = makeModule();

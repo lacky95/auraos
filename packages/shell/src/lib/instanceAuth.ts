@@ -1,6 +1,6 @@
 import { getAppManager, type AccessPrincipal, type ExecBridgeError } from '@aura/core';
 import * as core from '@aura/core';
-import { capabilityRefusal } from './runtimeCaps.ts';
+import { capabilityRefusal, refusalResponse } from './runtimeCaps.ts';
 import { errorResponse, jsonResponse } from './appResponse.js';
 import { isOwnerPrincipal, isTrustedOwnerAgent } from './access/identify.ts';
 
@@ -54,14 +54,20 @@ export function sidecarTarget(
   return { mgr, instance, caller: { instanceId, ...(p.sidecar ? { sidecar: p.sidecar } : {}) } };
 }
 
-/** Map a SidecarManager / MountManager failure to a status (and its `code`,
- *  e.g. `image_auth`, when the failure names one). */
+/**
+ * Map a SidecarManager / MountManager failure to a status. A runtime refusal
+ * (D107 isolation, a capability) is the 409 D105 body (`refusalResponse`); a
+ * failure that names a code (e.g. `image_auth`) answers the one error body,
+ * `error` the code and `message` the sentence (D105; the SDK reads `error`).
+ */
 export function sidecarError(err: unknown): Response {
+  const refused = refusalResponse(err);
+  if (refused) return refused;
   const { status, code } = (err ?? {}) as { status?: unknown; code?: unknown };
   const message = err instanceof Error ? err.message : String(err);
   if (typeof status === 'number') {
     return typeof code === 'string' && /^[a-z_]{1,32}$/.test(code)
-      ? jsonResponse({ error: message, code }, status) : errorResponse(message, status);
+      ? errorResponse(status, { error: code, message }) : errorResponse(message, status);
   }
   if (/no OS sidecar|not mounted|not found/i.test(message)) return errorResponse(message, 404);
   if (/already mounted|unavailable|refusing|inherited from|no mount root/i.test(message)) return errorResponse(message, 409);
@@ -108,7 +114,9 @@ export function execCaller(
 export function execError(err: unknown): Response {
   // By name, not instanceof: under `astro dev` core can load twice (SSR and Node's loader).
   const e = err as Partial<ExecBridgeError> | null;
-  // The SDK convention (error-messages-review.md §4): `error` is the code, `message` the sentence.
-  if (e?.name === 'ExecBridgeError' && typeof e.status === 'number') return jsonResponse({ error: e.code, message: e.message }, e.status);
+  // The one error body (D105): `error` is the code, `message` the sentence, `category` what a client may do.
+  if (e?.name === 'ExecBridgeError' && typeof e.status === 'number') {
+    return errorResponse(e.status, { error: e.code ?? 'error', message: e.message ?? '', ...(e.category ? { category: e.category } : {}) });
+  }
   return errorResponse(err instanceof Error ? err.message : String(err), 500);
 }

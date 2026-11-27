@@ -54,7 +54,8 @@ test('5b G: refusalResponse maps a runtime refusal (D80 idmappedMounts) to 409 {
   const r = refusalResponse(new core.RuntimeCapabilityError('container', ['idmappedMounts'], 'refusing a writable mount: no idmapped mounts'))!;
   assert.equal(r.status, 409);
   // The SDK convention: `error` is the code, `message` the sentence (error-messages-review.md §4).
-  assert.deepEqual(await r.json(), { error: 'capability-missing', message: 'refusing a writable mount: no idmapped mounts', category: 'unsupported-feature', runtime: 'container', missing: ['idmappedMounts'] });
+  assert.deepEqual(await r.json(), { error: 'capability-missing', message: 'refusing a writable mount: no idmapped mounts', category: 'unsupported-feature', missing: ['idmappedMounts'], details: { runtime: 'container' } });
+  assert.equal(r.headers.get('cache-control'), 'no-store', 'the one error body builder (D105)');
   assert.equal(refusalResponse(new Error('already mounted')), null);
   // With a runtime that has it: the owner's move as the hint.
   const moved = await refusalResponse(new core.RuntimeCapabilityError('proot', ['mounts'], 'no mounts', ['container']), 'io.t.app')!.json();

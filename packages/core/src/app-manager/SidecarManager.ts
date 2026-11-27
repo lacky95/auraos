@@ -13,6 +13,7 @@ import type { AppManifest } from '../types/manifest.js';
 import type { SpawnIdentity } from '../identity/types.js';
 import { listToolchainBinaries, provisionAllowlist, readSidecarMap, toolchainMirrorBin } from './tool-provision.js';
 import { SIDECAR_TOOL_RE, effectiveSidecarTools } from './sidecar-tools.js';
+import { privateHomeSidecarRefusal } from './privateHomeNetwork.js';
 import type { ResolvedHome } from '../homes/types.js';
 import { authFailureReason, isAuthFailure, parseImageRef } from '../nexus/RegistryAuth.js';
 import type { PullCredential } from '../nexus/types.js';
@@ -138,7 +139,7 @@ interface SidecarManagerOpts {
   tokens: InstanceTokens;
   mounts: MountManager;
   /** Live instance → app + its shell-side data dir. */
-  instance(instanceId: string): { appId: string; instanceDataDir: string; owner?: string; identity?: SpawnIdentity } | null;
+  instance(instanceId: string): { appId: string; instanceDataDir: string; owner?: string; identity?: SpawnIdentity; privateHome?: boolean; runtime?: string } | null;
   /**
    * D65: the parent instance's App Home (what `inheritHome` mounts); null
    * when it can't be resolved, and the sidecar is then not created.
@@ -326,6 +327,11 @@ export class SidecarManager {
     });
     // D107: mandatory isolation, refused before anything is made when the runtime can't enforce it.
     if (spec.network === 'instance') this.opts.requireNetwork?.('instance');
+    // D107 / D9: a parent with a Private Home: none of its sidecars on the shared network (privateHomeNetwork.ts).
+    if (inst.privateHome) {
+      const refusal = privateHomeSidecarRefusal(inst.runtime ?? 'unknown', inst.appId, spec.name, spec.network ?? 'shared');
+      if (refusal) throw refusal;
+    }
     const hash = specHash(spec);
     const container = this.wl().ref(instanceId, spec.name);
     // Spawn-time tools = initial runtime grants (resolveSidecarSpec already
