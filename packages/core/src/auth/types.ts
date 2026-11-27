@@ -140,7 +140,13 @@ export type GrantScope =
   /** One Terminal session (`<instanceId>#<label>`), for `terminal.embed` only (D25). */
   | { kind: 'terminal-session'; id: string }
   /** One user (D56): a `credential.read:<NAME>` grant reads that user's vault entry only. */
-  | { kind: 'user'; id: string };
+  | { kind: 'user'; id: string }
+  /**
+   * One target app's installation (D104, auth/appAccess.ts): an app-access
+   * grant (`apps.view`) to that app only. Keyed by the app id; the
+   * installation pins it, so a reinstalled target has to be granted again.
+   */
+  | { kind: 'app'; id: string; installationId: string };
 
 /** Reserved scopes for federation (D47), types only, like `ReservedGrantSubject`. */
 export type ReservedGrantScope = { kind: 'system'; systemId: string };

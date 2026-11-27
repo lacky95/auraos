@@ -52,6 +52,13 @@ export const OWNER_UI_APPS = Object.freeze({
   }),
 });
 
+/**
+ * D29: apps whose trusted system copy acts for the owner, its owner agents
+ * (lib/access/identify.ts explains each; it re-exports this). Kept here so
+ * the plain-ESM router (server/app-view.mjs) reads the same list.
+ */
+export const OWNER_AGENT_APPS = new Set(['com.aura.terminal', 'com.aura.aurashelld']);
+
 /** The trusted system UI entry for an app id, or null. */
 export function ownerUiApp(appId) {
   return Object.hasOwn(OWNER_UI_APPS, appId) ? OWNER_UI_APPS[appId] : null;

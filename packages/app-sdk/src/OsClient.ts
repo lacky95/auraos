@@ -51,6 +51,7 @@ import { StorageApi } from './storage.js';
 import { ContextApi } from './aura-context.js';
 import { ApprovalsApi } from './approvals.js';
 import { CredentialsApi } from './credentials.js';
+import { AppsApi } from './apps.js';
 import { PermissionsApi } from './permissions.js';
 import { ThemeApi } from './theme.js';
 import { DataApi } from './data.js';
@@ -133,6 +134,11 @@ export class OsClient {
    * value on the server with the owner's separate grant (D56). See ./credentials.ts.
    */
   readonly credentials: CredentialsApi;
+  /**
+   * Other apps (D104, app composition): `view()` reads another app's pages and
+   * read-only API for the user, on the server, with the owner's grant. See ./apps.ts.
+   */
+  readonly apps: AppsApi;
   /** What this app may do now, to hide what it may not. See ./permissions.ts. */
   readonly permissions: PermissionsApi;
   /** The OS theme: selection, inventory, palette, changes. See ./theme.ts. */
@@ -159,6 +165,7 @@ export class OsClient {
     this.context = new ContextApi();
     this.approvals = new ApprovalsApi();
     this.credentials = new CredentialsApi();
+    this.apps = new AppsApi();
     this.permissions = new PermissionsApi();
     const base = () => this.base;
     this.theme = new ThemeApi(base);

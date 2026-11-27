@@ -54,3 +54,4 @@ export const OWNER_SSR_CLAIM_TTL_S: number;
 export function signOwnerSsrClaim(ref: { appId: string; installationId: string; instanceId: string; userId: string; sid: string }): string;
 export function verifyOwnerSsrClaim(token: string, opts?: { now?: number }): OwnerSsrClaim | null;
 export function ownerSsrClaimOf(request: Request): OwnerSsrClaim | null;
+export const OWNER_AGENT_APPS: ReadonlySet<string>;

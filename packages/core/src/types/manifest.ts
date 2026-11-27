@@ -95,6 +95,15 @@ export const BUILTIN_PERMISSIONS = [
    */
   'apps.port',
   /**
+   * Read ANOTHER app's pages and read-only API for the user (D104, app
+   * composition), from this app's server: `osClient.apps.view(...)`. Declaring
+   * it only REQUESTS it: the owner grants it per target app (one click in the
+   * AuraOS dialog, or `aura grant perms <app> apps.view --target <target>`).
+   * GET/HEAD only, no socket; never a system app, an owner agent or an app
+   * that shows Terminal sessions. A target may refuse (`composition.view`).
+   */
+  'apps.view',
+  /**
    * Have the OS start sidecar containers for this app from its `services[]`
    * templates (`POST /api/instances/:id/sidecars`, `osSidecars()` in the
    * SDK), plus list / delete / exec / logs on them. No docker tool needed.
@@ -298,6 +307,17 @@ export const AppHostSchema = z.object({
   description: z.string().optional(),
 });
 export type AppHost = z.infer<typeof AppHostSchema>;
+
+/**
+ * What other apps may do with this app (D104, app composition). `view`:
+ * whether an app granted `apps.view` may read this app's pages and read-only
+ * API for the user (`allow`, the default) or not (`deny`). Requests that do
+ * come carry `x-aura-access: view` (and `x-aura-access-by: <app id>`), so the
+ * app's own server can refuse single routes.
+ */
+export const CompositionSchema = z.object({
+  view: z.enum(['allow', 'deny']).optional(),
+});
 
 export const AppManifestSchema = z.object({
   id: z.string().regex(/^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/, {
@@ -641,6 +661,8 @@ export const AppManifestSchema = z.object({
    * reachable; the Interface Registry lists each as an `http/host` entry.
    */
   hosts: z.array(AppHostSchema).default([]),
+  /** Delegated access by other apps (D104): see `CompositionSchema`. */
+  composition: CompositionSchema.optional(),
   /**
    * Where the app's source is developed — opt-in, for apps others may work
    * on. Bundles never ship `.git`; this (plus the release commit Nexus records

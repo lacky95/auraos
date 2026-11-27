@@ -159,8 +159,21 @@ export interface AppHostHandoffClaim {
   returnPath: string;
   /** A restricted sign-in for one embedded Terminal session (D25, 5.16). */
   embed?: AppHostEmbedClaim;
+  /** A restricted, server-side read by another app (D104, `apps.view`). */
+  view?: AppHostViewClaim;
   iat: number;
   exp: number;
+}
+
+/**
+ * What a view cookie stands for (D104, `apps.view`): the consuming app, the
+ * installation it was granted as, and the grant's time. The router re-checks
+ * that exact grant on every request, so a revoke or a new grant ends it.
+ */
+export interface AppHostViewClaim {
+  by: string;
+  byInstallation: string;
+  grantedAt: number;
 }
 
 /**
@@ -184,6 +197,8 @@ export interface AppHostCookiePayload {
   sid: string;
   /** Present only on the restricted embed cookie, which has its own name. */
   embed?: AppHostEmbedClaim;
+  /** Present only on the restricted view cookie (D104), which has its own name. */
+  view?: AppHostViewClaim;
   iat: number;
   exp: number;
 }

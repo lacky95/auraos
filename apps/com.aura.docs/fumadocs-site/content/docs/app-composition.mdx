@@ -1,0 +1,132 @@
+---
+title: App composition
+description: Let one app read another app for the user, with the owner's grant: apps.view (and what apps.embed and apps.interact will be).
+---
+
+Apps can work with each other without giving up their boundaries. The app that
+needs access asks for it; the owner grants or denies it; AuraOS enforces it on
+every request. The target app needs no code for a particular consumer.
+
+There are three levels. Each one is its own grant: none implies another, and
+asking for a level you do not hold always asks the owner again.
+
+| Level | What it allows | Status |
+|---|---|---|
+| `apps.view` | Your app's **server** reads another app's pages and read-only API, as the user | available |
+| `apps.embed` | Show another app's UI framed inside yours (origins stay separate) | planned |
+| `apps.interact` | Act in another app for the user: forms, writes, sockets | planned |
+
+## apps.view
+
+### 1. Declare it
+
+```json title="app.manifest.json"
+{ "permissions": ["apps.view"] }
+```
+
+Declaring only **requests** it. Nothing works until the owner grants it for a
+specific target.
+
+### 2. Read the target on your server
+
+```ts
+import { OsClient, appHostUrlFromRequest } from '@aura/app-sdk';
+const osClient = new OsClient();
+
+// In a server route. `desktop` is the host your users open AuraOS at.
+const desktop = new URL(request.url).host;            // or from appHostUrlFromRequest
+const sentinel = await osClient.apps.view({ appId: 'com.aura.sentinel', desktop });
+const res = await sentinel.fetch('/api/findings');    // GET or HEAD, as the user
+```
+
+You can also name the target by one of its App Host addresses:
+`osClient.apps.view({ host: 'sentinel--10-1-2-3.nip.io:3000' })`.
+
+The first call opens AuraOS's approval dialog ("Let MarkLayer read Sentinel"):
+one click (with the approval hold, the owner may also choose **Later**; your call keeps waiting). The
+grant lasts until the owner revokes it.
+
+The owner can grant and revoke it from a Terminal too:
+
+```bash
+aura grant perms io.lakner.marklayer apps.view --target com.aura.sentinel
+aura revoke perms io.lakner.marklayer apps.view --target com.aura.sentinel
+aura revoke perms io.lakner.marklayer apps.view          # every target
+aura admin grants                                         # lists them; "stale" = reinstalled, grant again
+```
+
+### What it can and cannot do
+
+- **Reads only:** `GET` and `HEAD`. No other method, no WebSocket, no event
+  stream (`Accept: text/event-stream`), and no AuraOS API through the target
+  (only its theme and icons).
+- **Server only:** the credential is a short-lived restricted cookie that stays
+  inside the `AppView` object on your server. `fetch()` takes paths on the
+  target only and never follows a redirect, so it never carries the credential
+  to another host. A browser that presents it is refused.
+- **Per target, per installation:** the grant names your app's installation and
+  the target's. If either is reinstalled, the grant no longer counts and the
+  owner is asked again.
+- **Revoking ends it at once:** every request re-checks the grant. A read still
+  streaming when it is revoked ends after at most 60 seconds.
+- **Normal apps only:** never a system app, a trusted system UI (Settings,
+  Nexus, …), an owner agent (the System Terminal) or an app that shows the
+  owner's Terminal sessions (it requests a `terminal.*` permission).
+
+### Read-only, honestly
+
+AuraOS lets only `GET` and `HEAD` through, opens no socket and gives the target
+no AuraOS identity of the user. It cannot see inside the target: an app whose
+`GET` routes change state (against HTTP's rules) would still run them. So every
+delegated request carries two headers the target can trust (a client cannot set
+them):
+
+```
+x-aura-access: view
+x-aura-access-by: io.lakner.marklayer
+```
+
+In the target, refuse what must not be read this way:
+
+```ts
+import { delegatedAccess } from '@aura/app-sdk';
+if (delegatedAccess(request)) return new Response('not for delegated reads', { status: 403 });
+```
+
+A target can refuse all delegated reads in its manifest:
+
+```json title="app.manifest.json (of the target)"
+{ "composition": { "view": "deny" } }
+```
+
+### When it is refused
+
+Every refusal says what is missing and how to fix it, in AuraOS's error body
+(the SDK throws an `OsError` with the same fields):
+
+```json
+{
+  "error": "access-denied",
+  "reason": "missing-permission",
+  "message": "MarkLayer lacks permission 'apps.view' for com.aura.sentinel: its app.manifest.json does not declare it in permissions[].",
+  "hint": "Add \"apps.view\" to permissions[] in io.lakner.marklayer's app.manifest.json; then approve the request in AuraOS, or the owner runs: aura grant perms io.lakner.marklayer apps.view --target com.aura.sentinel",
+  "permission": "apps.view",
+  "holder": "caller",
+  "manifestField": "permissions[]",
+  "target": "com.aura.sentinel",
+  "docs": "/docs/app-composition#not-declared",
+  "details": { "refusal": "not-declared" }
+}
+```
+
+| `details.refusal` | Meaning | Fix |
+|---|---|---|
+| `not-declared` | Your manifest lacks `apps.view` | Add it to `permissions[]` |
+| `not-granted`, `denied` | The owner has not granted it (202 while asking) | Approve the request, or `aura grant perms … --target …` |
+| `grant-stale` | Granted to an earlier installation | Approve again |
+| `revoked` | The credential's grant is gone | Call `apps.view()` again |
+| `target-not-allowed` | A system app, trusted UI, owner agent or Terminal-session app | None: open it as its own window |
+| `target-opted-out` | The target declares `composition.view: "deny"` | Only the target's developer can change it |
+| `read-only` | A write, a socket or an event stream | Read with `GET`/`HEAD` |
+| `not-through-target` | AuraOS's API through the target | Ask AuraOS with your own token |
+| `server-only` | Called from a page or a browser | Call it on your server |

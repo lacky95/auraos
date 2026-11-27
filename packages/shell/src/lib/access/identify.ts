@@ -7,7 +7,7 @@ import { localSystemId } from '@aura/core/system-identity';
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { loadAppHostServices, type AppHostServices } from '../../../server/app-host-auth.mjs';
-import { gatewayClaimOf, ownerSsrClaimOf, ownerUiActs, ownerUiApp } from '../../../server/gateway-identity.mjs';
+import { OWNER_AGENT_APPS, gatewayClaimOf, ownerSsrClaimOf, ownerUiActs, ownerUiApp } from '../../../server/gateway-identity.mjs';
 import type { AccessTarget, AccessVia, VerifiedIdentity } from './types.ts';
 
 /**
@@ -402,7 +402,7 @@ export function actingInstance(p: AccessPrincipal): InstancePrincipal | null {
  * Their upstreams are also the ones a network-identified app container never
  * reaches through /api/proxy, the System Terminal itself excepted (decide.ts, H2).
  */
-export const OWNER_AGENT_APPS: ReadonlySet<string> = new Set(['com.aura.terminal', 'com.aura.aurashelld']);
+export { OWNER_AGENT_APPS };
 
 /**
  * D29: the owner and trusted terminals have full control. A trusted owner

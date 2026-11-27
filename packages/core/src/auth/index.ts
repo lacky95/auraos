@@ -1,6 +1,7 @@
 export * from './types.js';
 export * from './identityContracts.js';
 export * from './GrantStore.js';
+export * from './appAccess.js';
 export * from './ApiKeyStore.js';
 export * from './identityKey.js';
 export * from './LoginSessionStore.js';

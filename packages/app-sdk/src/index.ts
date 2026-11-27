@@ -23,6 +23,8 @@ export { AURA_CONTRACT } from './contract.js';
 export { ContextApi } from './aura-context.js';
 export { ApprovalsApi, APPROVAL_HEADER, approvalHeader } from './approvals.js';
 export { CredentialsApi } from './credentials.js';
+export { AppsApi, delegatedAccess } from './apps.js';
+export type { AppView, AppViewFetchInit, AppViewTarget } from './apps.js';
 export type { CredentialRequest, CredentialResult } from './credentials.js';
 export type { ApprovalAsk, ApprovalLevel, ApprovalOutcome, ApprovalResult, ApprovalWaitOptions } from './approvals.js';
 export { PermissionsApi } from './permissions.js';

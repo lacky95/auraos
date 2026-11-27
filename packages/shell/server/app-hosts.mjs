@@ -33,7 +33,8 @@ import {
   SESSION_COOKIES, countSurfaceEvent, followIdentity, gatedHttpSurface, internalServiceHeaders, observeHttpSurface,
   reportSurface, requestIdentity, surfaceGate,
 } from './access-bridge.mjs';
-import { appHostAuth, appHostEmbedCookieName, safeReturnPath } from './app-host-auth.mjs';
+import { appHostAuth, appHostEmbedCookieName, appHostViewCookieName, safeReturnPath } from './app-host-auth.mjs';
+import { browserShaped, liveAppView, viewRefusalBody } from './app-view.mjs';
 import { handleAppGateway, handleAppGatewayUpgrade, serveAppRuntime } from './app-gateway.mjs';
 import { isOwnerUiInstallation, ownerUiApp, signOwnerSsrClaim } from './gateway-identity.mjs';
 import {
@@ -58,6 +59,7 @@ const probeCookieName = (secure) => (secure ? '__Host-aura_host_probe' : 'aura_h
 /** Never sent to an app, and an app may not set them. */
 const AURA_COOKIES = new Set([
   appHostCookieName(true), appHostCookieName(false), appHostEmbedCookieName(true), appHostEmbedCookieName(false),
+  appHostViewCookieName(true), appHostViewCookieName(false),
   probeCookieName(true), probeCookieName(false), ...SESSION_COOKIES,
 ]);
 const AURA_BEARER = /(?:^|,)\s*Bearer\s+(?:aura-(?:sess1|admin1)\.|aura1\.|aura_k1_)/i;
@@ -110,6 +112,26 @@ function embedRequestAllowed(req, url, path, embed) {
   return !OWN_API_RE.test(path) && EMBED_ASSET_RE.test(path);
 }
 
+/** D104 (core auth/appAccess.ts): the router marks a delegated read; never from a client (`x-aura-*` is stripped). */
+const ACCESS_HEADER = 'x-aura-access';
+const ACCESS_BY_HEADER = 'x-aura-access-by';
+/** core APP_VIEW_RESPONSE_MAX_MS: a revoke ends a read still in flight by then. */
+const VIEW_RESPONSE_MAX_MS = 60_000;
+
+/**
+ * Why a request on a view cookie (D104 `apps.view`) is refused, as a refusal
+ * code, or null. Reads only: GET and HEAD, no event stream (and no socket,
+ * `serveHostUpgrade`); the target's pages, assets and API; the runtime; of
+ * AuraOS's gateway the theme and icons only, never an identity through it.
+ */
+export function viewRequestRefusal(req, url, path) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return 'read-only';
+  if (/text\/event-stream/i.test(String(req.headers.accept ?? ''))) return 'read-only';
+  if (path === AURA_RESERVED_PATHS.runtime) return null;
+  if (isAuraReservedPath(url)) return EMBED_GATEWAY_RE.test(path) ? null : 'not-through-target';
+  return null;
+}
+
 const isLive = (i) => i.port != null && (i.state === 'resumed' || i.state === 'started');
 
 /** X-Forwarded-* for the upstream, from the edge view (`requestEdge`). */
@@ -133,6 +155,15 @@ function page(status, title, body, { refresh = 0 } = {}) {
     + `<title>${esc(title)}</title><style>body{font:15px/1.5 system-ui,sans-serif;display:grid;place-items:center;min-height:90vh;margin:0;color:#333;background:#fafafa}`
     + `@media(prefers-color-scheme:dark){body{color:#ddd;background:#1b1b1b}}main{max-width:32rem;padding:24px;text-align:center}code{font-size:13px}</style></head>`
     + `<body><main><h1 style="font-size:18px">${esc(title)}</h1><p>${body}</p></main></body></html>`;
+}
+
+/** A refused view request (D104): the structured body with its hint, JSON (the reader is a server). */
+async function viewRefused(res, code, consumer, target) {
+  let status = 403;
+  let body = { error: 'access-denied', message: 'This apps.view request was refused.' };
+  try { ({ status, body } = await viewRefusalBody(code, { consumer, target })); } catch { /* the plain body */ }
+  res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+  res.end(JSON.stringify(body));
 }
 
 function reply(res, status, title, body, opts = {}) {
@@ -257,14 +288,16 @@ export function activityHeaders(url, instanceId) {
  */
 export function createAppHostRouter({
   appsList, shellPort = process.env.SHELL_PORT ?? '3000', log = () => {},
-  services = async () => null, auth = null, embedAncestors = () => [], env = process.env,
+  services = async () => null, auth = null, embedAncestors = () => [], env = process.env, appView = null,
 }) {
   let apps = null;   // the last app list; null until the first load
   let loading = null;
   const startAsked = new Map();   // appId → when we last asked the shell to start it
   const slotStarts = new Map();   // installation and scope → the slot-1 start in flight
   const verifiedSessions = new WeakMap();   // req → the App Host session appSession() verified, for the report
+  const staleViews = new WeakMap();   // req → a signed view cookie whose grant no longer stands (D104)
   const hostAuth = () => (auth ??= appHostAuth());
+  const viewDecisions = () => (appView ??= liveAppView());
 
   /** The shell's app list (`appsList` caches it); `fresh` reloads it. */
   function load(fresh = false) {
@@ -340,11 +373,29 @@ export function createAppHostRouter({
     const secure = edge.scheme === 'https';
     const expected = { aud: edge.origin, label: route.label, installationId: route.record.installationId };
     const payload = hostAuth().readCookie(req.headers.cookie, appHostCookieName(secure), expected)
-      ?? hostAuth().readCookie(req.headers.cookie, appHostEmbedCookieName(secure), { ...expected, embed: true });
+      ?? hostAuth().readCookie(req.headers.cookie, appHostEmbedCookieName(secure), { ...expected, embed: true })
+      ?? hostAuth().readCookie(req.headers.cookie, appHostViewCookieName(secure), { ...expected, view: true });
     if (!payload) return null;
-    if (!(await route.svc.sessionLive(payload.sid, payload.userId))) return null;
+    if (payload.view) {
+      // D104: no login session behind it; the grant it was issued under, re-checked on every request.
+      if (!(await viewSessionLive(payload, route))) {
+        staleViews.set(req, payload);
+        return null;
+      }
+    } else if (!(await route.svc.sessionLive(payload.sid, payload.userId))) return null;
     verifiedSessions.set(req, payload);
     return payload;
+  }
+
+  /** Whether a view cookie's grant still stands for this host's app and installation (app-view.mjs). */
+  async function viewSessionLive(payload, route) {
+    try {
+      return await (await viewDecisions()).viewLive(payload.view, payload.userId, {
+        appId: route.record.appId, installationId: route.record.installationId,
+      });
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -371,7 +422,7 @@ export function createAppHostRouter({
    */
   async function ownerSsrHeader(route, req, session, t) {
     if (req.method !== 'GET' && req.method !== 'HEAD') return null;
-    if (session.embed !== undefined || !ownerUiApp(route.record.appId) || t.appId !== route.record.appId) return null;
+    if (session.embed !== undefined || session.view !== undefined || !ownerUiApp(route.record.appId) || t.appId !== route.record.appId) return null;
     if (typeof session.sid !== 'string' || !session.sid || typeof session.userId !== 'string' || !session.userId) return null;
     try {
       if (!(await isOwnerUiInstallation(route.svc.registry, route.record))) return null;
@@ -431,7 +482,7 @@ export function createAppHostRouter({
     const shell = originOf(edge.scheme, route.base);
     const ancestors = NO_SELF_FRAME_APPS.has(route.record.appId) ? [shell] : ["'self'", shell];
     const own = ancestors.length;
-    if (session && new URL(url, 'http://h').searchParams.get('embed') === '1') {
+    if (session && !session.view && new URL(url, 'http://h').searchParams.get('embed') === '1') {
       let extra = [];
       try {
         extra = await embedAncestors({
@@ -467,12 +518,18 @@ export function createAppHostRouter({
     if (!entry || entry.claim.installationId !== route.record.installationId || entry.claim.slot !== route.slot.slot) return refuse();
     const location = safeReturnPath(entry.claim.returnPath);
     if (!location) return refuse();
-    return route.svc.sessionLive(entry.claim.sid, entry.claim.userId).then((live) => {
+    // D104: a view code is for an app's server, never a browser; it stands on its grant, not a login session.
+    if (entry.claim.view && browserShaped(req.headers)) return refuse();
+    const live = entry.claim.view
+      ? viewSessionLive({ view: entry.claim.view, userId: entry.claim.userId }, route)
+      : route.svc.sessionLive(entry.claim.sid, entry.claim.userId);
+    return live.then((live) => {
       if (!live) return refuse();
       const secure = edge.scheme === 'https';
       const { value, maxAgeSeconds } = hostAuth().sealCookie(entry);
-      // An embed code signs in for its one session only, under its own name.
-      const name = entry.claim.embed ? appHostEmbedCookieName(secure) : appHostCookieName(secure);
+      // An embed code signs in for its one session only, a view code for reads only, each under its own name.
+      const name = entry.claim.embed ? appHostEmbedCookieName(secure)
+        : entry.claim.view ? appHostViewCookieName(secure) : appHostCookieName(secure);
       res.writeHead(303, {
         location,
         'set-cookie': `${name}=${value}; Path=/; Max-Age=${maxAgeSeconds}; HttpOnly${secure ? '; Secure' : ''}; SameSite=Lax`,
@@ -497,6 +554,9 @@ export function createAppHostRouter({
     if (path === AURA_RESERVED_PATHS.handoff) return redeemHandoff(route, req, res, edge, pageHeaders);
 
     const session = await appSession(route, req, edge);
+    const stale = session ? null : staleViews.get(req);
+    // D104: the reader of a revoked view is a server; it gets the reason, not the sign-in page.
+    if (stale) return viewRefused(res, 'revoked', stale.view.by, route.record.appId);
     if (!session) return page(401, 'Open this app from AuraOS', 'This address needs a sign-in from the AuraOS desktop.');
     if (!(await surfaceGate({ subject: 'app-hosts', method: req.method, appId: route.record.appId, identity: hostIdentity(route, req) }))) {
       return page(403, 'Request refused', 'This sign-in may not open this app.');
@@ -507,6 +567,10 @@ export function createAppHostRouter({
     }
     if (session.embed && !embedRequestAllowed(req, url, path, session.embed)) {
       return page(403, 'Request refused', 'This sign-in shows one embedded session only.');
+    }
+    if (session.view) {
+      const code = browserShaped(req.headers) ? 'server-only' : viewRequestRefusal(req, url, path);
+      if (code) return viewRefused(res, code, session.view.by, route.record.appId);
     }
 
     // An app's lifecycle routes are the kernel runner's alone.
@@ -526,6 +590,13 @@ export function createAppHostRouter({
     for (const [k, v] of Object.entries({ ...forwardedHeaders(req, edge), ...identityHeaders(t), ...activityHeaders(req.url, t.instanceId), [APP_HOST_ROUTE_HEADER]: 'host' })) headers.push(k, v);
     const ownerSsr = await ownerSsrHeader(route, req, session, t);
     if (ownerSsr) headers.push(OWNER_SSR_HEADER, ownerSsr);
+    // D104: the target sees that this is a delegated read, and by whom, so its server can refuse a route.
+    if (session.view) {
+      headers.push(ACCESS_HEADER, 'view', ACCESS_BY_HEADER, session.view.by);
+      const cap = setTimeout(() => res.destroy(), VIEW_RESPONSE_MAX_MS);
+      cap.unref?.();
+      res.once('close', () => clearTimeout(cap));
+    }
     const { ancestors, embedders } = await frameAncestors(route, edge, session, url);
     // The embed document still needs the grant its code was issued under.
     if (session.embed && path === '/' && embedders === 0) return page(403, 'Request refused', 'This embedded session is no longer granted.');
@@ -553,6 +624,8 @@ export function createAppHostRouter({
       const session = await appSession(route, req, edge);
       if (!session) return fail(401, 'Unauthorized');
       if (mux && session.embed) return fail(403, 'Forbidden');
+      // D104: a view cookie reads; it never opens a socket.
+      if (session.view) return fail(403, 'Forbidden');
       const identity = hostIdentity(route, req);
       if (!(await surfaceGate({ subject: mux ? 'sse-mux' : 'app-hosts', method: 'UPGRADE', appId: route.record.appId, identity }))) {
         return fail(403, 'Forbidden');

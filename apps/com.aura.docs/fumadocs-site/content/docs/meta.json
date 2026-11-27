@@ -10,6 +10,7 @@
     "develop-in-sandbox",
     "make-an-app-prod-ready",
     "cross-app-mounts",
+    "app-composition",
     "interfaces",
     "notifications",
     "flights",

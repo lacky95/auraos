@@ -4,6 +4,7 @@ import { jsonResponse } from '../../../lib/appResponse.js';
 import { readJson } from '../../../lib/notificationCaller.js';
 import { auditOwner, grantLevel, ownerAction } from '../../../lib/approvals/admin.ts';
 import { ownerUiApp } from '../../../../server/gateway-identity.mjs';
+import { liveAppView } from '../../../../server/app-view.mjs';
 
 /**
  * The owner's grants of privileged permissions (core auth `GrantStore`).
@@ -24,6 +25,11 @@ import { ownerUiApp } from '../../../../server/gateway-identity.mjs';
  *            "all" | "app:<id>,sender:<key>" | {apps:[…]} | {senders:[…]},
  *            plus `includeSecret` (default false). Re-granting replaces the scope.
  *   DELETE {subjectKind, subjectId, permission} (body or query) → revoke
+ *
+ * App access (D104, `apps.view`): POST and DELETE also take `target` (the
+ * target app id); a grant needs it, a revoke without it drops every target.
+ * Granting it is one click (owner decision; D102 class deferrable). GET lists
+ * them in `appAccess` with whether each still counts (both installations).
  *
  * Takes effect on the very next request (no restart); emits
  * `permissions:changed`; the record and the audit name the owner (or the
@@ -95,7 +101,14 @@ export const GET: APIRoute = async (ctx) => {
     });
   }
   apps.sort((a, b) => a.appId.localeCompare(b.appId));
-  return jsonResponse({ privileged: core.PRIVILEGED_PERMISSIONS, grants: all, apps });
+  const view = await liveAppView();
+  const appAccess = [];
+  for (const g of all) {
+    if (g.subject.kind !== 'app' || g.scope?.kind !== 'app') continue;
+    const counts = core.appAccessCounts(g, await view.binding(g.subject.id), (await view.binding(g.scope.id)).installationId);
+    appAccess.push({ consumer: g.subject.id, permission: g.permission, target: g.scope.id, grantedAt: g.grantedAt, state: counts ? 'active' : 'stale' });
+  }
+  return jsonResponse({ privileged: core.PRIVILEGED_PERMISSIONS, grants: all, apps, appAccess });
 };
 
 export const POST: APIRoute = async (ctx) => {
@@ -118,6 +131,7 @@ export const POST: APIRoute = async (ctx) => {
     if (!k) return jsonResponse({ error: `unknown API key ${a.id}` }, 404);
     if (k.revokedAt) return jsonResponse({ error: `API key ${a.id} is revoked` }, 409);
   }
+  if (core.isAppAccessPermission(a.permission) || a.src['target'] !== undefined) return grantAppAccess(ctx, a);
   const readArg = a.src['readScope'] ?? (a.permission === 'notifications.read' ? a.src['scope'] : undefined);
   const read = a.permission === 'notifications.read' && readArg !== undefined
     ? { scope: readArg, includeSecret: a.src['includeSecret'] === true || a.src['includeSecret'] === 'true' }
@@ -145,6 +159,7 @@ export const POST: APIRoute = async (ctx) => {
 export const DELETE: APIRoute = async (ctx) => {
   const a = await subjectArgs(ctx.request, ctx.url);
   if (a instanceof Response) return a;
+  if (core.isAppAccessPermission(a.permission)) return revokeAppAccess(ctx, a);
   const actor = await ownerAction(ctx, {
     action: 'admin.revoke', level: 'session',
     payload: { subjectKind: a.kind, subjectId: a.id, permission: a.permission },
@@ -159,3 +174,78 @@ export const DELETE: APIRoute = async (ctx) => {
     return fail(err);
   }
 };
+
+type SubjectArgs = { kind: string; id: string; permission: string; src: Record<string, unknown> };
+type RouteCtx = Parameters<APIRoute>[0];
+
+const refuse = (e: core.AppAccessError) => jsonResponse(core.appAccessErrorBody(e), e.status);
+
+/** POST {subjectId, permission:'apps.view', target}: the owner grants one app read access to one target (D104). */
+async function grantAppAccess(ctx: RouteCtx, a: SubjectArgs): Promise<Response> {
+  const target = typeof a.src['target'] === 'string' ? a.src['target'] : '';
+  const mgr = core.getAppManager();
+  const consumerName = mgr.registry.getById(a.id)?.name ?? a.id;
+  const base = { consumer: a.id, consumerName, permission: a.permission, ...(target ? { target } : {}) };
+  if (!core.isAppAccessPermission(a.permission)) {
+    if ((core.RESERVED_APP_ACCESS_PERMISSIONS as readonly string[]).includes(a.permission)) return refuse(core.appAccessError('level-not-available', base));
+    return jsonResponse({ error: 'invalid-request', message: `--target applies to app access (apps.view) only, not '${a.permission}'.` }, 400);
+  }
+  if (a.kind !== 'app') return jsonResponse({ error: 'invalid-request', message: `${a.permission} is granted to an app.` }, 400);
+  if (!mgr.registry.getById(a.id)) return jsonResponse({ error: 'not-found', message: `No app ${a.id} is installed.` }, 404);
+  if (!target) {
+    return jsonResponse({ error: 'invalid-request', message: `${a.permission} is granted for one target app.`, hint: `aura grant perms ${a.id} ${a.permission} --target <app id>`, permission: a.permission }, 400);
+  }
+  const view = await liveAppView();
+  const blocked = view.targetRefusal(a.id, target, { consumerName, permission: a.permission });
+  if (blocked) return refuse(blocked);
+  const warnings = view.declares(a.id) ? [] : [core.appAccessError('not-declared', base).hint!];
+  const consumer = await view.binding(a.id);
+  const targetInstallation = (await view.binding(target)).installationId;
+  if (!consumer.installationId || !targetInstallation) {
+    return jsonResponse({ error: 'conflict', message: `${!consumer.installationId ? a.id : target} has no installation record yet; start it once, then grant again.` }, 409);
+  }
+  const actor = await ownerAction(ctx, {
+    action: 'admin.grant', level: 'session',
+    payload: { subjectKind: 'app', subjectId: a.id, permission: a.permission, target, consumerInstallation: consumer.installationId, targetInstallation },
+    title: `Let ${consumerName} read ${mgr.registry.getById(target)?.name ?? target}`,
+    details: [
+      `Reader: ${a.id}, on its server, with GET and HEAD only.`,
+      `Reads: ${target}, everything you can see there: its pages and its read-only API. This can be sensitive content.`,
+      ...warnings,
+    ],
+  });
+  if (actor instanceof Response) return actor;
+  try {
+    const { grants } = core.getAuthServices();
+    const r = await grants.grant({ kind: 'app', id: a.id }, a.permission, {
+      by: actor.by, scope: core.appTargetScope(target, targetInstallation), installationId: consumer.installationId,
+      ...(consumer.scope ? { appScope: consumer.scope } : {}),
+    });
+    await auditOwner(actor, 'grant', { target: `app:${a.id}`, detail: { permission: a.permission, target, appScope: consumer.scope ?? null } });
+    return jsonResponse({ ok: true, ...r, warnings });
+  } catch (err) {
+    return fail(err);
+  }
+}
+
+/** DELETE {subjectId, permission:'apps.view', target?}: revoke one target, or every target. Ends outstanding credentials at once. */
+async function revokeAppAccess(ctx: RouteCtx, a: SubjectArgs): Promise<Response> {
+  const target = typeof a.src['target'] === 'string' && a.src['target'] ? a.src['target'] : null;
+  const actor = await ownerAction(ctx, {
+    action: 'admin.revoke', level: 'session',
+    payload: { subjectKind: a.kind, subjectId: a.id, permission: a.permission, target },
+    title: target ? `Revoke ${a.permission} for ${target} from ${a.id}` : `Revoke ${a.permission} for every app from ${a.id}`,
+  });
+  if (actor instanceof Response) return actor;
+  try {
+    const { grants } = core.getAuthServices();
+    const subject = { kind: 'app' as const, id: a.id };
+    const had = (await grants.listFor(subject)).filter((g) => g.permission === a.permission && (!target || (g.scope?.kind === 'app' && g.scope.id === target)));
+    if (target) await grants.revoke(subject, a.permission, core.appTargetScope(target, ''));
+    else await grants.revoke(subject, a.permission);
+    await auditOwner(actor, 'revoke', { target: `app:${a.id}`, detail: { permission: a.permission, target: target ?? '*', changed: had.length > 0 } });
+    return jsonResponse({ ok: true, changed: had.length > 0, removed: had });
+  } catch (err) {
+    return fail(err);
+  }
+}

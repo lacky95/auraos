@@ -246,6 +246,15 @@ const routes: RouteAccessManifest['routes'] = {
   // Owner login (D6, D37), always on.
   // `setup` also takes the reset path: both need a one-time host code (D8).
   '/api/app-hosts/handoff': { methods: { POST: rule(OWNER, 'session') } },
+  // D104 `apps.view`: an app's own server (its instance token) asks for a view
+  // handoff to another app; the handler checks the manifest, the target and
+  // the owner's grant (202 needs-approval until then), and says what is missing.
+  '/api/app-hosts/view': {
+    methods: {
+      POST: rule(INSTANCE, 'system', { guard: 'rule', ...why(
+        'An app\'s own server asks to read another app for its user (D104, lib/appView.ts): the handler admits only an instance token (never a page, the gateway or the owner\'s login) and checks the declared apps.view, a normal target app and the owner\'s per-target grant, refusing with a hint for each.') }),
+    },
+  },
   '/api/auth/status': { methods: { GET: rule(['public'], 'system') } },
   '/api/auth/setup': { methods: { POST: rule(['public'], 'system') } },
   '/api/auth/login': { methods: { POST: rule(['public'], 'session') } },

@@ -723,16 +723,19 @@ export function registerVerbs(program: Command): void {
     .option('--sidecar <name>', 'caps: to one running OS sidecar of <inst|app> (runtime; inside the app)')
     .option('--scope <scope>', "nperm read: which senders — app:<appId>, sender:<senderKey> (comma-separated) or all")
     .option('--include-secret', 'nperm read: secret notifications too')
+    .option('--target <app>', 'perms apps.view: the app it may read (D104, app composition)')
     .addHelpText('after', resourcesLine('grant') + examples([
       'aura grant perms com.aura.terminal apps.mount',
+      'aura grant perms io.lakner.marklayer apps.view --target com.aura.sentinel   # read another app',
       'aura grant nperm com.example.dash read --scope app:com.example.notes   # read another app\'s notifications',
       'aura grant caps com.example.hello ripgrep jq',
       'aura grant caps com.example.hello git --template worker    # every worker sidecar',
       'aura grant caps com.example.hello git --sidecar worker-7   # one running sidecar',
       'aura grant perms                                 # interactive',
     ]))
-    .action(async (resource: string, app: string | undefined, names: string[], opts: { interactive?: boolean; template?: string; sidecar?: string; scope?: string; includeSecret?: boolean }) => {
+    .action(async (resource: string, app: string | undefined, names: string[], opts: { interactive?: boolean; template?: string; sidecar?: string; scope?: string; includeSecret?: boolean; target?: string }) => {
       const def = resourceOrFail(resource, 'grant');
+      if (opts.target) return dispatch(['admin', 'grant', ...(app ? [app] : []), ...names, '--target', opts.target]);
       const target = targetedCaps(def, 'grant', app, names, opts);
       if (target === 'template') return dispatch(['cap', 'grant', app!, ...names, '--template', opts.template!]);
       if (target === 'sidecar') return sidecarToolsCmd('grant', app!, opts.sidecar!, names);
@@ -750,14 +753,17 @@ export function registerVerbs(program: Command): void {
     .description('Revoke permissions or capabilities from an app, a sidecar template or one running sidecar.')
     .option('--template <tpl>', 'caps: from a services[] template of the app (persistent)')
     .option('--sidecar <name>', 'caps: runtime grants of one running OS sidecar of <inst|app> (inside the app)')
+    .option('--target <app>', 'perms apps.view: the app it may no longer read')
     .addHelpText('after', resourcesLine('revoke') + examples([
       'aura revoke perms com.aura.terminal apps.mount',
+      'aura revoke perms io.lakner.marklayer apps.view --target com.aura.sentinel',
       'aura revoke caps com.example.hello jq            # also gone from every sidecar of the app',
       'aura revoke caps com.example.hello git --template worker',
       'aura revoke caps com.example.hello git --sidecar worker-7',
     ]))
-    .action(async (resource: string, app: string, names: string[], opts: { template?: string; sidecar?: string }) => {
+    .action(async (resource: string, app: string, names: string[], opts: { template?: string; sidecar?: string; target?: string }) => {
       const def = resourceOrFail(resource, 'revoke');
+      if (opts.target) return dispatch(['admin', 'revoke', app, ...names, '--target', opts.target]);
       const target = targetedCaps(def, 'revoke', app, names, opts);
       if (target === 'template') return dispatch(['cap', 'revoke', app, ...names, '--template', opts.template!]);
       if (target === 'sidecar') return sidecarToolsCmd('revoke', app, opts.sidecar!, names);

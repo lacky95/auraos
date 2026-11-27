@@ -41,6 +41,9 @@ export function notifPermission(name: string): string {
     process.stderr.write(`warning: '${name}' is deprecated — use 'systemModal' (notifications.systemModal)\n`);
     return old;
   }
+  // App access (D104) goes by its full name, with --target.
+  if (name === 'apps.view') return name;
+  if (name === 'apps.embed' || name === 'apps.interact') fail(`'${name}' is not available yet: only apps.view can be granted (D104)`);
   // The owner's Terminal grants (D25) go by their full name.
   if (name === 'terminal.embed' || name === 'terminal.sessions.list' || name === 'terminal.screen.read') return name;
   // Writing an OS-wide KV topic (system.kv.os.<topic>.write) also goes by its full name.
@@ -54,10 +57,13 @@ export function notifPermission(name: string): string {
 export interface ReadGrantOpts {
   scope?: string;
   includeSecret?: boolean;
+  /** apps.view (D104): the target app. */
+  target?: string;
 }
 
 interface GrantsDto {
   privileged: string[];
+  appAccess?: Array<{ consumer: string; permission: string; target: string; grantedAt: number; state: 'active' | 'stale' }>;
   apps: Array<{ appId: string; name?: string; scope: string | null; sends: boolean; requested: string[]; granted: string[]; effective: string[]; read?: { label: string } }>;
   grants: Array<{ subject: { kind: string; id: string }; permission: string; appScope?: string; grantedAt: number }>;
 }
@@ -70,6 +76,10 @@ export async function grantNotif(verb: 'grant' | 'revoke', appId: string, featur
   if (features.length === 0) fail(`aura ${verb} notif-perms <app> <locked|popup|read...>`);
   for (const f of features) {
     const permission = notifPermission(f);
+    if (permission === 'apps.view' || readOpts.target) {
+      await grantAppAccess(verb, appId, permission, readOpts.target);
+      continue;
+    }
     if (verb === 'grant') {
       const isRead = permission === 'notifications.read';
       if (isRead && !readOpts.scope) {
@@ -94,6 +104,22 @@ export async function grantNotif(verb: 'grant' | 'revoke', appId: string, featur
   }
 }
 
+/** apps.view (D104): one app may read one target app; revoking without a target drops every target. */
+async function grantAppAccess(verb: 'grant' | 'revoke', appId: string, permission: string, target: string | undefined): Promise<void> {
+  if (permission !== 'apps.view') fail(`--target applies to apps.view only, not '${permission}'`);
+  if (verb === 'grant') {
+    if (!target) fail(`apps.view is granted for one target app: aura grant perms ${appId} apps.view --target <app id>`);
+    const r = await api.post<{ warnings?: string[] }>('/api/admin/grants', { subjectKind: 'app', subjectId: appId, permission, target });
+    ok(`granted ${color.bold(permission)} to ${color.bold(appId)} for ${color.bold(target!)} (reads only)`);
+    for (const w of r.warnings ?? []) warn(w);
+    return;
+  }
+  const q = `subjectKind=app&subjectId=${encodeURIComponent(appId)}&permission=${encodeURIComponent(permission)}${target ? `&target=${encodeURIComponent(target)}` : ''}`;
+  const r = await api.del<{ changed: boolean }>(`/api/admin/grants?${q}`);
+  if (r.changed) ok(`revoked ${color.bold(permission)} from ${color.bold(appId)}${target ? ` for ${target}` : ' for every app'}; its open reads end now`);
+  else info(`${appId} had no ${permission} grant${target ? ` for ${target}` : ''}`);
+}
+
 export function fmtTime(ms: number): string {
   return new Date(ms).toISOString().replace('T', ' ').replace(/\.\d+Z$/, 'Z');
 }
@@ -108,6 +134,13 @@ export function registerAdmin(program: Command): void {
     .description('Privileged permissions per app: requested (manifest) vs granted (owner) vs effective.')
     .action(async () => {
       const d = await fetchNotifPerms();
+      if (d.appAccess?.length) {
+        console.log(table(d.appAccess.map((g) => ({
+          APP: g.consumer, ACCESS: g.permission, TARGET: g.target, SINCE: fmtTime(g.grantedAt),
+          STATE: g.state === 'active' ? g.state : color.yellow('stale (reinstalled: grant again)'),
+        }))));
+        console.log('');
+      }
       if (d.apps.length === 0) { info('no app sends or requests notification permissions'); return; }
       console.log(table(d.apps.map((a) => ({
         APP: a.appId,
@@ -125,12 +158,14 @@ export function registerAdmin(program: Command): void {
     .description("Grant privileged notification features (locked | popup | read | systemModal) to an app. The app must also request them in its manifest. read = other senders' notifications, scoped with --scope.")
     .option('--scope <scope>', 'read: app:<appId>, sender:<senderKey> (comma-separated) or all')
     .option('--include-secret', 'read: secret notifications too (default: not)')
-    .action((app: string, features: string[], opts: { scope?: string; includeSecret?: boolean }) => grantNotif('grant', app, features, opts));
+    .option('--target <app>', 'apps.view: the app it may read (D104)')
+    .action((app: string, features: string[], opts: { scope?: string; includeSecret?: boolean; target?: string }) => grantNotif('grant', app, features, opts));
 
   admin
     .command('revoke <app> <features...>')
     .description('Revoke privileged notification features (locked | popup | read | systemModal). Takes effect at once; revoking systemModal releases that app\'s blocking modals.')
-    .action((app: string, features: string[]) => grantNotif('revoke', app, features));
+    .option('--target <app>', 'apps.view: only this target (default: every target)')
+    .action((app: string, features: string[], opts: { target?: string }) => grantNotif('revoke', app, features, { target: opts.target }));
 
   registerAdminDev(admin);
   registerAdminNotif(admin);

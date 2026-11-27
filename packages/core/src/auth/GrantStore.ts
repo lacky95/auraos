@@ -10,7 +10,10 @@
  * Today a grant is OS-wide (`{kind:'os'}`), except a Terminal embed grant for
  * ONE session (`{kind:'terminal-session', id}`, D25): the shell records it
  * when an app holding the OS-wide `terminal.embed` grant creates that session,
- * and it counts only while that OS-wide grant does.
+ * and it counts only while that OS-wide grant does. An app-access grant
+ * (D104, `apps.view`, auth/appAccess.ts) is scoped to ONE target app
+ * (`{kind:'app', id, installationId}`) and pinned to the consumer's
+ * installation (`installationId`): never OS-wide.
  *
  * App grants are pinned to the app's install scope (`appScope`): a clone,
  * scaffold or store install that SHADOWS the app from another scope under the
@@ -23,6 +26,7 @@
 import type { Redis } from '@aura/kv-store';
 import { OsEventBus } from '../ipc/OsEventBus.js';
 import { describeReadScope, normalizeReadScope, type ReadGrant } from '../notifications/access.js';
+import { APP_ACCESS_PERMISSIONS, isAppAccessPermission } from './appAccess.js';
 import { OS_SCOPE, type ChangeAttribution, type GrantScope, type LegacyAdminAttribution, type GrantSubject, type GrantSubjectKind } from './types.js';
 
 export const GRANT_PREFIX = 'grant:';
@@ -60,7 +64,7 @@ export const TERMINAL_EMBED_PERMISSION = 'terminal.embed';
 export const TERMINAL_SESSIONS_LIST_PERMISSION = 'terminal.sessions.list';
 export type PrivilegedPermission = typeof PRIVILEGED_PERMISSIONS[number];
 /** What GrantStore accepts. Deliberately not "any permission": no generic bypass. */
-export const GRANTABLE_PERMISSIONS: readonly string[] = [...PRIVILEGED_PERMISSIONS];
+export const GRANTABLE_PERMISSIONS: readonly string[] = [...PRIVILEGED_PERMISSIONS, ...APP_ACCESS_PERMISSIONS];
 
 /**
  * Writing an OS-wide KV topic (`/api/kv/os/<topic>`: the theme, keymap, lock
@@ -83,7 +87,7 @@ export const userScope = (userId: string): GrantScope => ({ kind: 'user', id: us
 
 export function isPrivilegedPermission(p: string): boolean {
   return (PRIVILEGED_PERMISSIONS as readonly string[]).includes(p) || KV_OS_WRITE_PERMISSION_RE.test(p)
-    || CREDENTIAL_READ_PERMISSION_RE.test(p);
+    || CREDENTIAL_READ_PERMISSION_RE.test(p) || isAppAccessPermission(p);
 }
 
 const SUBJECT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
@@ -101,6 +105,12 @@ export interface GrantRecord {
   scope: GrantScope;
   /** App subjects: the install scope the grant was given for (system|global|user). */
   appScope?: string;
+  /**
+   * App-access grants (D104): the consuming app's installation the grant was
+   * given to; it counts only while that installation is the current one
+   * (`appAccessCounts`). The same field S1(b) adds for every app grant.
+   */
+  installationId?: string;
   grantedAt: number;
   /** A record from before D50 may name the retired shared admin credential. */
   grantedBy: GrantedBy | LegacyAdminAttribution;
@@ -142,12 +152,26 @@ function field(permission: string, scope: GrantScope): string {
 export class GrantStore {
   constructor(private readonly redis: () => Redis, private readonly now: () => number = Date.now) {}
 
-  private validate(subject: GrantSubject, permission: string, scope: GrantScope = OS_SCOPE): void {
+  /** `forRevoke`: an app-access permission may name every target (OS scope) or one target without its installation. */
+  private validate(subject: GrantSubject, permission: string, scope: GrantScope = OS_SCOPE, forRevoke = false): void {
     permission = canonicalPermission(permission);
     if (!SUBJECT_KINDS.includes(subject.kind)) throw new GrantError(400, `subject kind must be one of ${SUBJECT_KINDS.join(', ')}`);
     if (typeof subject.id !== 'string' || !SUBJECT_ID.test(subject.id)) throw new GrantError(400, 'invalid subject id');
     if (!isPrivilegedPermission(permission)) {
       throw new GrantError(400, `'${permission}' cannot be granted here — grantable: ${GRANTABLE_PERMISSIONS.join(', ')}, system.kv.os.<topic>.write, credential.read:<NAME>`);
+    }
+    if (isAppAccessPermission(permission) || scope.kind === 'app') {
+      if (!isAppAccessPermission(permission) || subject.kind !== 'app') {
+        throw new GrantError(400, `only an app's ${APP_ACCESS_PERMISSIONS.join('/')} grant is scoped to a target app`);
+      }
+      if (forRevoke && scope.kind === 'os') return;
+      if (scope.kind !== 'app' || typeof scope.id !== 'string' || !SUBJECT_ID.test(scope.id)) {
+        throw new GrantError(400, `'${permission}' is granted for one target app: give --target <app id>`);
+      }
+      if (!forRevoke && (typeof scope.installationId !== 'string' || !SUBJECT_ID.test(scope.installationId))) {
+        throw new GrantError(409, `'${permission}' for ${scope.id} needs the target's installation, and ${scope.id} has none`);
+      }
+      return;
     }
     const credential = CREDENTIAL_READ_PERMISSION_RE.test(permission);
     if (credential || scope.kind === 'user') {
@@ -170,11 +194,22 @@ export class GrantStore {
    */
   async grant(
     subject: GrantSubject, permission: string,
-    opts: { by: GrantedBy; appScope?: string; scope?: GrantScope; read?: { scope: unknown; includeSecret?: boolean }; binding?: string },
+    opts: {
+      by: GrantedBy; appScope?: string; scope?: GrantScope; read?: { scope: unknown; includeSecret?: boolean }; binding?: string;
+      /** App-access grants (D104): the consuming app's installation. Required for them, refused elsewhere. */
+      installationId?: string;
+    },
   ): Promise<{ record: GrantRecord; changed: boolean }> {
     permission = canonicalPermission(permission);
     const scope = opts.scope ?? OS_SCOPE;
     this.validate(subject, permission, scope);
+    if (isAppAccessPermission(permission)) {
+      if (typeof opts.installationId !== 'string' || !SUBJECT_ID.test(opts.installationId)) {
+        throw new GrantError(409, `'${permission}' is given to one installation of ${subject.id}, and it has none`);
+      }
+    } else if (opts.installationId !== undefined) {
+      throw new GrantError(400, 'only an app-access grant is pinned to an installation here');
+    }
     if (opts.binding !== undefined
       && (scope.kind !== 'terminal-session' || typeof opts.binding !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(opts.binding))) {
       throw new GrantError(400, 'only a Terminal session grant can be bound to an instance life');
@@ -190,6 +225,7 @@ export class GrantStore {
       permission,
       scope: { ...scope },
       ...(opts.appScope ? { appScope: opts.appScope } : {}),
+      ...(opts.installationId ? { installationId: opts.installationId } : {}),
       grantedAt: this.now(),
       grantedBy: opts.by,
       ...(read ? { read } : {}),
@@ -200,7 +236,10 @@ export class GrantStore {
     const prev = await r.hget(key, field(permission, scope));
     await r.multi().hset(key, field(permission, scope), JSON.stringify(record)).sadd(GRANT_INDEX_KEY, key).exec();
     const prevRec = prev ? (JSON.parse(prev) as GrantRecord) : null;
+    // An app-access grant changes with every approval: the credentials of the old one end (they name its time).
     const changed = !prevRec || prevRec.appScope !== record.appScope || prevRec.binding !== record.binding
+      || prevRec.installationId !== record.installationId || isAppAccessPermission(permission)
+      || JSON.stringify(prevRec.scope) !== JSON.stringify(record.scope)
       || JSON.stringify(prevRec.read ?? null) !== JSON.stringify(record.read ?? null);
     if (changed) this.emit({ subjectKind: subject.kind, subjectId: subject.id, permission, change: 'granted' });
     return { record, changed };
@@ -209,11 +248,12 @@ export class GrantStore {
   /**
    * Revoke. Returns the removed record, or null when there was none. Revoking
    * an OS-wide grant also drops the subject's narrower grants of it (the
-   * per-session Terminal embed grants), so nothing outlives the owner's answer.
+   * per-session Terminal embed grants, and every target of an app-access
+   * grant), so nothing outlives the owner's answer.
    */
   async revoke(subject: GrantSubject, permission: string, scope: GrantScope = OS_SCOPE): Promise<GrantRecord | null> {
     permission = canonicalPermission(permission);
-    this.validate(subject, permission, scope);
+    this.validate(subject, permission, scope, true);
     const r = this.redis();
     const key = grantKey(subject);
     const prev = await r.hget(key, field(permission, scope));

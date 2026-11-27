@@ -31,6 +31,26 @@ const SERVICES = Symbol.for('aura.appHosts.services');
  */
 export const appHostEmbedCookieName = (secure) => `${appHostCookieName(secure)}_embed`;
 
+/**
+ * The restricted cookie of a view handoff (D104, `apps.view`): one consuming
+ * app's server reads this host for the user. Its own name too; a full or an
+ * embed read never accepts it, and it never reaches a browser (the handoff
+ * is redeemed by the consuming app's server, server/app-view.mjs).
+ */
+export const appHostViewCookieName = (secure) => `${appHostCookieName(secure)}_view`;
+
+const VIEW_APP_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
+
+/** A well-formed view claim, copied, or null: who reads, as which installation, under which grant. */
+export function viewClaim(value) {
+  if (!value || typeof value !== 'object') return null;
+  const { by, byInstallation, grantedAt } = value;
+  if (typeof by !== 'string' || !VIEW_APP_RE.test(by)) return null;
+  if (typeof byInstallation !== 'string' || !VIEW_APP_RE.test(byInstallation)) return null;
+  if (!Number.isSafeInteger(grantedAt) || grantedAt <= 0) return null;
+  return { by, byInstallation, grantedAt };
+}
+
 const EMBED_SESSION_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}#[A-Za-z0-9._-]{1,64}$/;
 const EMBED_LABEL_RE = /^[a-z0-9]{1,63}$/;
 
@@ -79,17 +99,22 @@ export function createAppHostAuth({ secret, now = Date.now }) {
   }
 
   /** @returns {{ code: string, expiresAt: number }} */
-  /** `embed` makes it a restricted embed code (see appHostEmbedCookieName). */
-  function issueCode({ aud, label, installationId, appId, slot, userId, sid, returnPath, sessionExpiresAt = null, embed = null }) {
+  /**
+   * `embed` makes it a restricted embed code (see appHostEmbedCookieName),
+   * `view` a restricted view code (appHostViewCookieName); never both.
+   */
+  function issueCode({ aud, label, installationId, appId, slot, userId, sid, returnPath, sessionExpiresAt = null, embed = null, view = null }) {
     const restricted = embed === null ? null : embedClaim(embed);
     if (embed !== null && !restricted) throw new TypeError('malformed embed claim');
+    const viewing = view === null ? null : viewClaim(view);
+    if (view !== null && (!viewing || restricted)) throw new TypeError('malformed view claim');
     sweep();
     const code = randomBytes(32).toString('base64url');
     const iat = now();
     const exp = iat + HANDOFF_TTL_MS;
     const claim = {
       v: 1, jti: code, aud, label, installationId, appId, slot, userId, sid, returnPath,
-      ...(restricted ? { embed: restricted } : {}), iat, exp,
+      ...(restricted ? { embed: restricted } : {}), ...(viewing ? { view: viewing } : {}), iat, exp,
     };
     pending.set(code, { claim, sessionExpiresAt });
     return { code, expiresAt: exp };
@@ -115,16 +140,18 @@ export function createAppHostAuth({ secret, now = Date.now }) {
     const exp = Math.min(iat + APP_COOKIE_TTL_MS, sessionExpiresAt ?? Infinity);
     const embed = claim.embed === undefined ? null : embedClaim(claim.embed);
     if (claim.embed !== undefined && !embed) throw new TypeError('malformed embed claim');
+    const view = claim.view === undefined ? null : viewClaim(claim.view);
+    if (claim.view !== undefined && (!view || embed)) throw new TypeError('malformed view claim');
     const payload = {
       v: 1, aud: claim.aud, label: claim.label, installationId: claim.installationId,
-      userId: claim.userId, sid: claim.sid, ...(embed ? { embed } : {}), iat, exp,
+      userId: claim.userId, sid: claim.sid, ...(embed ? { embed } : {}), ...(view ? { view } : {}), iat, exp,
     };
     const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
     return { value: `${body}.${sign(secret, body).toString('base64url')}`, maxAgeSeconds: Math.max(0, Math.floor((exp - iat) / 1000)), payload };
   }
 
-  /** `embed`: read the restricted embed cookie, else only a full one passes. */
-  function openCookie(value, { aud, label, installationId, embed = false }) {
+  /** `embed`: read the restricted embed cookie, `view` the view cookie, else only a full one passes. */
+  function openCookie(value, { aud, label, installationId, embed = false, view = false }) {
     const dot = String(value).indexOf('.');
     if (dot <= 0) return null;
     const body = value.slice(0, dot);
@@ -135,8 +162,9 @@ export function createAppHostAuth({ secret, now = Date.now }) {
       const p = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
       if (p.v !== 1 || p.aud !== aud || p.label !== label || p.installationId !== installationId) return null;
       if (typeof p.sid !== 'string' || typeof p.userId !== 'string' || !(p.exp > now())) return null;
-      // A restricted cookie never reads as a full one, under any name.
+      // A restricted cookie never reads as a full one, or as the other kind, under any name.
       if (embed ? !embedClaim(p.embed) : p.embed !== undefined) return null;
+      if (view ? !viewClaim(p.view) : p.view !== undefined) return null;
       return p;
     } catch {
       return null;

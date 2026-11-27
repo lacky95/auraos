@@ -235,3 +235,31 @@ export function credentialReadDisplay(read: CredentialRead, appName: string, req
     requestedBy,
   };
 }
+
+// ── apps.view (D104, app composition) ───────────────────────────────────────
+
+/**
+ * The exact delegation an approval allows: one consuming app's installation
+ * reads one target app's installation, for the user.
+ */
+export interface AppViewAsk {
+  consumer: string;
+  consumerInstallation: string;
+  target: string;
+  targetInstallation: string;
+}
+
+/** What the dialog says: the consequence of `view` in plain words (D104 §4). */
+export function appViewDisplay(ask: AppViewAsk, consumerName: string, targetName: string, requestedBy: string): ApprovalDisplay {
+  const named = (name: string, id: string) => (name === id ? id : `${name} (${id})`);
+  return {
+    title: `Let ${consumerName} read ${targetName}`,
+    details: [
+      `Reads: ${named(targetName, ask.target)}, everything you can see there: its pages and its read-only API.`,
+      `Reader: ${named(consumerName, ask.consumer)}, on its server. Your browser never gets this access, and it cannot change anything in ${targetName} (no forms, no sockets).`,
+      'This can be sensitive content. It lasts until you revoke it:',
+      `aura revoke perms ${ask.consumer} apps.view --target ${ask.target}`,
+    ],
+    requestedBy,
+  };
+}

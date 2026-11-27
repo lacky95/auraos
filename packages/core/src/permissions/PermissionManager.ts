@@ -46,6 +46,8 @@ export const ENFORCED_PERMISSIONS: readonly string[] = [
   'user.confirm',
   // Ask the owner for a credential through the shell's dialog (D56). Declaring it is enough.
   'credentials.request',
+  // Read another app (D104): declaring it only requests it; the owner grants it per target app.
+  'apps.view',
 ];
 const ENFORCED = new Set<string>(ENFORCED_PERMISSIONS);
 

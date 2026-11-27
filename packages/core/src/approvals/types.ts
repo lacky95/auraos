@@ -54,6 +54,10 @@ export const FINAL_APPROVAL_STATES: ReadonlySet<ApprovalState> = new Set(['denie
  *   credential.read    an app reads a credential's raw value (D56,
  *                      `osClient.credentials.get`): `fresh`, and approving it
  *                      grants `credential.read:<NAME>` until revoked
+ *   apps.view          an app reads another app's pages and read-only API for
+ *                      the user (D104, `osClient.apps.view`): `session` (one
+ *                      click); approving it grants `apps.view` for that target
+ *                      until revoked. D102 class: deferrable (owner, 2026-11-27)
  *
  * The owner's management routes (D50), asked for from a sandbox (the CLI in
  * the System Terminal) or through Settings; shell `lib/approvals/admin.ts`:
@@ -75,7 +79,7 @@ export const FINAL_APPROVAL_STATES: ReadonlySet<ApprovalState> = new Set(['denie
  */
 export const APPROVAL_ACTIONS = [
   'nexus.install', 'nexus.update', 'os.context.write', 'user.confirm', 'terminal.agent-hooks',
-  'credential.store', 'credential.read',
+  'credential.store', 'credential.read', 'apps.view',
   'admin.grant', 'admin.revoke', 'admin.api-key', 'admin.manifest-edit', 'admin.read', 'admin.change',
   'app.patch.activate', 'app.source.open',
 ] as const;
