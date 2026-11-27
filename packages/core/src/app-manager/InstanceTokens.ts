@@ -1,5 +1,6 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { ensurePrivateDir } from '../system/privateDir.js';
 import { dirname } from 'node:path';
 
 /**
@@ -64,7 +65,7 @@ export class InstanceTokens {
       const raw = readFileSync(this.keyFile);
       if (raw.length >= 32) return (this.key = raw);
     }
-    mkdirSync(dirname(this.keyFile), { recursive: true });
+    ensurePrivateDir(dirname(this.keyFile));
     const fresh = randomBytes(32);
     writeFileSync(this.keyFile, fresh, { mode: 0o600 });
     try { chmodSync(this.keyFile, 0o600); } catch { /* best effort on odd filesystems */ }

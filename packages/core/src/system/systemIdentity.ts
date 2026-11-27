@@ -20,6 +20,7 @@
  */
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { ensurePrivateDir } from './privateDir.js';
 import { dirname, join } from 'node:path';
 
 export interface SystemIdentity {
@@ -37,7 +38,8 @@ export const systemKeyFile = (dataDir: string = defaultDataDir()): string => joi
 
 /** Write via a temp file and rename, so a crash never leaves half a file. */
 function writeAtomic(file: string, content: string, mode: number): void {
-  mkdirSync(dirname(file), { recursive: true, mode: file.includes('/secrets/') ? 0o700 : 0o755 });
+  if (file.includes('/secrets/')) ensurePrivateDir(dirname(file));
+  else mkdirSync(dirname(file), { recursive: true, mode: 0o755 });
   const tmp = `${file}.${process.pid}.tmp`;
   writeFileSync(tmp, content, { mode });
   chmodSync(tmp, mode);

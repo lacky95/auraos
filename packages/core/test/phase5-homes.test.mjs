@@ -438,3 +438,27 @@ test("5-main (VM finding): core finds its worker scripts when another build bund
   // Nothing found: an error, never another file.
   assert.throws(() => coreWorkerPath("file:///nonexistent/x.js", "ownershipApplyWorker.js", "ownership-apply"));
 });
+
+test("5-main (VM finding): <data>/aura/secrets is 0700, also when a first writer created it open; parents keep their mode", async () => {
+  const { ensurePrivateDir } = await import("../dist/system/privateDir.js");
+  const { InstanceTokens } = await import("../dist/app-manager/InstanceTokens.js");
+  const { mkdtempSync, mkdirSync, statSync, chmodSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const mode = (p) => statSync(p).mode & 0o777;
+  const root = mkdtempSync(join(tmpdir(), "aura-secrets-"));
+  // Fresh: the parent /data/aura keeps the default mode, the secrets dir is 0700.
+  ensurePrivateDir(join(root, "aura", "secrets"));
+  assert.equal(mode(join(root, "aura", "secrets")), 0o700);
+  assert.notEqual(mode(join(root, "aura")) & 0o055, 0, "the parent is not made private");
+  // An install whose first writer created it open is repaired.
+  const open = join(root, "b", "secrets");
+  mkdirSync(open, { recursive: true }); chmodSync(open, 0o755);
+  ensurePrivateDir(open);
+  assert.equal(mode(open), 0o700);
+  // The instance-token key (the first writer on a fresh install) goes through it.
+  const c = join(root, "c");
+  new InstanceTokens(join(c, "aura", "secrets", "instance-token.key")).mint("a-1");
+  assert.equal(mode(join(c, "aura", "secrets")), 0o700);
+  assert.equal(mode(join(c, "aura", "secrets", "instance-token.key")), 0o600);
+});
