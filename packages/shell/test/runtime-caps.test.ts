@@ -86,3 +86,12 @@ test('5b G: no shell route or lib compares a runtime id any more (the replaced s
     assert.doesNotMatch(src, /`aura-\$\{/, rel);
   }
 });
+
+test('5b G (D80, owner answer 4): revoking apps.mount detaches every cross-app mount; Developer Mode off only makes writable source read-only', () => {
+  const read = (rel: string) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
+  const edit = read('../src/pages/api/admin/manifest-edit.ts');
+  assert.match(edit, /perm === 'apps\.mount' && action !== 'add-permission'[\s\S]{0,200}mgr\.mounts\.revokeConsumer\(i\.instanceId\)/);
+  assert.doesNotMatch(edit, /revokeWritable/);
+  const mode = read('../src/pages/api/admin/system-mode.ts');
+  assert.match(mode, /revokeWritable\(\(m\) => m\.kind === 'source' && !!m\.idmap\)/);
+});

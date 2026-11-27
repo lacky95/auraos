@@ -138,7 +138,38 @@ test('D80 / owner answer 4: a writable source mount into another uid needs Devel
 
 test('D80: a root-owned data tree is never mapped to another uid', async (t) => {
   const root = world(t, { owners: { '/scopes/global/apps/io.t.root': 0 } });
-  await assert.rejects(root.mm.add(CONSUMER, { targetAppId: 'io.t.root', mode: 'rw', data: true }), /root-owned data tree/);
+  await assert.rejects(root.mm.add(CONSUMER, { targetAppId: 'io.t.root', mode: 'rw', data: true }),
+    /root-owned, and uid 0 is never mapped[\s\S]*owned by the app's identity first[\s\S]*aura admin homes ownership/);
+  assert.equal(root.helper.length, 0, 'nothing mounted');
+  assert.equal(root.kernel.size, 0);
+  // Restored from a declaration: read-only, never mapped.
+  const back = await root.mm.add(CONSUMER, { targetAppId: 'io.t.root', mode: 'rw', data: true }, { persist: false, origin: 'restored' });
+  assert.equal(back.mode, 'ro');
+  assert.equal(back.idmap, undefined);
+});
+
+test('D80 / owner answer 4: an authorized patch workspace stays writable without Developer Mode (no idmap, never refused)', async (t) => {
+  const w = world(t, { devMode: false });
+  const m = await w.mm.add(CONSUMER, { targetAppId: 'io.t.src', workspace: 'aura/workspaces/default/inst-io-t-src/1' });
+  assert.equal(m.kind, 'work');
+  assert.equal(m.mode, 'rw');
+  assert.equal(m.idmap, undefined);
+  assert.equal(m.containerPath, '/mnt/aura/work/io.t.src');
+  // …while the source itself, writable into another uid, needs Developer Mode.
+  await assert.rejects(w.mm.add(CONSUMER, { targetAppId: 'io.t.src', mode: 'rw' }), /needs Developer Mode/);
+});
+
+test('D80 / owner answer 4: losing apps.mount detaches every cross-app mount (read-only and writable) and its declaration', async (t) => {
+  const w = world(t, { devMode: true });
+  await w.mm.add(CONSUMER, { targetAppId: 'io.t.src', mode: 'rw' });
+  await w.mm.add(CONSUMER, { targetAppId: 'io.t.src', mode: 'ro', data: true });
+  await w.mm.add(CONSUMER, { targetAppId: 'io.t.src', workspace: 'aura/workspaces/default/inst-io-t-src/1' });
+  assert.equal(w.mm.list(CONSUMER).length, 3);
+  const revoked = w.mm.revokeConsumer(CONSUMER).sort();
+  assert.deepEqual(revoked, [`${CONSUMER}:io.t.src`, `${CONSUMER}:io.t.src:data`, `${CONSUMER}:io.t.src:work`].sort());
+  assert.deepEqual(w.mm.list(CONSUMER), []);
+  assert.equal(w.kernel.size, 0, 'every bind is gone');
+  assert.equal(fs.existsSync(join(w.dataDir, 'aura', 'mounts', '.state', `${CONSUMER}.json`)), false, 'no declaration a later spawn would restore');
 });
 
 test('D80: an idmapped mount that arrives without its idmapping is rolled back', async (t) => {

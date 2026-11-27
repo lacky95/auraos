@@ -73,8 +73,10 @@
  * probe) and is refused with `capability-missing: idmappedMounts` otherwise,
  * never made read-only or broader. A source tree (root-owned) needs
  * Developer Mode on top of being open; a root-owned data tree is never
- * mapped. Switching Developer Mode off, or revoking `apps.mount`, makes such
- * mounts read-only again (`revokeWritable`). Read-only mounts are unchanged.
+ * mapped. Switching Developer Mode off makes such source mounts read-only
+ * again (`revokeWritable`); revoking `apps.mount` detaches every cross-app
+ * mount of the consumer (`revokeConsumer`). A patch workspace (`work`) is the
+ * consumer's own dir: no idmap, no Developer Mode. Read-only mounts are unchanged.
  *
  * ## The AuraOS checkout (`workspace` kind, Developer Mode)
  *
@@ -585,7 +587,10 @@ export class MountManager {
       return refuse('a writable source mount into another app\'s uid needs Developer Mode (or patch it in a workspace: aura dev patch start)');
     }
     // An idmap of uid 0 would let the consumer create root-owned files on disk.
-    if (kind === 'data' && st.uid === 0) return refuse('a root-owned data tree is never mapped to another uid');
+    if (kind === 'data' && st.uid === 0) {
+      return refuse('the data is root-owned, and uid 0 is never mapped to another uid: it must be owned by the app\'s identity first '
+        + '(the app runs as its own uid and its ownership was applied: aura admin apps run-as, aura admin homes ownership)');
+    }
     const probe = this.opts.runner.canIdmapMounts();
     if (!probe.ok || !this.opts.runner.idmapHelperHostPath()) {
       const runtime = this.opts.runtimeOf?.(consumer) ?? 'container';
@@ -639,6 +644,29 @@ export class MountManager {
       if (set.size === 0) this.mounts.delete(consumer);
     }
     await this.settled();
+    return revoked;
+  }
+
+  /**
+   * Revokes every cross-app mount of an instance and of its OS sidecars, read-only and writable, with their
+   * declarations, so no later spawn restores them (owner answer 4 on D80: losing `apps.mount` revokes the
+   * access, including existing mounts). A bind that can't be unmounted stays listed (reconcile reaps it).
+   * Never throws; returns the revoked `<consumer>:<mountId>`.
+   */
+  revokeConsumer(instanceId: string): string[] {
+    const revoked: string[] = [];
+    for (const key of [instanceId, ...(isSidecarConsumer(instanceId) ? [] : this.sidecarKeysOf(instanceId))]) {
+      const set = this.mounts.get(key);
+      for (const m of [...(set?.values() ?? [])]) {
+        try { this.unmountHost(key, m.hostDest); }
+        catch (err) { console.warn(`[MountManager] revoke ${m.id} in ${key}: ${(err as Error).message}`); continue; }
+        set!.delete(m.id);
+        revoked.push(`${key}:${m.id}`);
+      }
+      if (set && set.size === 0) this.mounts.delete(key);
+      this.writeDeclFile(key, []);
+      this.pruneStale(key);
+    }
     return revoked;
   }
 

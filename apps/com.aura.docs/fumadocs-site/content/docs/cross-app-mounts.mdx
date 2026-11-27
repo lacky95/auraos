@@ -119,9 +119,11 @@ Read these before you rely on it.
   with `capability-missing: idmappedMounts`, never made read-only or
   broader. A writable **source** mount into another uid also needs
   Developer Mode (closed sources stay read-only; use a patch workspace), and
-  a root-owned data tree is never mapped. Switching Developer Mode off, or
-  revoking `apps.mount`, makes those mounts read-only again. Read-only
-  mounts are unchanged.
+  a root-owned data tree is never mapped (the data must be owned by the
+  app's identity). A patch workspace (`/mnt/aura/work/…`) needs no
+  Developer Mode. Switching Developer Mode off makes writable source mounts
+  read-only again; revoking `apps.mount` detaches every cross-app mount of
+  that app. Read-only mounts are unchanged.
 - **Not atomic.** There is no bulk endpoint, so the wizard issues one
   request per change. A failure partway leaves a *partial* set — the CLI
   reports each outcome rather than implying the whole plan applied.

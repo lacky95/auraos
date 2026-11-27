@@ -187,10 +187,10 @@ export const POST: APIRoute = async (ctx) => {
       // refill (grant) or empty (revoke) the running ones now, not at their
       // next spawn.
       if (changed && perm === 'sidecars.tools') mgr.refreshInstanceTools(appId);
-      // D80 (owner answer 4): losing apps.mount revokes the writable cross-app mounts its instances hold.
+      // D80 (owner answer 4): losing apps.mount revokes the access: every cross-app mount its instances (and
+      // their sidecars) hold, read-only and writable, with the declarations.
       if (changed && perm === 'apps.mount' && action !== 'add-permission') {
-        const instances = new Set(mgr.getInstancesByApp(appId).map((i) => i.instanceId));
-        await mgr.mounts.revokeWritable((m) => instances.has(m.instanceId));
+        for (const i of mgr.getInstancesByApp(appId)) mgr.mounts.revokeConsumer(i.instanceId);
       }
       return json({ ok: true, appId, action, permission: perm, changed, permissions: next, unknown, reloaded: true });
     } catch (err) {
