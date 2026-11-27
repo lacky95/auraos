@@ -81,6 +81,14 @@ interface InstallResponse {
   needsIdentityChoice?: boolean;
   conflict?:      IdentityConflict;
   error?:         string;
+  /** A D105 refusal (e.g. refused-file): the fix, one line. */
+  hint?:          string;
+}
+
+/** The store's answer when it did not install: the D105 message and hint, else the error code. */
+function installFailure(res: InstallResponse, fallback: string): string {
+  if (!res.message) return res.error ?? fallback;
+  return `${res.error ? `${res.error}: ` : ''}${res.message}${res.hint ? `\n  hint: ${res.hint}` : ''}`;
 }
 
 type IdentityAction = 'update-existing' | 'install-as' | 'install-copy';
@@ -793,7 +801,7 @@ function wireInstall(parent: Command, opts: { hidden?: boolean } = {}): void {
 
       const res = await installWithChoices('/api/nexus/install', { ref, scope, ...(o.force ? { force: true } : {}) }, o, 'install');
       if (!res) { info('install cancelled'); return; }
-      if (!res.ok || !res.record) fail(res.error ?? 'install failed');
+      if (!res.ok || !res.record) fail(installFailure(res, 'install failed'));
       ok(`installed ${color.cyan(res.record!.id)} (${res.record!.version}) from ${res.record!.source} → scope:${res.record!.scope ?? scope}`);
       info(`  ref:    ${res.record!.ref}`);
       if (res.record!.digest) info(`  digest: ${res.record!.digest.slice(0, 16)}`);
@@ -966,7 +974,7 @@ function wireUpdate(parent: Command, opts: { hidden?: boolean } = {}): void {
         info(`updating ${i}...`);
         const res = await installWithChoices(`/api/nexus/update/${encodeURIComponent(i)}`, o.force ? { force: true } : {}, o, 'update');
         if (!res) { info(`  → ${i} skipped`); continue; }
-        if (!res.ok) info(`  → ${i} failed: ${res.error ?? '<unknown>'}`);
+        if (!res.ok) info(`  → ${i} failed: ${installFailure(res, '<unknown>')}`);
         else        ok(`  → ${i} updated to ${res.record?.version ?? '<?>'}`);
       }
     });
