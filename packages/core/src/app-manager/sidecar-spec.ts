@@ -125,7 +125,39 @@ export interface ResolvedSidecarSpec {
    * `inheritHome`: a `shared` sidecar's spec hash is unchanged.
    */
   network?: 'instance';
+  /**
+   * D108: env variables whose value is a setup SECRET, by reference only
+   * (field, vault handle). The value is read server-side when the container
+   * is created (SidecarManager) and goes only into its env: never into this
+   * spec, its hash, the record label or an error. Present only when set, so
+   * every other spec hash is unchanged.
+   */
+  secretEnv?: Record<string, SecretEnvRef>;
   mounts: { own: boolean; inherit: boolean; exclude: string[]; forceRo: boolean };
+}
+
+/** A secret env variable by reference: the setup field and the app's vault handle. */
+export interface SecretEnvRef { field: string; handle: string }
+
+/**
+ * D108 value delivery, handed in through the context (setup/values.ts
+ * `sidecarSetupValues` over the app's effective configuration): turns a
+ * template's env into literals (`fromSetup`, mapped) and secret references
+ * (`fromSecret`). Throws when a value can't be delivered (never a raw or
+ * empty value instead).
+ */
+export interface SpecEnvResolver {
+  env(template: string, env: Record<string, EnvValue>): { env: Record<string, string>; secretEnv: Record<string, SecretEnvRef> };
+}
+
+/**
+ * D108 value delivery for one spawn (SidecarManager opts.setupValues;
+ * setup/values.ts `sidecarSetupValues`): the env resolver and the
+ * server-side read of the app's own secret handles.
+ */
+export interface SidecarSetupValues extends SpecEnvResolver {
+  /** The value behind the app's handle, or null when it is not the app's to read. Never logged. */
+  readSecret(handle: string): Promise<string | null>;
 }
 
 export interface ResolveContext {
@@ -139,6 +171,12 @@ export interface ResolveContext {
   appDataVolume: string;
   /** Does the pre-`.sidecars` per-app volume `aura-<appId>-<vol>` exist? (SDK precedence) */
   legacyVolumeExists: (name: string) => boolean;
+  /**
+   * D108: the resolver of setup references in the template's env, present
+   * only when the app has an effective configuration (`ready`). Without it a
+   * reference refuses the sidecar (fail closed).
+   */
+  setupEnv?: SpecEnvResolver;
 }
 
 export class SpecError extends Error {
@@ -259,12 +297,16 @@ export function resolveSidecarSpec(req: SidecarSpawnRequest, ctx: ResolveContext
     forceRo: typeof inh === 'object' && inh.mode === 'ro',
   };
 
+  const tplEnv = templateEnv(tpl.name, tpl.env ?? {}, ctx.setupEnv);
+  // The request wins over the template, also over a secret reference.
+  const secretEnv = Object.fromEntries(Object.entries(tplEnv.secretEnv).filter(([k]) => !(req.env && k in req.env)));
+
   return {
     name,
     template: tpl.name,
     image: req.image ?? tpl.image,
     command: req.command ?? tpl.command ?? [],
-    env: { ...literalEnv(tpl.name, tpl.env ?? {}), ...(req.env ?? {}) },
+    env: { ...tplEnv.env, ...(req.env ?? {}) },
     envInherit: [...new Set([...(tpl.envInherit ?? []), ...(req.envInherit ?? [])])],
     ...(tpl.port !== undefined ? { port: tpl.port } : {}),
     restart: tpl.restart ?? 'unless-stopped',
@@ -285,26 +327,30 @@ export function resolveSidecarSpec(req: SidecarSpawnRequest, ctx: ResolveContext
     ...(tpl.inheritHome ? { inheritHome: true as const } : {}),
     ...(tpl.tools ? { ownTools: true as const } : {}),
     ...((tpl.network ?? (tpl.inheritHome ? 'instance' : 'shared')) === 'instance' ? { network: 'instance' as const } : {}),
+    ...(Object.keys(secretEnv).length ? { secretEnv } : {}),
     mounts,
   };
 }
 
-/** JSON with object keys sorted at every level — stable across key order. */
 /**
- * A template's env as literals. A D108 reference (`fromSetup`/`fromSecret`)
- * is resolved by the setup module's value delivery at spawn (D108 P4); until
- * a resolver is wired in, a reference refuses the sidecar instead of
- * starting it without the value (fail closed, never an empty or raw value).
+ * A template's env: literals, plus secret references. A template without a
+ * D108 reference is taken as is (no resolver asked). A reference is resolved
+ * through `setupEnv` (the app's effective configuration); without one (the
+ * app's setup is not complete) the sidecar is refused instead of started
+ * without the value (fail closed, never an empty or raw value).
  */
-function literalEnv(template: string, env: Record<string, EnvValue>): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(env)) {
-    if (isEnvValueRef(v)) throw new SpecError(409, `template '${template}' env ${k} references a setup value; it needs the app's completed setup (D108)`);
-    out[k] = v;
+function templateEnv(template: string, env: Record<string, EnvValue>, setupEnv: SpecEnvResolver | undefined): ReturnType<SpecEnvResolver['env']> {
+  const refs = Object.entries(env).filter(([, v]) => isEnvValueRef(v));
+  if (!refs.length) return { env: { ...(env as Record<string, string>) }, secretEnv: {} };
+  if (!setupEnv) throw new SpecError(409, `template '${template}' env ${refs[0]![0]} references a setup value; it needs the app's completed setup (D108)`);
+  try {
+    return setupEnv.env(template, env);
+  } catch (err) {
+    throw new SpecError(409, `template '${template}': ${(err as Error).message}`);
   }
-  return out;
 }
 
+/** JSON with object keys sorted at every level — stable across key order. */
 function canonical(v: unknown): string {
   if (Array.isArray(v)) return `[${v.map(canonical).join(',')}]`;
   if (v && typeof v === 'object') {
@@ -313,7 +359,11 @@ function canonical(v: unknown): string {
   return JSON.stringify(v);
 }
 
-/** Identity of a resolved spec: equal hash → the running container can be adopted as-is. */
+/**
+ * Identity of a resolved spec: equal hash → the running container can be
+ * adopted as-is. A secret is covered by its reference (`secretEnv`: field and
+ * handle), never by its value: the spec holds no secret value.
+ */
 export function specHash(spec: ResolvedSidecarSpec): string {
   // `inheritDockerSocket: false` was part of every spec before the socket
   // went (J.7, stream C): hashed as before, so no existing sidecar is
