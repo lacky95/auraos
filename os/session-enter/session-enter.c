@@ -568,7 +568,13 @@ static void pin(const struct spec *sp, struct pinned *pn) {
       if (sp_) *sp_ = '\0';
       if (*cur && strcmp(cur, "unconfined")) snprintf(pn->apparmor, sizeof pn->apparmor, "%s", cur);
     } else if (generic && strchr(cur, ':') && strcmp(cur, "unconfined")) {
-      snprintf(pn->selinux, sizeof pn->selinux, "%s", cur);
+      /* Only a different context needs an exec transition: the same one (an SELinux host whose Docker does not
+       * label containers: app and broker both in the daemon's domain) is inherited as is, and an explicit setexec
+       * under no_new_privs is refused there (vm: "bash: Operation not permitted", 126). */
+      char *self = read_file("/proc/self/attr/current", 255);
+      if (self) { char *n2 = strchr(self, '\n'); if (n2) *n2 = '\0'; }
+      if (!self || strcmp(self, cur)) snprintf(pn->selinux, sizeof pn->selinux, "%s", cur);
+      free(self);
     }
     free(cur);
   }
