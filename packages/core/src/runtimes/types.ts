@@ -7,6 +7,7 @@
  * back to another runtime (Q17). The registry, the settings store and the
  * resolver (stream R) are built on these types: registry.ts, settingsStore.ts.
  */
+import type { AuraErrorBody, ErrorCategory } from '../errors/contracts.js';
 
 /** A runtime id, and so a manifest `sandbox` value (ARI §2.1). */
 export const RUNTIME_ID_PATTERN = /^[a-z][a-z0-9-]{1,31}$/;
@@ -198,6 +199,23 @@ export interface RuntimeRefusal {
   hint?: string;
 }
 
+/**
+ * A runtime refusal as the one error body (D105, errors/contracts.ts): `error`
+ * the code, `message`, `category`, `missing`, `suggest`, `hint`; the runtime
+ * id and the app go in `details` (the contract names no runtime field). Plain
+ * data: what the shell answers, the SDK decodes and the CLI prints.
+ */
+export function runtimeErrorBody(r: RuntimeRefusal, hint?: string): AuraErrorBody {
+  const h = r.hint ?? hint;
+  return {
+    error: r.code, message: r.message, category: r.category,
+    ...(r.missing?.length ? { missing: [...r.missing] } : {}),
+    ...(r.suggest ? { suggest: [...r.suggest] } : {}),
+    ...(h ? { hint: h } : {}),
+    ...(r.runtime || r.appId ? { details: { ...(r.runtime ? { runtime: r.runtime } : {}), ...(r.appId ? { appId: r.appId } : {}) } } : {}),
+  };
+}
+
 export function runtimeRefusal(err: unknown): RuntimeRefusal | null {
   if (err instanceof RuntimeCapabilityError) {
     return { code: err.code, category: CATEGORY_OF_CODE[err.code], message: err.message, runtime: err.runtime, missing: err.missing, ...(err.suggest ? { suggest: err.suggest } : {}) };
@@ -218,10 +236,10 @@ export function runtimeRefusal(err: unknown): RuntimeRefusal | null {
  * authorized", "not supported", "temporary", "restart needed", "needs more
  * infrastructure" and "not applied yet" apart without parsing messages.
  */
-export type RuntimeErrorCategory =
+export type RuntimeErrorCategory = Extract<ErrorCategory,
   | 'unsupported-operation' | 'unsupported-feature' | 'permission-denied' | 'runtime-unavailable'
   | 'instance-not-found' | 'resource-exhausted' | 'restart-required' | 'recreate-required'
-  | 'provisioning-failed' | 'enforcement-failed' | 'operation-timeout' | 'operation-cancelled' | 'conflict';
+  | 'provisioning-failed' | 'enforcement-failed' | 'operation-timeout' | 'operation-cancelled' | 'conflict'>;
 
 /** Every code a runtime refusal or a failed operation carries. */
 export type RuntimeRefusalCode =

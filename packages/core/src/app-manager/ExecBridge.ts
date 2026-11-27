@@ -35,6 +35,7 @@
  * itself, or a member with `app.jump`); this module trusts the caller it is
  * handed and never reads a credential.
  */
+import type { ErrorCategory } from '../errors/contracts.js';
 import { randomUUID } from 'node:crypto';
 import type { AccessPrincipal } from '../auth/types.js';
 import { homeRequirements } from '../homes/HomeResolver.js';
@@ -53,9 +54,18 @@ export const EXEC_SUBPROTOCOL = 'aura.exec.v1';
 /** Binary frame channel bytes (first byte of every binary WS frame). */
 export const EXEC_CHANNEL = { stdin: 0, stdout: 1, stderr: 2 } as const;
 
+/** The D105 category of each exec/session refusal code (errors/contracts.ts `ErrorCategory`). */
+const EXEC_CATEGORY: Readonly<Record<string, ErrorCategory>> = Object.freeze({
+  'bad-request': 'invalid-request', 'too-large': 'invalid-request', forbidden: 'permission-denied', 'home-denied': 'permission-denied',
+  'not-found': 'not-found', 'not-running': 'instance-not-found', 'capability-missing': 'unsupported-feature',
+  'runtime-unsupported': 'unsupported-operation', 'broker-unavailable': 'unavailable', engine: 'runtime-unavailable', internal: 'unavailable',
+});
+
 export class ExecBridgeError extends Error {
   override readonly name = 'ExecBridgeError';
   constructor(readonly status: number, readonly code: string, message: string) { super(message); }
+  /** What a client may do about it (D105); absent for a code without one. */
+  get category(): ErrorCategory | undefined { return EXEC_CATEGORY[this.code]; }
 }
 
 /**

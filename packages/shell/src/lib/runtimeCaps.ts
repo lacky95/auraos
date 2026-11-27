@@ -7,7 +7,7 @@
  */
 import * as core from '@aura/core';
 import type { RuntimeCapabilities } from '@aura/core';
-import { jsonResponse } from './appResponse.js';
+import { errorResponse } from './appResponse.js';
 
 type Mgr = Pick<ReturnType<typeof core.getAppManager>, 'instanceCapabilities' | 'getInstance'>;
 
@@ -33,22 +33,17 @@ export function capabilityRefusal(instanceId: string, needs: Partial<RuntimeCapa
 }
 
 /**
- * A runtime refusal as the 409 answer in the SDK's error convention
- * (error-messages-review.md §4): `error` is the code (what `OsError.code`
- * reads), `message` the sentence, plus `category` (D100 §17), `runtime`,
- * `missing`, `suggest`, and for a missing capability with a runtime that has
- * it, the owner's `hint` (the move, never a weaker mount). Null for anything
- * else.
+ * A runtime refusal as the 409 answer: the one error body (D105,
+ * `core.runtimeErrorBody`: `error` the code, `message`, `category`,
+ * `missing`, `suggest`, `hint`, the runtime in `details`). For a missing
+ * capability another runtime has, the hint names the owner's move (never a
+ * weaker mount). Null for anything else.
  */
 export function refusalResponse(err: unknown, appId?: string): Response | null {
   const r = core.runtimeRefusal(err);
   if (!r) return null;
-  const hint = r.hint ?? (r.code === 'capability-missing' && r.suggest?.length
+  const hint = r.code === 'capability-missing' && r.suggest?.length
     ? `the owner can move ${appId ?? 'the app'} to a runtime that has it: aura runtime set ${appId ?? '<app>'} ${r.suggest[0]} (or Settings → Runtimes)`
-    : undefined);
-  return jsonResponse({
-    error: r.code, message: r.message, category: r.category,
-    ...(r.runtime ? { runtime: r.runtime } : {}), ...(r.missing ? { missing: r.missing } : {}),
-    ...(r.suggest ? { suggest: r.suggest } : {}), ...(hint ? { hint } : {}),
-  }, 409);
+    : undefined;
+  return errorResponse(409, core.runtimeErrorBody(r, hint));
 }
