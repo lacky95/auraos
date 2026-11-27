@@ -22,8 +22,11 @@
  * marker on/off never loses the user's explicit selection; this function only
  * computes the EFFECTIVE binary set for the current marker state.
  *
- * `claude-code` is an alias for the `claude` binary (kept for manifest
- * readability); it's normalised here so comparisons/symlinks use the real name.
+ * ALIASES. A registry entry may name other names for its binary (`aliases:`,
+ * data on the capability, never a name in this code). An `AliasMap`
+ * (binary → aliases, built at install time like the sidecar map, see
+ * tool-provision) normalises a `tools[]` entry to the real binary name, so
+ * comparisons and links use one name.
  *
  * SIDECARS. A capability is not always one file. `codex` spawns
  * `codex-code-mode-host` as a sibling of its own executable, so an allowlist
@@ -39,13 +42,17 @@
  */
 export const TOOL_MARKERS = new Set(['*', '#']);
 
-export function toolBinaryName(tool: string): string {
-  return tool === 'claude-code' ? 'claude' : tool;
+/** Binary name → the other names `tools[]` may use for it (the registry's `aliases:`). Persisted next to the toolchain binaries; see `ALIAS_MANIFEST`. */
+export type AliasMap = Record<string, string[]>;
+
+export function toolBinaryName(tool: string, aliases: AliasMap = {}): string {
+  for (const [binary, names] of Object.entries(aliases)) if (names.includes(tool)) return binary;
+  return tool;
 }
 
 /** Plain (non-marker) tool names from a `tools[]`, normalised to binary names. */
-export function namedTools(tools: string[]): string[] {
-  return tools.filter((t) => !TOOL_MARKERS.has(t)).map(toolBinaryName);
+export function namedTools(tools: string[], aliases: AliasMap = {}): string[] {
+  return tools.filter((t) => !TOOL_MARKERS.has(t)).map((t) => toolBinaryName(t, aliases));
 }
 
 /**
@@ -86,6 +93,7 @@ function withSidecars(names: Iterable<string>, sidecars: SidecarMap): Set<string
  * @param tools        the manifest `tools[]` array (may include `'*'` / `'#'`).
  * @param allBinaries  every binary name available in the toolchain bin dir.
  * @param sidecars     owner → helper names, so a tool is granted as a unit.
+ * @param aliases      binary → other names for it (the registry's `aliases:`).
  * @returns            binary names to materialise into the instance allowlist.
  *
  * Names with no binary behind them are deliberately kept: the caller reports
@@ -96,10 +104,11 @@ export function resolveToolBinaries(
   tools: string[],
   allBinaries: string[],
   sidecars: SidecarMap = {},
+  aliases: AliasMap = {},
 ): string[] {
   // Wildcard wins, and already covers helpers — they are in `allBinaries`.
   if (tools.includes('*')) return [...allBinaries];
-  const named = namedTools(tools);
+  const named = namedTools(tools, aliases);
   if (tools.includes('#')) {                              // all-except
     // Denying an owner denies its helpers too, so a partial tool never
     // reaches the sandbox.
@@ -132,11 +141,11 @@ export function toolsTrackInstalledCaps(tools: string[]): boolean {
  * marker (stream J.7, D54/D55): only an explicit entry names it, and even
  * that gives no Docker socket any more (spawn/socketArgs.ts).
  */
-export function toolsGrant(tools: string[], name: string, sidecars: SidecarMap = {}): boolean {
-  const bin = toolBinaryName(name);
-  if (bin === 'docker') return namedTools(tools).includes('docker');
+export function toolsGrant(tools: string[], name: string, sidecars: SidecarMap = {}, aliases: AliasMap = {}): boolean {
+  const bin = toolBinaryName(name, aliases);
+  if (bin === 'docker') return namedTools(tools, aliases).includes('docker');
   if (tools.includes('*')) return true;
-  const named = namedTools(tools);
+  const named = namedTools(tools, aliases);
   // A helper follows its owner's grant, never its own name.
   const probe = sidecarOwners(sidecars).get(bin) ?? bin;
   if (tools.includes('#')) return !named.includes(probe); // all-except: granted unless explicitly excepted

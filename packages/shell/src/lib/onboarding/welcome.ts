@@ -4,8 +4,12 @@
  * (through the shell UI command broker, so nothing in the notification
  * schema had to change), and steps tick themselves off:
  *
- *   agent     claude or codex is in the app toolchain
- *   login     a Claude / Codex login exists in the shared home
+ *   agent     an agent CLI is in the app toolchain
+ *   login     an agent CLI's login exists in the shared home
+ *
+ * Which tools are agent CLIs, and which files are their logins, is data on
+ * the capability registry entries (`tags: [agent]`, `login_probe`; D96), so
+ * a new agent needs a registry entry, not a shell change.
  *   theme     os/theme differs from the seeded default
  *   firstApp  an app is installed in the user scope
  *   docs      Aura Docs was opened
@@ -24,10 +28,11 @@ import { defaultKv } from '@aura/kv-store';
 import { uiCommandBroker } from '../uiCommandBroker.js';
 import { localOwnerId } from '../userContext.js';
 import { SystemCard } from './card.js';
+import { readReleaseRegistry, resolveRegistry } from '../capabilities.js';
 import { readOnboarding, updateOnboarding, type OnboardingState } from './state.js';
 import {
-  HIDE_BUTTON_ID, TARGET_APP, WELCOME_STEPS, appForButton, renderWelcome,
-  type WelcomeStepId, type WelcomeTarget,
+  HIDE_BUTTON_ID, TARGET_APP, WELCOME_STEPS, appForButton, renderWelcome, welcomeAgents,
+  type WelcomeAgent, type WelcomeStepId, type WelcomeTarget,
 } from './steps.js';
 
 const RECHECK_MS = 60_000;
@@ -36,15 +41,23 @@ const ALL_DONE_LINGER_MS = 10_000;
 export interface WelcomeOpts {
   dataDir: string;
   toolchainDir: string;
+  /** The agent CLIs (default: the capability registry, release and owner entries). */
+  agents?: () => Promise<WelcomeAgent[]>;
+}
+
+/** The registry's agent CLIs; none when the registry cannot be read. */
+async function registryAgents(): Promise<WelcomeAgent[]> {
+  const registry = await resolveRegistry({ releaseRegistry: () => readReleaseRegistry(), store: core.getAuthServices().capabilityRegistry });
+  return welcomeAgents(Object.fromEntries(Object.entries(registry).map(([n, c]) => [n, c.definition])));
 }
 
 /** Detect which steps are done right now (beyond what is already recorded). */
-export function detectDone(opts: WelcomeOpts, theme: unknown): Set<WelcomeStepId> {
+export function detectDone(opts: WelcomeOpts, theme: unknown, agents: readonly WelcomeAgent[] = []): Set<WelcomeStepId> {
   const done = new Set<WelcomeStepId>();
   const bin = join(opts.toolchainDir, 'bin');
-  if (existsSync(join(bin, 'claude')) || existsSync(join(bin, 'codex'))) done.add('agent');
+  if (agents.some((a) => existsSync(join(bin, a.binary)))) done.add('agent');
   const home = join(opts.dataDir, 'aura', 'home', 'default');
-  if (existsSync(join(home, '.claude', '.credentials.json')) || existsSync(join(home, '.codex', 'auth.json'))) done.add('login');
+  if (agents.some((a) => a.loginProbe.some((p) => existsSync(join(home, p))))) done.add('login');
   const t = (theme ?? {}) as { themeIdDark?: string; themeIdLight?: string; colorMode?: string };
   const tm = core.ThemeManager;
   if (theme && (t.themeIdDark !== tm.DEFAULT_THEME_ID_DARK || t.themeIdLight !== tm.DEFAULT_THEME_ID_LIGHT || t.colorMode !== tm.DEFAULT_COLOR_MODE)) {
@@ -67,6 +80,7 @@ export function currentWelcome(): Welcome | undefined {
 export class Welcome {
   private readonly card: SystemCard;
   private state: OnboardingState | null = null;
+  private agents: WelcomeAgent[] = [];
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
   private closing = false;
@@ -130,7 +144,9 @@ export class Welcome {
         // tracked in one OS-wide onboarding record, so it stays the owner's (C8; a
         // member gets no welcome tour in Phase 5).
         try { theme = await core.readUserPrefValue(kv, localOwnerId(), 'theme'); } finally { await kv.close().catch(() => undefined); }
-        const found = detectDone(this.opts, theme);
+        try { this.agents = await (this.opts.agents ?? registryAgents)(); }
+        catch (err) { console.warn(`[onboarding] capability registry unreadable: ${(err as Error).message}`); }
+        const found = detectDone(this.opts, theme, this.agents);
         const known = this.state?.welcome.done ?? {};
         const fresh = [...found].filter((id) => !known[id]);
         if (fresh.length) {
@@ -165,7 +181,7 @@ export class Welcome {
   private render(): void {
     if (!this.running || !this.state || this.state.welcome.hidden) return;
     const done = new Set(Object.keys(this.state.welcome.done) as WelcomeStepId[]);
-    const view = renderWelcome(done, this.available());
+    const view = renderWelcome(done, this.available(), this.agents);
     void this.card.show({ title: view.title, text: view.text, priority: 'medium', components: view.components });
     if (view.allDone) this.stop(ALL_DONE_LINGER_MS);
   }

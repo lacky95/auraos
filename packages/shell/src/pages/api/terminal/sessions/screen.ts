@@ -31,10 +31,12 @@ const handle = createScreenStateRoute({
     const r = await terminalJson<{ sessions?: Array<{ id?: unknown }> }>(instanceId, '/api/sessions');
     return r ? (r.sessions ?? []).map((s) => s.id).filter((id): id is string => typeof id === 'string') : null;
   },
-  screen: async (instanceId, sessionId) => {
-    const r = await terminalJson<{ screen?: unknown }>(instanceId, `/api/sessions/screen?id=${encodeURIComponent(sessionId)}`);
+  facts: async (instanceId, sessionId) => {
+    const r = await terminalJson<{ busy?: unknown; agent?: unknown }>(instanceId, `/api/sessions/screen?id=${encodeURIComponent(sessionId)}&facts=1`);
     if (!r) throw new Error('not running');
-    return Array.isArray(r.screen) ? r.screen.filter((row): row is string => typeof row === 'string') : [];
+    // A Terminal from before `?facts=1` answers with the rows: never forward those.
+    if (typeof r.busy !== 'boolean') throw new Error('the Terminal instance does not report screen facts; restart it');
+    return { busy: r.busy, agent: typeof r.agent === 'string' ? r.agent : null };
   },
 });
 

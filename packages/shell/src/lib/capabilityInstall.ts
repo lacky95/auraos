@@ -19,7 +19,7 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import {
-  detectSidecars, readSidecarMap, setSidecars,
+  detectSidecars, findBinaryPath, readAliasMap, readSidecarMap, setAliases, setSidecars,
   readLinkage, stageLibs, stageIntoRootfs, setLibs, readLibMap, orphanedLibs, conflictingLibs,
   toolchainLibFor, toolchainMirrorLib, type CapabilityDefinition, type CapabilityStep, type LibDep,
 } from '@aura/core';
@@ -132,6 +132,30 @@ export function reconcileCapabilityState(
     if (def.source === 'builtin' || state.capabilities[name]?.installed || !present(name)) continue;
     state.capabilities[name] = { installed: true, installedAt: now.toISOString(), version: null };
     changed = true;
+  }
+  return changed;
+}
+
+/**
+ * Make each bin dir's alias map (core tool-provision `ALIAS_MANIFEST`) hold
+ * the registry's `aliases:` of exactly the capabilities whose binary is
+ * there, so a tool installed before its entry named an alias (or by the
+ * image) resolves too. Returns whether a map changed.
+ */
+export function reconcileAliases(registry: Record<string, CapabilityDefinition>, binDirs: readonly string[]): boolean {
+  let changed = false;
+  for (const dir of binDirs) {
+    const want: Record<string, string[]> = {};
+    for (const [name, def] of Object.entries(registry)) {
+      const binary = def.binary ?? name;
+      if (def.aliases?.length && existsSync(join(dir, binary))) want[binary] = [...def.aliases];
+    }
+    const have = readAliasMap(dir);
+    for (const binary of new Set([...Object.keys(have), ...Object.keys(want)])) {
+      if (JSON.stringify(have[binary] ?? []) === JSON.stringify(want[binary] ?? [])) continue;
+      setAliases([dir], binary, want[binary] ?? []);
+      changed = true;
+    }
   }
   return changed;
 }
@@ -344,6 +368,7 @@ export function liveCapabilityInstaller(run: RunCommand): CapabilityInstaller {
     reconcile(registry) {
       const state = loadState();
       if (reconcileCapabilityState(state, registry, TOOLCHAIN_BIN_DIRS)) saveState(state);
+      reconcileAliases(registry, TOOLCHAIN_BIN_DIRS);
       return state;
     },
     async install(name, def, force) {
@@ -353,30 +378,31 @@ export function liveCapabilityInstaller(run: RunCommand): CapabilityInstaller {
       let binary: string | null = null;
       switch (def.source) {
         case 'builtin':
-          if (!def.binary_path || !existsSync(def.binary_path)) return { symlink: link, version: null, libsCopied: 0, libs: [], sidecars: [] };
-          binary = def.binary_path;
+          binary = findBinaryPath(def.binary_path);
+          if (!binary) return { symlink: link, version: null, libsCopied: 0, libs: [], sidecars: [] };
           break;
         case 'apt':
           run(aptUpdateArgv()[0]!, aptUpdateArgv().slice(1), { timeoutMs: 120_000 });
           run('apt-get', aptInstallArgv([def.package!], { recommends: true }).slice(1), { timeoutMs: 600_000 });
-          binary = def.binary_path && existsSync(def.binary_path) ? def.binary_path : which(binaryName);
+          binary = findBinaryPath(def.binary_path) ?? which(binaryName);
           try { version = run('dpkg-query', ['-W', '-f=${Version}', '--', def.package!], { timeoutMs: 10_000 }) || null; } catch { /* ignore */ }
           break;
         case 'npm':
           run('npm', ['install', '-g', '--', def.package!], { timeoutMs: 900_000 });
-          // Prefer an explicit binary_path: some packages (e.g. @openai/codex)
-          // expose a JS launcher as their bin that only works from inside the
-          // package tree, while the real executable lives in a platform dep.
-          binary = def.binary_path && existsSync(def.binary_path) ? def.binary_path : which(binaryName);
+          // Prefer an explicit binary_path: some packages expose a JS launcher
+          // as their bin that only works from inside the package tree, while
+          // the real executable lives in a platform dep (a `*` pattern).
+          binary = findBinaryPath(def.binary_path) ?? which(binaryName);
           try { version = run('npm', ['view', '--', def.package!, 'version'], { timeoutMs: 30_000 }) || null; } catch { /* ignore */ }
           break;
         case 'steps':
           for (const step of def.steps ?? []) await runStep(run, step);
-          binary = def.binary_path && existsSync(def.binary_path) ? def.binary_path : null;
+          binary = findBinaryPath(def.binary_path);
           break;
       }
       if (!binary) throw new Error(`${name}: installed, but its binary '${def.binary_path ?? binaryName}' is missing`);
       const placed = installWithSidecars(binary, binaryName, def, baseRootfs, force);
+      setAliases(TOOLCHAIN_BIN_DIRS, binaryName, def.aliases ?? []);
       // Recorded installed only once the binary is in BOTH stores: the
       // volume mirror is what survives a recreate.
       const absent = TOOLCHAIN_BIN_DIRS.filter((dir) => !existsSync(join(dir, binaryName)));
@@ -411,6 +437,7 @@ function removeToolchainEntry(name: string, def: CapabilityDefinition, run: RunC
   // Deliberately NOT un-staged from /os/base-rootfs: that tree has no
   // ownership model, and a stale .so there is inert.
   setSidecars(TOOLCHAIN_BIN_DIRS, binaryName, []);
+  setAliases(TOOLCHAIN_BIN_DIRS, binaryName, []);
   if (def.source === 'apt' && def.package) {
     try { run('apt-get', ['remove', '-y', '-q', '--', def.package], { timeoutMs: 300_000 }); } catch { /* ignore */ }
   } else if (def.source === 'npm' && def.package) {

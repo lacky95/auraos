@@ -3,12 +3,15 @@
  * screen shows, for an app holding `terminal.sessions.list` AND
  * `terminal.screen.read` (5.16: programmatic screen access is its own grant).
  *
- * Only derived facts leave the shell, never the rows: TerminalX's fallback
- * for an agent without hooks needs one bit (Claude Code and Codex both show
- * "esc to interrupt" while they work) and which agent it is (Codex shows its
- * banner). Anything more would be the session's content.
+ * Only derived facts leave the Terminal, never the rows: whether the program
+ * in the session says it is working (`busy`) and which agent CLI it is
+ * (`agent`, a label or null). TerminalX's fallback for an agent without hooks
+ * needs just that. The Terminal app derives both from its own program
+ * profiles (it owns the PTY, D96); this route checks the caller and forwards
+ * the two facts, so no product string lives in the shell.
  *
- *   200 { id, busy, codex }
+ *   200 { id, busy, agent }   (plus `[agent]: true`, the per-agent flag the
+ *                              first consumer read before `agent`; one release)
  *   400 bad-session-id   401 caller-invalid   403 not-granted
  *   404 instance-not-running | unknown-session (not in its instance's list)
  *   429 rate-limited     502 instance-unreachable
@@ -21,15 +24,13 @@
  * `/api/terminal/sessions`; the System Terminal is not limited by grants.
  */
 
-/** Claude Code and Codex both show this while they work. */
-export const SCREEN_BUSY_RE = /esc to interrupt/i;
-/** Codex's banner, to tell the two apart. */
-export const SCREEN_CODEX_RE = /OpenAI Codex/;
 /** Per caller (TerminalX polls each agent session every 5 s). */
 export const SCREEN_READS_PER_MINUTE = 120;
 const WINDOW_MS = 60_000;
 
-export interface ScreenState { id: string; busy: boolean; codex: boolean }
+/** What the Terminal app derives from a session's screen. */
+export interface ScreenFacts { busy: boolean; agent: string | null }
+export interface ScreenState extends ScreenFacts { id: string; [legacyAgentFlag: string]: unknown }
 
 export interface ScreenStateDeps {
   /** The proved app making the call; null without an app identity; 'invalid' for a claim that does not verify. */
@@ -42,8 +43,8 @@ export interface ScreenStateDeps {
   sessionInstance(sessionId: string | null): string | null;
   /** The session ids its instance lists now, or null when that instance is not running. */
   listed(instanceId: string): Promise<string[] | null>;
-  /** The session's visible rows. */
-  screen(instanceId: string, sessionId: string): Promise<string[]>;
+  /** The session's screen facts, as the Terminal instance derives them. */
+  facts(instanceId: string, sessionId: string): Promise<ScreenFacts>;
   /** D69: whether the caller acts for the instance's user (terminalCaller `callerOwnsTerminal`); another's is not running. */
   owns?(request: Request, instanceId: string): Promise<boolean>;
   now?: () => number;
@@ -52,9 +53,16 @@ export interface ScreenStateDeps {
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
   Response.json(body, { status, headers: { 'cache-control': 'no-store', ...headers } });
 
-/** The derived facts of one screen. */
-export function screenFacts(id: string, rows: readonly string[]): ScreenState {
-  return { id, busy: rows.some((r) => SCREEN_BUSY_RE.test(r)), codex: rows.some((r) => SCREEN_CODEX_RE.test(r)) };
+const FIELDS = new Set(['id', 'busy', 'agent']);
+/** An agent label: a program name, nothing a response field could be confused with. */
+const AGENT_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+
+/** The response for one session: only the two facts, whatever the Terminal sent. */
+export function screenState(id: string, facts: ScreenFacts): ScreenState {
+  const agent = typeof facts.agent === 'string' && AGENT_RE.test(facts.agent) ? facts.agent : null;
+  const out: ScreenState = { id, busy: facts.busy === true, agent };
+  if (agent && !FIELDS.has(agent)) out[agent] = true;
+  return out;
 }
 
 export function createScreenStateRoute(deps: ScreenStateDeps): (request: Request) => Promise<Response> {
@@ -93,7 +101,7 @@ export function createScreenStateRoute(deps: ScreenStateDeps): (request: Request
       const ids = await deps.listed(instanceId);
       if (!ids) return json({ error: 'instance-not-running', message: `${instanceId} is not a running Terminal instance` }, 404);
       if (!ids.includes(id)) return json({ error: 'unknown-session', message: `${id} is not a session of ${instanceId}` }, 404);
-      return json(screenFacts(id, await deps.screen(instanceId, id)));
+      return json(screenState(id, await deps.facts(instanceId, id)));
     } catch (err) {
       return json({ error: 'instance-unreachable', message: `${instanceId}: ${(err as Error).message}` }, 502);
     }

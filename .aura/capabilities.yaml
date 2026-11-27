@@ -3,22 +3,31 @@ capabilities:
     source: builtin
     binary: aura
     description: AuraOS CLI itself (forward into PRoots)
+  # Agent CLIs: `tags: [agent]` and `login_probe` (files under the home that
+  # mean "logged in") feed the welcome checklist; `aliases` are other names
+  # an app's `tools[]` may use for the binary. A `*` in `binary_path` matches
+  # the platform package npm installed on this machine (any architecture).
   claude:
     source: npm
     package: "@anthropic-ai/claude-code"
     binary: claude
+    aliases: [claude-code]
+    tags: [agent]
+    login_probe: [.claude/.credentials.json]
     description: Claude Code CLI
   codex:
     source: npm
     package: "@openai/codex"
     binary: codex
-    binary_path: /usr/local/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex
+    binary_path: /usr/local/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-*/vendor/*-unknown-linux-musl/bin/codex
+    tags: [agent]
+    login_probe: [.codex/auth.json]
     description: OpenAI Codex CLI
   copilot:
     source: npm
     package: "@github/copilot"
     binary: copilot
-    binary_path: /usr/local/lib/node_modules/@github/copilot/node_modules/@github/copilot-linux-x64/copilot
+    binary_path: /usr/local/lib/node_modules/@github/copilot/node_modules/@github/copilot-linux-*/copilot
     description: GitHub Copilot CLI
   ssh:
     source: apt

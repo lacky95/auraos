@@ -31,7 +31,7 @@ import {
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { MY_TOOLS_PATH } from '../runtimes/spawn/paths.js';
-import { resolveToolBinaries, type SidecarMap } from '../capabilities/tool-allowlist.js';
+import { resolveToolBinaries, type AliasMap, type SidecarMap } from '../capabilities/tool-allowlist.js';
 import {
   INSTANCE_LIB_DIR, libsForBinaries, materialiseLibs, readLibMap, toolchainLibFor,
   toolchainMirrorLib,
@@ -96,6 +96,13 @@ export function wrapperScript(name: string): string {
 export const SIDECAR_MANIFEST = '.sidecars.json';
 
 /**
+ * Alias map filename inside a toolchain bin dir: `{ binary: [alias, ...] }`,
+ * the registry's `aliases:` of every installed capability. Same shape, same
+ * lifecycle and same reasons as the sidecar map.
+ */
+export const ALIAS_MANIFEST = '.aliases.json';
+
+/**
  * Bin dirs where a `<binary>-*` name match proves nothing: /usr/bin holds
  * thousands of unrelated programs, so `git` would adopt `git-lfs` and `apt`
  * would adopt `apt-get`. Auto-detection is therefore limited to directories a
@@ -107,31 +114,54 @@ const SYSTEM_BIN_DIRS = new Set([
   '/bin', '/sbin', '/usr/bin', '/usr/sbin', '/usr/local/bin', '/usr/local/sbin',
 ]);
 
-/** Read the sidecar map from a toolchain bin dir; `{}` when absent/corrupt. */
-export function readSidecarMap(binDir: string): SidecarMap {
-  const path = join(binDir, SIDECAR_MANIFEST);
+/** Read a `{ name: [name, ...] }` map from a toolchain bin dir; `{}` when absent/corrupt. */
+function readNameMap(binDir: string, file: string): Record<string, string[]> {
+  const path = join(binDir, file);
   if (!existsSync(path)) return {};
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf-8')) as unknown;
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
-    const out: SidecarMap = {};
+    const out: Record<string, string[]> = {};
     for (const [owner, list] of Object.entries(parsed as Record<string, unknown>)) {
       if (Array.isArray(list)) out[owner] = list.filter((n): n is string => typeof n === 'string');
     }
     return out;
   } catch {
     // A corrupt map must not take the OS down: every tool still provisions,
-    // multi-file ones just lose their helpers until the next cap install
-    // rewrites the file.
+    // multi-file ones just lose their helpers (aliased names their alias)
+    // until the next cap install rewrites the file.
     console.warn(`[tools] ignoring unreadable ${path}`);
     return {};
   }
 }
 
+function writeNameMap(binDir: string, file: string, map: Record<string, string[]>): void {
+  mkdirSync(binDir, { recursive: true });
+  writeFileSync(join(binDir, file), `${JSON.stringify(map, null, 2)}\n`);
+}
+
+/** Record (or, with an empty list, clear) one owner's entry in every given toolchain bin dir. */
+function setNameMapEntry(binDirs: readonly string[], file: string, owner: string, names: readonly string[]): void {
+  for (const dir of binDirs) {
+    try {
+      const map = readNameMap(dir, file);
+      if (names.length) map[owner] = [...names];
+      else delete map[owner];
+      writeNameMap(dir, file, map);
+    } catch (err) {
+      console.warn(`[tools] could not update ${join(dir, file)}: ${(err as Error).message}`);
+    }
+  }
+}
+
+/** Read the sidecar map from a toolchain bin dir; `{}` when absent/corrupt. */
+export function readSidecarMap(binDir: string): SidecarMap {
+  return readNameMap(binDir, SIDECAR_MANIFEST);
+}
+
 /** Overwrite the sidecar map in a toolchain bin dir. */
 export function writeSidecarMap(binDir: string, map: SidecarMap): void {
-  mkdirSync(binDir, { recursive: true });
-  writeFileSync(join(binDir, SIDECAR_MANIFEST), `${JSON.stringify(map, null, 2)}\n`);
+  writeNameMap(binDir, SIDECAR_MANIFEST, map);
 }
 
 /**
@@ -140,16 +170,17 @@ export function writeSidecarMap(binDir: string, map: SidecarMap): void {
  * same map so container- and proot-sandboxed apps resolve grants identically.
  */
 export function setSidecars(binDirs: readonly string[], owner: string, names: readonly string[]): void {
-  for (const dir of binDirs) {
-    try {
-      const map = readSidecarMap(dir);
-      if (names.length) map[owner] = [...names];
-      else delete map[owner];
-      writeSidecarMap(dir, map);
-    } catch (err) {
-      console.warn(`[tools] could not update ${join(dir, SIDECAR_MANIFEST)}: ${(err as Error).message}`);
-    }
-  }
+  setNameMapEntry(binDirs, SIDECAR_MANIFEST, owner, names);
+}
+
+/** Read the alias map from a toolchain bin dir; `{}` when absent/corrupt. */
+export function readAliasMap(binDir: string): AliasMap {
+  return readNameMap(binDir, ALIAS_MANIFEST);
+}
+
+/** Record (or, with an empty list, clear) one binary's aliases in every given toolchain bin dir. */
+export function setAliases(binDirs: readonly string[], binary: string, aliases: readonly string[]): void {
+  setNameMapEntry(binDirs, ALIAS_MANIFEST, binary, aliases);
 }
 
 export interface DetectedSidecar {
@@ -389,7 +420,7 @@ export function provisionAllowlist(opts: {
   // Read the map from the SAME dir we enumerate, so a grant and its helpers
   // are resolved against one consistent view of the store.
   const wanted = resolveToolBinaries(
-    tools, listToolchainBinaries(storeBin), readSidecarMap(storeBin),
+    tools, listToolchainBinaries(storeBin), readSidecarMap(storeBin), readAliasMap(storeBin),
   );
 
   // Libraries BEFORE binaries: a hot-refresh is visible to a running app the

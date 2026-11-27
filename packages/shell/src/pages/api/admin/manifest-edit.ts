@@ -1,7 +1,7 @@
 import type { APIRoute } from 'astro';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { BUILTIN_PERMISSIONS, toolsGrant } from '@aura/core';
+import { BUILTIN_PERMISSIONS, readAliasMap, toolchainMirrorBin, toolsGrant } from '@aura/core';
 import { auditOwner, manifestEditLevel, ownerAction } from '../../../lib/approvals/admin.ts';
 
 /**
@@ -233,7 +233,7 @@ export const POST: APIRoute = async (ctx) => {
     const changed = next !== current;
     const appTools = Array.isArray(manifest['tools']) ? (manifest['tools'] as string[]) : [];
     // A tool the app lacks is kept but not provisioned — tell the caller.
-    const appHolds = tool === '*' || tool === '#' || toolsGrant(appTools, tool!);
+    const appHolds = tool === '*' || tool === '#' || toolsGrant(appTools, tool!, {}, readAliasMap(toolchainMirrorBin(mgr.getDataDir())));
     if (changed) {
       svc['tools'] = next;
       try { writeFileSync(path, JSON.stringify(manifest, null, 2) + '\n'); }

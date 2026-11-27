@@ -2,13 +2,13 @@
 // validated, digest-bound; the owner's additions are sealed (CapabilityRegistryStore).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import {
   CAPABILITY_REGISTRY_KEY, CapabilityDefinitionError, CapabilityRegistryStore, capabilityDigest,
-  parseCapabilityDefinition, parseCapabilityRegistry,
+  findBinaryPath, parseCapabilityDefinition, parseCapabilityRegistry,
 } from '../dist/index.js';
 
 const SHA = 'a'.repeat(64);
@@ -24,6 +24,37 @@ test('the release registry validates whole; no entry carries a shell command', (
       for (const k of ['download', 'extract', 'deb']) if (s[k]) assert.match(s[k].sha256, /^[a-f0-9]{64}$/, `${name} pins ${k}`);
     }
   }
+});
+
+test('D96: aliases, tags and login probes are validated data; binary_path is never tied to one architecture', () => {
+  const def = parseCapabilityDefinition('agent-a', {
+    source: 'npm', package: 'agent-a', binary: 'a', aliases: ['a-cli'], tags: ['agent'], login_probe: ['.a/creds.json'],
+    binary_path: '/usr/local/lib/node_modules/agent-a/node_modules/agent-a-linux-*/bin/a',
+  });
+  assert.deepEqual([def.aliases, def.tags, def.login_probe], [['a-cli'], ['agent'], ['.a/creds.json']]);
+  bad('x1', { source: 'npm', package: 'x', aliases: ['x1'] });
+  bad('x1', { source: 'npm', package: 'x', aliases: ['a b'] });
+  bad('x1', { source: 'npm', package: 'x', aliases: 'x2' });
+  for (const p of ['/abs', '../x', '.a/../../etc/shadow', 'a//b', 'a/', '$(id)']) bad('x1', { source: 'npm', package: 'x', login_probe: [p] });
+  bad('x1', { source: 'npm', package: 'x', tags: ['Agent!'] });
+  for (const p of ['/usr/local/**/x', '/usr/local/lib/../x', 'usr/x', '/usr/local/lib/x?']) bad('x1', { source: 'npm', package: 'x', binary_path: p });
+  // The release registry: no x86-only path for a binary.
+  const text = readFileSync(new URL('../../../.aura/capabilities.yaml', import.meta.url), 'utf8');
+  for (const [name, d] of Object.entries(parseCapabilityRegistry(parseYaml(text)))) {
+    assert.doesNotMatch(d.binary_path ?? '', /x64|x86_64|amd64|aarch64|arm64/, `${name} binary_path`);
+  }
+});
+
+test('findBinaryPath: a plain path, or the first existing match of a pattern', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'binpath-'));
+  mkdirSync(join(dir, 'pkg-linux-arm64', 'vendor', 'aarch64-musl', 'bin'), { recursive: true });
+  writeFileSync(join(dir, 'pkg-linux-arm64', 'vendor', 'aarch64-musl', 'bin', 'tool'), '');
+  mkdirSync(join(dir, 'other'));
+  assert.equal(findBinaryPath(`${dir}/pkg-linux-*/vendor/*-musl/bin/tool`), `${dir}/pkg-linux-arm64/vendor/aarch64-musl/bin/tool`);
+  assert.equal(findBinaryPath(`${dir}/pkg-linux-arm64/vendor/aarch64-musl/bin/tool`), `${dir}/pkg-linux-arm64/vendor/aarch64-musl/bin/tool`);
+  assert.equal(findBinaryPath(`${dir}/pkg-mac-*/bin/tool`), null);
+  assert.equal(findBinaryPath(`${dir}/nope`), null);
+  assert.equal(findBinaryPath(undefined), null);
 });
 
 test('free-form commands and unknown fields are refused', () => {

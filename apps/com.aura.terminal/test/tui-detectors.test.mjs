@@ -5,7 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { detectMenu, detectTypedMenu, detectPrompt, summarizeScreen, guardInput } from '../src/screen-summary.ts';
+import { detectMenu, detectTypedMenu, detectPrompt, summarizeScreen, guardInput, screenFacts } from '../src/screen-summary.ts';
 import { PROGRAM_PROFILES, profileFor } from '../src/tui-profiles.ts';
 import { findOption, menuFromStyled } from '../src/menu-select.ts';
 import { ghostText } from '../src/screen-styles.ts';
@@ -144,4 +144,17 @@ test('codex profile: by command, and under node by its header', () => {
   assert.equal(profileFor('codex', '', []).program, 'codex');
   assert.equal(profileFor('node', '', ['╭───╮', '│ >_ OpenAI Codex (v0.1) │']).program, 'codex');
   assert.equal(profileFor('node', '', ['plain node output']), null);
+});
+
+test('screenFacts: the two facts the shell forwards ({busy, agent}), from the profile table', () => {
+  // A busy agent CLI under `node`, recognised by its screen.
+  assert.deepEqual(screenFacts({ command: 'node', title: '', screen: ['✻ Thinking… (esc to interrupt)', 'secret: hunter2'] }),
+    { busy: true, agent: 'claude' });
+  // The other agent: its banner under `node`, or its own command; idle.
+  assert.deepEqual(screenFacts({ command: 'node', title: '', screen: ['>_ OpenAI Codex', '> '] }), { busy: false, agent: 'codex' });
+  assert.deepEqual(screenFacts({ command: 'codex', title: '', screen: ['Working (esc to interrupt)'] }), { busy: true, agent: 'codex' });
+  // Not an agent: a shell, an editor, a plain tool that says it is busy.
+  assert.deepEqual(screenFacts({ command: 'bash', title: '', screen: ['>_ OpenAI Codex', '$ '] }), { busy: false, agent: null });
+  assert.deepEqual(screenFacts({ command: 'vim', title: '', screen: ['x'] }), { busy: false, agent: null });
+  assert.deepEqual(screenFacts({ command: 'mytool', title: '', screen: ['ctrl+c to interrupt'] }), { busy: true, agent: null });
 });

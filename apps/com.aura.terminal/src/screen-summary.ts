@@ -288,6 +288,24 @@ export function programOf(v: Pick<ScreenLike, 'command' | 'title' | 'screen'>): 
   return identify(v).program;
 }
 
+/** Two derived facts of a screen, never its rows (D96). */
+export interface ScreenFacts {
+  /** A program says it is working and how to stop it ("esc to interrupt"). */
+  busy: boolean;
+  /** The agent CLI in the foreground (a `prompt-tui` profile's label), else null. */
+  agent: string | null;
+}
+
+/**
+ * What the shell's `GET /api/terminal/sessions/screen` hands an app holding
+ * `terminal.screen.read`: this app owns the PTY and the program profiles, so
+ * the product strings stay here and the shell only forwards `{busy, agent}`.
+ */
+export function screenFacts(v: Pick<ScreenLike, 'command' | 'title' | 'screen'>): ScreenFacts {
+  const { program, role } = identify(v);
+  return { busy: v.screen.some((l) => BUSY_HINT.test(l)), agent: role === 'prompt-tui' ? program : null };
+}
+
 /** The text after the prompt on the cursor row (`user@host:~$ ls -l` → `ls -l`). */
 export function promptInput(screen: string[], cursor: { x: number; y: number }): string | null {
   const row = (screen[cursor.y] ?? '').replace(/\s+$/, '');

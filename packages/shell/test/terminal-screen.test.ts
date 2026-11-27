@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { SCREEN_READS_PER_MINUTE, createScreenStateRoute, screenFacts } from '../src/lib/terminalScreen.ts';
+import { SCREEN_READS_PER_MINUTE, createScreenStateRoute, screenState } from '../src/lib/terminalScreen.ts';
 import { createTerminalAccess, terminalSessionInstance } from '../server/terminal-embed.mjs';
 import { ROUTE_ACCESS_MANIFEST } from '../src/lib/access/routeManifest.ts';
 
@@ -12,7 +12,8 @@ const TERMINAL = 'com.aura.terminal';
 const TX = 'io.lakner.terminalx';
 const COUNTER = 'io.example.counter';
 const SESSION = 'com.aura.terminal-2#a3';
-const ROWS = ['✻ Thinking… (esc to interrupt)', 'secret: hunter2'];
+// What the Terminal app derives (its screen-summary.ts screenFacts); a stray field never passes.
+const FACTS = { busy: true, agent: null, screen: ['secret: hunter2'] } as never;
 
 function route(opts: { grants?: Record<string, string[]>; listed?: string[] | null; now?: () => number } = {}) {
   const grants = opts.grants ?? { [TX]: ['terminal.sessions.list', 'terminal.screen.read'] };
@@ -33,7 +34,7 @@ function route(opts: { grants?: Record<string, string[]>; listed?: string[] | nu
     mayReadScreens: access.mayReadScreens,
     sessionInstance: (id) => terminalSessionInstance(id) ?? null,
     listed: async (instanceId) => (instanceId === 'com.aura.terminal-2' ? ('listed' in opts ? opts.listed! : [SESSION]) : null),
-    screen: async (_instanceId, sessionId) => { reads.push(sessionId); return ROWS; },
+    facts: async (_instanceId, sessionId) => { reads.push(sessionId); return FACTS; },
     now: opts.now,
   });
   const call = async (app: string | null, id: string | null = SESSION, user?: string) => {
@@ -48,9 +49,13 @@ test('with both grants: the derived facts of a listed session, never its rows', 
   const r = route();
   const { status, body } = await r.call(TX);
   assert.equal(status, 200);
-  assert.deepEqual(body, { id: SESSION, busy: true, codex: false });
+  assert.deepEqual(body, { id: SESSION, busy: true, agent: null });
   assert.ok(!JSON.stringify(body).includes('hunter2'));
-  assert.deepEqual(screenFacts('x#a1', ['>_ OpenAI Codex', '> ']), { id: 'x#a1', busy: false, codex: true });
+  // An agent label is forwarded as is, plus its one-release per-agent flag; never over a field.
+  assert.deepEqual(screenState('x#a1', { busy: false, agent: 'some-agent' }), { id: 'x#a1', busy: false, agent: 'some-agent', 'some-agent': true });
+  assert.deepEqual(screenState('x#a1', { busy: false, agent: 'busy' }), { id: 'x#a1', busy: false, agent: 'busy' });
+  assert.deepEqual(screenState('x#a1', { busy: 'yes', agent: 7 } as never), { id: 'x#a1', busy: false, agent: null });
+  assert.deepEqual(screenState('x#a1', { busy: true, agent: '__proto__' }), { id: 'x#a1', busy: true, agent: null });
 });
 
 test('refused without terminal.screen.read, without the list grant, and for another app', async () => {

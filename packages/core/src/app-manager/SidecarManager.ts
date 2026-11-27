@@ -11,7 +11,7 @@ import type { FanoutTarget, MountManager } from './MountManager.js';
 import type { PermissionManager } from '../permissions/PermissionManager.js';
 import type { AppManifest } from '../types/manifest.js';
 import type { SpawnIdentity } from '../identity/types.js';
-import { listToolchainBinaries, provisionAllowlist, readSidecarMap, toolchainMirrorBin } from './tool-provision.js';
+import { listToolchainBinaries, provisionAllowlist, readAliasMap, readSidecarMap, toolchainMirrorBin } from './tool-provision.js';
 import { SIDECAR_TOOL_RE, effectiveSidecarTools } from './sidecar-tools.js';
 import { privateHomeSidecarRefusal } from './privateHomeNetwork.js';
 import { inheritHomeUser } from '../runtimes/spawn/identityArgs.js';
@@ -638,7 +638,7 @@ export class SidecarManager {
     const templateTools = tpl?.tools ?? [];
     const runtime = this.readGrants(consumer);
     const r = effectiveSidecarTools(manifest?.tools ?? [], templateTools, runtime,
-      listToolchainBinaries(store), readSidecarMap(store));
+      listToolchainBinaries(store), readSidecarMap(store), readAliasMap(store));
     // Never hand tools to a sidecar of an app without sidecars.tools — also
     // not on adopt / reconcile / refresh after the permission was revoked:
     // the dir is emptied (in place) instead.
