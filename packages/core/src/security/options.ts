@@ -62,6 +62,12 @@ export const FRESH_AUTH_REQUIRE_HTTPS = 'fresh-auth-require-https';
 /** The host switch behind the proot runtime (`AURA_USE_PROOT`, D92). */
 export const PROOT_HOST = 'proot-host';
 
+/** Phase 6 Stage 1b (D71, owner answer c): the release update options; stream U reads them. */
+export const UPDATE_CHANNEL = 'update-channel';
+export const SECURITY_UPDATE_POLICY = 'security-update-policy';
+export const RELEASE_AUTO_UPDATE = 'release-auto-update';
+export const RELEASE_TRUSTED_KEYS = 'release-trusted-keys';
+
 export const SECURITY_OPTIONS: readonly SecurityOption[] = Object.freeze([
   {
     id: FRESH_AUTH_REQUIRE_HTTPS,
@@ -232,6 +238,44 @@ export const SECURITY_OPTIONS: readonly SecurityOption[] = Object.freeze([
       + '(a Zero Trust installation turns it off); a tab already open stays until it ends (`aura root end`).',
     type: 'enum', values: ['enabled', 'disabled'], default: 'enabled', source: 'policy',
     restartRequired: false, change: 'fresh', since: '2026-11-26', phase: '5 (D55, P5-4)',
+  },
+  {
+    id: UPDATE_CHANNEL,
+    title: 'Update channel',
+    description: 'Where release updates come from. signed (default): signed release tags only; a missing, invalid or '
+      + 'untrusted signature is refused, and an update never falls back to an unsigned revision. main: the unsigned '
+      + 'development head; its releases are shown as unsigned and a security-update claim in them is ignored. Switching '
+      + 'to main needs your password and is its own decision, never a side effect of an update. install.sh records the '
+      + 'channel it installed from; release updates read this option (Phase 6, stream U).',
+    type: 'enum', values: ['signed', 'main'], default: 'signed', source: 'policy',
+    restartRequired: false, change: 'fresh', since: '2026-11-27', phase: '6 (D71, Stage 1b)',
+  },
+  {
+    id: SECURITY_UPDATE_POLICY,
+    title: 'Signed security updates',
+    description: 'What a signed release flagged as a security update does. follow-signed (default): it is flagged in the '
+      + 'update dialog and, with system patches (Phase 7), installed without a patch that no longer applies. hold: it is '
+      + 'treated like any other update (your audited override). Only signed releases can flag a security update.',
+    type: 'enum', values: ['follow-signed', 'hold'], default: 'follow-signed', source: 'policy',
+    restartRequired: false, change: 'fresh', since: '2026-11-27', phase: '6 (D71, Stage 1b)',
+  },
+  {
+    id: RELEASE_AUTO_UPDATE,
+    title: 'Unattended release updates',
+    description: 'Installing release updates without the owner. Not yet available: in the alpha every release update is '
+      + 'started and approved by the owner.',
+    type: 'enum', values: ['off'], default: 'off', source: 'reserved',
+    restartRequired: false, change: 'fresh', since: '2026-11-27', phase: 'later (D71)',
+  },
+  {
+    id: RELEASE_TRUSTED_KEYS,
+    title: 'Trusted release keys',
+    description: 'Release signing keys the host operator added beyond the keys the running release ships '
+      + '(os/release-keys/): a replacement for a lost or compromised key, or an internal signer. Public keys only '
+      + '(*.pub, revoked.txt) in /data/aura/release/trusted-keys/; every change needs your password or the host and is '
+      + 'audited. A revoked key is never trusted again.',
+    type: 'record', default: null, source: 'record', record: 'aura/release/trusted-keys', restartRequired: false,
+    change: 'fresh', since: '2026-11-27', phase: '6 (D71, Stage 1b)',
   },
   {
     id: 'access-profile',

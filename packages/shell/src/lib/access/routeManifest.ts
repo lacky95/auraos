@@ -776,10 +776,33 @@ const routes: RouteAccessManifest['routes'] = {
   },
 };
 
-// ── reserved: Phase 5 routes, denied until their stream implements them ────
-// (Stage 1, phase5-plan.md §4 item 5: each stream moved its row into `routes`; the last, J's root tab, is there.)
+// ── reserved: routes declared ahead of their stream, denied until it implements them ────
+// (Phase 5 Stage 1: each stream moved its row into `routes`.) Phase 6 Stage 1b (6B.0): the release
+// routes of streams U and L. Each row denies every method; its note is the rule the stream moves into
+// `routes` with the handler.
 
-const reserved: RouteAccessManifest['reserved'] = {};
+const RESERVED = (note: string) => rule([], 'system', why(`Reserved (Phase 6 Stage 1b): denied until stream U implements it. ${note}`));
+
+const reserved: RouteAccessManifest['reserved'] = {
+  '/api/admin/release': {
+    methods: { GET: RESERVED('Then: the owner (D29: the trusted Terminal too). The current and previous release, channel, provenance, available updates.') },
+  },
+  '/api/admin/release/build': {
+    methods: { POST: RESERVED('Then: ownerManages: build a release (owner decides; the operator directly).') },
+  },
+  '/api/admin/release/activate': {
+    methods: { POST: RESERVED('Then: ownerManages, approval system.release.activate (forced) on the release binding.') },
+  },
+  '/api/admin/release/rollback': {
+    methods: { POST: RESERVED('Then: ownerManages at fresh; a data restore is its own explicit choice (Q35).') },
+  },
+  '/api/admin/release/accept-writes': {
+    methods: { POST: RESERVED('Then: the host operator only (the updater\'s operator ticket), never a session or an app.') },
+  },
+  '/api/admin/release/jobs/[id]': {
+    methods: { GET: RESERVED('Then: the owner: one build or activation job checklist.') },
+  },
+};
 
 export const ROUTE_ACCESS_MANIFEST: RouteAccessManifest = {
   groups,

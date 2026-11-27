@@ -390,7 +390,7 @@ for (const e of coreRuntime) {
 
 // ── contract-leaf (D97 §4.2, 5b K): declared contract files stay leaves ───────
 // Type-only imports are free; a runtime import inside the same module, or of another declared leaf, is allowed.
-const CONTRACT_LEAVES = new Set(['core/src/app-manager/maintenance.ts', 'core/src/runtimes/ari.ts', 'core/src/runtimes/types.ts', 'core/src/runtimes/requirements.ts', 'core/src/runtimes/workloadEnv.ts', 'core/src/system/systemApps.ts', 'core/src/contract/types.ts']);
+const CONTRACT_LEAVES = new Set(['core/src/app-manager/maintenance.ts', 'core/src/runtimes/ari.ts', 'core/src/runtimes/types.ts', 'core/src/runtimes/requirements.ts', 'core/src/runtimes/workloadEnv.ts', 'core/src/system/systemApps.ts', 'core/src/contract/types.ts', 'core/src/release/types.ts', 'core/src/release/paths.ts', 'core/src/infra/types.ts']);
 for (const e of coreRuntime) {
   if (!CONTRACT_LEAVES.has(e.from) || CONTRACT_LEAVES.has(e.to)) continue;
   const a = files.get(e.from).module, b = files.get(e.to).module;

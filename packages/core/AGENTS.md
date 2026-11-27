@@ -27,7 +27,7 @@ execution: app-manager scopes runtimes
 identity-security: auth permissions approvals security identity
 resource: context users homes
 communication: interfaces app-hosts content
-system-management: nexus patches updater contract capabilities
+system-management: nexus patches release infra updater contract capabilities
 platform-services: notifications
 presentation-contracts: theme layout keymap
 ```
@@ -39,7 +39,7 @@ presentation-contracts: theme layout keymap
 | **Identity & Security** (`auth`, `permissions`, `approvals`, `security`, `identity`) | users, sessions, principals; grants; the authorizer; the approval state machine; the D64 security options and policy records; the credential vault lives in `context/CredentialVault.ts` | transport-side enforcement, which is `packages/shell/src/lib/access` |
 | **Resource** (`context`, `users`, `homes`) | Context env and secrets (sealed), volumes, per-user data, Private and App Homes | mounts and ports (Execution until 5b G) |
 | **Communication** (`interfaces`, `app-hosts`, `content`) | the Interface Registry, App Host routing and gateway contracts, content providers; `IntentResolver` stays in `app-manager` for now | sockets, HTTP and WS, which are server-layer transport |
-| **System Management** (`nexus`, `patches`, `updater`, `contract`, `capabilities`) | install and remove, sources and registries, app contract checks, patch series, the self-updater, the capability (tool) registry, the `tools[]` allowlist rules (`capabilities/tool-allowlist.ts`, a leaf: no imports) and provisioning; `AppRegistry.ts`, `appBuild.ts`, `BaseImage.ts` and `tool-provision.ts` sit in `app-manager` (they move in the Phase 8 decomposition) | grants (Identity & Security) |
+| **System Management** (`nexus`, `patches`, `release`, `infra`, `updater`, `contract`, `capabilities`) | install and remove, sources, app contract checks, patch series, releases and D94 infra, the self-updater, the capability registry, the `tools[]` allowlist (`capabilities/tool-allowlist.ts`, a leaf) and provisioning; `AppRegistry.ts`, `appBuild.ts`, `BaseImage.ts` and `tool-provision.ts` sit in `app-manager` (Phase 8 moves them) | grants (Identity & Security) |
 | **Platform services** (`notifications`) | a system service reached through its contract; not a kernel sector (D97 §4) | kernel decisions |
 | **Presentation contracts** (`theme`, `layout`, `keymap`) | themes and icons, layout strategies and keymaps shared by the Web Shell, the SDK types and Settings; **outside the kernel boundary** (labelled now, relocated after the alpha) | anything the headless kernel needs |
 

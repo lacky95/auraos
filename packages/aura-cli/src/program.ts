@@ -32,6 +32,7 @@ import { registerApprove } from './commands/approve.js';
 import { registerSecret } from './commands/secret.js';
 import { registerRuntime } from './commands/runtime.js';
 import { registerRoot } from './commands/root.js';
+import { registerRelease } from './commands/release.js';
 import { LEGACY_GROUPS, markLegacy } from './lib/deprecate.js';
 import { color, visibleWidth } from './lib/format.js';
 import { RESOURCES, fetchApps, findResource, liveInstances, shortName } from './lib/resources.js';
@@ -138,6 +139,7 @@ export const HELP_SECTIONS: Array<{ title: string; lines: Array<[string, string]
     ['aura nexus ...', 'Find, install, update, publish apps'],
     ['aura dev ...', 'Scaffold, validate, run apps standalone; rebuild/restart AuraOS'],
     ['aura mode ...', 'Developer Mode: show it, switch it (on asks for your password)'],
+    ['aura release ...', 'Normal Mode releases: status · ls · build · activate · rollback (Phase 6)'],
   ] },
   { title: 'Settings', lines: [
     ['aura set theme <name>', 'Switch the active theme'],
@@ -301,6 +303,8 @@ export function buildProgram(): Command {
   // Phase 5: the streams fill these files in (R: runtime, J: root).
   registerRuntime(program);
   registerRoot(program);
+  // Phase 6 Stage 1b: registered; streams U and L fill it in.
+  registerRelease(program);
   // Pre-kubectl groups: registered so they keep working, then hidden.
   registerApp(program);
   registerInst(program);
