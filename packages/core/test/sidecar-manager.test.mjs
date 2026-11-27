@@ -113,7 +113,7 @@ function fixture(t, opts = {}) {
       clearToolsDir: (k) => rmSync(join(dataDir, 'aura', 'runtime', k, 'tools'), { recursive: true, force: true }),
       resolveContextEnv: async () => ({ CTX_KEY: 'ctx-value' }),
     },
-    registry: { getById: (id) => (id === APP ? { id: APP, services, tools: opts.appTools?.() ?? opts.tools ?? [], permissions: ['sidecars.spawn'] } : undefined) },
+    registry: { getById: (id) => (id === APP ? { id: APP, scopeId: opts.scopeId ?? 'system', services, tools: opts.appTools?.() ?? opts.tools ?? [], permissions: ['sidecars.spawn'] } : undefined) },
     permissions: { hasPermission: (_app, p) => perms.includes(p) },
     tokens,
     mounts: {
@@ -290,6 +290,14 @@ test('the docker socket is forwarded only with the docker tool', async (t) => {
   await assert.rejects(fixture(t, { services: svc }).mgr.spawn(INST, { template: 'sock' }, { instanceId: INST }), /does not grant docker/);
   await fixture(t, { services: svc, tools: ['docker'] }).mgr.spawn(INST, { template: 'sock' }, { instanceId: INST });
   assert.ok(d.containers.get(`aura-${INST}--sock`).args.includes('/var/run/docker.sock:/var/run/docker.sock'));
+});
+
+test('a user- or global-scope app declaring docker forwards no socket (a declaration grants nothing)', async (t) => {
+  fakeDocker(t);
+  const svc = [{ name: 'sock', image: 'x:1', inheritDockerSocket: true, command: [], env: {}, volumes: [] }];
+  for (const scopeId of ['user', 'global']) {
+    await assert.rejects(fixture(t, { services: svc, tools: ['docker'], scopeId }).mgr.spawn(INST, { template: 'sock' }, { instanceId: INST }), /does not grant docker/);
+  }
 });
 
 test('a sidecar caller manages only its own subtree; sidecars.manageAll lifts that', async (t) => {

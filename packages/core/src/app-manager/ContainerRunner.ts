@@ -5,7 +5,7 @@ import { hostname } from 'node:os';
 import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import { lifecyclePath } from '../types/manifest.js';
-import { toolsGrant } from './tool-allowlist.js';
+import { dockerSocketGranted } from './tool-allowlist.js';
 import { MY_TOOLS_PATH, SHARED_HOME_PATH, currentToolsMode, provisionAllowlist, toolchainMirrorBin } from './tool-provision.js';
 import { userHomeSubpath } from '../scopes/home.js';
 // Value import, but MountManager imports ContainerRunner type-only, so there
@@ -755,12 +755,12 @@ export class ContainerRunner implements SandboxRunner {
       // Identity + callback URL.
     ];
 
-    // Bind host docker socket if the manifest asks for it (explicit 'docker'
-    // in tools[] or the wildcard '*'). Matches ProotRunner's gating — needed
+    // Bind host docker socket for a built-in app that declares it (explicit
+    // 'docker' in tools[] or the wildcard '*'; dockerSocketGranted: a
+    // declaration alone grants nothing). Matches ProotRunner's gating — needed
     // so commands like `aura jump` from inside a container app can drive
     // sibling-container spawns via the host daemon.
-    const wantsDocker = toolsGrant(manifest.tools ?? [], 'docker');
-    if (wantsDocker && existsSync('/var/run/docker.sock')) {
+    if (dockerSocketGranted(manifest) && existsSync('/var/run/docker.sock')) {
       a.push('-v', '/var/run/docker.sock:/var/run/docker.sock');
     }
 

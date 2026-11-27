@@ -155,3 +155,14 @@ test('real pnpm: a payload\'s lifecycle scripts do not run, and a root-only file
     assert.equal(statSync(dest).uid, 0);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test("the Docker socket follows the release, never a declaration (owner 2026-11-27)", async () => {
+  const { dockerSocketGranted } = await import("../dist/app-manager/tool-allowlist.js");
+  assert.equal(dockerSocketGranted({ scopeId: "system", tools: ["*"] }), true);
+  assert.equal(dockerSocketGranted({ scopeId: "system", tools: ["docker"] }), true);
+  assert.equal(dockerSocketGranted({ scopeId: "system", tools: ["git"] }), false);
+  for (const scopeId of ["user", "global", undefined]) {
+    assert.equal(dockerSocketGranted({ scopeId, tools: ["docker"] }), false, String(scopeId));
+    assert.equal(dockerSocketGranted({ scopeId, tools: ["*"] }), false, String(scopeId));
+  }
+});

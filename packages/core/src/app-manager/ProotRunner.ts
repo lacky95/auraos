@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync 
 import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import { lifecyclePath } from '../types/manifest.js';
-import { toolsGrant } from './tool-allowlist.js';
+import { dockerSocketGranted } from './tool-allowlist.js';
 import { ALL_TOOLS_PATH, MY_TOOLS_PATH, SHARED_HOME_PATH, currentToolsMode, provisionAllowlist } from './tool-provision.js';
 import { userHomeDir } from '../scopes/home.js';
 import type { SandboxExecOpts, SandboxRunner, SandboxRunnerOpts } from './SandboxRunner.js';
@@ -393,13 +393,13 @@ export class ProotRunner implements SandboxRunner {
       args.push(`--bind=${myTools}:${MY_TOOLS_PATH}`);
     }
 
-    // Bind the host docker socket if the manifest asks for it (explicit
-    // 'docker' in tools[] or the wildcard '*' allowlist). Required so that
+    // Bind the host docker socket for a built-in app that declares it
+    // (dockerSocketGranted: 'docker' or '*' in tools[] AND the system scope;
+    // a declaration alone grants nothing). Required so that
     // `docker` invocations from inside the proot — e.g. `aura jump` from
     // the terminal app dropping into a sibling-container app via
     // `docker exec` — reach the same daemon the shell uses.
-    const wantsDocker = toolsGrant(manifest.tools ?? [], 'docker');
-    if (wantsDocker && existsSync('/var/run/docker.sock')) {
+    if (dockerSocketGranted(manifest) && existsSync('/var/run/docker.sock')) {
       args.push('--bind=/var/run/docker.sock:/var/run/docker.sock');
     }
 

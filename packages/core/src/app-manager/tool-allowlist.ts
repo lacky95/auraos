@@ -117,6 +117,19 @@ export function resolveToolBinaries(
  * wildcard (`'*'`) and deny-list (`'#'`) apps grow when a cap appears; plain
  * allow-lists don't.
  */
+/**
+ * Whether an app's containers get the host's Docker socket (host root). Owner
+ * 2026-11-27: "A manifest declaration must never implicitly grant access to the
+ * Docker socket or other privileged resources." Declaring `docker` (or `*`/`#`)
+ * is not enough: only a built-in app of the release (system scope, the System
+ * Terminal) gets it. A user- or global-scope app that declares it starts
+ * without it. 5-main (D54/D55) removes the socket from every app container and
+ * opens it per approved root session (`aura root`) instead.
+ */
+export function dockerSocketGranted(manifest: { tools?: string[]; scopeId?: string }): boolean {
+  return manifest.scopeId === 'system' && toolsGrant(manifest.tools ?? [], 'docker');
+}
+
 export function toolsTrackInstalledCaps(tools: string[]): boolean {
   return tools.includes('*') || tools.includes('#');
 }

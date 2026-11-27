@@ -11,7 +11,7 @@ import type { FanoutTarget, MountManager } from './MountManager.js';
 import { MOUNT_ROOT_PATH } from './MountManager.js';
 import type { PermissionManager } from '../permissions/PermissionManager.js';
 import type { AppManifest } from '../types/manifest.js';
-import { toolsGrant } from './tool-allowlist.js';
+import { dockerSocketGranted } from './tool-allowlist.js';
 import { rawSocketArgs } from './spawn/networkArgs.js';
 import {
   MY_TOOLS_PATH, SHARED_HOME_PATH, listToolchainBinaries, provisionAllowlist, readSidecarMap, toolchainMirrorBin,
@@ -352,7 +352,7 @@ export class SidecarManager {
       appDataSubpath,
       appDataVolume: rt.appDataVolume,
       legacyVolumeExists: (n) => legacy.has(n),
-      hasDockerTool: toolsGrant(manifest.tools ?? [], 'docker'),
+      hasDockerTool: dockerSocketGranted(manifest),
     });
     const hash = specHash(spec);
     const container = sidecarContainerName(instanceId, spec.name);
