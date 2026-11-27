@@ -145,8 +145,8 @@ test('contract report: version, declarations, findings, source scan, signals', a
   const off = core.AppManifestSchema.parse({ id: 'com.ex.off', name: 'Off', version: '1.0.0' });
   const r = await contractReport({
     apps: () => [
-      { appId: 'com.ex.on', name: 'On', scope: 'user', dir: join(dir, 'none'), sandbox: 'container', manifest: on, instances: [] },
-      { appId: 'com.ex.off', name: 'Off', scope: 'user', dir, sandbox: 'proot', manifest: off, instances: [] },
+      { appId: 'com.ex.on', name: 'On', scope: 'user', dir: join(dir, 'none'), sandbox: 'container', ownNamespace: true, manifest: on, instances: [] },
+      { appId: 'com.ex.off', name: 'Off', scope: 'user', dir, sandbox: 'proot', ownNamespace: false, manifest: off, instances: [] },
     ],
     contextKeys: async () => ['OPENAI_API_KEY'],
     signals: async () => ({ 'contract|context-undeclared|com.ex.off': 3, 'contract|context-get|com.ex.on': 5 }),

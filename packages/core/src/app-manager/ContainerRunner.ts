@@ -14,6 +14,7 @@ import { containerIdentityArgs, isNonRootIdentity, writeIdentityFiles } from './
 import { readKernelSessionSecret, sessionHostUser, terminalSessionArgs, writeSessionSecret } from './spawn/sessionArgs.js';
 import { containerName } from '../runtimes/container/names.js';
 import type { RuntimeCapabilities } from '../runtimes/types.js';
+import { IDMAP_HELPER_PATH, type ContainerMountBackend, type ContainerPortBackend, type ContainerSidecarBackend, type FacilityProbe, type SidecarRuntimeFacts } from '../runtimes/container/backends.js';
 // Value import, but MountManager imports ContainerRunner type-only, so there
 // is no runtime cycle.
 import { MOUNT_ROOT_PATH } from './MountManager.js';
@@ -22,7 +23,7 @@ import type { SandboxExecOpts, SandboxRunner, SandboxRunnerOpts } from './Sandbo
 import type { EngineContainer, ExecSession, SessionSpec } from './ExecBridge.js';
 import { ExecBridgeError } from './ExecBridge.js';
 import { DockerApi, type EngineClient } from './DockerApi.js';
-import { SessionBroker } from './SessionBroker.js';
+import { SessionBroker, stageSessionEnter } from './SessionBroker.js';
 import type { ResourceUsage, SidecarInfo } from '../types/instance.js';
 import { SIDECAR_PS_FORMAT, USAGE_STATS_FORMAT, parseSidecarPs, parseUsageStats } from './sidecars.js';
 import type { InstanceSpawnContext } from './SandboxRunner.js';
@@ -298,7 +299,7 @@ interface TrackedContainer {
  * Cleanup is automatic — every container is started with `--rm`, so when the
  * astro process inside exits (or we `docker kill`), the container disappears.
  */
-export class ContainerRunner implements SandboxRunner {
+export class ContainerRunner implements SandboxRunner, ContainerMountBackend, ContainerPortBackend, ContainerSidecarBackend {
   private containers = new Map<string, TrackedContainer>();
   private toolchainDir: string;
   private appsDir: string;
@@ -373,8 +374,9 @@ export class ContainerRunner implements SandboxRunner {
       readOnlyBinds: true,
       hostFilesystem: true,
       mounts: true,
-      // D80: until 5b G's idmapped-bind probe lands, cross-uid writable mounts are refused, never downgraded.
-      idmappedMounts: false,
+      // D80: an idmapped bind passed the boot probe (`probeIdmappedMounts`); false until then, and
+      // where it fails: a cross-uid writable mount is then refused, never downgraded.
+      idmappedMounts: this.idmapProbe?.ok === true,
       portExpose: true,
       sidecars: true,
       warmPool: true,
@@ -431,10 +433,7 @@ export class ContainerRunner implements SandboxRunner {
    * What SidecarManager needs to start a container the way this runner starts
    * app containers: the shared volumes, network and OS coordinates.
    */
-  public sidecarRuntime(): {
-    dataDir: string; appDataVolume: string; nodeModulesVolume: string; network: string;
-    osApiBase: string; shellHostname: string; workspaceRoot: string; toolsMode: string;
-  } {
+  public sidecarRuntime(): SidecarRuntimeFacts {
     return {
       dataDir: this.dataDir,
       appDataVolume: this.appDataVolume,
@@ -620,7 +619,7 @@ export class ContainerRunner implements SandboxRunner {
    * peer group); a `private` mount receives nothing and cross-app mounting
    * would silently no-op. Cached after the first probe.
    */
-  private propagationCache: { ok: boolean; reason?: string } | null = null;
+  private propagationCache: FacilityProbe | null = null;
   public canPropagateMounts(): { ok: boolean; reason?: string } {
     if (this.propagationCache) return this.propagationCache;
     let result: { ok: boolean; reason?: string };
@@ -642,6 +641,50 @@ export class ContainerRunner implements SandboxRunner {
     }
     if (!result.ok) console.warn(`[ContainerRunner] mount propagation unavailable: ${result.reason}`);
     this.propagationCache = result;
+    return result;
+  }
+
+  /** The last idmapped-bind probe (D80), the helper it ran as a daemon host path; null before it ran. */
+  private idmapProbe: FacilityProbe | null = null;
+  private idmapHelper: string | null = null;
+
+  /** D80: whether an idmapped bind works on the data filesystem (`ok: false` until probed). */
+  public canIdmapMounts(): FacilityProbe {
+    return this.idmapProbe ?? { ok: false, reason: 'not probed yet' };
+  }
+
+  /** The idmap helper (the staged session launcher) as a daemon host path, once the probe passed. */
+  public idmapHelperHostPath(): string | null {
+    return this.idmapProbe?.ok ? this.idmapHelper : null;
+  }
+
+  /**
+   * D80: probes an idmapped bind of a scratch dir on the data filesystem, in
+   * the privileged mount helper with the session launcher's `idmap-probe`
+   * (it attaches nothing). Run at boot (AppManager init). Any failure (no
+   * kernel support, a filesystem that refuses it, a launcher that predates
+   * the subcommand, no engine, no base image yet) makes `idmappedMounts`
+   * false: cross-uid writable mounts are then refused with that reason. Only
+   * the composition point asks for it (AppManager `probeIdmappedMounts`):
+   * tests never run a privileged helper.
+   */
+  public async probeIdmappedMounts(run: (args: string[]) => Promise<unknown> = (args) => execFileAsync('docker', args, { timeout: 60_000 })): Promise<FacilityProbe> {
+    let result: FacilityProbe;
+    try {
+      // No base-image wait: a probe must never start an image build. Missing, it fails (false until the next boot).
+      const helper = this.toDaemonHostPath(await stageSessionEnter(this.dataDir));
+      const scratch = join(this.dataDir, 'aura', 'runtime', 'idmap-probe');
+      mkdirSync(scratch, { recursive: true, mode: 0o700 });
+      await run(idmapProbeArgs({ helper, scratch: this.toDaemonHostPath(scratch), image: BASE_IMAGE }));
+      this.idmapHelper = helper;
+      result = { ok: true };
+    } catch (err) {
+      const e = err as { stderr?: string | Buffer; message?: string };
+      const detail = String(e.stderr ?? '').trim().split('\n').pop() || e.message || String(err);
+      result = { ok: false, reason: `idmapped mounts unavailable: ${detail}` };
+      console.warn(`[ContainerRunner] ${result.reason}`);
+    }
+    this.idmapProbe = result;
     return result;
   }
 
@@ -1764,4 +1807,13 @@ export class ContainerRunner implements SandboxRunner {
 export function ownSourceReadOnly(ctx: { appDir: string; sourceMode?: 'closed' | 'open' }, manifest: AppManifest): boolean {
   if (ctx.sourceMode !== 'closed' || !(manifest.tools ?? []).includes('*')) return false;
   return serveState(ctx.appDir, manifest).mode === 'prod';
+}
+
+/** `docker run` of the D80 idmap probe (paths are daemon host paths; nothing comes from a request). */
+export function idmapProbeArgs(o: { helper: string; scratch: string; image: string }): string[] {
+  return [
+    'run', '--rm', '--privileged', '--network', 'none', '--label', 'aura.mount=1',
+    '-v', `${o.helper}:${IDMAP_HELPER_PATH}:ro`, '-v', `${o.scratch}:/probe`,
+    o.image, IDMAP_HELPER_PATH, 'idmap-probe', '/probe',
+  ];
 }

@@ -1,4 +1,6 @@
 import { getAppManager, type AccessPrincipal, type ExecBridgeError } from '@aura/core';
+import * as core from '@aura/core';
+import { capabilityRefusal } from './runtimeCaps.ts';
 import { errorResponse, jsonResponse } from './appResponse.js';
 import { isOwnerPrincipal, isTrustedOwnerAgent } from './access/identify.ts';
 
@@ -46,9 +48,9 @@ export function sidecarTarget(
   if (p?.kind !== 'instance' || p.instanceId !== instanceId) {
     return errorResponse('send Authorization: Bearer $AURA_INSTANCE_TOKEN (the OS injects it into every app container)', 401);
   }
-  if (instance.sandbox && instance.sandbox !== 'container') {
-    return errorResponse(`${instanceId} runs in a '${instance.sandbox}' sandbox; OS sidecars need sandbox: container`, 409);
-  }
+  // OS sidecars need the runtime's `sidecars` capability (5b G), whatever the runtime is called.
+  const refused = capabilityRefusal(instanceId, core.requestNeeds('sidecars'), 'OS sidecars', mgr);
+  if (refused) return refused;
   return { mgr, instance, caller: { instanceId, ...(p.sidecar ? { sidecar: p.sidecar } : {}) } };
 }
 

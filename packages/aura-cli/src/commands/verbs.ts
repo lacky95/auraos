@@ -20,7 +20,7 @@ import { parseOutput, renderDocument, renderObjects, type OutputFormat } from '.
 import { ownersOf, resolveInstance, resolveSessionTarget, resolveSidecar } from '../lib/resolve.js';
 import { reportRestart, type RestartResult } from './app.js';
 import {
-  RESOURCES, fetchApps, findResource, fetchSidecars, liveInstances, resourcesFor, shortName, sidecarId, sidecarMatches,
+  RESOURCES, canMount, fetchApps, findResource, fetchSidecars, liveInstances, resourcesFor, shortName, sidecarId, sidecarMatches,
   type Ctx, type MountDto, type PortDto, type ResourceDef,
 } from '../lib/resources.js';
 
@@ -179,7 +179,7 @@ async function describeCmd(resource: string, name: string, opts: { output?: stri
       const sidecars = (await fetchSidecars(inst.instanceId).catch(() => [])).map((s) => ({
         id: sidecarId(s), container: s.id, state: s.state, image: s.image, managedBy: s.managedBy ?? 'app',
       }));
-      const mounts = inst.sandbox === 'container'
+      const mounts = canMount(inst)
         ? ((await api.get<{ mounts: Array<{ id: string; mode: string; containerPath: string }> }>(`/api/instances/${id}/mounts`)
           .catch(() => ({ mounts: [] }))).mounts ?? []).map((m) => ({ id: m.id, mode: m.mode, path: m.containerPath }))
         : [];

@@ -187,6 +187,11 @@ export const POST: APIRoute = async (ctx) => {
       // refill (grant) or empty (revoke) the running ones now, not at their
       // next spawn.
       if (changed && perm === 'sidecars.tools') mgr.refreshInstanceTools(appId);
+      // D80 (owner answer 4): losing apps.mount revokes the writable cross-app mounts its instances hold.
+      if (changed && perm === 'apps.mount' && action !== 'add-permission') {
+        const instances = new Set(mgr.getInstancesByApp(appId).map((i) => i.instanceId));
+        await mgr.mounts.revokeWritable((m) => instances.has(m.instanceId));
+      }
       return json({ ok: true, appId, action, permission: perm, changed, permissions: next, unknown, reloaded: true });
     } catch (err) {
       // The file is written but the running registry still has the old value,

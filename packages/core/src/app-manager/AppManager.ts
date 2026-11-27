@@ -34,7 +34,8 @@ import { MountManager } from './MountManager.js';
 import { PortManager, type ExposeSpec } from './PortManager.js';
 import { InstanceTokens } from './InstanceTokens.js';
 import { SidecarManager } from './SidecarManager.js';
-import { parentOfConsumer } from './MountManager.js';
+import { isSidecarConsumer, parentOfConsumer } from './MountManager.js';
+import { instanceCapabilities as effectiveCapabilities } from '../runtimes/requirements.js';
 import type { InstanceSpawnContext, SandboxExecOpts, SandboxRunner } from './SandboxRunner.js';
 import type { RuntimeCapabilities } from '../runtimes/types.js';
 import { RuntimeRegistry, type ResolvedRuntime, type RuntimeModule } from '../runtimes/registry.js';
@@ -210,6 +211,8 @@ export class AppManager {
   private readonly context: GrantedContextDeps;
   /** Stream C: the Context migration's app-source scanner, from the composition point (opts.contractScan). */
   private readonly contractScan: NonNullable<ConstructorParameters<typeof AppManager>[0]['contractScan']> | null;
+  /** 5b G: probe idmapped binds at init (opts.probeIdmappedMounts, the composition point only). */
+  private readonly probeIdmap: boolean;
   /** The D64 switch `app-root-execution` (identity/execution.ts); a read failure throws (the start fails closed). */
   private readonly rootExecutionPolicy: () => Promise<AppRootExecutionPolicy>;
   private instances = new Map<string, AppInstance>();
@@ -293,6 +296,17 @@ export class AppManager {
     contractScan?: (appDir: string, manifest: AppManifest, keys: readonly string[]) => ReturnType<ContextMigrationDeps['scan']>;
     /** The D64 switch `app-root-execution`; default: the owner's security policy record. */
     rootExecutionPolicy?: () => Promise<AppRootExecutionPolicy>;
+    /**
+     * 5b G (D80): Developer Mode is on (the shell owns the system mode). A
+     * writable cross-app source mount into another uid needs it. Absent: off.
+     */
+    developerMode?: () => boolean;
+    /**
+     * 5b G (D80): probe idmapped binds at init (a privileged mount helper).
+     * Only the composition point sets it; absent, `idmappedMounts` stays
+     * false and cross-uid writable mounts are refused (fail closed).
+     */
+    probeIdmappedMounts?: boolean;
     /**
      * The identity, user, grant and audit services (`getAuthServices` from the
      * composition point). Passed in, never imported: auth/services builds its
@@ -387,6 +401,7 @@ export class AppManager {
     });
     // Stream C (Q7): only declared AND granted Context keys reach an app; personal keys from its user's vault (D56).
     this.contractScan = opts.contractScan ?? null;
+    this.probeIdmap = opts.probeIdmappedMounts === true;
     this.context = opts.context ?? (() => {
       const auth = async () => this.auth();
       return liveGrantedContextDeps({
@@ -411,6 +426,10 @@ export class AppManager {
       scopeRegistry: this.scopeRegistry,
       runner:        this.container,
       sourceMode:    (appId) => this.sourceModeOf(appId)?.mode ?? 'closed',
+      // D80: the consumer's process identity (an OS sidecar: as before, no cross-uid handling).
+      consumerIdentity: (consumer) => (isSidecarConsumer(consumer) ? null : this.processIdentityOf(consumer)),
+      developerMode:   () => opts.developerMode?.() ?? false,
+      runtimeOf:       (consumer) => this.instances.get(parentOfConsumer(consumer))?.sandbox,
       // Mirrors spawnInstance's own derivation so a mount lands in exactly the
       // dir the instance has bound at /data. A sidecar consumer key
       // (`<inst>--<sc>`) resolves to its instance's dir.
@@ -698,6 +717,38 @@ export class AppManager {
     const sandbox = this.instances.get(instanceId)?.sandbox;
     const module = sandbox ? this.runtimes.get(sandbox) : undefined;
     return module ? module.runner.capabilities() : null;
+  }
+
+  /**
+   * An instance's effective capabilities (5b G): its runtime's, narrowed by
+   * the installation facts it latched (core `instanceCapabilities`). Null for
+   * an instance with no runtime yet. The one input of every per-instance
+   * gate in the shell and the CLI: none compares a runtime id.
+   */
+  instanceCapabilities(instanceId: string): RuntimeCapabilities | null {
+    const inst = this.instances.get(instanceId);
+    const caps = this.runtimeCapabilitiesOf(instanceId);
+    return inst && caps ? effectiveCapabilities(caps, { ...(inst.runAs ? { runAs: inst.runAs } : {}) }) : null;
+  }
+
+  /** The instance view's runtime (5b G): `{id, source, capabilities}`, the effective capabilities. Null before a start. */
+  instanceRuntime(instanceId: string): { id: string; source?: string; capabilities: RuntimeCapabilities } | null {
+    const inst = this.instances.get(instanceId);
+    const capabilities = this.instanceCapabilities(instanceId);
+    if (!inst?.sandbox || !capabilities) return null;
+    return { id: inst.sandbox, ...(inst.runtimeSource ? { source: inst.runtimeSource } : {}), capabilities };
+  }
+
+  /**
+   * The uid:gid an instance's processes run as (D80 cross-uid mounts): null
+   * for a legacy root instance, which keeps its capabilities and writes
+   * anywhere; an approved root request is uid 0 without them.
+   */
+  private processIdentityOf(instanceId: string): { uid: number; gid: number } | null {
+    const inst = this.instances.get(instanceId);
+    if (!inst) return null;
+    if (inst.uid) return { uid: inst.uid, gid: inst.gid ?? inst.uid };
+    return inst.approvedRoot ? { uid: 0, gid: 0 } : null;
   }
 
   /**
@@ -1508,6 +1559,8 @@ export class AppManager {
     // 5b RS: what ran on a non-surviving runtime when the previous kernel ended, read before anything changes it.
     const respawn = readRespawnRecord(this.dataDir).entries;
     this.healToolchainShims();
+    // D80: probe idmapped binds in the background (never holds boot); false until it passes.
+    if (this.probeIdmap) void this.container.probeIdmappedMounts().catch(() => undefined);
     await this.prepareAppHostGuard();
     await this.registry.init();
     this.refreshManifestDerived();

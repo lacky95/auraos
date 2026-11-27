@@ -48,7 +48,8 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { AppRegistry } from './AppRegistry.js';
-import type { ContainerRunner } from './ContainerRunner.js';
+import type { ContainerPortBackend } from '../runtimes/container/backends.js';
+import { containerName as instanceContainer } from '../runtimes/container/names.js';
 import { BASE_IMAGE } from './BaseImage.js';
 import { rawSocketArgs } from './spawn/networkArgs.js';
 
@@ -110,15 +111,10 @@ export interface AuraPortExpose {
 
 interface PortManagerOpts {
   dataDir: string;
-  runner: ContainerRunner;
+  runner: ContainerPortBackend;
   registry: AppRegistry;
   /** Resolve an appId to its running instance (any running one). Null if none. */
   resolveRunningInstance(appId: string): { instanceId: string } | null;
-}
-
-/** Mirrors ContainerRunner.containerName — the same docker-name sanitisation. */
-function containerNameFor(instanceId: string): string {
-  return `aura-${instanceId.replace(/[^a-zA-Z0-9_.-]/g, '_')}`;
 }
 
 function sanitizeToken(s: string): string {
@@ -221,7 +217,7 @@ export class PortManager {
     const source = this.opts.resolveRunningInstance(spec.sourceAppId);
     if (!source) throw new Error(`source app ${spec.sourceAppId} has no running instance to expose`);
     const sourceInstanceId = source.instanceId;
-    const sourceContainer = containerNameFor(sourceInstanceId);
+    const sourceContainer = instanceContainer(sourceInstanceId);
 
     const kind = spec.kind;
     const port = spec.port ?? spec.sourcePort;
@@ -263,7 +259,7 @@ export class PortManager {
       }
       args = [
         'create', '--name', containerName,
-        '--network', `container:${containerNameFor(ownerInstanceId)}`,
+        '--network', `container:${instanceContainer(ownerInstanceId)}`,
         ...rawSocketArgs(),
         '--restart', 'unless-stopped',
         ...labels,

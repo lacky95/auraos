@@ -45,10 +45,18 @@ function workspaceMounts(): Array<{ instanceId: string; containerPath: string }>
   } catch { return []; }
 }
 
-/** Developer Mode is off: no Terminal keeps the checkout (D60). */
+/**
+ * Developer Mode is off: no Terminal keeps the checkout (D60), and every
+ * idmapped writable source mount into another uid is made read-only again
+ * (D80, owner answer 4: leaving Developer Mode revokes that writable access).
+ */
 async function detachWorkspaceMounts(): Promise<string[]> {
   const detached: string[] = [];
   let mounts: core.AuraMount[] = [];
+  try {
+    const revoked = await core.getAppManager().mounts.revokeWritable((m) => m.kind === 'source' && !!m.idmap);
+    if (revoked.length) console.log(`[system-mode] Developer Mode off: writable source mounts made read-only: ${revoked.join(', ')}`);
+  } catch (err) { console.warn(`[system-mode] could not revoke writable source mounts: ${(err as Error).message}`); }
   try { mounts = core.getAppManager().mounts.workspaceMounts(); } catch { return detached; }
   for (const m of mounts) {
     try { await core.getAppManager().mounts.remove(m.instanceId, m.id); detached.push(m.instanceId); }

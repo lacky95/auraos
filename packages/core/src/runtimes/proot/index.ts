@@ -51,6 +51,7 @@ export function prootRuntime(runner: SandboxRunner, opts: ProotRuntimeOpts): Run
   const exists = opts.exists ?? existsSync;
   const toolsMode = () => opts.toolsMode?.() ?? null;
   return {
+    hostSwitches: () => ({ AURA_USE_PROOT: env['AURA_USE_PROOT'] ?? null }),
     descriptor: {
       id: 'proot',
       version: '1.1.0',

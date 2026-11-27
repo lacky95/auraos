@@ -44,6 +44,8 @@ export interface RuntimeView {
   capabilities: Record<string, unknown>;
   features?: FeatureView[];
   health: { status: 'ok' | 'degraded' | 'unavailable'; detail?: string; checks?: Array<{ id: string; ok: boolean; detail?: string }> };
+  /** The host switches the module reads (display only). */
+  hostSwitches?: Record<string, string | null>;
   instances: Array<{ instanceId: string; appId: string; state: string; source?: string; restartToApply?: boolean }>;
   restartToApply?: number;
 }
@@ -198,7 +200,7 @@ async function show(id: string): Promise<void> {
   console.log(`enabled:   ${r.enabled ? color.green('yes') : color.yellow('no')}${r.alwaysEnabled ? color.dim(' (always)') : ''}`);
   console.log(`health:    ${r.health.status === 'ok' ? 'ok' : color.yellow(`${r.health.status}${r.health.detail ? `: ${r.health.detail}` : ''}`)}`);
   for (const c of r.health.checks ?? []) console.log(`  ${c.ok ? color.green('ok ') : color.yellow('no ')} ${c.id}${c.detail ? color.dim(`  ${c.detail}`) : ''}`);
-  if (r.id === 'proot') console.log(`AURA_USE_PROOT: ${s.useProotEnv ?? color.dim('(unset)')} ${color.dim('(on the container, read-only)')}`);
+  for (const [k, v] of Object.entries(r.hostSwitches ?? {})) console.log(`${k}: ${v ?? color.dim('(unset)')} ${color.dim('(on the container, read-only)')}`);
   console.log('\ncapabilities:');
   for (const [k, v] of Object.entries(r.capabilities)) console.log(`  ${(CAPABILITY_LABELS[k] ?? k).padEnd(30)} ${capabilityText(k, v)}`);
   if (r.features?.length) {

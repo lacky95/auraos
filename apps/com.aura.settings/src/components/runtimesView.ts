@@ -24,6 +24,8 @@ export interface RuntimeEntry {
   capabilities: Record<string, unknown>;
   features?: FeatureEntry[];
   health: { status: 'ok' | 'degraded' | 'unavailable'; detail?: string; checks?: Array<{ id: string; ok: boolean; detail?: string }> };
+  /** The host switches the module reads (display only). */
+  hostSwitches?: Record<string, string | null>;
   instances: Array<{ instanceId: string; appId: string; state: string; source?: string; restartToApply?: boolean }>;
   /** Instances on older settings or on a runtime their installation no longer resolves to. */
   restartToApply?: number;
@@ -153,7 +155,7 @@ export function renderRuntimes(root: HTMLElement, s: RuntimesState, selected: st
   fact('Default', current.isDefault ? 'yes: apps that name no runtime start on it' : 'no');
   fact('Version', `${current.version ?? '-'} · ARI ${current.ari ?? '-'} · settings v${current.settingsVersion ?? '-'}`, 'fact-version');
   fact('Health', current.health.status === 'ok' ? 'ok' : `${current.health.status}${current.health.detail ? `: ${current.health.detail}` : ''}`, 'fact-health');
-  if (current.id === 'proot') fact('AURA_USE_PROOT', `${s.useProotEnv ?? '(unset)'} (set on the container, read-only)`);
+  for (const [k, v] of Object.entries(current.hostSwitches ?? {})) fact(k, `${v ?? '(unset)'} (set on the container, read-only)`);
   head.append(facts);
   if (current.health.checks?.length) {
     const checks = el(doc, 'ul', 'rt-list');

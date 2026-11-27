@@ -448,6 +448,12 @@ export interface RuntimeModule extends Pick<AuraRuntime,
   usage?(req: { instanceIds: string[]; sidecarIds: string[] }): Promise<RuntimeUsage>;
   /** Owner and diagnose actions, by id (`aura runtime`, the admin routes). */
   readonly actions?: Readonly<Record<string, RuntimeAction>>;
+  /**
+   * The host switches this module reads (D64/D92: each is a security option),
+   * with their values here, for display only (`aura runtime show`, Settings):
+   * clients render them by name, never by the runtime's id. Null: unset.
+   */
+  hostSwitches?(): Record<string, string | null>;
 }
 
 /** A module's features under its settings: the derived view plus its overrides. */

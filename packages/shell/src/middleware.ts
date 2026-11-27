@@ -14,6 +14,7 @@ import { GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
 import { shellFramePolicy } from './lib/desktop/shellFramePolicy.ts';
 import { runAfterResponse } from './lib/afterResponse.ts';
 import { installRelaySigner, type RelaySigner } from './lib/access/relay.ts';
+import { isDeveloperMode } from './lib/systemMode.ts';
 
 // D89 B4: the relay claim signer for the WS proxy and App Hosts (server/access-bridge.mjs `relayClaimOf`).
 installRelaySigner(() => { try { return getAppManager() as unknown as RelaySigner; } catch { return null; } });
@@ -120,6 +121,9 @@ async function ensureAppManager() {
       contractScan: core.scanContractSources,
       // 5b K: the identity, user, grant and audit services, handed in (D97: no app-manager -> auth/services import).
       auth: core.getAuthServices,
+      // 5b G (D80): the shell owns the system mode; the kernel probes idmapped binds at init.
+      developerMode: isDeveloperMode,
+      probeIdmappedMounts: true,
     });
     // Hydrate per-app enable state BEFORE init() so its autoStart / warmPool
     // / service-spawn loops skip disabled apps from the very first tick.
