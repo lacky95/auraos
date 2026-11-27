@@ -4,20 +4,20 @@ The sector rules are in `packages/core/AGENTS.md`. Design: D108 (`app-profiles-s
 
 ## Files
 
-- **`contracts.ts`** (contract leaf): operational states and transitions, the desired-configuration record, the resolution (desired / authorized / effective), digests, resolver ports, D105 codes (`needs-setup`), the `app.setup.apply` payload and class, API/SDK views, hook contracts, audit and the `app:setup-state` event.
+- **`contracts.ts`** (contract leaf): states, the desired record, the resolution, digests, ports, D105 codes, the `app.setup.apply` payload, API/SDK views, hooks, audit, `app:setup-state`.
 - **`resolve.ts`** (P1): `resolveEffective(input, ports)`, the one pure resolver (never a fallback; `shared` refused until BT-M2); `autoSelectableProfile` (decision 3) and `profileOptions`.
 - **`merge.ts`** (P1): the merge rules (overlay over base, desired overrides, sorted request union, services by name, fields tightened never loosened) and `effectiveManifestView` (a simple app gets its base back).
 - **`requirements.ts`** (P1): requirement evaluation through the `ResolverPorts`: explicit (`setup`/profile, level, `when`), implied (Private Home, `instance` network, resources) and derived (`requirementsOf()` → `FEATURE_OF_NEED`). Only `supported` meets one.
 - **`digest.ts`** (P1): `configDigestOf` (secrets by field name only) and `grantDigestOf` (`GrantBearing`), `sha256:<hex>` over canonical JSON.
 - **`store.ts`** (P2): `SetupConfigStore`, the sealed `app:config:*` records (`read`, `compareAndSet`, `update`, `forgetInstallation` revoking handles via `vaultHandleRevoker`).
 - **`state.ts`** (P2): `SetupStateMachine` over `AppHostStore.setSetup`: `state`, `begin`, `transition`, `progress`, `markReady` (the only way into `ready`), `desired` (tamper → `resetTampered`, once). Errors carry `code`.
-- **`values.ts`** (P4): value delivery by reference only: `setupConfigView` (`/api/setup/self`, secrets as handles); `sidecarSetupValues` (SidecarManager `opts.setupValues`: `fromSetup` → literal, `map` must hold the value, arrays refused; `fromSecret` → `{field, handle}` in the spec, the value read at create by `vaultSecretReader`); `secretReadableWithoutGrant` (a generated secret of the same installation needs no `credential.read` grant); `generateSetupSecrets`.
+- **`values.ts`** (P4): values by reference only: `setupConfigView`; `sidecarSetupValues` (`fromSetup` → literal, `map` must hold it, arrays refused; `fromSecret` → `{field, handle}`, read at create by `vaultSecretReader`); `secretReadableWithoutGrant`; `generateSetupSecrets`.
 - **`service.ts`** (P3): `SetupService`, the engine (`SetupServiceContract` + the `SetupGate` AppManager asks). Proposals are resolved before any write; `configuring` writes step + record first; added privileges → one `app.setup.apply` (requester = the actor) bound to both digests; on consumption grants via the existing paths; init in the maintenance start; `ready` only by `markReady`.
 - **`ports.ts`** (P3, types only): `SetupEngineDeps`, the P9 `HomeEnvironmentPort`, `SetupGate`/`SetupEngine`. Wired by `system/compose.ts` `createSetupEngine` into AppManager `opts.setup`; the shell uses `getAppManager().setup`.
 - **`approval.ts`**, **`hooks.ts`**, **`blocking.ts`** (P3): the approval payload and display (wording = @aura/ui `approvalSummary.ts`); `onSetup`/`onValidate` through the frozen `MaintenanceStarter` (none → fail closed); `blocked` on a lost grant, policy or feature, back to `ready` with the same digests.
 - **`homeEnvironment.ts`** (P9, D107-a): the Private Home as home environment. `grantHomePrivate` (on the home user's `app.setup.apply`), `homePrivateAuthorized` (pure, P1 `isAuthorized`; facts from `loadHomePrivateFacts`), `privateHomeSpawnPort` (AppManager `privateHome`), `privateHomeTeardown` (revocation; never reconfigures).
 - **`index.ts`**: the module's public surface, re-exported by the core barrel. Named exports only; one region per work package.
-- Related leaves outside this directory: `config/schema.ts` (the one field model, also behind runtime settings) and `types/setupManifest.ts` (the manifest blocks `setup`, `profiles`, `homeEnvironments`, env references).
+- Related leaves: `config/schema.ts` (the field model) and `types/setupManifest.ts` (the manifest blocks).
 
 ## State it owns
 
