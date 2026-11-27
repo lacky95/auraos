@@ -51,6 +51,13 @@ export interface ResolverPortsQuery {
   userId: string;
   manifest: SetupAppManifest;
   approved: ApprovedRequests;
+  /**
+   * The Private Home is checked against the configuration being resolved (its
+   * overlay's sidecar networks and homes), never the base: D107 §8.1. Only
+   * the home check reads it; every other port reads `manifest` (a profile's
+   * added tools never count as held through it).
+   */
+  homeView?: SetupAppManifest;
 }
 
 /**
@@ -60,14 +67,14 @@ export interface ResolverPortsQuery {
  */
 export interface HomeEnvironmentPort {
   /** Does `home.private` (or `home.private.sidecar:<sidecar>`) count for this installation and user? */
-  homePrivateAuthorized(q: { appId: string; installationId: string; userId: string; sidecar?: string }): Promise<boolean>;
+  homePrivateAuthorized(q: { appId: string; installationId: string; userId: string; sidecar?: string; manifest?: SetupAppManifest }): Promise<boolean>;
   /** An approved `app.setup.apply` with `adds.homePrivate` / `homePrivateSidecars`: record the grants. */
   grantHomePrivate(g: {
     appId: string; installationId: string; userId: string; homePrivate: boolean; sidecars: readonly string[];
     approvalId: string; by: ChangeAttribution;
   }): Promise<void>;
   /** A revoked Private Home: end the private sessions of the installation (D107; instances are stopped by the engine). */
-  privateHomeTeardown(t: { appId: string; installationId: string; userId: string; reason: string }): Promise<void>;
+  privateHomeTeardown(t: { appId: string; installationId: string; userId: string; reason: string; code?: string }): Promise<void>;
 }
 
 /** The approval store as the engine uses it (D102; `ValkeyApprovalStore`). */

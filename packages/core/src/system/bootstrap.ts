@@ -25,7 +25,7 @@ import { kvServer, defaultKv, defaultRedis, closeSharedRedis } from '@aura/kv-st
 import { ensureSystemIdentity } from './systemIdentity.js';
 import { bootstrapKv } from './kvBootstrap.js';
 import { BOOTSTRAP_VERSION, writeBootStatus } from './status.js';
-import { composeKernel, createSetupEngine } from './compose.js';
+import { composeKernel, createSetupEngine, homeEnvironmentPort, privateHomeForSpawn } from './compose.js';
 import type {
   BootHook, BootHookContext, BootOptions, BootStatus, Composition, ShutdownReason, SystemHandle,
 } from './types.js';
@@ -249,7 +249,9 @@ async function bootKernel(state: SystemState, { first }: { first: boolean }): Pr
     auth: getAuthServices,
     appHosts: getAppHostServices,
     // D108: the setup engine (its start gate, the setup API's service).
-    setup: (m) => createSetupEngine(m),
+    setup: (m) => createSetupEngine(m, { home: homeEnvironmentPort(m) }),
+    // D107-a (D108 P9): the Private Home of a start, from the setup's effective configuration.
+    privateHome: privateHomeForSpawn(() => getAppManager()),
     ...(state.opts.developerMode ? { developerMode: state.opts.developerMode } : {}),
     probeIdmappedMounts: true,
   });

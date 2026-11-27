@@ -49,6 +49,11 @@ import type { ApprovalRequester } from '../approvals/types.js';
 import type { ResolverPorts, SetupActor } from '../setup/contracts.js';
 import type { HomeEnvironmentPort, ResolverPortsQuery, SetupEngine } from '../setup/ports.js';
 import { SetupService } from '../setup/service.js';
+import {
+  grantHomePrivate, homePrivateAuthorized, loadHomePrivateFacts, privateHomeSpawnPort, privateHomeTeardown,
+  type HomePrivateFactsDeps, type HomePrivateFactsInput, type PrivateHomeSpawnPort, type PrivateHomeTeardownInput,
+} from '../setup/homeEnvironment.js';
+import { APP_PRIVATE_HOME_OPTION, HOME_PRIVATE_PERMISSION, declaresSetup, type EffectiveConfig } from '../setup/contracts.js';
 import { SetupStateMachine } from '../setup/state.js';
 import { SetupConfigStore, tamperAuditInput, vaultHandleRevoker } from '../setup/store.js';
 import { localSystemId } from './systemIdentity.js';
@@ -65,7 +70,8 @@ export function createAuthServices(): AuthServices {
   const loginSessions = new LoginSessionStore({ identityKeyFile: defaultIdentityKeyFile(), redis });
   const authorizer = new Authorizer({
     grants,
-    declared: (appId) => registry()?.getById(appId)?.permissions,
+    // D108: a ready setup's approved permissions count (AppManager `effectiveManifest`).
+    declared: (appId) => { try { return getAppManager().effectiveManifest(appId)?.permissions; } catch { return registry()?.getById(appId)?.permissions; } },
     appBinding: async (appId) => {
       try { return await getAppManager().appGrantBinding(appId); } catch { return { scope: undefined, installationId: null }; }
     },
@@ -231,9 +237,10 @@ async function setupResolverPorts(mgr: AppManager, home: HomeEnvironmentPort | n
   // The Private Home (P9): the app's and each sidecar's grant, for this installation and user.
   const homeAuth = new Map<string, boolean>();
   if (home) {
-    const q0 = { appId: q.appId, installationId: q.installationId, userId: q.userId };
+    const view = q.homeView ?? q.manifest;
+    const q0 = { appId: q.appId, installationId: q.installationId, userId: q.userId, manifest: view };
     homeAuth.set('', await home.homePrivateAuthorized(q0).catch(() => false));
-    for (const s of q.manifest.services) homeAuth.set(s.name, await home.homePrivateAuthorized({ ...q0, sidecar: s.name }).catch(() => false));
+    for (const s of view.services) homeAuth.set(s.name, await home.homePrivateAuthorized({ ...q0, sidecar: s.name }).catch(() => false));
   }
   const mirror = toolchainMirrorBin(process.env['AURA_DATA_DIR'] ?? '/data');
   return {
@@ -265,6 +272,104 @@ async function setupResolverPorts(mgr: AppManager, home: HomeEnvironmentPort | n
       try { const v = securityPolicyValue(policy, id); return typeof v === 'string' || typeof v === 'boolean' ? v : null; } catch { return null; }
     },
   };
+}
+
+// ── D107-a (D108 P9): the Private Home over the kernel ──────────────────────
+
+/** What P9's facts loader reads, over the live kernel. */
+function homeFactsDeps(mgr: AppManager): HomePrivateFactsDeps {
+  const auth = getAuthServices();
+  return {
+    grants: auth.grants,
+    binding: (appId) => mgr.appGrantBinding(appId),
+    policy: async () => {
+      try { const v = securityPolicyValue(await auth.securityPolicy.get(), APP_PRIVATE_HOME_OPTION); return typeof v === 'string' || typeof v === 'boolean' ? v : null; }
+      catch { return null; }
+    },
+    runtime: async (appId) => {
+      const m = mgr.registry.getById(appId);
+      if (!m) return null;
+      try {
+        const r = await mgr.resolveRuntime(appId, m);
+        return { id: r.runtime, capabilities: r.capabilities, ...(r.module.featureOverrides ? { featureOverrides: r.module.featureOverrides(r.settings) } : {}) };
+      } catch { return null; }
+    },
+    installation: async (appId) => {
+      const i = await mgr.installationRunAs(appId).catch(() => null);
+      return i ? { ...(i.runAs === 'app' || i.runAs === 'root' ? { runAs: i.runAs } : {}), ...(i.execution ? { execution: i.execution } : {}) } : null;
+    },
+  };
+}
+
+/**
+ * P3's `HomeEnvironmentPort` over P9's functions (the one adapter): the
+ * engine asks simple questions, P9 decides with its deps bound here. The
+ * home check reads the configuration being resolved (`manifest`, the
+ * engine's home view), never only the base.
+ */
+export function homeEnvironmentPort(mgr: AppManager): HomeEnvironmentPort {
+  const auth = () => getAuthServices();
+  return {
+    async homePrivateAuthorized({ appId, installationId, userId, sidecar, manifest }) {
+      const m = manifest ?? mgr.registry.getById(appId);
+      if (!m) return false;
+      const facts = await loadHomePrivateFacts(homeFactsDeps(mgr), {
+        appId, installationId, userId, manifest: m as HomePrivateFactsInput['manifest'], ...(sidecar ? { sidecars: [sidecar] } : {}),
+      });
+      return homePrivateAuthorized(facts, sidecar ? { kind: 'home-private-sidecar', sidecar, userId } : { kind: 'home-private', userId }).ok;
+    },
+    async grantHomePrivate({ appId, installationId, userId, homePrivate, sidecars, approvalId, by }) {
+      if (!homePrivate && sidecars.length === 0) return;
+      await grantHomePrivate(
+        { grants: auth().grants, binding: (id) => mgr.appGrantBinding(id), audit: (e) => auth().audit.record(e), ownerId: DEFAULT_OWNER_ID },
+        { appId, installationId, userId, sidecars: [...sidecars], decidedBy: by, approvalId },
+      );
+    },
+    async privateHomeTeardown({ appId, installationId, userId, code }) {
+      const cause: PrivateHomeTeardownInput['cause'] = code === 'policy-refused' ? { kind: 'policy' }
+        : code === 'requirement-unsupported' ? { kind: 'feature', feature: 'storage.privateHome' }
+        : { kind: 'grant', permission: HOME_PRIVATE_PERMISSION };
+      await privateHomeTeardown({
+        instances: (id) => mgr.getInstancesByApp(id),
+        stop: (instanceId) => mgr.stop(instanceId, { reason: 'user' }),
+        sessions: () => mgr.openSessions(),
+        endSession: (sessionId) => mgr.endSession(sessionId),
+        audit: (e) => auth().audit.record(e),
+      }, { appId, installationId, userId, cause, actor: { kind: 'system' } });
+    },
+  };
+}
+
+/**
+ * AppManager `opts.privateHome` (P9's spawn port): the gate-validated
+ * effective configuration of an app with setup/profiles (null for every
+ * other app: no lookup, `app` as before) and the facts for its re-check at
+ * each start. `mgr` is late-bound: the port is handed in before the
+ * manager exists.
+ */
+export function privateHomeForSpawn(mgr: () => AppManager): PrivateHomeSpawnPort {
+  const effective = async (appId: string): Promise<EffectiveConfig | null> => {
+    const m = mgr();
+    const base = m.registry.getById(appId);
+    if (!base || !declaresSetup(base) || !m.setup) return null;
+    const inst = await m.installationRunAs(appId).catch(() => null);
+    if (!inst) return null;
+    const d = await m.setup.check(appId, base, { installationId: inst.installationId }).catch(() => null);
+    return d?.ok ? d.effective : null;
+  };
+  return privateHomeSpawnPort({
+    effective: (appId) => effective(appId),
+    facts: async (appId, installationId, userId, sidecars) => {
+      const m = mgr();
+      const base = m.registry.getById(appId);
+      const eff = await effective(appId);
+      // The effective view (overlay networks and sidecar homes), as the gate validated it.
+      const view = base && eff && m.setup ? m.setup.manifestView(appId, base, eff) : base;
+      return loadHomePrivateFacts(homeFactsDeps(m), {
+        appId, installationId, userId, manifest: (view ?? {}) as HomePrivateFactsInput['manifest'], sidecars: [...sidecars],
+      });
+    },
+  });
 }
 
 /**

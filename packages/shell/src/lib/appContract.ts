@@ -83,7 +83,8 @@ export function liveContextReadDeps(store: Pick<ContextStore, 'get' | 'resolveEn
   return {
     resolve: async (request) => (await import('./auth.ts')).resolveCaller(request),
     declared: (appId) => {
-      try { return (core.getAppManager().getManifest(appId) as (AppManifest & { context?: string[] }) | undefined)?.context; } catch { return undefined; }
+      // D108: a ready setup's approved Context keys count (the effective view).
+      try { return (core.getAppManager().effectiveManifest(appId) as (AppManifest & { context?: string[] }) | undefined)?.context; } catch { return undefined; }
     },
     context: core.liveGrantedContextDeps({
       grants: svc.grants,

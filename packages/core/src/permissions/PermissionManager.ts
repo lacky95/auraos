@@ -57,7 +57,8 @@ const ENFORCED = new Set<string>(ENFORCED_PERMISSIONS);
  * the switch for each one.
  */
 export class PermissionManager {
-  constructor(private readonly registry: AppRegistry) {}
+  /** `getById`: the app's manifest as its authorization reads it (AppManager `effectiveManifest`, D108). */
+  constructor(private readonly registry: Pick<AppRegistry, 'getById'>) {}
 
   /**
    * Check whether `sourceAppId` is allowed to use `permission`.

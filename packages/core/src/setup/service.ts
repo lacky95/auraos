@@ -265,8 +265,13 @@ export class SetupService implements SetupEngine {
   }
 
   private async resolveWith(ctx: Ctx, desired: DesiredConfig | null, userDesired: DesiredConfig | null, approved: ApprovedRequests): Promise<Resolution> {
-    const ports = await this.deps.resolverPorts({ appId: ctx.appId, installationId: ctx.installationId, userId: ctx.userId, manifest: ctx.m, approved });
-    return resolveEffective({ appId: ctx.appId, installationId: ctx.installationId, userId: ctx.userId, manifest: ctx.m, desired, userDesired }, ports);
+    const q = { appId: ctx.appId, installationId: ctx.installationId, userId: ctx.userId, manifest: ctx.m, approved };
+    const input = { appId: ctx.appId, installationId: ctx.installationId, userId: ctx.userId, manifest: ctx.m, desired, userDesired };
+    const first = resolveEffective(input, await this.deps.resolverPorts(q));
+    if (first.requested.homeEnvironment !== 'private') return first;
+    // D107-a: the Private Home is authorized against the requested configuration (the profile's
+    // sidecar networks and homes), not the base manifest; the second pass is the answer.
+    return resolveEffective(input, await this.deps.resolverPorts({ ...q, homeView: effectiveManifestView(ctx.m, first.requested) }));
   }
 
   /** The approval record of the run in `initializing` (kept on the summary), when still readable. */
@@ -724,7 +729,7 @@ export class SetupService implements SetupEngine {
       this.emit(ctx, ctx.summary.state, s);
       await this.deps.stopWorkloads(ctx.appId).catch((err) => console.warn(`[setup] stopping ${ctx.appId} failed: ${(err as Error).message}`));
       if (d.privateHomeLost && this.deps.home) {
-        await this.deps.home.privateHomeTeardown({ appId: ctx.appId, installationId: ctx.installationId, userId: ctx.userId, reason: d.error.message })
+        await this.deps.home.privateHomeTeardown({ appId: ctx.appId, installationId: ctx.installationId, userId: ctx.userId, reason: d.error.message, code: d.error.error })
           .catch((err) => console.warn(`[setup] Private Home teardown of ${ctx.appId} failed: ${(err as Error).message}`));
       }
       void this.audit({

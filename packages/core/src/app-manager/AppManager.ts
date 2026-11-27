@@ -477,7 +477,8 @@ export class AppManager {
         audit: (entry) => new AdminAudit(() => defaultRedis()).record(entry),
       });
     })();
-    this.permissions = new PermissionManager(this.registry);
+    // D108: a profile's approved permissions count like declared ones (the effective view).
+    this.permissions = new PermissionManager({ getById: (id: string) => this.effectiveManifest(id) });
     this.tokens      = new InstanceTokens(join(opts.dataDir, 'aura', 'secrets', 'instance-token.key'));
     this.providers   = new ContentProviderRegistry();
     this.intents     = new IntentResolver();
@@ -1517,7 +1518,8 @@ export class AppManager {
    * or `unsupported`. `aura cap grant|revoke` prints it.
    */
   applyInstanceTools(appId: string): RuntimeOperationResult[] {
-    const manifest = this.registry.getById(appId);
+    // D108: the tools a ready setup approved (the effective view) are provisioned like declared ones.
+    const manifest = this.effectiveManifest(appId);
     if (!manifest) return [];
     const results: RuntimeOperationResult[] = [];
     for (const inst of this.getInstancesByApp(appId)) {
@@ -2581,7 +2583,7 @@ export class AppManager {
    */
   async instanceContext(instanceId: string): Promise<{ env: Record<string, string>; known: Set<string> }> {
     const inst = this.instances.get(instanceId);
-    const manifest = inst ? this.registry.getById(inst.appId) : undefined;
+    const manifest = inst ? this.effectiveManifest(inst.appId) : undefined;
     const known = new Set<string>(manifest?.context ?? []);
     try { for (const e of await new ContextStore(this.dataDir).list()) known.add(e.key); } catch { /* names only; best effort */ }
     if (!inst || !manifest) return { env: {}, known };
@@ -2757,8 +2759,8 @@ export class AppManager {
     return this.modulesWith('sessions').flatMap((m) => m.sessions.list());
   }
 
-  /** Ends one open session through the runtime that holds it. */
-  private async endSession(sessionId: string): Promise<boolean> {
+  /** Ends one open session through the runtime that holds it (also the D107-a teardown of a revoked Private Home). */
+  async endSession(sessionId: string): Promise<boolean> {
     for (const m of this.modulesWith('sessions')) {
       if (!m.sessions.list().some((r) => r.sessionId === sessionId)) continue;
       return m.sessions.end(sessionId).catch(() => false);
@@ -4232,6 +4234,19 @@ export class AppManager {
 
   getManifest(appId: string): AppManifest | undefined {
     return this.registry.getById(appId);
+  }
+
+  /**
+   * D108: the manifest the app's authorization reads (permissions, tools,
+   * context): its gate-validated effective configuration when it declares
+   * setup/profiles and is `ready`, else the manifest itself. A profile's added
+   * requests count here only after the setup that approved them is ready
+   * (requests never grant before `app.setup.apply`); a blocked app falls back
+   * to nothing more than its base declarations, and it does not run.
+   */
+  effectiveManifest(appId: string): ReturnType<AppRegistry['getById']> {
+    const base = this.registry.getById(appId);
+    return base && this.setup ? this.setup.manifestView(appId, base) : base;
   }
 
   /**
