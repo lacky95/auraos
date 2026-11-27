@@ -8,15 +8,19 @@ import { limitArgs } from './limits.mjs';
 
 /**
  * mounts: [{ type: 'volume'|'bind', source, target, subpath?, readonly? }]
- * env, labels: { KEY: value }; user: 'uid:gid' (omitted = the image's user); verb: run | create
+ * env, labels: { KEY: value }; capAdd: capabilities kept after --cap-drop ALL (default none);
+ * init: Docker's init as PID 1 (reaps orphaned processes); user: 'uid:gid' (omitted = the image's user); verb: run | create
  * (create: the caller inspects the container before `docker start -a`);
  * entrypoint + image come last, the caller appends the command.
  */
-export function throwawayArgs({ verb = 'run', name, image, network, limits, workdir, mounts = [], env = {}, labels = {}, user, entrypoint }) {
+export function throwawayArgs({ verb = 'run', name, image, network, limits, workdir, mounts = [], env = {}, labels = {}, capAdd = [], init = false, user, entrypoint }) {
   if (!network) throw new Error('throwawayArgs: an explicit network is required');
   if (verb !== 'run' && verb !== 'create') throw new Error(`throwawayArgs: verb must be run or create, got ${verb}`);
   const a = [verb, '--rm', '--name', name, '--network', network, ...limitArgs(limits)];
-  a.push('--cap-drop', 'ALL', '--security-opt', 'no-new-privileges');
+  a.push('--cap-drop', 'ALL');
+  for (const c of capAdd) a.push('--cap-add', c);
+  a.push('--security-opt', 'no-new-privileges');
+  if (init) a.push('--init');
   if (user) a.push('--user', user);
   a.push('--workdir', workdir);
   for (const m of mounts) {

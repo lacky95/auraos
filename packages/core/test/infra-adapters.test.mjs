@@ -214,7 +214,9 @@ test('build-env.sh with the rendered config and secrets: env, rewrites, apt mirr
 function toolEnv(dir, extra = {}) {
   const home = join(dir, 'home');
   mkdirSync(home, { recursive: true });
-  return { PATH: process.env.PATH, HOME: home, COREPACK_ENABLE_DOWNLOAD_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '', ...extra };
+  // COREPACK_HOME: the image's pinned corepack cache (Dockerfile); without it corepack fetches pnpm from the registry.
+  const corepack = process.env.COREPACK_HOME ? { COREPACK_HOME: process.env.COREPACK_HOME } : {};
+  return { PATH: process.env.PATH, HOME: home, COREPACK_ENABLE_DOWNLOAD_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '', ...corepack, ...extra };
 }
 const have = (bin) => spawnSync('sh', ['-c', `command -v ${bin}`]).status === 0;
 

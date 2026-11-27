@@ -13,9 +13,9 @@
 // The container is `docker create`d, inspected, then `docker start -a`ed.
 // Options:
 //   --worktree DIR    the checkout to check (default: the current directory); mounted rw at its own path
-//   --image IMG       default aura-base (node + toolchain; the tools come from the worktree's node_modules).
-//                     aura-base has no pnpm and no valkey-server: `pnpm …` commands and the kv-store suite
-//                     need the shell image (`docker inspect aura-shell -f '{{.Config.Image}}'`)
+//   --image IMG       default `self`: the image of the container this runs in (in aura-shell: the shell image,
+//                     the toolchain the suites are written for: node, pnpm with its corepack cache, valkey-server);
+//                     outside a container aura-base (node only: no pnpm, no valkey-server)
 //   --cpus N --memory BYTES|6g --pids N     the limits profile (DEFAULT_CHECK_LIMITS)
 //   --network none|bridge                   default none; bridge only for `pnpm install` through the registry
 //   --timeout SEC     default 2400; the container is killed after it
@@ -24,16 +24,22 @@
 //                     capped check at a time, since the sum of capped containers can still exceed the host
 //   --no-lock         run without the slot
 //   --no-git          do not mount the worktree's git directory (read-only; dep-check lists files through git)
+//   --user UID:GID    the container's user (default: the worktree's owner)
 //   --target T        where the check runs (env AURA_CHECK_TARGET), default `live`: the Docker daemon this runs
 //                     against. The build/test VM (D106 §3 item 5) becomes the default once it is registered as a
-//                     build target in auraos-e2e config/targets.yaml; until then any other target is refused (3)
+//                     build target in auraos-e2e config/targets.yaml (it is driven from there: `aura-e2e check
+//                     --target <build>` copies a bundle of the ref and runs this file on that host with
+//                     `--target local`, the build host's own daemon). Any other target is refused (3)
 //
 // Every check container is labelled (CHECK_LABELS: aura.role=check, the worktree, its branch, the start time
 // and the timeout), so diagnose/containers (auraos-e2e) tells a capped check from an orphan and flags one that
 // runs past its timeout. The container is created, inspected and only then started: a container whose
 // HostConfig lacks a limit of the profile, --rm or the role label is removed unstarted (refused, 3).
 //
-// The container: `--rm`, --network none, no capabilities, no-new-privileges,
+// The container: `--rm`, --network none, no-new-privileges, every capability dropped but CHECK_CAPS (the
+// file-ownership and identity capabilities the suites' root tests use: chown into app and user uids, keep
+// setgid bits, read and remove what they own, spawn as them, kill their processes; no NET_*, MKNOD, SYS_*,
+// SETPCAP or SETFCAP), Docker's init as PID 1 (orphaned test processes are reaped, as in the shell),
 // the worktree owner's uid:gid, HOME=/tmp, no Docker socket, no home, no
 // secrets, nothing of /data but the worktree. Run it where the worktree lives
 // (in aura-shell for /data/dev/...): the worktree's path is mapped to what the
@@ -50,12 +56,15 @@ import { parseArgs } from '../release-verify.mjs';
 import { throwawayArgs } from './container.mjs';
 import { DEFAULT_CHECK_LIMITS, parseBytes, validateLimits } from './limits.mjs';
 
-export const CHECK_IMAGE = 'aura-base';
+export const CHECK_IMAGE = 'self';
+export const CHECK_FALLBACK_IMAGE = 'aura-base';
+/** Capabilities a check keeps after --cap-drop ALL (a subset of Docker's default set). */
+export const CHECK_CAPS = Object.freeze(['CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'FSETID', 'SETUID', 'SETGID', 'KILL']);
 export const CHECK_LOCK = '/data/dev/.cpu.lock';
 export const CHECK_TIMEOUT_S = 2400;
 export const CHECK_NETWORKS = Object.freeze(['none', 'bridge']);
 /** Registered check targets; the first is the default. The build/test VM goes first once it is registered. */
-export const CHECK_TARGETS = Object.freeze(['live']);
+export const CHECK_TARGETS = Object.freeze(['live', 'local']);
 /** The labels of every check container (diagnose/containers reads them). */
 export const CHECK_LABELS = Object.freeze({
   role: 'aura.role', worktree: 'aura.check.worktree', branch: 'aura.check.branch', started: 'aura.check.started', timeout: 'aura.check.timeout',
@@ -95,8 +104,10 @@ export function parseCheckArgs(argv) {
   if (!CHECK_TARGETS.includes(target)) {
     throw new CheckError('no-target', `check target ${target} is not registered (known: ${CHECK_TARGETS.join(', ')}): the build/test VM becomes a target once it is in auraos-e2e config/targets.yaml (D106)`);
   }
+  const user = str('user');
+  if (user !== undefined && !/^\d+:\d+$/.test(user)) throw new CheckError('usage', `--user needs UID:GID, got ${user}`, 64);
   return {
-    target,
+    target, user,
     worktree: str('worktree') ?? process.cwd(),
     image: str('image') ?? CHECK_IMAGE,
     limits, network, timeoutS, env,
@@ -166,7 +177,7 @@ export function checkRunArgs(o, { name, mounts, owner, started }) {
   if (o.gitDir) m.push(at(o.gitDir, true));
   return [
     ...throwawayArgs({
-      verb: 'create', name, image: o.image, network: o.network, limits: o.limits, workdir: o.worktree, mounts: m, user: owner,
+      verb: 'create', name, image: o.image, network: o.network, limits: o.limits, workdir: o.worktree, mounts: m, user: owner, capAdd: CHECK_CAPS, init: true,
       labels: checkLabels(o, { started }), env: { HOME: '/tmp', AURA_TESTS_LIVE_SHELL: '1', ...o.env }, entrypoint: 'timeout',
     }),
     '-k', '30', String(o.timeoutS), ...o.cmd,
@@ -188,6 +199,11 @@ export function capProblems({ hostConfig: h, labels }, o) {
   want('AutoRemove', h?.AutoRemove, true);
   want('Privileged', h?.Privileged ?? false, false);
   want('NetworkMode', h?.NetworkMode, o.network);
+  want('Init', h?.Init, true);
+  want('CapDrop', JSON.stringify(h?.CapDrop ?? null), JSON.stringify(['ALL']));
+  const extra = (h?.CapAdd ?? []).map((c) => String(c).toUpperCase().replace(/^CAP_/, '')).filter((c) => !CHECK_CAPS.includes(c));
+  if (extra.length) p.push(`CapAdd has ${extra.join(', ')} beyond the check's capabilities`);
+  if (!(h?.SecurityOpt ?? []).some((x) => /^no-new-privileges(:true)?$/.test(x))) p.push('SecurityOpt lacks no-new-privileges');
   want(`label ${CHECK_LABELS.role}`, labels?.[CHECK_LABELS.role], 'check');
   return p;
 }
@@ -204,13 +220,17 @@ async function takeSlot(lock) {
   return { release: () => { try { closeSync(fd); } catch { /* closed */ } } };
 }
 
-/** This container's mounts as the daemon sees them, or null outside a container. */
-function ownMounts(docker) {
+/** The container this runs in, as the daemon sees it: { mounts, image }; null outside a container. */
+function ownContainer(docker) {
   if (!existsSync('/.dockerenv')) return null;
-  const r = spawnSync(docker, ['inspect', '-f', '{{json .Mounts}}', hostname()], { encoding: 'utf8', timeout: 10_000 });
+  const r = spawnSync(docker, ['inspect', '-f', '{{json .Mounts}}\t{{.Config.Image}}', hostname()], { encoding: 'utf8', timeout: 10_000 });
   if (r.status !== 0) throw new CheckError('inspect', `cannot read this container's mounts (docker inspect ${hostname()}): ${(r.stderr ?? '').trim()}`);
-  return JSON.parse(r.stdout);
+  const [mounts, image] = r.stdout.trim().split('\t');
+  return { mounts: JSON.parse(mounts), image: image || null };
 }
+
+/** `--image self` → the image of the container this runs in, else CHECK_FALLBACK_IMAGE. */
+export const resolveImage = (image, own) => (image === 'self' ? own?.image || CHECK_FALLBACK_IMAGE : image);
 
 /** Runs one check; resolves the command's exit code. */
 export async function check(o, { docker = 'docker', log = (s) => process.stderr.write(`[check] ${s}\n`) } = {}) {
@@ -220,14 +240,16 @@ export async function check(o, { docker = 'docker', log = (s) => process.stderr.
   const st = statSync(worktree);
   const run = { ...o, worktree, gitDir: o.git ? gitCommonDir(worktree) : null, branch: branchOf(worktree) };
   const name = `aura-check-${randomBytes(4).toString('hex')}`;
-  const mounts = ownMounts(docker);
+  const own = ownContainer(docker);
+  const mounts = own?.mounts ?? null;
+  run.image = resolveImage(o.image, own);
   const l = o.limits;
-  log(`${o.image} in ${name} (target ${o.target}): cpus ${l.cpus}, memory ${l.memoryBytes} bytes (no swap), pids ${l.pids}, network ${o.network}, timeout ${o.timeoutS} s; ${worktree} (${run.branch ?? 'unknown branch'})`);
+  log(`${run.image} in ${name} (target ${o.target}): cpus ${l.cpus}, memory ${l.memoryBytes} bytes (no swap), pids ${l.pids}, network ${o.network}, timeout ${o.timeoutS} s; ${worktree} (${run.branch ?? 'unknown branch'})`);
   log(o.lock ? `waiting for the slot ${o.lock} (one check at a time)` : 'no slot lock');
   const slot = o.lock ? await takeSlot(o.lock) : null;
   const remove = () => spawnSync(docker, ['rm', '-f', name], { stdio: 'ignore', timeout: 20_000 });
   try {
-    const args = checkRunArgs(run, { name, mounts, owner: `${st.uid}:${st.gid}`, started: new Date().toISOString() });
+    const args = checkRunArgs(run, { name, mounts, owner: o.user ?? `${st.uid}:${st.gid}`, started: new Date().toISOString() });
     const c = spawnSync(docker, args, { encoding: 'utf8', timeout: 120_000 });
     if (c.status !== 0) throw new CheckError('create', `docker create failed: ${(c.stderr ?? '').trim().split('\n').slice(-3).join(' / ')}`);
     const i = spawnSync(docker, ['inspect', '-f', '{{json .HostConfig}}\t{{json .Config.Labels}}', name], { encoding: 'utf8', timeout: 20_000 });

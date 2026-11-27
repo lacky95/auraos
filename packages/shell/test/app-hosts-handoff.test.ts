@@ -147,7 +147,9 @@ test('on HTTPS from a trusted proxy the cookie is __Host- and Secure', async () 
   const code = issue({ aud: `https://${HOST}` });
   const r = await new Promise<Reply>((resolve, reject) => {
     const req = http.request({
-      port, path: `/_aura/handoff?code=${code}`, localAddress: '127.0.0.1', agent: false,
+      // host: the server listens on 127.0.0.1; `localhost` may resolve to ::1 first (a check container), and an
+      // IPv4 localAddress cannot bind for an IPv6 peer (EINVAL).
+      host: '127.0.0.1', port, path: `/_aura/handoff?code=${code}`, localAddress: '127.0.0.1', agent: false,
       headers: { host: HOST, 'x-forwarded-proto': 'https' },
     }, (res) => { res.resume(); res.on('end', () => resolve({ status: res.statusCode ?? 0, body: '', headers: res.headers })); });
     req.on('error', reject);
