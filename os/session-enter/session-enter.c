@@ -465,6 +465,7 @@ struct pinned {
   struct sock_fprog filters[8];
   int nfilters;
   char apparmor[256];
+  char selinux[256];
 };
 
 /* The init's seccomp filters, oldest first; the session gets exactly the app's filter class. */
@@ -538,17 +539,29 @@ static void pin(const struct spec *sp, struct pinned *pn) {
   pn->nfilters = copy_seccomp(sp->pid, pn->filters, 8);
   if (pn->nfilters == 0) { errno = 0; die("the app container has no seccomp filter; refusing a session without one"); }
 
-  /* The init's AppArmor profile ("docker-default (enforce)"); none on a host without AppArmor. */
+  /* The init's LSM label, so the session is confined exactly like the app. AppArmor: its profile
+   * ("docker-default (enforce)"). The generic /proc/<pid>/attr/current is AppArmor's only when AppArmor is the
+   * active LSM: on an SELinux host it is the SELinux context ("system_u:system_r:container_t:s0:c1,c2"), which is
+   * applied as such (the VM finding: it was written as an AppArmor profile and every session failed). */
   char attr[64];
+  pn->apparmor[0] = pn->selinux[0] = '\0';
+  char *aa_on = read_file("/sys/module/apparmor/parameters/enabled", 7);
+  int apparmor = aa_on && aa_on[0] == 'Y';
+  free(aa_on);
   snprintf(attr, sizeof attr, "/proc/%d/attr/apparmor/current", (int)sp->pid);
-  char *cur = read_file(attr, 255);
-  if (!cur) { snprintf(attr, sizeof attr, "/proc/%d/attr/current", (int)sp->pid); cur = read_file(attr, 255); }
+  char *cur = apparmor ? read_file(attr, 255) : NULL;
+  int generic = 0;
+  if (!cur) { snprintf(attr, sizeof attr, "/proc/%d/attr/current", (int)sp->pid); cur = read_file(attr, 255); generic = 1; }
   if (cur) {
-    char *sp_ = strstr(cur, " (");
-    if (sp_) *sp_ = '\0';
     char *nl = strchr(cur, '\n');
     if (nl) *nl = '\0';
-    if (*cur && strcmp(cur, "unconfined")) snprintf(pn->apparmor, sizeof pn->apparmor, "%s", cur);
+    if (apparmor) {
+      char *sp_ = strstr(cur, " (");
+      if (sp_) *sp_ = '\0';
+      if (*cur && strcmp(cur, "unconfined")) snprintf(pn->apparmor, sizeof pn->apparmor, "%s", cur);
+    } else if (generic && strchr(cur, ':') && strcmp(cur, "unconfined")) {
+      snprintf(pn->selinux, sizeof pn->selinux, "%s", cur);
+    }
     free(cur);
   }
 }
@@ -706,6 +719,13 @@ static void drop(const struct spec *sp, const struct pinned *pn) {
     if (fd < 0 || write(fd, cmd, (size_t)n) != n) die("AppArmor profile %s", pn->apparmor);
     close(fd);
   }
+  /* SELinux: the app's own context from the next exec on (fail closed: never less confined than the app). */
+  if (pn->selinux[0]) {
+    size_t n = strlen(pn->selinux);
+    int fd = open("/proc/self/attr/exec", O_WRONLY | O_CLOEXEC);
+    if (fd < 0 || write(fd, pn->selinux, n) != (ssize_t)n) die("SELinux context %s", pn->selinux);
+    close(fd);
+  }
   unsigned long long keep = 0;
   if (sp->kind == KIND_ROOT) for (size_t i = 0; i < sizeof ROOT_CAPS / sizeof *ROOT_CAPS; i++) keep |= 1ULL << ROOT_CAPS[i];
   int last = last_cap();
@@ -857,6 +877,7 @@ static int cmd_enter(const char *json) {
   if (sp.kind == KIND_ROOT) relay_identity.kind = KIND_APP;
   struct pinned none = pn;
   none.apparmor[0] = '\0';
+  none.selinux[0] = '\0';
   drop(&relay_identity, &none);
   prctl(PR_SET_PDEATHSIG, SIGHUP);
   return relay(master, shell, alive[0]);
