@@ -15,7 +15,7 @@ import type { AppManifest } from '../types/manifest.js';
 import { lifecyclePath } from '../types/manifest.js';
 import type { AppLifecycleState } from '../types/lifecycle.js';
 import type { AppInstance, ResourceUsage, SidecarInfo } from '../types/instance.js';
-import type { AppActivity, ActivityRestoreSeed, FlightPatch, FlightNotice, FlightState, FlightRect, FlightBadge, FlightAction, FlightEdge, FlightEdgeSize, FlightMode } from '../types/activity.js';
+import type { AppActivity, ActivityCloseResult, ActivityRestoreSeed, FlightPatch, FlightNotice, FlightState, FlightRect, FlightBadge, FlightAction, FlightEdge, FlightEdgeSize, FlightMode } from '../types/activity.js';
 import { cleanNotice, patchOpensFlight, noticeClearsOnOpen } from './flight-notice.js';
 import { ACTIVITY_STATE_MAX_BYTES, FLIGHT_MODES } from '../types/activity.js';
 import { OsEventBus } from '../ipc/OsEventBus.js';
@@ -3321,11 +3321,15 @@ export class AppManager {
   /**
    * Close a single activity. If it was the last activity of its parent
    * AND the manifest does not declare `backgroundService`, the parent instance
-   * is also stopped (Auto-Stop).
+   * is also stopped (Auto-Stop). The result says whether it was the last one
+   * and whether the instance keeps running: for a background process the
+   * shell may then ask the user whether to stop it (D101).
    */
-  async closeActivity(activityId: string): Promise<void> {
+  async closeActivity(activityId: string): Promise<ActivityCloseResult> {
     const activity = this.activities.get(activityId);
-    if (!activity) return;
+    if (!activity) {
+      return { closed: false, activityId, parentInstanceId: null, appId: null, lastOfInstance: false, instanceStopped: false, instanceRunning: false };
+    }
     const { parentInstanceId, appId } = activity;
 
     await this.runnerOf(parentInstanceId).callOptionalLifecycle(parentInstanceId, `onActivityDestroy/${encodeURIComponent(activityId)}`);
@@ -3335,14 +3339,21 @@ export class AppManager {
 
     // Auto-Stop: last activity closed and instance is not a background service
     const manifest = this.registry.getById(appId);
+    const lastOfInstance = this.getActivitiesByInstance(parentInstanceId).length === 0;
+    let instanceStopped = false;
     if (
       manifest &&
       !manifest.backgroundService &&
-      this.getActivitiesByInstance(parentInstanceId).length === 0 &&
+      lastOfInstance &&
       this.runnerOf(parentInstanceId).isRunning(parentInstanceId)
     ) {
       await this.stop(parentInstanceId);
+      instanceStopped = true;
     }
+    return {
+      closed: true, activityId, parentInstanceId, appId, lastOfInstance, instanceStopped,
+      instanceRunning: !instanceStopped && this.runnerOf(parentInstanceId).isRunning(parentInstanceId),
+    };
   }
 
   /**

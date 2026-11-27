@@ -37,6 +37,7 @@ import { claimFrame, moveInto, parkFrame } from './handoff.ts';
 import { postToFrame, logicalFrameUrl, setAppFrameUrl } from '../appFrame.ts';
 import { onAuraChannel, type AuraChannelEvent } from '../auraChannelShell.ts';
 import { noticeView, type Notice } from './notice.ts';
+import { afterUserClose } from '../lastWindowDialog.ts';
 import {
   clampFlightRect, defaultFlightRect, layoutTabs, nearestEdge, perchTarget, posAlong, unfoldRect,
   edgeRect, edgeSizeOf, distanceFromEdge, TEAR_OFF_PX,
@@ -447,7 +448,15 @@ function wire(f: FlightView): void {
   f.panel.querySelector('[data-act="dock"]')!.addEventListener('click', () => dock(f));
   f.panel.querySelector('[data-act="float"]')!.addEventListener('click', () => float(f));
   f.panel.querySelector('[data-act="land"]')!.addEventListener('click', () => { void send(f.activityId, '/land', 'POST'); });
-  f.panel.querySelector('[data-act="close"]')!.addEventListener('click', () => { void send(f.activityId, '/close', 'POST', { reason: 'user' }); });
+  f.panel.querySelector('[data-act="close"]')!.addEventListener('click', () => {
+    // A close at once answers what it did: a background process left without
+    // a window gets the last-window question (D101).
+    void send(f.activityId, '/close', 'POST', { reason: 'user' })
+      .then((r) => (r?.ok ? r.json() : null)).catch(() => null)
+      .then((body: { close?: Parameters<typeof afterUserClose>[0]['close'] } | null) => {
+        if (body?.close) return afterUserClose({ close: body.close, manifest: null });
+      });
+  });
 
   attachEdgeDrag(f.tab, {
     onTap: () => { if (f.flight.folded) unfold(f); },

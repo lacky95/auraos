@@ -5,6 +5,7 @@ import type { FlightRect } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../../../lib/appResponse.js';
 import { flightService } from '../../../../../lib/flight/service.js';
 import { loadFlightMemory, rememberedFlight } from '../../../../../lib/flight/memory.js';
+import { describeClose } from '../../../../../lib/activityClose.js';
 
 /**
  * Flight transitions.
@@ -15,7 +16,8 @@ import { loadFlightMemory, rememberedFlight } from '../../../../../lib/flight/me
  *        unless the app turned the veto on (`confirmClose`): then the app gets
  *        `activity:flightClosing` and may keep it within the veto window; a
  *        second close while pending closes at once. (An app closing its own
- *        flight uses the plain POST /api/activities/<id>/close.)
+ *        flight uses the plain POST /api/activities/<id>/close.) A close at
+ *        once also answers `close` (lib/activityClose.ts, D101).
  *   POST …/flight/keep                     — the app vetoes a pending close
  *   POST …/flight/proceed                  — the app lets a pending close go now
  */
@@ -50,9 +52,10 @@ export const POST: APIRoute = async ({ params, request }) => {
       return jsonResponse({ activityId: id, presentation: 'window' });
     case 'close': {
       const reason = typeof body?.reason === 'string' ? body.reason.slice(0, 64) : 'user';
-      const r = flightService().requestClose(id, reason);
-      if (r === 'not-found') return errorResponse(`Activity ${id} is not a flight`, 409);
-      return jsonResponse({ activityId: id, result: r });
+      const r = await flightService().requestClose(id, reason);
+      if (r.result === 'not-found') return errorResponse(`Activity ${id} is not a flight`, 409);
+      // A close at once says what it did (D101), like POST /api/activities/<id>/close.
+      return jsonResponse({ activityId: id, result: r.result, ...(r.close ? { close: await describeClose(r.close) } : {}) });
     }
     case 'keep':
       if (!flightService().keep(id)) return errorResponse(`No close pending for ${id}`, 409);

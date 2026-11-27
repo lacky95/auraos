@@ -25,7 +25,7 @@ import { withEtag } from '../../../lib/etag.js';
  * Per user (D46). The user is the verified caller's (lib/userContext.ts),
  * never something the request names:
  *   • `os/<pref>` for a per-user preference (core `USER_PREF_KEYS`: theme,
- *     locale, keymap, workspaces, app-mru, session) is the caller's own
+ *     locale, keymap, workspaces, app-mru, session, lastWindow) is the caller's own
  *     `user/<userId>/prefs:<pref>`. A read falls back to the shared `os`
  *     value from before the move, for one release; a write never touches it.
  *   • `app/<id>/<key>` is the app's storage for the caller's user,

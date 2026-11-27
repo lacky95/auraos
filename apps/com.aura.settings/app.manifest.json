@@ -21,7 +21,8 @@
     "system.kv.os.frontendLog.write",
     "system.kv.os.keymap.write",
     "system.kv.os.lockscreen.write",
-    "system.kv.os.notifications.write"
+    "system.kv.os.notifications.write",
+    "system.kv.os.lastWindow.write"
   ],
   "provides": [
     {

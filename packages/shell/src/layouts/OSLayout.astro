@@ -8,6 +8,7 @@ import LockScreenOverlay from '../components/shell/LockScreenOverlay.astro';
 import AppHostSetupBar from '../components/shell/AppHostSetupBar.astro';
 import OwnerPasswordDialog from '../components/shell/OwnerPasswordDialog.astro';
 import TerminalShareDialog from '../components/shell/TerminalShareDialog.astro';
+import LastWindowDialog from '../components/shell/LastWindowDialog.astro';
 import NotificationCenter from '../components/shell/notifications/NotificationCenter.astro';
 import NotificationToasts from '../components/shell/notifications/NotificationToasts.astro';
 import NotificationDialogs from '../components/shell/notifications/NotificationDialogs.astro';
@@ -564,6 +565,7 @@ const activeThemeId   = activeTheme.id;
   <DeveloperModeBadge />
   <OwnerPasswordDialog />
   <TerminalShareDialog />
+  <LastWindowDialog />
   <!--
     LockScreenOverlay mounted last so its z-index 2000 sits above every
     other shell surface (launcher 1000, focus-view 50, dock, statusbar,

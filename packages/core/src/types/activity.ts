@@ -113,7 +113,28 @@ export interface AppActivity {
   flight?: FlightState;
 }
 
-export type FlightEdge = 'left' | 'right' | 'top' | 'bottom';
+/**
+ * What `AppManager.closeActivity` did (D101). The shell asks the user about a
+ * background process from this, never from its own count of windows:
+ * `lastOfInstance` counts every activity of the instance (all windows, all
+ * flights, in every tab). Moving a window to another workspace and a flight
+ * takeoff or landing are not closes and never produce one.
+ */
+export interface ActivityCloseResult {
+  /** False when the activity was already gone (nothing was closed). */
+  closed: boolean;
+  activityId: string;
+  parentInstanceId: string | null;
+  appId: string | null;
+  /** The instance has no activity left after this close. */
+  lastOfInstance: boolean;
+  /** The close auto-stopped the instance (an activity app without `backgroundService`). */
+  instanceStopped: boolean;
+  /** The instance still runs after the close: its background process stays. */
+  instanceRunning: boolean;
+}
+
+export type FlightEdge ='left' | 'right' | 'top' | 'bottom';
 
 /** Viewport CSS pixels (the shell clamps on every viewport change). */
 export interface FlightRect { x: number; y: number; w: number; h: number }

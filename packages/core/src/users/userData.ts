@@ -3,7 +3,9 @@
  *
  *   user/<userId>/prefs : <key>     the user's preferences (theme and mode,
  *                                   locale, keymap, workspaces, app MRU,
- *                                   desktop session). Were shared `os/<key>`.
+ *                                   desktop session, what happens when the last
+ *                                   window of a background app closes, D101).
+ *                                   Were shared `os/<key>`.
  *   app/<appId>/u/<userId> : <key>  an app's storage for one user (default)
  *   app/<appId>/shared : <key>      an app's storage for all its users (opt-in)
  *
@@ -21,7 +23,7 @@ import { join } from 'node:path';
 import type { KvValue } from '@aura/kv-store';
 
 /** The preferences that are per user. Everything else in `os` stays OS-wide. */
-export const USER_PREF_KEYS = Object.freeze(['theme', 'locale', 'keymap', 'workspaces', 'app-mru', 'session'] as const);
+export const USER_PREF_KEYS = Object.freeze(['theme', 'locale', 'keymap', 'workspaces', 'app-mru', 'session', 'lastWindow'] as const);
 export type UserPrefKey = (typeof USER_PREF_KEYS)[number];
 export const isUserPrefKey = (key: string): key is UserPrefKey => (USER_PREF_KEYS as readonly string[]).includes(key);
 

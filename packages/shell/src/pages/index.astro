@@ -313,6 +313,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
   } from '../lib/appFrame.ts';
   import { isHostNestedSender, onAuraChannel, replyTo, senderAppId, setNativeRuntimeCheck } from '../lib/auraChannelShell.ts';
   import { openExternalTab } from '../lib/externalTab.ts';
+  import { afterUserClose } from '../lib/lastWindowDialog.ts';
 
   const layoutLog = createLogger('shell:layout');
   const iframeLog = createLogger('shell:iframe');
@@ -1439,7 +1440,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     focus: (viewId) => focusView_(viewId),
     minimize: (viewId) => minimizeView_(viewId),
     restore: (viewId) => restoreView_(viewId),
-    close: (viewId) => closeView_(viewId),
+    close: (viewId) => closeView_(viewId, { user: true }),
     toggleMaximize: (viewId) => toggleMaximizeView_(viewId),
     requestRender: () => renderLayout(),
     broadcastViewport: () => queueViewportBroadcast('layout'),
@@ -2162,7 +2163,13 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     renderLayout();
   }
 
-  function closeView_(viewId: string) {
+  /**
+   * `user`: the user closed it (window chrome, a layout's own close). Only
+   * then may the desktop ask about a background process left without a
+   * window (D101, lib/lastWindowDialog.ts); a close by an agent or the shell
+   * itself never asks.
+   */
+  function closeView_(viewId: string, opts: { user?: boolean } = {}) {
     // A maximized window that's being closed must release the maximize state,
     // or the desktop would stay "stuck" promoting a dead viewId.
     if (maximizedViewId === viewId) maximizedViewId = null;
@@ -2178,7 +2185,10 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
         // No stop / close call. Just remove the view from the layout.
       } else if (v.activityId) {
         // Activity view — close only this activity. Auto-stop handled server-side.
-        fetch(`/api/activities/${encodeURIComponent(v.activityId)}/close`, { method: 'POST' }).catch(() => undefined);
+        // The answer says whether a background process stayed without a window (D101).
+        const closing = fetch(`/api/activities/${encodeURIComponent(v.activityId)}/close`, { method: 'POST' })
+          .then((r) => (r.ok ? r.json() : null)).catch(() => null);
+        if (opts.user) void closing.then((body) => afterUserClose({ close: body?.close, manifest }));
         // …plus the handles this window still holds on instances it was
         // switched away from. A handle is not a session — the app owns those,
         // and they outlive every window — so nothing a user cares about is
@@ -2192,7 +2202,15 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
         // Hermes): closing its window must NOT stop the backend — the sidecar
         // runtime + agent keep running. Drop the visual slot only; the instance
         // stays live in the dock / Process Manager and reopens on next launch.
-        // Same rationale as the service branch above.
+        // Same rationale as the service branch above. Its window is its only
+        // one (it has no activities): when the user closed the last view of
+        // that instance here, the same last-window question applies (D101).
+        if (opts.user && !views.some((x) => x.viewId !== viewId && x.instanceId === v.instanceId)) {
+          void afterUserClose({
+            close: { closed: true, lastOfInstance: true, instanceStopped: false, instanceRunning: true, appId: v.appId, parentInstanceId: v.instanceId },
+            manifest,
+          });
+        }
       } else {
         fetch(`/api/instances/${encodeURIComponent(v.instanceId)}/stop`, { method: 'POST' }).catch(() => undefined);
       }
@@ -3085,7 +3103,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
       currentStrategy?.onChromeAction?.(action.slice('layout:'.length), viewId, layoutHost);
       return;
     }
-    if (action === 'close')    { e.preventDefault(); closeView_(viewId); }
+    if (action === 'close')    { e.preventDefault(); closeView_(viewId, { user: true }); }
     if (action === 'minimize') { e.preventDefault(); minimizeView_(viewId); }
     if (action === 'refresh')  { e.preventDefault(); refreshView_(viewId); }
     if (action === 'takeoff')  { e.preventDefault(); takeOffView_(viewId, slot); }
@@ -3247,7 +3265,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
   // catches this; the explicit call guarantees it.)
   window.addEventListener('resize', () => queueViewportBroadcast('layout'));
 
-  (window as any).auraClose    = closeView_;
+  (window as any).auraClose    = (viewId: string) => closeView_(viewId);
   (window as any).auraMinimize = minimizeView_;
 
   // -------- Focus mode --------
