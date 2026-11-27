@@ -1,4 +1,4 @@
-import { effectiveSourceMode, installRecordPath, type SourceModeInfo } from '../nexus/AppSource.js';
+import { effectiveSourceMode, installRecordPath, type SourceModeInfo } from './contracts.js';
 import { resolvePullCredential, type InstallOrigin } from '../nexus/RegistryAuth.js';
 import type { PullCredential } from '../nexus/types.js';
 import { loadSourcesConfig } from '../nexus/SourcesConfig.js';
@@ -13,6 +13,7 @@ function hookUser(instances: ReadonlyMap<string, { owner?: string }>, instanceId
   return userId ?? instances.get(instanceId)?.owner;
 }
 import { mkdirSync, readdirSync, readFileSync, lstatSync, writeFileSync, chmodSync, copyFileSync, cpSync, renameSync, rmSync, unlinkSync, existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join, dirname, basename } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import { lifecyclePath } from '../types/manifest.js';
@@ -232,6 +233,8 @@ export class AppManager {
   private readonly appHosts: () => AppHostServices;
   /** Stream C: which Context keys a start gets (declared AND granted, context/grantedContext.ts). */
   private readonly context: GrantedContextDeps;
+  /** Phase 7a: install recovery at boot, from the composition point (opts.installRecovery). */
+  private readonly installRecovery: (() => Array<{ scope: string; appId: string; outcome: string; detail?: string }>) | null;
   /** Stream C: the Context migration's app-source scanner, from the composition point (opts.contractScan). */
   private readonly contractScan: NonNullable<ConstructorParameters<typeof AppManager>[0]['contractScan']> | null;
   /** 5b G: probe idmapped binds at init (opts.probeIdmappedMounts, the composition point only). */
@@ -319,6 +322,13 @@ export class AppManager {
      * never imports the contract module (D97). Absent: the migration waits.
      */
     contractScan?: (appDir: string, manifest: AppManifest, keys: readonly string[]) => ReturnType<ContextMigrationDeps['scan']>;
+    /**
+     * Phase 7a: finish or undo installs a crash interrupted (System
+     * Management's `NexusManager.reconcileInstalls`), handed in by the
+     * composition point and run in `init()` before the registry scans the
+     * scopes, so it never sees a half-switched app dir. Absent: none run.
+     */
+    installRecovery?: () => Array<{ scope: string; appId: string; outcome: string; detail?: string }>;
     /** The D64 switch `app-root-execution`; default: the owner's security policy record. */
     rootExecutionPolicy?: () => Promise<AppRootExecutionPolicy>;
     /**
@@ -451,6 +461,7 @@ export class AppManager {
     // Stream C (Q7): only declared AND granted Context keys reach an app; personal keys from its user's vault (D56).
     this.contractScan = opts.contractScan ?? null;
     this.probeIdmap = opts.probeIdmappedMounts === true;
+    this.installRecovery = opts.installRecovery ?? null;
     this.context = opts.context ?? (() => {
       const auth = async () => this.auth();
       return liveGrantedContextDeps({
@@ -1659,6 +1670,53 @@ export class AppManager {
   }
 
   /**
+   * Validate a staged tree before it is installed (Phase 7a, Q23 "validate
+   * before the swap", owner decision 2): its dependencies installed and, when
+   * it can run from a build, `astro build` run and stamped, all in the
+   * throwaway builder through the runtime build group (5b-2 D-B, D106 limits; no socket, no home, no secrets), in `dir` itself. The
+   * built tree is then installed as is, so the first start finds its build
+   * current (one build). The app need not be registered.
+   */
+  async prepareStagedTree(appId: string, dir: string, manifest: AppManifest, opts: { onLine?: (line: string) => void } = {}): Promise<{
+    ok: boolean; step?: 'provision' | 'build'; output: string; provisioned: boolean; built: boolean;
+    lockfileHash: string | null; builderImage: string | null;
+  }> {
+    const runtime = manifest.runtime === 'raw' ? 'raw' : 'astro';
+    const lockfileHash = (() => {
+      for (const f of ['pnpm-lock.yaml', 'package-lock.json', 'yarn.lock']) {
+        try { return `${f}:${createHash('sha256').update(readFileSync(join(dir, f))).digest('hex')}`; } catch { /* next */ }
+      }
+      return null;
+    })();
+    const base = { lockfileHash, builderImage: BASE_IMAGE };
+    let provisioned = false;
+    if (needsProvisioning(dir, runtime)) {
+      const res = await this.builder(DEFAULT_BUILD_LIMITS).provision({ appId, appDir: dir, runtime, limits: DEFAULT_BUILD_LIMITS, ...(opts.onLine ? { onLine: opts.onLine } : {}) });
+      if (!res.ok || needsProvisioning(dir, runtime)) return { ok: false, step: 'provision', output: res.output, provisioned: false, built: false, ...base };
+      provisioned = true;
+    }
+    const cap = prodCapability(dir, manifest);
+    if (!cap.capable) return { ok: true, output: '', provisioned, built: false, ...base };
+    const run = async () => {
+      const fingerprint = appFingerprint(dir, manifest.build?.ignore ?? []);
+      try {
+        prepareBuildStaging(dir);
+        const res = await this.builder(DEFAULT_BUILD_LIMITS).build({ appId, appDir: dir, limits: DEFAULT_BUILD_LIMITS });
+        if (!res.ok) return { ok: false, step: 'build' as const, output: res.output, provisioned, built: false, ...base };
+        installBuild(dir, { prune: true });
+        writeBuildStamp(dir, fingerprint);
+        return { ok: true, output: '', provisioned, built: true, ...base };
+      } finally {
+        try { discardBuildStaging(dir); } catch { /* next build clears it */ }
+      }
+    };
+    // One app build at a time (buildApp's chain).
+    const next = this.buildChain.then(run, run);
+    this.buildChain = next.catch(() => undefined);
+    return next;
+  }
+
+  /**
    * Bring the registry copy of this app's @aura/* packages up to date
    * (`aura sdk install` compares digests). `changed` says whether what the
    * app builds against is different now.
@@ -1795,6 +1853,17 @@ export class AppManager {
     // D80: probe idmapped binds in the background (never holds boot); false until it passes.
     if (this.probeIdmap) void this.container.probeIdmappedMounts().catch(() => undefined);
     await this.prepareAppHostGuard();
+    // Before the scan: an install a crash interrupted is finished or undone (Phase 7a).
+    if (this.installRecovery) {
+      try {
+        for (const r of this.installRecovery()) {
+          const line = `[AppManager] install recovery: ${r.scope}/${r.appId} ${r.outcome}${r.detail ? ` (${r.detail})` : ''}`;
+          if (r.outcome === 'failed') console.error(line); else console.warn(line);
+        }
+      } catch (err) {
+        console.error(`[AppManager] install recovery failed: ${(err as Error).message}`);
+      }
+    }
     await this.registry.init();
     this.refreshManifestDerived();
     console.log(`[AppManager] Ready. Apps found: ${this.registry.getAll().length}, keymap actions: ${keymapRegistry.list().length}`);
@@ -3928,7 +3997,11 @@ export class AppManager {
       activity.history = [...(activity.history ?? []), entry];
     }
     activity.path = normalizedPath;
-    if (opts?.title !== undefined) activity.title = opts.title;
+    if (opts?.title !== undefined) {
+      // A preview's window stays marked "Preview" (Track P).
+      const inst = this.instances.get(activity.parentInstanceId);
+      activity.title = inst?.preview ? previewTitle(opts.title, this.registry.getById(inst.appId)?.name ?? inst.appId) : opts.title;
+    }
     activity.lastTransitionAt = new Date();
     OsEventBus.emit('activity:navigated', {
       activityId:       activity.activityId,
@@ -3941,6 +4014,35 @@ export class AppManager {
       ...(activity.title !== undefined ? { title: activity.title } : {}),
     });
     return true;
+  }
+
+  /**
+   * Breadcrumb jump: the history entry at `index` becomes the current path;
+   * the entries after it are dropped (D97 A2: the route calls this, the
+   * kernel emits `activity:navigated`). An index past the history is a
+   * no-op (click spam); an unknown activity is null.
+   */
+  navigateBackTo(activityId: string, index: number): { ok: true; noop?: 'index-past-history'; historyLength: number } | null {
+    const activity = this.activities.get(activityId);
+    if (!activity) return null;
+    const history = activity.history ?? [];
+    if (index >= history.length) return { ok: true, noop: 'index-past-history', historyLength: history.length };
+    const target = history[index]!;
+    activity.history = history.slice(0, index);
+    activity.path = target.path;
+    activity.title = target.title;
+    activity.lastTransitionAt = new Date();
+    OsEventBus.emit('activity:navigated', {
+      activityId:       activity.activityId,
+      parentInstanceId: activity.parentInstanceId,
+      appId:            activity.appId,
+      path:             target.path,
+      history:          [...activity.history],
+      breadcrumb:       activity.breadcrumb ?? 'os',
+      fromHistory:      true,
+      ...(target.title !== undefined ? { title: target.title } : {}),
+    });
+    return { ok: true, historyLength: activity.history.length };
   }
 
   /**

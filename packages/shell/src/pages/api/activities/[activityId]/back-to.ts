@@ -1,6 +1,5 @@
 import type { APIRoute } from 'astro';
-import { getAppManager, OsEventBus } from '@aura/core';
-import type { AppActivity } from '@aura/core';
+import { getAppManager } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
 
 /**
@@ -33,43 +32,11 @@ export const POST: APIRoute = async ({ params, request }) => {
   }
   const targetIndex = body.index;
 
-  type HistoryEntry = { path: string; title?: string };
-  type ExtActivity = AppActivity & { history?: HistoryEntry[]; breadcrumb?: 'os' | 'off' };
-  const mgr = getAppManager();
+  // The kernel moves the history and emits `activity:navigated` (D97 A2).
   try {
-    const activity = mgr.getActivity?.(activityId) as ExtActivity | undefined;
-    if (!activity) return errorResponse(`Activity not found: ${activityId}`, 404);
-    const history = activity.history ?? [];
-    // Click-spam tolerance: if the requested index is past the live history
-    // (rapid clicks where the DOM still shows yesterday's trail; double-fire
-    // from a fast tap), report a no-op-200 instead of 400. The shell's
-    // re-render after the previous navigate already moved the user to the
-    // right place — returning 400 would surface as a red warning in the
-    // console for what is, semantically, "already there".
-    if (targetIndex >= history.length) {
-      return jsonResponse({ ok: true, activityId, index: targetIndex, noop: 'index-past-history', historyLength: history.length });
-    }
-
-    // Target entry stays in history? No — it becomes the current path. The
-    // entries AFTER it are discarded; entries BEFORE it remain as the new
-    // shorter back stack.
-    const target = history[targetIndex]!;
-    const newHistory = history.slice(0, targetIndex);
-    activity.history = newHistory;
-    activity.path = target.path;
-    activity.title = target.title;
-    activity.lastTransitionAt = new Date();
-    OsEventBus.emit('activity:navigated', {
-      activityId:       activity.activityId,
-      parentInstanceId: activity.parentInstanceId,
-      appId:            activity.appId,
-      path:             target.path,
-      history:          [...newHistory],
-      breadcrumb:       activity.breadcrumb ?? 'os',
-      fromHistory:      true,
-      ...(target.title !== undefined ? { title: target.title } : {}),
-    } as never);
-    return jsonResponse({ ok: true, activityId, index: targetIndex });
+    const r = getAppManager().navigateBackTo(activityId, targetIndex);
+    if (!r) return errorResponse(`Activity not found: ${activityId}`, 404);
+    return jsonResponse(r.noop ? { ok: true, activityId, index: targetIndex, noop: r.noop, historyLength: r.historyLength } : { ok: true, activityId, index: targetIndex });
   } catch (err) {
     return errorResponse(`back-to failed: ${(err as Error).message}`, 500);
   }

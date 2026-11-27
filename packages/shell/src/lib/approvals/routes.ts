@@ -370,7 +370,7 @@ async function recordDecision(
 ): Promise<void> {
   try {
     await deps.audit({
-      by, action: decision === 'approve' ? 'approval.approved' : 'approval.denied', target: `approval:${record.id}`, outcome: 'ok',
+      by, action: decision === 'approve' ? 'approval.approved' : 'approval.denied', target: core.approvalRef(record.id), outcome: 'ok',
       detail: {
         action: record.action, level: record.level, title: record.display.title,
         requestedBy: requesterSummary(record.requester), ...extra,

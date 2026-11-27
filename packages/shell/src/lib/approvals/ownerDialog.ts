@@ -109,6 +109,8 @@ export function initOwnerDialog(): void {
   const reasonText = $('aura-owner-password-reason-text');
   const explanationBox = $('aura-owner-password-explanation');
   const explanationBody = $('aura-owner-password-explanation-body');
+  const diffBox = $<HTMLDetailsElement>('aura-owner-password-diff');
+  const diffText = $('aura-owner-password-diff-text');
   const currentLabel = $('aura-owner-password-current-label');
   const currentCaption = $('aura-owner-password-current-caption');
   const currentNote = $('aura-owner-password-current-note');
@@ -161,6 +163,7 @@ export function initOwnerDialog(): void {
     if (explanationBox) explanationBox.hidden = true;
     explanationBody?.replaceChildren();
     if (riskBox) riskBox.hidden = true;
+    if (diffBox) diffBox.hidden = true;
     if (blockBtn) blockBtn.hidden = true;
     if (laterBtn) laterBtn.hidden = true;
     if (feedbackLabel) feedbackLabel.hidden = true;
@@ -298,6 +301,11 @@ export function initOwnerDialog(): void {
     explanationBody?.replaceChildren(...(explanation ? [renderMarkdown(visibleText(explanation), { links: 'text' })] : []));
     if (explanationBody) explanationBody.scrollTop = 0;
     if (explanationBox) explanationBox.hidden = !explanation;
+    if (diffBox && diffText) {
+      diffText.textContent = view.display.diff ?? '';
+      diffBox.open = false;
+      diffBox.hidden = !view.display.diff;
+    }
     newFields.hidden = true;
     // D18, D63: the server says how a fresh approval is given here. `operator`: the
     // owner requires HTTPS and this is HTTP, so the password is never sent.

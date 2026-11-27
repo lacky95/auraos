@@ -43,6 +43,9 @@ const RULES = {
   'contract-leaf': 'Declared contract leaf files of @aura/core (the ARI contract, runtimes/ari.ts, types.ts and requirements.ts; the system app ids; the contract majors, contract/types.ts) import no other core module at runtime except another declared leaf, so any module may depend on them without a cycle (D97, 5b).',
   'runtime-no-bus': 'Runtime provider code (core/src/runtimes/** and the runners and engine files behind them) never imports the event bus (ipc/OsEventBus) at runtime: a runtime reports exits through onExit and the kernel emits app:* (D93 G1, 5b-2 D).',
   'agent-agnostic': 'Agent-aware but agent-agnostic (owner, philosophy audit): no product-specific agent knowledge (claude, codex, anthropic, openai, .claude/.codex paths, CLAUDE_CONFIG_DIR, CODEX_HOME, config.toml) in the code of @aura/core src or the shell server infrastructure (src/lib, server/); it belongs in apps, adapters, the home seed, docs and tests. Comments and the AGENTS.md/CLAUDE.md file convention do not count.',
+  'core-deep-import': 'A cross-module import inside @aura/core targets the other module\'s declared contract: its index.ts, a leaf contract file (types.ts, contracts.ts, keys.ts, ari.ts) or a declared contract leaf; Foundation is imported directly (D97 A1, Phase 7).',
+  'event-owner': 'A kernel bus event is emitted (a literal `emit(\'<event>\'`) only by its owning module, as declared in the dep-check:event-owners block of core/src/ipc/OsEventBus.ts (D97 A2, Phase 7).',
+  'kv-owner': 'A Valkey key prefix a module declares in its keys.ts (`*_KV_PREFIXES`) appears as a literal only in that module; others go through the owner (D97 A3, Phase 7).',
   'agents-docs': 'Every AGENTS.md has a sibling CLAUDE.md that is exactly `@AGENTS.md`; the chain of AGENTS.md files from the root to any directory stays under 28 KiB (Codex stops adding files at project_doc_max_bytes, 32 KiB by default); the sector map in packages/core/AGENTS.md names every core module exactly once.',
 };
 
@@ -389,10 +392,20 @@ for (const e of coreRuntime) {
 }
 
 // ── contract-leaf (D97 §4.2, 5b K): declared contract files stay leaves ───────
-// Type-only imports are free; a runtime import inside the same module, or of another declared leaf, is allowed.
-const CONTRACT_LEAVES = new Set(['core/src/app-manager/maintenance.ts', 'core/src/runtimes/ari.ts', 'core/src/runtimes/types.ts', 'core/src/runtimes/requirements.ts', 'core/src/runtimes/workloadEnv.ts', 'core/src/system/systemApps.ts', 'core/src/contract/types.ts']);
+// Type-only imports are free; a runtime import inside the same module, of another declared leaf, or of a keys.ts is allowed.
+const CONTRACT_LEAVES = new Set([
+  'core/src/app-manager/maintenance.ts', 'core/src/runtimes/ari.ts', 'core/src/runtimes/types.ts', 'core/src/runtimes/requirements.ts', 'core/src/runtimes/workloadEnv.ts',
+  'core/src/runtimes/spawn/paths.ts', 'core/src/system/systemApps.ts', 'core/src/contract/types.ts',
+  // Phase 7 (D97 A1): the contracts other modules import.
+  'core/src/patches/types.ts', 'core/src/app-manager/contracts.ts', 'core/src/app-manager/provisioning.ts', 'core/src/release/lock.ts', 'core/src/release/faults.ts',
+  'core/src/auth/identityKey.ts', 'core/src/app-hosts/relayClaim.ts', 'core/src/capabilities/tool-allowlist.ts', 'core/src/identity/execution.ts',
+  'core/src/security/options.ts', 'core/src/system/privateDir.ts',
+]);
+// Every module's keys.ts is a leaf (D97 A3); a leaf may import another module's keys.ts.
+const isKeysFile = (r) => /^core\/src\/[^/]+\/keys\.ts$/.test(r);
+for (const f of coreFiles) if (isKeysFile(f)) CONTRACT_LEAVES.add(f);
 for (const e of coreRuntime) {
-  if (!CONTRACT_LEAVES.has(e.from) || CONTRACT_LEAVES.has(e.to)) continue;
+  if (!CONTRACT_LEAVES.has(e.from) || CONTRACT_LEAVES.has(e.to) || isKeysFile(e.to)) continue;
   const a = files.get(e.from).module, b = files.get(e.to).module;
   if (a !== b) add('contract-leaf', `${e.from} -> ${e.to}`, { from: e.from, line: e.line, detail: `${e.from} is a contract leaf; it imports ${b} at runtime` });
 }
@@ -403,6 +416,65 @@ const RUNTIME_FILE = (r) => /^core\/src\/runtimes\//.test(r)
 for (const e of coreRuntime) {
   if (RUNTIME_FILE(e.from) && e.to === 'core/src/ipc/OsEventBus.ts') {
     add('runtime-no-bus', `${e.from} -> ${e.to}`, { from: e.from, line: e.line, detail: `${e.from} is runtime provider code; it imports the event bus` });
+  }
+}
+
+// ── core-deep-import (D97 A1, Phase 7): modules meet at their contracts ──────
+// Keyed by importing module and target file: a new deep target fails; Foundation and the barrel are exempt.
+const FOUNDATION = new Set([...sectorOf].filter(([, s]) => s === 'foundation').map(([m]) => m));
+const isContractFile = (r) => /\/(index|types|contracts|keys|ari)\.ts$/.test(r) || CONTRACT_LEAVES.has(r);
+for (const e of coreRuntime) {
+  const a = files.get(e.from).module, b = files.get(e.to).module;
+  if (a === b || FOUNDATION.has(a) || FOUNDATION.has(b) || isContractFile(e.to)) continue;
+  add('core-deep-import', `${a} -> ${e.to}`, { from: e.from, line: e.line, detail: `${e.from} imports ${b}'s implementation file; import its index.ts or a leaf contract` });
+}
+
+// ── event-owner (D97 A2, Phase 7) ──────────────────────────────────────────
+const busFile = join(ROOT, 'packages/core/src/ipc/OsEventBus.ts');
+const eventOwners = [];
+if (existsSync(busFile)) {
+  const block = readFileSync(busFile, 'utf8').match(/dep-check:event-owners\n([\s\S]*?)\*\//);
+  if (!block) add('event-owner', 'core/src/ipc/OsEventBus.ts has no dep-check:event-owners block', { from: 'core/src/ipc/OsEventBus.ts', line: 1, detail: '' });
+  else for (const line of block[1].split('\n')) { const m = line.match(/^\s*\*\s+([\w:.-]+)\s+(\S+)\s*$/); if (m) eventOwners.push([m[1], m[2]]); }
+}
+function ownerOfEvent(ev) {
+  const exact = eventOwners.find(([k]) => k === ev);
+  if (exact) return exact[1];
+  const pre = eventOwners.filter(([k]) => k.endsWith(':') && ev.startsWith(k)).sort((x, y) => y[0].length - x[0].length)[0];
+  return pre ? pre[1] : null;
+}
+const EMIT_RE = /\.emit\(\s*(['"])([a-z][\w]*:[\w:.-]+)\1/g;
+for (const f of files.values()) {
+  if (!(f.pkg === 'core' || f.pkg === 'shell')) continue;
+  const code = stripComments(readFileSync(f.path, 'utf8'));
+  for (const m of code.matchAll(EMIT_RE)) {
+    const owner = ownerOfEvent(m[2]);
+    if (!owner) continue; // not a bus event (an SDK or socket channel name)
+    const ok = owner === 'shell' ? f.pkg === 'shell' : f.module === owner;
+    if (!ok) add('event-owner', `${f.rel} -> ${m[2]}`, { from: f.rel, line: code.slice(0, m.index).split('\n').length, detail: `${m[2]} belongs to ${owner}` });
+  }
+}
+
+// ── kv-owner (D97 A3 part 1, Phase 7) ──────────────────────────────────────
+const kvOwners = [];
+for (const f of coreFiles.filter(isKeysFile)) {
+  const src = readFileSync(files.get(f).path, 'utf8');
+  for (const m of src.matchAll(/_KV_PREFIXES\s*=\s*\[([^\]]*)\]/g)) {
+    for (const p of m[1].matchAll(/['"]([^'"]+)['"]/g)) kvOwners.push([p[1], files.get(f).module]);
+  }
+}
+for (const f of files.values()) {
+  if (!(f.pkg === 'core' || (f.pkg === 'shell' && f.layer !== 'webshell')) || isKeysFile(f.rel)) continue;
+  const code = stripComments(readFileSync(f.path, 'utf8'));
+  const seen = new Set();
+  for (const m of code.matchAll(/(['"`])([a-z][\w./-]*[:/][^'"`\s]*)/g)) {
+    const lit = m[2];
+    const hit = kvOwners.find(([p]) => lit.startsWith(p) && (lit.length > p.length || p.endsWith(':') || p.endsWith('/') || p === lit));
+    if (!hit || f.module === hit[1] || seen.has(hit[0])) continue;
+    // A prefix followed by a space is prose (`hosts: '<name>' is taken`), not a key.
+    if (/^[a-z]+:$/.test(hit[0]) && /\s/.test(code[m.index + 1 + hit[0].length] ?? '')) continue;
+    seen.add(hit[0]);
+    add('kv-owner', `${f.rel} -> ${hit[0]}`, { from: f.rel, line: code.slice(0, m.index).split('\n').length, detail: `${hit[0]} keys belong to ${hit[1]}` });
   }
 }
 

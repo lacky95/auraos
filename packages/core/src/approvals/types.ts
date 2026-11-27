@@ -210,6 +210,13 @@ export interface ApprovalDisplay {
    */
   highRisk?: ApprovalRisk[];
   /**
+   * The exact change being approved, as a unified diff (a patch activation,
+   * Q23: "exact diff review"). Server-built from the bound content; shown
+   * collapsed, in full up to its clip.
+   */
+  diff?: string;
+
+  /**
    * D109 AF2: the requester's own summary of what it asks for (an agent's
    * architecture summary), Markdown, normalised and bounded by the server
    * (shell `lib/approvals/display.ts` `requesterExplanation`). The dialog

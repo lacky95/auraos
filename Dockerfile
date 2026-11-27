@@ -286,6 +286,10 @@ COPY --from=base-rootfs / /os/base-rootfs
 # shell stages for the session broker (core SessionBroker.ts).
 COPY os/session-enter/ /os/session-enter/
 RUN cc -std=gnu11 -O2 -Wall -Wextra -Werror -static -o /os/session-enter/aura-session-enter /os/session-enter/session-enter.c
+# The atomic app-tree switch of installs (Phase 7a, core nexus/Installer.ts):
+# renameat2(RENAME_EXCHANGE) + fsync. No runtime fallback: without it installs refuse.
+COPY os/rename-exchange/ /os/rename-exchange/
+RUN cc -std=gnu11 -O2 -Wall -Wextra -Werror -static -o /os/rename-exchange/aura-rename-exchange /os/rename-exchange/rename-exchange.c
 
 # ─── Stage: deps ──────────────────────────────────────────────────────────────
 FROM base AS deps
@@ -411,6 +415,10 @@ COPY --from=base-rootfs / /os/base-rootfs
 # Without it (an image from before J) the shell compiles the same source once.
 COPY os/session-enter/ /os/session-enter/
 RUN cc -std=gnu11 -O2 -Wall -Wextra -Werror -static -o /os/session-enter/aura-session-enter /os/session-enter/session-enter.c
+# The atomic app-tree switch of installs (Phase 7a, core nexus/Installer.ts):
+# renameat2(RENAME_EXCHANGE) + fsync. No runtime fallback: without it installs refuse.
+COPY os/rename-exchange/ /os/rename-exchange/
+RUN cc -std=gnu11 -O2 -Wall -Wextra -Werror -static -o /os/rename-exchange/aura-rename-exchange /os/rename-exchange/rename-exchange.c
 
 # Master-container PATH. aura-shell is the OS itself, not a sandbox, so it
 # gets the whole toolchain instead of a per-app `tools[]` allowlist — see

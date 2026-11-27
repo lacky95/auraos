@@ -31,6 +31,7 @@ import type {
 } from './types.js';
 import { OsEventBus } from '../ipc/OsEventBus.js';
 import { getAppManager, initAppManager, type AppManager } from '../app-manager/AppManager.js';
+import { getNexusManager } from '../nexus/index.js';
 import { getAuthServices, retireSharedAdminCredential } from '../auth/services.js';
 import { getAppHostServices } from '../app-hosts/services.js';
 import { getNotificationService } from '../notifications/NotificationService.js';
@@ -248,6 +249,8 @@ async function bootKernel(state: SystemState, { first }: { first: boolean }): Pr
     contractScan: scanContractSources,
     auth: getAuthServices,
     appHosts: getAppHostServices,
+    // Phase 7a: installs a crash interrupted are finished or undone before the registry scan (journaled exchange).
+    installRecovery: () => getNexusManager().reconcileInstalls(),
     ...(state.opts.developerMode ? { developerMode: state.opts.developerMode } : {}),
     probeIdmappedMounts: true,
   });

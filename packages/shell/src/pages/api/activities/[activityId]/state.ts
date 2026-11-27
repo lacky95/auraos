@@ -39,20 +39,9 @@ export const PUT: APIRoute = async ({ params, request }) => {
   catch { return errorResponse('Body must be JSON: { state }', 400); }
   if (!body || typeof body !== 'object' || !('state' in body)) return errorResponse('Body must be JSON: { state }', 400);
 
-  const mgr = core.getAppManager() as ReturnType<typeof core.getAppManager> & {
-    setActivityState?: (id: string, state: unknown) => void;
-  };
+  // The kernel stores it and emits `activity:stateSaved` (D97 A2).
   try {
-    if (typeof mgr.setActivityState === 'function') {
-      mgr.setActivityState(activityId, body.state);
-    } else {
-      // Singleton from before setActivityState existed (no restart yet).
-      const a = mgr.getActivity(activityId) as (core.AppActivity & { savedState?: unknown }) | undefined;
-      if (!a) return errorResponse(`Activity not found: ${activityId}`, 404);
-      if (body.state === null || body.state === undefined) delete a.savedState;
-      else a.savedState = JSON.parse(JSON.stringify(body.state));
-      core.OsEventBus.emit('activity:stateSaved', { activityId, parentInstanceId: a.parentInstanceId, appId: a.appId });
-    }
+    core.getAppManager().setActivityState(activityId, body.state);
   } catch (err) {
     const msg = (err as Error).message;
     return errorResponse(msg, /not found/i.test(msg) ? 404 : 400);

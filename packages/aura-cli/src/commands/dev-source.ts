@@ -96,6 +96,13 @@ export async function getAppSource(app: string, opts: { ensure?: boolean } = {})
   return r;
 }
 
+/** Tell the system a series revision was saved (R1 `saved`: it audits `patch.saved`). Best effort. */
+export async function reportSaved(app: string, rev: string): Promise<void> {
+  const inst = encodeURIComponent(callerInstance());
+  try { await api.post(`/api/instances/${inst}/app-source`, { app, saved: rev }); }
+  catch (err) { warn(`the save was not recorded in the audit: ${(err as Error).message.split('\n')[0]}`); }
+}
+
 /** The mount API (`aura mount`), kinds `work` and `patches`: the one way they are bound. */
 async function mountVolume<T>(app: string, body: Record<string, unknown>, what: string): Promise<T> {
   const inst = encodeURIComponent(callerInstance());
@@ -137,7 +144,7 @@ export async function cleanWorkspaces(app: string, opts: { keep?: number; dryRun
   return r;
 }
 
-/** A built-in app (system scope): read-only, patched by system patches (Phase 7) or in Developer Mode (Q6). */
+/** A built-in app (system scope): read-only, changed with system patches (Phase 7b) or in Developer Mode (Q6). */
 export function isBuiltInLater(v: Pick<AppSourceView, 'scope'>): boolean {
   return v.scope === 'system';
 }

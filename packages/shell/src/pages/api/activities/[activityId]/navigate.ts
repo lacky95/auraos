@@ -1,6 +1,5 @@
 import type { APIRoute } from 'astro';
-import { getAppManager, OsEventBus, previewTitle } from '@aura/core';
-import type { AppActivity } from '@aura/core';
+import { getAppManager } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
 
 /**
@@ -36,55 +35,11 @@ export const POST: APIRoute = async ({ params, request }) => {
   if (typeof body.title === 'string') opts.title = body.title;
   if (typeof body.pushHistory === 'boolean') opts.pushHistory = body.pushHistory;
 
-  const mgr = getAppManager();
-
-  // Prefer the typed AppManager method when present. Falls back to in-place
-  // mutation when the singleton on globalThis is older than the @aura/core
-  // dist — Vite/Astro HMR doesn't re-init globalThis singletons, so the
-  // stale-class case is real until the Node process is fully restarted.
-  // Both paths land on the same OsEventBus emit so the SSE-driven shell
-  // refresh fires uniformly.
+  // The kernel changes the activity and emits `activity:navigated` (D97 A2: routes emit no kernel events).
   try {
-    if (typeof mgr.navigateActivity === 'function') {
-      const ok = mgr.navigateActivity(activityId, body.path, opts);
-      if (!ok) return errorResponse(`Activity not found: ${activityId}`, 404);
-      return jsonResponse({ ok: true, activityId, path: body.path });
-    }
-
-    // Fallback: mutate the activity object directly. `getActivity()` is on
-    // every AppManager generation, so this works even on a singleton from
-    // before the navigateActivity method existed. The activity object
-    // reference is the AppManager's own internal record, so the mutation
-    // is visible to subsequent calls.
-    type HistoryEntry = { path: string; title?: string };
-    type ExtActivity = AppActivity & { history?: HistoryEntry[]; breadcrumb?: 'os' | 'off' };
-    const activity = mgr.getActivity?.(activityId) as ExtActivity | undefined;
-    if (!activity) return errorResponse(`Activity not found: ${activityId}`, 404);
-    const normalizedPath = body.path.startsWith('/') ? body.path : `/${body.path}`;
-    const pushHistory = opts.pushHistory !== false;
-    if (pushHistory && normalizedPath !== activity.path) {
-      const entry: HistoryEntry = { path: activity.path };
-      if (activity.title !== undefined) entry.title = activity.title;
-      activity.history = [...(activity.history ?? []), entry];
-    }
-    activity.path = normalizedPath;
-    if (typeof opts.title === 'string') {
-      // A preview's window stays marked "Preview" (Track P).
-      const inst = mgr.getInstance(activity.parentInstanceId);
-      activity.title = inst?.preview ? previewTitle(opts.title, mgr.getManifest(inst.appId)?.name ?? inst.appId) : opts.title;
-    }
-    activity.lastTransitionAt = new Date();
-    OsEventBus.emit('activity:navigated', {
-      activityId:       activity.activityId,
-      parentInstanceId: activity.parentInstanceId,
-      appId:            activity.appId,
-      path:             normalizedPath,
-      history:          [...(activity.history ?? [])],
-      breadcrumb:       activity.breadcrumb ?? 'os',
-      fromHistory:      false,
-      ...(activity.title !== undefined ? { title: activity.title } : {}),
-    } as never);
-    return jsonResponse({ ok: true, activityId, path: body.path, viaFallback: true });
+    const ok = getAppManager().navigateActivity(activityId, body.path, opts);
+    if (!ok) return errorResponse(`Activity not found: ${activityId}`, 404);
+    return jsonResponse({ ok: true, activityId, path: body.path });
   } catch (err) {
     return errorResponse(`navigate failed: ${(err as Error).message}`, 500);
   }

@@ -8,7 +8,7 @@
 
   "htmlSinkScope": ["packages/shell/**", "apps/com.aura.*/**", "os/**"],
 
-  "trustHeaderDefinitions": ["packages/core/src/app-hosts/hostRules.ts", "packages/app-sdk/src/hostRules.ts"],
+  "trustHeaderDefinitions": ["packages/core/src/types/hostRules.ts", "packages/app-sdk/src/hostRules.ts"],
   "trustHeaders": [
     { "header": "x-aura-gateway-identity", "constant": "GATEWAY_IDENTITY_HEADER", "setters": ["packages/shell/server/app-gateway.mjs"] },
     { "header": "x-aura-owner-ssr", "constant": "OWNER_SSR_HEADER", "setters": ["packages/shell/server/app-hosts.mjs", "packages/app-sdk/src/os-auth.ts"] },

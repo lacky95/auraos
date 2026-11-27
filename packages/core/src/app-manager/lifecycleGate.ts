@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { LIFECYCLE_TOKEN_HEADER } from '../app-hosts/hostRules.js';
+import { LIFECYCLE_TOKEN_HEADER } from '../types/hostRules.js';
 import { securityEnvValue } from '../security/options.js';
 
 /**

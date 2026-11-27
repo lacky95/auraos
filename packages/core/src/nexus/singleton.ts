@@ -6,7 +6,7 @@
 import { NexusManager } from './NexusManager.js';
 import { getAppManager } from '../app-manager/AppManager.js';
 import { OsEventBus } from '../ipc/OsEventBus.js';
-import { getAppHostServices } from '../app-hosts/services.js';
+import { getAppHostServices } from '../app-hosts/index.js';
 import type { SourcesConfig } from './SourcesConfig.js';
 import { DEFAULT_SOURCES_CONFIG } from './SourcesConfig.js';
 import * as Publisher from './Publisher.js';
@@ -70,6 +70,8 @@ export function getNexusManager(): NexusManager {
     provision:     (id, onLine) => getAppManager().provisionApp(id, { onLine }),
     // Phase 6 stream M: an update drains, switches, runs onUpdate in a maintenance start, then serves.
     updater:       { updateInstance: (id, o) => getAppManager().updateInstance(id, o) },
+    // Phase 7a: provision and build the staged tree before the swap, in the builder.
+    prepare:       (id, dir, manifest, onLine) => getAppManager().prepareStagedTree(id, dir, manifest, { onLine }),
   });
   g[GLOBAL_KEY] = instance;
   g[CODE_KEY] = CODE;

@@ -1,6 +1,5 @@
 import type { APIRoute } from 'astro';
-import { getAppManager, OsEventBus } from '@aura/core';
-import type { AppActivity } from '@aura/core';
+import { getAppManager } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
 
 /**
@@ -30,28 +29,11 @@ export const POST: APIRoute = async ({ params, request }) => {
   }
   const mode = body.mode;
 
-  const mgr = getAppManager();
-  // Prefer the typed setter when available. Fall back to direct mutation +
-  // event emit for the stale-singleton case (same pattern as /navigate and
-  // /back endpoints), so this works without a container restart.
+  // The kernel emits `activity:breadcrumbChanged` (D97 A2).
   try {
-    if (typeof mgr.setActivityBreadcrumb === 'function') {
-      const ok = mgr.setActivityBreadcrumb(activityId, mode);
-      if (!ok) return errorResponse(`Activity not found: ${activityId}`, 404);
-      return jsonResponse({ ok: true, activityId, breadcrumb: mode });
-    }
-    const activity = mgr.getActivity?.(activityId) as (AppActivity & { breadcrumb?: 'os' | 'off' }) | undefined;
-    if (!activity) return errorResponse(`Activity not found: ${activityId}`, 404);
-    if (activity.breadcrumb === mode) return jsonResponse({ ok: true, activityId, breadcrumb: mode });
-    activity.breadcrumb = mode;
-    activity.lastTransitionAt = new Date();
-    OsEventBus.emit('activity:breadcrumbChanged', {
-      activityId:       activity.activityId,
-      parentInstanceId: activity.parentInstanceId,
-      appId:            activity.appId,
-      breadcrumb:       mode,
-    } as never);
-    return jsonResponse({ ok: true, activityId, breadcrumb: mode, viaFallback: true });
+    const ok = getAppManager().setActivityBreadcrumb(activityId, mode);
+    if (!ok) return errorResponse(`Activity not found: ${activityId}`, 404);
+    return jsonResponse({ ok: true, activityId, breadcrumb: mode });
   } catch (err) {
     return errorResponse(`breadcrumb toggle failed: ${(err as Error).message}`, 500);
   }

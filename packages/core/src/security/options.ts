@@ -23,6 +23,8 @@
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { PASSWORD_POLICY_KEY } from '../auth/keys.js';
+import { APP_INSTALLATION_KEY_DOC } from '../app-hosts/keys.js';
 
 export type SecurityOptionSource = 'policy' | 'env' | 'record' | 'file' | 'reserved';
 export type SecurityOptionType = 'boolean' | 'enum' | 'list' | 'record';
@@ -77,7 +79,7 @@ export const SECURITY_OPTIONS: readonly SecurityOption[] = Object.freeze([
     title: 'Password policy',
     description: 'The rules for new and changed passwords: minimum length, character types, different from the username. '
       + 'Existing passwords stay valid. Changed in Settings → Users & Identities → Global.',
-    type: 'record', default: null, source: 'record', record: 'user:policy:password', restartRequired: false, change: 'fresh',
+    type: 'record', default: null, source: 'record', record: PASSWORD_POLICY_KEY, restartRequired: false, change: 'fresh',
     since: '2026-11-24', phase: '3a',
   },
   {
@@ -189,7 +191,7 @@ export const SECURITY_OPTIONS: readonly SecurityOption[] = Object.freeze([
       + 'Installations recorded before 5-apps run as root; new installations start as app (built-in apps stay root until the owner '
       + 'flips them). A failed app start is never retried as root. Changed per app with `aura admin apps run-as <app> app|root`; '
       + '`aura admin apps privileges` is the review (Phase 5, P5-3).',
-    type: 'record', default: null, source: 'record', record: 'apphost:install:<installationId> runAs', restartRequired: false, change: 'fresh',
+    type: 'record', default: null, source: 'record', record: `${APP_INSTALLATION_KEY_DOC} runAs`, restartRequired: false, change: 'fresh',
     since: '2026-11-26', phase: '5 (P5-3)',
   },
   {
@@ -232,6 +234,16 @@ export const SECURITY_OPTIONS: readonly SecurityOption[] = Object.freeze([
       + '(a Zero Trust installation turns it off); a tab already open stays until it ends (`aura root end`).',
     type: 'enum', values: ['enabled', 'disabled'], default: 'enabled', source: 'policy',
     restartRequired: false, change: 'fresh', since: '2026-11-26', phase: '5 (D55, P5-4)',
+  },
+  {
+    id: 'test-fault-points',
+    title: 'Test crash points',
+    description: 'For the end-to-end crash tests on a test VM only: the activation steps (installer:after-stage, '
+      + 'installer:after-carry, installer:after-exchange, installer:after-record) at which the shell kills itself, as a power '
+      + 'cut would, to prove the boot recovery. Empty (default): none. Armed only by a root-owned, not group- or '
+      + 'world-writable file, or by AURA_TEST_FAULT under NODE_ENV=test; never set it on a real installation.',
+    type: 'list', default: [], source: 'file', file: 'aura/test-faults', env: 'AURA_TEST_FAULT', restartRequired: false, change: 'fresh',
+    since: '2026-11-27', phase: '7a (Q23)',
   },
   {
     id: 'access-profile',

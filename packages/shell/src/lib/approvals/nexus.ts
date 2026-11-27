@@ -34,7 +34,11 @@ type InstallGenerator = AsyncGenerator<NexusProgressEvent, InstallRecord | null,
  */
 export function installGate(
   deps: ApprovalServiceDeps, principal: AccessPrincipal, request: Request, operatorCode: unknown,
-  override?: { level: (binding: InstallBinding) => ApprovalLevel; diff: PermissionDiff },
+  override?: {
+    level: (binding: InstallBinding) => ApprovalLevel; diff: PermissionDiff;
+    /** A patch activation's series lines and exact diff (lib/patchActivation.ts), added to the dialog. */
+    details?: string[]; exactDiff?: string;
+  },
   /** Where the approved Context keys are granted: GrantStore, the admin audit, the installation the app landed as. */
   contextGrants: () => Pick<core.AuthServices, 'grants' | 'audit'> & { installationOf(appId: string, scope: string): Promise<string | null> } = () => {
     const svc = core.getAuthServices();
@@ -90,11 +94,18 @@ export function installGate(
         detail: { appScope: binding.scope, runAs: ex.runAs, digest: ex.digest, via: binding.action, approval: gate.consumed()?.id },
       }).catch(() => undefined);
     },
+    /** The approval consumed for this install, and who gave it (null before, or without one). */
+    consumed: (): { id: string | undefined; by: core.GrantedBy } | null => (approved ? { id: gate.consumed()?.id, by: approved.by } : null),
     needsApproval: (binding: InstallBinding, coreDiff: PermissionDiff) => {
       const diff = override?.diff ?? coreDiff;
       return gate.needsApproval({
         action: binding.action, payload: binding, level: override ? override.level(binding) : installLevel(binding, diff),
-        display: (by) => installDisplay(binding, diff, by),
+        display: (by) => {
+          const d = installDisplay(binding, diff, by);
+          return override?.details || override?.exactDiff
+            ? { ...d, details: [...d.details, ...(override.details ?? [])], ...(override.exactDiff ? { diff: override.exactDiff } : {}) }
+            : d;
+        },
       }, { diff });
     },
   };
@@ -130,6 +141,11 @@ export async function runInstall(
     if (cursor.value) { await gate.grantContext(); await gate.auditExecution(); }
     return json({ ok: true, record: cursor.value });
   } catch (err) {
-    return json({ error: (err as Error).message }, 500);
+    // Phase 7a: an activation that is busy, failed before the swap, or cannot switch atomically says so.
+    const e = err as Error & { code?: string; heldBy?: unknown; step?: string };
+    const status = e.code === core.ACTIVATION_BUSY ? 409 : e.code === 'install-prepare-failed' ? 422 : e.code === core.INSTALL_NOT_ATOMIC ? 503 : 500;
+    return json({
+      error: e.message, ...(e.code ? { code: e.code } : {}), ...(e.heldBy ? { heldBy: e.heldBy } : {}), ...(e.step ? { step: e.step } : {}),
+    }, status);
   }
 }

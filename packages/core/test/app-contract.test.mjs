@@ -163,7 +163,8 @@ test('install and patch activation refuse an app built for a newer contract: err
   const root = mkdtempSync(join(tmpdir(), 'aura-contract-install-'));
   const scope = (id, priority, immutable) => ({ id, appsDir: join(root, id, 'apps'), dataDir: join(root, id, 'data'), immutable, priority });
   const scopes = [scope('system', 0, true), scope('global', 1, false), scope('user', 2, false)];
-  const mgr = new NexusManager({ scopes, rootDataDir: join(root, 'root') });
+  // Phase 7a: installs need the atomic exchange helper (the image ships it; tests build it).
+  const mgr = new NexusManager({ exchangeHelper: (await import('./rename-exchange-helper.mjs')).exchangeHelper(), scopes, rootDataDir: join(root, 'root') });
   const tree = (name, auraContract) => {
     const dir = join(root, name);
     mkdirSync(dir, { recursive: true });

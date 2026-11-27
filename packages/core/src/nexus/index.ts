@@ -9,10 +9,10 @@ export * from './GitHubClient.js';
 export * from './StoreAssets.js';
 export * from './StoreSubmitter.js';
 export { DEFAULT_INDEX, seedIndex } from './defaultIndex.js';
-export { Installer } from './Installer.js';
+export { Installer, InstallAtomicityError, INSTALL_NOT_ATOMIC, RENAME_EXCHANGE_IMAGE_PATH } from './Installer.js';
 export { removeInstalledApp } from './removeApp.js';
-export { NexusManager, SystemAppRemovalError } from './NexusManager.js';
-export type { InstallState } from './NexusManager.js';
+export { InstallPrepareError, NexusManager, SystemAppRemovalError } from './NexusManager.js';
+export type { InstallState, PreparedTree } from './NexusManager.js';
 export { compareVersions } from './version.js';
 export { publishGit, publishOci } from './Publisher.js';
 export {
@@ -55,6 +55,7 @@ export {
   OFFICIAL_STORE_REPO,
 } from './SourcesConfig.js';
 export { readOsKey, writeOsKey } from './osKv.js';
+export * from './keys.js';
 export type {
   SourcesConfig, SourceEntry, SourceKind,
   OciSource, GitIndexSource, GitAppSource, GitAppMeta,

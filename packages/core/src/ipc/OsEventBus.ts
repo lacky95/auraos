@@ -29,6 +29,34 @@ export const NOTIFICATION_BUS_EVENTS = [
 ] as const;
 export type NotificationBusEventName = typeof NOTIFICATION_BUS_EVENTS[number];
 
+/**
+ * Who owns each event (D97 A2, `pnpm arch` rule `event-owner`): one module
+ * states each fact, and a literal `emit('<event>'` appears only in the
+ * owner's files. A row ending in `:` covers a prefix; an exact name wins.
+ * `shell` is the server layer (`packages/shell`): presentation and transport
+ * facts the kernel does not own. Exceptions are baselined with their owner
+ * phase in tools/dep-baseline.json.
+ *
+ * dep-check:event-owners
+ *   app:                    core/app-manager
+ *   activity:               core/app-manager
+ *   os:shuttingDown         core/system
+ *   os:systemModeChanged    shell
+ *   session:                shell
+ *   shell:                  shell
+ *   theme:                  shell
+ *   mode:                   shell
+ *   notification:           core/notifications
+ *   permissions:            core/auth
+ *   auth:                   core/auth
+ *   ui:                     shell
+ *   workspaces:             shell
+ *   workspace:              shell
+ *   kv:changed              shell
+ *   user:changed            shell
+ *   context:                core/context
+ *   nexus:                  core/nexus
+ */
 export interface OsEvents {
   'app:stateChanged': { instanceId: string; appId: string; state: AppLifecycleState; port: number | null };
   'app:crashed': { instanceId: string; appId: string; error: string };

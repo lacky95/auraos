@@ -173,6 +173,7 @@ test('originId travels with releases and the registry catalog', () => {
 
 import { compareVersions } from '../dist/nexus/version.js';
 import { NexusManager } from '../dist/nexus/NexusManager.js';
+import { exchangeHelper } from './rename-exchange-helper.mjs';
 
 test('compareVersions: numeric parts, pre-releases first, junk never "newer"', () => {
   assert.equal(compareVersions('1.10.0', '1.9.9'), 1);
@@ -204,7 +205,7 @@ test('installStates: id + originId decide what the store shows', () => {
   put(user, 'io.a.same.copy', O(6), '1.0.0', { ref: 'io.a.same', sourceName: 'src', detached: true });
   put(sys, 'com.sys', O(5), '2.0.0');
 
-  const mgr = new NexusManager({ scopes, rootDataDir: join(root, 'root') });
+  const mgr = new NexusManager({ exchangeHelper: exchangeHelper(), scopes, rootDataDir: join(root, 'root') });
   const e = (id, originId, version, sourceName = 'src') => ({ id, originId, version, sourceName, sources: { oci: { ref: `reg/${id}` } } });
   const st = mgr.installStates([
     e('io.a.same', O(1), '1.1.0'),
@@ -242,7 +243,7 @@ test('install: --copy installs a second copy of an installed app; --as for it is
     writeFileSync(join(dir, 'app.manifest.json'), JSON.stringify({ id, originId, name: 'A', version }));
     return dir;
   };
-  const mgr = new NexusManager({ scopes, rootDataDir: join(root, 'root') });
+  const mgr = new NexusManager({ exchangeHelper: exchangeHelper(), scopes, rootDataDir: join(root, 'root') });
   const run = async (opts) => {
     const it = mgr.install({ scope: 'user', approval: async () => true, ...opts });
     for (let c = await it.next(); ; c = await it.next()) if (c.done) return c.value;
@@ -272,7 +273,7 @@ test('install gate (D31): no approval, or a body autoApprove, stops at permissio
   const scopes = [scope('system', 0, true), scope('global', 1, false), scope('user', 2, false)];
   const dir = join(root, 'src', 'io.gate.app'); mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'app.manifest.json'), JSON.stringify({ id: 'io.gate.app', originId: O1, name: 'Gate', version: '1.0.0', tools: ['git'], permissions: ['storage.read'] }));
-  const mgr = new NexusManager({ scopes, rootDataDir: join(root, 'root') });
+  const mgr = new NexusManager({ exchangeHelper: exchangeHelper(), scopes, rootDataDir: join(root, 'root') });
   const until = async (it) => { for (let c = await it.next(); ; c = await it.next()) if (c.done || c.value.type === 'permission.needed') return c; };
 
   for (const opts of [{}, { autoApprove: true }, { approval: async () => false }]) {

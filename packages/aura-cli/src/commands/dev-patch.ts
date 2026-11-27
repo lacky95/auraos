@@ -42,7 +42,7 @@ import { installWithChoices } from './nexus.js';
 import type { RestartResult } from './app.js';
 import {
   ACTIVE_REF, apiOrBody, appFromArgOrCwd, bindWorkspace, cleanWorkspaces, detachWorkspace, findWorkspace, getAppSource, gitOut,
-  patchRepoOf, readWorkspaceMarker, refuseBuiltIn, requireInstallation, upstreamBase, writeWorkspaceMarker, type AppSourceView, type WorkspaceMarker,
+  patchRepoOf, readWorkspaceMarker, refuseBuiltIn, reportSaved, requireInstallation, upstreamBase, writeWorkspaceMarker, type AppSourceView, type WorkspaceMarker,
 } from './dev-source.js';
 
 const GIT_ENV = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
@@ -210,10 +210,12 @@ export async function saveWorkspace(wsRoot: string, message?: string): Promise<S
   const repo = await patchRepoOf(await getAppSource(marker!.appId));
   const subjects = patches.map((p) => p.subject);
   const r = saveSeries(repo, {
-    app: marker!.appId, base: marker!.base, patches,
+    target: { kind: 'app', appId: marker!.appId }, base: marker!.base, patches,
     message: message ?? `Save ${patches.length} patch${patches.length === 1 ? '' : 'es'}${subjects.length ? `: ${subjects[subjects.length - 1]}` : ''}`,
   });
   writeWorkspaceMarker(wsRoot, { ...marker!, patchesRev: r.commit });
+  // The system records the save (audit `patch.saved`, read from the patch repo).
+  if (r.changed) await reportSaved(marker!.appId, r.commit);
   return { repo, commit: r.commit, changed: r.changed, files: patches.map((p) => p.file) };
 }
 
@@ -310,7 +312,8 @@ async function activateRoute(appId: string, body: Record<string, unknown>): Prom
  * restart that fails rolls back to the previous tree.
  */
 export async function installWorkspace(v: AppSourceView, n: number, rev: string): Promise<ActivateOutcome> {
-  const res = await activateRoute(v.appId, { workspace: n });
+  // The revision is bound by the system: it reads the series there and checks the tree against it (Q23).
+  const res = await activateRoute(v.appId, { workspace: n, rev });
   if (!res) return { status: 'not-approved', reason: 'the owner did not approve the activation' };
   if (!res.ok) return { status: 'failed', reason: res.message ?? res.error ?? 'activation failed' };
   const repo = await patchRepoOf(v);
@@ -328,7 +331,7 @@ export async function installWorkspace(v: AppSourceView, n: number, rev: string)
     return { status: 'installed', rev, restarted: r.instanceId, workspace: n };
   } catch (err) {
     const reason = (err as Error).message.split('\n')[0]!;
-    const back = await activateRoute(v.appId, { rollback: true });
+    const back = await activateRoute(v.appId, { rollback: true, automatic: true });
     if (back?.ok) {
       try { await api.post(`/api/apps/${encodeURIComponent(v.appId)}/restart`); } catch { /* reported below */ }
       git(repo, previous ? ['update-ref', ACTIVE_REF, previous] : ['update-ref', '-d', ACTIVE_REF]);
@@ -457,7 +460,8 @@ export async function updateSeries(app: string, opts: { ref?: string; activate?:
     if (!built.ok) return { status: 'needs-repair', failure: built, base: newBase, name: v.name };
     // Patch files regenerated on the new base (context lines moved), one commit.
     const r = saveSeries(repo, {
-      app: series!.app, base: newBase, patches: exportPatches(ws.path, built.baseCommit),
+      target: series!.target, base: newBase,
+      patches: exportPatches(ws.path, built.baseCommit),
       message: `Update base ${base.commit.slice(0, 12)} → ${target.slice(0, 12)}`,
     });
     if (opts.activate === false) return { status: 'saved', rev: r.commit };

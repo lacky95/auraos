@@ -27,7 +27,7 @@ execution: app-manager scopes runtimes
 identity-security: auth permissions approvals security identity
 resource: context users homes
 communication: interfaces app-hosts content
-system-management: nexus patches updater contract capabilities
+system-management: nexus patches release updater contract capabilities
 platform-services: notifications
 presentation-contracts: theme layout keymap
 ```
@@ -39,7 +39,7 @@ presentation-contracts: theme layout keymap
 | **Identity & Security** (`auth`, `permissions`, `approvals`, `security`, `identity`) | users, sessions, principals; grants; the authorizer; the approval state machine; the D64 security options and policy records; the credential vault lives in `context/CredentialVault.ts` | transport-side enforcement, which is `packages/shell/src/lib/access` |
 | **Resource** (`context`, `users`, `homes`) | Context env and secrets (sealed), volumes, per-user data, Private and App Homes | mounts and ports (Execution until 5b G) |
 | **Communication** (`interfaces`, `app-hosts`, `content`) | the Interface Registry, App Host routing and gateway contracts, content providers; `IntentResolver` stays in `app-manager` for now | sockets, HTTP and WS, which are server-layer transport |
-| **System Management** (`nexus`, `patches`, `updater`, `contract`, `capabilities`) | install and remove, sources and registries, app contract checks, patch series, the self-updater, the capability (tool) registry, the `tools[]` allowlist rules (`capabilities/tool-allowlist.ts`, a leaf: no imports) and provisioning; `AppRegistry.ts`, `appBuild.ts`, `BaseImage.ts` and `tool-provision.ts` sit in `app-manager` (they move in the Phase 8 decomposition) | grants (Identity & Security) |
+| **System Management** (`nexus`, `patches`, `release`, `updater`, `contract`, `capabilities`) | install and remove, sources and registries, app contract checks, patch series, the activation lock and crash points (`release`, Phase 7a; the release builder joins in Phase 6), the self-updater, the capability (tool) registry, the `tools[]` allowlist rules (`capabilities/tool-allowlist.ts`, a leaf: no imports) and provisioning; `AppRegistry.ts`, `appBuild.ts`, `BaseImage.ts` and `tool-provision.ts` sit in `app-manager` (they move in the Phase 8 decomposition) | grants (Identity & Security) |
 | **Platform services** (`notifications`) | a system service reached through its contract; not a kernel sector (D97 §4) | kernel decisions |
 | **Presentation contracts** (`theme`, `layout`, `keymap`) | themes and icons, layout strategies and keymaps shared by the Web Shell, the SDK types and Settings; **outside the kernel boundary** (labelled now, relocated after the alpha) | anything the headless kernel needs |
 
@@ -51,13 +51,14 @@ presentation-contracts: theme layout keymap
 - **Platform services** may use kernel contracts; kernel sectors reach them only through a contract that is handed in.
 - **Core never imports** `@aura/shell`, `@aura/ui`, `@aura/app-sdk`, `@aura/cli`, Astro, React or socket.io.
 
-**Enforced by `pnpm arch`:** `core-cycle`, `core-module-cycle`, `core-forbidden`, `foundation-leaf`, `kernel-presentation`, `contract-leaf` (5b), `runtime-no-bus` (5b-2) and `agent-agnostic`. Planned: `core-deep-import` and `event-owner` (Phase 7), `kv-owner` (Phase 7–8).
+**Enforced by `pnpm arch`:** `core-cycle`, `core-module-cycle`, `core-forbidden`, `foundation-leaf`, `kernel-presentation`, `contract-leaf` (5b), `runtime-no-bus` (5b-2), `agent-agnostic`, and from Phase 7 `core-deep-import`, `event-owner` and `kv-owner` (keys of auth, approvals, app-hosts, nexus).
 
 ## Public contract
 
 - **Today:** other packages import the root `@aura/core` (`src/index.ts`, 78 `export *` lines) or the declared leaf subpaths in `package.json` `exports`: `theme`, `keymap`, `setup-tickets`, `system-identity`, `system-apps`, `workload-env`, `logger`, `host-rules`, `aura-channel`.
 - **Don't widen the barrel with implementation classes.** Phase 8 narrows it.
-- **Inside core**, cross-module imports go straight to implementation files today (131 imports, none through an `index.ts`). New code imports another module's leaf contract file or its `index.ts`. Phase 7 adds the `core-deep-import` rule with a baseline.
+- **Inside core**, a cross-module import targets the other module's `index.ts`, a leaf (`types.ts`, `contracts.ts`, `keys.ts`, `ari.ts`) or a declared contract leaf (`CONTRACT_LEAVES` in `tools/dep-check.mjs`); Foundation is imported directly. Rule `core-deep-import`; the remaining deep imports are baselined (Phase 8).
+- **Module files** (contract, keys, events, invariants): `src/auth/`, `src/approvals/`, `src/nexus/`, `src/app-hosts/`, `src/app-manager/`, `src/runtimes/` each have an `AGENTS.md`.
 
 ## State ownership (kernel-wide)
 
@@ -72,7 +73,8 @@ presentation-contracts: theme layout keymap
 | `os:app-enabled` | `app-manager` (`AppManager`: hydrated in `init()`, persisted by `setEnabled` / `forgetEnabledState`) | Phase 6 K |
 | `os:interfaces` | `interfaces` (`interfaces/custom.ts`) | hydrated by `bootSystem()` (D98 R2) |
 | `/data/aura/boot/status.json` | `system` (`status.ts`) | readiness |
-| Events (`OsEvents` in `ipc/OsEventBus.ts`) | the emitting module | `app:*` events come only from the kernel (G1, 5b). Debt: `activity:*` is also emitted by API routes and `app:restart*` by `shell/lib/appRestart.ts`. Phase 7 adds `event-owner` |
+| Events (`OsEvents` in `ipc/OsEventBus.ts`) | the owner in its `dep-check:event-owners` block | rule `event-owner`; `app:*`, `activity:*`: app-manager; shell emits left are baselined |
+| Key prefixes in a module's `keys.ts` (`*_KV_PREFIXES`) | that module | rule `kv-owner`: auth, approvals, app-hosts, nexus (Phase 7); the rest in Phase 8 |
 
 **Singletons pinned on `globalThis`** (two copies of core exist: the Astro SSR bundle and the Node `dist`):
 - `AppManager`, `AuthServices`, `OsEventBus`, `BaseImage`, Nexus, `AppHostServices`;
@@ -90,16 +92,9 @@ The composition root constructs them (`system/AGENTS.md`); `auth/services.ts` an
 - **No local assumption is added** where D85 keeps multi-system open: `systemId` stays on records, refs are qualified.
 - **Agent-agnostic:** kernel contracts and code never name an agent product (`claude`, `codex`, `.claude`, `CODEX_HOME`, `config.toml`, ...). An app or adapter supplies product specifics as data or through a generic contract; the kernel keeps authorization and enforcement.
 
-## Known debt (`tools/dep-baseline.json`; each entry has an owner, and it must shrink)
+## Known debt
 
-| Violation | Owner |
-|---|---|
-| `app-hosts/lifecycle.ts → app-manager/AppIdentity` | Phase 7 (contract leaf) |
-| `nexus/removeApp.ts → AppManager` | Phase 7 (removal contract) |
-| `types/manifest.ts → app-hosts/appHosts` (Foundation not a leaf) | Phase 7 (host-name rules into Foundation) |
-| `AppManager → keymap/KeymapRegistry` (kernel uses presentation) | Phase 8 (AppManager decomposition) |
-| `agent-agnostic`: the privilege table (N1: one-shot install data) | 5-post (deleted after the migration) |
-| `agent-agnostic`: the `claude-code` alias, onboarding probes, screen scraping (#4–#6) | Phase 6 |
+`tools/dep-baseline.json` is the one list: each entry names its owning phase; it must shrink (`pnpm arch` reports fixed entries).
 
 **Phase 8 (committed):** AppManager is decomposed behind a compatibility facade into real modules. Each gets its own responsibility, state, contract and tests: activities and navigation, the service supervisor, previews, build and tools.
 

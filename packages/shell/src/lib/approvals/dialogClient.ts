@@ -27,6 +27,8 @@ export interface ApprovalDialogView {
     highRisk?: Array<{ item: string; why: string; added: boolean }>;
     /** D109 AF2: the requester's summary (Markdown), rendered apart from the facts. */
     explanation?: { format: 'markdown'; text: string };
+    /** The exact change (a patch activation), shown collapsed. */
+    diff?: string;
   };
   appId: string | null;
   /** The app "Deny and block" would block (L4), or null: no block offered. */
@@ -62,6 +64,7 @@ export function parseApprovalView(x: unknown, protocol = 'https:'): ApprovalDial
       ...(typeof d['reason'] === 'string' ? { reason: d['reason'] } : {}),
       ...(Array.isArray(d['highRisk']) ? { highRisk: parseRisks(d['highRisk']) } : {}),
       ...(explanationOf(d['explanation']) ? { explanation: explanationOf(d['explanation'])! } : {}),
+      ...(typeof d['diff'] === 'string' && d['diff'] ? { diff: d['diff'] } : {}),
     },
     appId: typeof v['appId'] === 'string' ? v['appId'] : null,
     blockable: typeof v['blockable'] === 'string' ? v['blockable'] : null,

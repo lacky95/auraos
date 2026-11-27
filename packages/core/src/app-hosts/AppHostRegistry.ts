@@ -26,7 +26,7 @@ import type {
 } from './contracts.js';
 import {
   MAX_APP_HOST_SLOT, appHostNameForSlot, isValidHostName, proposeAppHostName,
-} from './hostRules.js';
+} from '../types/hostRules.js';
 
 export const APP_HOST_PREFIX = 'apphost:';
 /** The alpha's one user (D19). */

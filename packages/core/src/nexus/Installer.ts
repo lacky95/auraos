@@ -4,28 +4,70 @@
  * install record at `data/nexus/installed/<id>.json`, and lets the
  * AppRegistry's chokidar watcher pick up the new app.
  *
- * Atomicity: rsync into `apps/<id>.tmp.<ts>/`, then `rename(2)`. The
- * rename is the chokidar trigger point — a partial dir never appears.
+ * Atomicity and durability (Phase 7a, Q23, owner decision 1): the staged
+ * tree moves to `apps/<id>.tmp.<ts>/` and is synced to disk; the app's
+ * runtime data moves into it; then ONE `renameat2(RENAME_EXCHANGE)` swaps
+ * it with `apps/<id>/` (the `aura-rename-exchange` helper, which also syncs
+ * both parents); the old tree goes to trash. Every step is recorded first in
+ * a journal (`data/nexus/journal/<id>.json`, synced), and `reconcile()` at
+ * boot finishes or undoes an interrupted install: `apps/<id>` is always the
+ * complete old tree (data back in place) or the complete new one (record
+ * written). A filesystem that cannot exchange refuses installs (fail closed,
+ * no two-rename fallback).
  *
  * The installer DOES NOT call into AppRegistry directly; the chokidar
  * watcher does that on its own when the new directory appears.
  */
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
-  cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync,
-  renameSync, rmSync, writeFileSync,
+  closeSync, cpSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync,
+  renameSync, rmSync, statSync, unlinkSync, writeFileSync,
 } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import type { InstallRecord, ResolvedRef } from './types.js';
 import type { ScopeId } from '../scopes/types.js';
 import { APP_ID_PATTERN, isOriginId, readOriginId } from '../app-manager/AppIdentity.js';
 import { readPublishMarker, type AppSourceInfo, type SourceMode } from './AppSource.js';
+import type { FaultPoint } from '../release/faults.js';
+
+/** The helper as the image builds it (Dockerfile, os/rename-exchange). */
+export const RENAME_EXCHANGE_IMAGE_PATH = '/os/rename-exchange/aura-rename-exchange';
+/** The helper's exit status for "this filesystem cannot do it". */
+const EXCHANGE_UNSUPPORTED = 3;
+export const INSTALL_NOT_ATOMIC = 'install-not-atomic';
+
+/** Installs refused: the apps dir cannot be switched atomically. */
+export class InstallAtomicityError extends Error {
+  readonly code = INSTALL_NOT_ATOMIC;
+}
 
 export interface InstallerOpts {
   appsDir: string;
   dataDir: string;
   scope:   ScopeId;
+  /** The exchange helper (default: the image's). Tests pass a built copy. */
+  exchangeHelper?: string;
+  /** Crash points (release/faults.ts); tests and the e2e VM only. */
+  fault?: (point: FaultPoint) => void;
+}
+
+/** One install in flight, as the journal records it before each step. */
+interface InstallJournal {
+  v: 1;
+  appId: string;
+  phase: 'staging' | 'carry' | 'exchange' | 'switched';
+  tmp: string;
+  target: string;
+  trash: string;
+  /** apps/<id> existed (an update): the switch is an exchange, not a rename. */
+  hadTarget: boolean;
+  /** Runtime data entries moved from the old tree into tmp. */
+  carried: string[];
+  /** The inode of the new tree: after a crash, apps/<id> has it iff the switch happened. */
+  newIno?: number;
+  record?: InstallRecord;
+  recordPath: string;
 }
 
 export class Installer {
@@ -43,53 +85,50 @@ export class Installer {
   async install(
     stagingDir: string, manifest: AppManifest, resolved: ResolvedRef,
     link: { remoteId?: string; detached?: boolean } = {},
-    opts: { keepProvenance?: boolean } = {},
+    opts: { keepProvenance?: boolean; extra?: Pick<InstallRecord, 'patched'> } = {},
   ): Promise<InstallRecord> {
+    this.assertAtomic();
     // Read before anything moves: the record this install replaces.
     const previous = this.getRecord(manifest.id);
     const targetDir = join(this.opts.appsDir, manifest.id);
     const ts = Date.now();
     const tmpDir = `${targetDir}.tmp.${ts}`;
 
-    // 1. Sync staging → tmp (still off the watched glob, since the
-    //    watcher matches `apps/*/app.manifest.json` and .tmp.* isn't
-    //    a real app id).
-    mkdirSync(dirname(tmpDir), { recursive: true });
-    rsyncOrCp(stagingDir, tmpDir);
-
-    // 2. If a previous version exists, move it aside. `apps/` and
-    //    `data/` may live on different mounts (bind mounts vs the
-    //    container's own fs), in which case `rename(2)` fails with
-    //    EXDEV — fall back to cp+rm.
     // Never replace a DIFFERENT app: the caller (NexusManager's identity
     // check) only gets here for the same artifact or an explicit choice, so
     // two different originIds under one id is a bug, not a decision.
     const have = readOriginId(join(targetDir, 'app.manifest.json'));
     if (have && manifest.originId && have !== manifest.originId) {
-      rmSync(tmpDir, { recursive: true, force: true });
       throw new Error(`refusing to replace ${manifest.id}: it is a different app (originId ${have}, incoming ${manifest.originId})`);
     }
-    if (existsSync(targetDir)) {
-      // An update must not wipe the user's data: in the global and user
-      // scopes it lives inside the app dir that is being replaced.
+    const j: InstallJournal = {
+      v: 1, appId: manifest.id, phase: 'staging', tmp: tmpDir, target: targetDir,
+      trash: join(this.opts.dataDir, 'nexus', 'trash', `${manifest.id}-${ts}`),
+      hadTarget: existsSync(targetDir), carried: [],
+      recordPath: join(this.opts.dataDir, 'nexus', 'installed', `${manifest.id}.json`),
+    };
+    this.writeJournal(j);
+
+    // 1. Staging → tmp (off the watched glob: `.tmp.*` is no app id), synced.
+    mkdirSync(dirname(tmpDir), { recursive: true });
+    moveOrSync(stagingDir, tmpDir);
+    this.syncfs(tmpDir);
+    this.opts.fault?.('installer:after-stage');
+
+    // 2. An update must not wipe the user's data: in the global and user
+    //    scopes it lives inside the app dir that is being replaced. Moved
+    //    (journaled first) into the new tree; reconcile() moves it back.
+    if (j.hadTarget) {
+      j.phase = 'carry';
+      j.carried = runtimeDataEntries(targetDir, manifest.id);
+      this.writeJournal(j);
       carryOverRuntimeData(targetDir, tmpDir, manifest.id);
-      if (readdirSafe(targetDir).length === 0) {
-        // Only data was left (an uninstall keeps it): nothing to keep in trash.
-        rmSync(targetDir, { recursive: true, force: true });
-      } else {
-        const trashRoot = join(this.opts.dataDir, 'nexus', 'trash');
-        mkdirSync(trashRoot, { recursive: true });
-        moveOrCopy(targetDir, join(trashRoot, `${manifest.id}-${ts}`));
-      }
+      fsyncDir(targetDir); fsyncDir(tmpDir);
+      this.opts.fault?.('installer:after-carry');
     }
 
-    // 3. Atomic rename — this is the chokidar trigger. tmpDir lives
-    //    alongside targetDir under appsDir so the rename is in-fs.
-    renameSync(tmpDir, targetDir);
-
-    // 4. Write the install record. Stored under data/, NOT in the app
-    //    dir (keeps the app dir reproducible across publishes).
-    let record = buildInstallRecord(manifest, resolved, ts, this.opts.scope, link, upstreamOf(targetDir, manifest));
+    // 3. The record the switch makes true, journaled with the switch.
+    let record = buildInstallRecord(manifest, resolved, ts, this.opts.scope, link, upstreamOf(tmpDir, manifest));
     // A patched tree (Track P) is still the release it was built from: keep
     // where that came from, so the store still knows its source and updates.
     if (opts.keepProvenance && previous) {
@@ -98,11 +137,146 @@ export class Installer {
     }
     // The owner's source-mode choice belongs to the installation, not the release.
     if (previous?.sourceMode) record.sourceMode = previous.sourceMode;
-    const recordPath = join(this.opts.dataDir, 'nexus', 'installed', `${manifest.id}.json`);
-    mkdirSync(dirname(recordPath), { recursive: true });
-    writeFileSync(recordPath, JSON.stringify(record, null, 2));
+    // What a patched tree was built from (D68 reproducibility): only this install's, never carried over.
+    delete record.patched;
+    if (opts.extra?.patched) record.patched = opts.extra.patched;
+    j.phase = 'exchange';
+    j.newIno = statSync(tmpDir).ino;
+    j.record = record;
+    this.writeJournal(j);
 
+    // 4. The switch: one atomic exchange (an update) or rename (a new app).
+    //    This is the chokidar trigger point.
+    this.exchange(tmpDir, targetDir, j.hadTarget);
+    this.opts.fault?.('installer:after-exchange');
+    j.phase = 'switched';
+    this.writeJournal(j);
+
+    // 5. Record, old tree to trash, journal gone.
+    this.finish(j);
     return record;
+  }
+
+  // ── atomic switch: helper, journal, recovery ──────────────────────────────
+
+  private probed: { ok: boolean; reason?: string } | null = null;
+
+  /**
+   * Whether installs can switch atomically here: the helper exists and the
+   * apps dir's filesystem does RENAME_EXCHANGE. Probed once per installer.
+   */
+  probeAtomic(): { ok: boolean; reason?: string } {
+    if (this.probed) return this.probed;
+    const helper = this.opts.exchangeHelper ?? RENAME_EXCHANGE_IMAGE_PATH;
+    mkdirSync(this.opts.appsDir, { recursive: true });
+    const r = spawnSync(helper, ['probe', this.opts.appsDir], { encoding: 'utf8', timeout: 10_000 });
+    if (r.error) {
+      this.probed = { ok: false, reason: `the exchange helper ${helper} is missing (${(r.error as NodeJS.ErrnoException).code ?? r.error.message}): rebuild the AuraOS image` };
+    } else if (r.status === EXCHANGE_UNSUPPORTED) {
+      this.probed = { ok: false, reason: `the filesystem of ${this.opts.appsDir} does not support an atomic exchange (renameat2 RENAME_EXCHANGE): use ext4, xfs, btrfs or tmpfs` };
+    } else if (r.status !== 0) {
+      this.probed = { ok: false, reason: `the exchange probe on ${this.opts.appsDir} failed: ${(r.stderr || '').trim() || `exit ${String(r.status)}`}` };
+    } else {
+      this.probed = { ok: true };
+    }
+    return this.probed;
+  }
+
+  private assertAtomic(): void {
+    const p = this.probeAtomic();
+    if (!p.ok) throw new InstallAtomicityError(`${INSTALL_NOT_ATOMIC}: installs are refused: ${p.reason}`);
+  }
+
+  private helper(args: string[]): void {
+    const helper = this.opts.exchangeHelper ?? RENAME_EXCHANGE_IMAGE_PATH;
+    const r = spawnSync(helper, args, { encoding: 'utf8', timeout: 120_000 });
+    if (r.error || r.status !== 0) {
+      const why = r.error ? r.error.message : (r.stderr || '').trim() || `exit ${String(r.status)}`;
+      throw r.status === EXCHANGE_UNSUPPORTED ? new InstallAtomicityError(`${INSTALL_NOT_ATOMIC}: ${why}`) : new Error(`${args[0]} failed: ${why}`);
+    }
+  }
+
+  private exchange(tmp: string, target: string, hadTarget: boolean): void {
+    this.helper([hadTarget ? 'exchange' : 'rename', tmp, target]);
+  }
+
+  /** Everything written under `dir`, durable (syncfs of its filesystem). */
+  private syncfs(dir: string): void { this.helper(['syncfs', dir]); }
+
+  private journalDir(): string { return join(this.opts.dataDir, 'nexus', 'journal'); }
+
+  private writeJournal(j: InstallJournal): void {
+    mkdirSync(this.journalDir(), { recursive: true });
+    writeDurable(join(this.journalDir(), `${j.appId}.json`), JSON.stringify(j, null, 2));
+  }
+
+  private dropJournal(appId: string): void {
+    try { unlinkSync(join(this.journalDir(), `${appId}.json`)); } catch { /* gone */ }
+    fsyncDir(this.journalDir());
+  }
+
+  /** After the switch: the record, the old tree to trash, the journal removed. */
+  private finish(j: InstallJournal): void {
+    mkdirSync(dirname(j.recordPath), { recursive: true });
+    if (j.record) writeDurable(j.recordPath, JSON.stringify(j.record, null, 2));
+    this.opts.fault?.('installer:after-record');
+    if (j.hadTarget && existsSync(j.tmp)) {
+      if (readdirSafe(j.tmp).length === 0) {
+        // Only data was left (an uninstall keeps it): nothing to keep in trash.
+        rmSync(j.tmp, { recursive: true, force: true });
+      } else {
+        mkdirSync(dirname(j.trash), { recursive: true });
+        moveOrCopy(j.tmp, j.trash);
+        fsyncDir(dirname(j.trash));
+      }
+      fsyncDir(dirname(j.tmp));
+    }
+    this.dropJournal(j.appId);
+  }
+
+  /**
+   * Boot recovery: finish or undo every install a crash interrupted. Before
+   * the switch: the carried data goes back into apps/<id> and the new tree
+   * is deleted (the old app, complete). After it: the record is written and
+   * the old tree goes to trash (the new app, complete). Never throws for one
+   * journal; returns what happened to each.
+   */
+  reconcile(): Array<{ appId: string; outcome: 'undone' | 'completed' | 'failed'; detail?: string }> {
+    const out: Array<{ appId: string; outcome: 'undone' | 'completed' | 'failed'; detail?: string }> = [];
+    for (const name of readdirSafe(this.journalDir())) {
+      if (!name.endsWith('.json')) continue;
+      let j: InstallJournal;
+      try { j = JSON.parse(readFileSync(join(this.journalDir(), name), 'utf8')) as InstallJournal; }
+      catch (err) { out.push({ appId: basename(name, '.json'), outcome: 'failed', detail: `unreadable journal: ${(err as Error).message}` }); continue; }
+      try {
+        if (!APP_ID_PATTERN.test(j.appId) || j.target !== join(this.opts.appsDir, j.appId) || dirname(j.tmp) !== this.opts.appsDir
+          || !basename(j.tmp).startsWith(`${j.appId}.tmp.`)) {
+          throw new Error('journal paths do not belong to this scope');
+        }
+        const switched = j.phase === 'switched'
+          || (j.phase === 'exchange' && j.newIno !== undefined && existsSync(j.target) && statSync(j.target).ino === j.newIno);
+        if (switched) {
+          this.finish(j);
+          out.push({ appId: j.appId, outcome: 'completed' });
+          continue;
+        }
+        // Not switched: the old tree is in place; its data goes back.
+        if (existsSync(j.tmp)) {
+          for (const entry of j.carried) {
+            const from = join(j.tmp, entry), to = join(j.target, entry);
+            if (existsSync(from) && !existsSync(to) && existsSync(j.target)) renameSync(from, to);
+          }
+          if (existsSync(j.target)) fsyncDir(j.target);
+          rmSync(j.tmp, { recursive: true, force: true });
+          fsyncDir(dirname(j.tmp));
+        }
+        this.dropJournal(j.appId);
+        out.push({ appId: j.appId, outcome: 'undone' });
+      } catch (err) {
+        out.push({ appId: j.appId, outcome: 'failed', detail: (err as Error).message });
+      }
+    }
+    return out;
   }
 
   /**
@@ -374,6 +548,30 @@ export function carryOverRuntimeData(oldDir: string, newDir: string, appId: stri
     moved.push(name);
   }
   return moved;
+}
+
+/** Write a file so it survives a crash: temp file, fsync, rename, fsync the dir. */
+function writeDurable(path: string, data: string): void {
+  const tmp = `${path}.tmp-${process.pid}`;
+  const fd = openSync(tmp, 'w', 0o644);
+  try { writeFileSync(fd, data); fsyncSync(fd); } finally { closeSync(fd); }
+  renameSync(tmp, path);
+  fsyncDir(dirname(path));
+}
+
+/** fsync a directory (its entries: renames and creations in it are durable). */
+function fsyncDir(dir: string): void {
+  let fd: number | null = null;
+  try { fd = openSync(dir, 'r'); fsyncSync(fd); } catch { /* gone or not a dir */ } finally { if (fd !== null) closeSync(fd); }
+}
+
+/** The staging tree into `dst` (missing): a rename on one filesystem, else a copy. */
+function moveOrSync(src: string, dst: string): void {
+  try { renameSync(src, dst); }
+  catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EXDEV') throw err;
+    rsyncOrCp(src, dst);
+  }
 }
 
 function rsyncOrCp(src: string, dst: string): void {
