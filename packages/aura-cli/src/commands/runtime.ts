@@ -27,6 +27,8 @@ export interface RuntimeView {
   settingsSchema: { properties: Record<string, SettingsField> };
   settings: Record<string, unknown>;
   capabilities: Record<string, unknown>;
+  /** D100 §12 (5b): technical feasibility; absent from an older shell. */
+  features?: Array<{ id: string; support: 'supported' | 'conditional' | 'unsupported'; applyMode?: string; constraints?: Record<string, unknown> }>;
   health: { status: 'ok' | 'unavailable'; detail?: string };
   instances: Array<{ instanceId: string; appId: string; state: string; source?: string }>;
 }
@@ -61,6 +63,13 @@ export const CAPABILITY_LABELS: Record<string, string> = {
   usage: 'Usage metering',
   gpu: 'GPU',
 };
+
+/** A feature row for people: support, how a change applies, its constraints. */
+export function featureText(f: NonNullable<RuntimeView['features']>[number]): string {
+  const support = f.support === 'supported' ? color.green('supported') : f.support === 'conditional' ? color.yellow('conditional') : color.dim('unsupported');
+  const extra = [f.applyMode, ...Object.entries(f.constraints ?? {}).map(([k, v]) => `${k}=${String(v)}`)].filter(Boolean);
+  return extra.length ? `${support} ${color.dim(`(${extra.join(', ')})`)}` : support;
+}
 
 /** A capability value for people: booleans as yes/no, with the fail-closed note. */
 export function capabilityText(key: string, v: unknown): string {
@@ -134,6 +143,10 @@ async function show(id: string): Promise<void> {
   if (r.id === 'proot') console.log(`AURA_USE_PROOT: ${s.useProotEnv ?? color.dim('(unset)')} ${color.dim('(on the container, read-only)')}`);
   console.log('\ncapabilities:');
   for (const [k, v] of Object.entries(r.capabilities)) console.log(`  ${(CAPABILITY_LABELS[k] ?? k).padEnd(30)} ${capabilityText(k, v)}`);
+  if (r.features?.length) {
+    console.log(`\nfeatures ${color.dim('(what it can do technically; grants and permissions still decide)')}:`);
+    for (const f of r.features) console.log(`  ${f.id.padEnd(30)} ${featureText(f)}`);
+  }
   const fields = Object.entries(r.settingsSchema.properties);
   console.log('\nsettings:');
   if (!fields.length) console.log(color.dim('  (none)'));

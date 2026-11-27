@@ -19,7 +19,7 @@
  * Registration refuses a module this kernel must not load (`ariRefusal`:
  * an ARI above `ARI_VERSION`, a bad id or descriptor, a duplicate id).
  */
-import { ariRefusal, healthRefusal, type RuntimeDescriptor, type RuntimeHealth, type RuntimeModule } from './ari.js';
+import { ariRefusal, healthRefusal, moduleFeatures, type RuntimeDescriptor, type RuntimeFeature, type RuntimeHealth, type RuntimeModule } from './ari.js';
 import type { SandboxRunner } from '../app-manager/SandboxRunner.js';
 import { requirementsOf, type RequirementsManifest } from './requirements.js';
 import { RuntimeSettingsError, settingsDefaults, validateSettings } from './settingsSchema.js';
@@ -162,6 +162,11 @@ export class RuntimeRegistry {
   /** The capabilities of a runtime under its current settings. */
   capabilitiesOf(id: string, record: RuntimeSettingsRecord | null): RuntimeCapabilities {
     return this.require(id).capabilities(this.settingsOf(id, record));
+  }
+
+  /** A runtime's features under its current settings (D100 §12): technical feasibility, never authorization. */
+  featuresOf(id: string, record: RuntimeSettingsRecord | null): RuntimeFeature[] {
+    return moduleFeatures(this.require(id), this.settingsOf(id, record));
   }
 
   /**

@@ -80,7 +80,7 @@ test('ARI refusal: a newer ARI, a bad id, a non-semver version or a missing sett
   assert.equal(ariRefusal({ ...ok, ari: 0 })?.code, 'invalid-descriptor');
   const reg = registry();
   assert.throws(() => reg.register(containerRuntime(runner(CONTAINER_CAPS))), (e) => e.code === 'runtime-duplicate' && /already registered/.test(e.message));
-  assert.deepEqual(runtimeRefusal(newer), { code: 'ari-unsupported', message: newer.message, runtime: 'good' });
+  assert.deepEqual(runtimeRefusal(newer), { code: 'ari-unsupported', category: 'unsupported-operation', message: newer.message, runtime: 'good' });
 });
 
 test('BUILTIN_RUNTIMES: container and proot, each with version, ari and settings version; AppManager registers exactly these', () => {
@@ -238,7 +238,7 @@ test('suggest: a sidecar app on PRoot names sidecars and suggests container; not
   assert.deepEqual(err.missing, ['sidecars']);
   assert.deepEqual(err.suggest, ['container']);
   assert.match(err.message, /it could run on: container$/);
-  assert.deepEqual(runtimeRefusal(err), { code: 'capability-missing', message: err.message, runtime: 'proot', missing: ['sidecars'], suggest: ['container'] });
+  assert.deepEqual(runtimeRefusal(err), { code: 'capability-missing', category: 'unsupported-feature', message: err.message, runtime: 'proot', missing: ['sidecars'], suggest: ['container'] });
   // Nothing can: the message says so. A disabled runtime is never suggested.
   assert.deepEqual(reg.suggest({ gpu: true }, rec), []);
   assert.equal(suggestText([]), '; no installed runtime can run it');
@@ -273,4 +273,38 @@ test('D89: a spawn context or spec without instanceToken does not compile', () =
       '--target', 'ES2022', file], { encoding: 'utf-8' });
     assert.equal(r.status, 0, r.stdout + r.stderr);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ── D100 K addendum: features, error categories, operation results ──────────
+
+test('D100 §12: featuresOf is one derived table over every feature id; overrides refine it', async () => {
+  const { featuresOf, RUNTIME_FEATURE_IDS } = await import('../dist/index.js');
+  const caps = ContainerRunner.prototype.capabilities.call({});
+  const fs = featuresOf(caps);
+  assert.equal(fs.length, RUNTIME_FEATURE_IDS.length);
+  assert.equal(fs.find((f) => f.id === 'instance.adoption').support, 'supported');
+  assert.equal(fs.find((f) => f.id === 'mount.live').applyMode, 'live');
+  const prootFs = featuresOf(ProotRunner.prototype.capabilities.call({}, {}));
+  assert.equal(prootFs.find((f) => f.id === 'instance.adoption').support, 'unsupported');
+  assert.equal(prootFs.find((f) => f.id === 'workload.dynamic').support, 'unsupported');
+  const advisory = featuresOf(caps, { 'tools.liveRevoke': { support: 'conditional', constraints: { enforcement: 'advisory' } } });
+  assert.deepEqual(advisory.find((f) => f.id === 'tools.liveRevoke'), { id: 'tools.liveRevoke', support: 'conditional', applyMode: 'live', constraints: { enforcement: 'advisory' } });
+});
+
+test('D100 §17: every refusal code has exactly one category', async () => {
+  const { CATEGORY_OF_CODE } = await import('../dist/index.js');
+  const cats = new Set(['unsupported-operation', 'unsupported-feature', 'permission-denied', 'runtime-unavailable', 'instance-not-found',
+    'resource-exhausted', 'restart-required', 'recreate-required', 'provisioning-failed', 'enforcement-failed', 'operation-timeout',
+    'operation-cancelled', 'conflict']);
+  for (const [code, cat] of Object.entries(CATEGORY_OF_CODE)) assert.ok(cats.has(cat), `${code} -> ${cat}`);
+  assert.equal(CATEGORY_OF_CODE['runtime-disabled'], 'runtime-unavailable');
+});
+
+test('D100 §13: an operation result is plain data with a terminal state and a categorized error', async () => {
+  const { operationResult } = await import('../dist/index.js');
+  const a = operationResult('tools.liveGrant', { instanceId: 'i-1' }, 'applied', { detail: { mode: 'hardlink' } });
+  const b = operationResult('tools.liveGrant', { instanceId: 'i-1' }, 'failed', { error: { code: 'provisioning-failed', message: 'x' } });
+  assert.notEqual(a.opId, b.opId);
+  assert.deepEqual(JSON.parse(JSON.stringify(b)), b);
+  assert.equal(b.error.category, 'provisioning-failed');
 });

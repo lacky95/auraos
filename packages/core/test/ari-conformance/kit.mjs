@@ -16,7 +16,7 @@ import assert from 'node:assert/strict';
 import {
   ARI_VERSION, RUNTIME_ID_PATTERN, RUNTIME_VERSION_PATTERN, RUNTIME_CAPABILITY_KEYS, RUNTIME_BOOLEAN_CAPABILITIES,
   RuntimeRegistry, RuntimeCapabilityError, builtInRuntimeRecord, settingsDefaults, validateSettings, healthRefusal,
-  requirementsOf, runtimeRefusal,
+  requirementsOf, runtimeRefusal, RUNTIME_FEATURE_IDS, moduleFeatures, CATEGORY_OF_CODE,
 } from '../../dist/index.js';
 
 const plain = (v) => JSON.parse(JSON.stringify(v));
@@ -58,6 +58,19 @@ export function describeRuntime(name, makeModule, harness = {}) {
       assert.ok(['shell-netns', 'bridge', 'remote'].includes(caps.network));
       assert.equal(caps.gpu, false, 'gpu is reserved');
       assert.deepEqual(plain(caps), caps);
+    }
+  });
+
+  test(`[ARI ${name}] features: exhaustive over RUNTIME_FEATURE_IDS, valid values, plain data (D100 §12)`, () => {
+    const m = makeModule();
+    for (const settings of settingsList()) {
+      const fs = moduleFeatures(m, settings);
+      assert.deepEqual(fs.map((f) => f.id), [...RUNTIME_FEATURE_IDS]);
+      for (const f of fs) {
+        assert.ok(['supported', 'conditional', 'unsupported'].includes(f.support), f.id);
+        if (f.applyMode) assert.ok(['live', 'restart-required', 'recreate-required'].includes(f.applyMode), f.id);
+      }
+      assert.deepEqual(plain(fs), fs);
     }
   });
 
@@ -116,7 +129,8 @@ export function describeRuntime(name, makeModule, harness = {}) {
       const manifest = { id: 'org.k.app', sandbox: m.descriptor.id, ...extra };
       assert.ok(requirementsOf(manifest, { sourceMode }).capabilities.includes(cap), `${cap} is derived`);
       assert.throws(() => reg.resolve({ manifest, installationId: 'i', sourceMode, record: rec }),
-        (e) => e instanceof RuntimeCapabilityError && e.code === 'capability-missing' && e.missing.includes(cap) && Array.isArray(e.suggest),
+        (e) => e instanceof RuntimeCapabilityError && e.code === 'capability-missing' && e.missing.includes(cap) && Array.isArray(e.suggest)
+          && runtimeRefusal(e)?.category === CATEGORY_OF_CODE['capability-missing'],
         `${cap} fails closed`);
     }
   });
