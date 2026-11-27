@@ -32,7 +32,7 @@ import { installGate, runInstall } from '../../../lib/approvals/nexus.ts';
  * `force` replaces an app that is a dev checkout (`aura dev checkout`); without
  * it such an install fails rather than overwriting the working tree.
  */
-export const POST: APIRoute = async ({ request }) => {
+export const POST: APIRoute = async ({ request, locals }) => {
   const principal = await authenticate(request);
   if (principal instanceof Response) return principal;
   const body = await request.json().catch(() => ({})) as {
@@ -57,5 +57,5 @@ export const POST: APIRoute = async ({ request }) => {
   return runInstall(getNexusManager().install({
     ref: body.ref, scope, approval: gate.approval,
     ...(identity ? { identity } : {}), ...(body.force === true ? { replaceCheckout: true } : {}),
-  }), gate);
+  }), gate, undefined, { request, locals });
 };

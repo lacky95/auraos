@@ -327,6 +327,28 @@ export type ApprovalRefusal =
    */
   | 'stale';
 
+/**
+ * What each refusal says (D105 Pass B, review row 26): one sentence and, when
+ * someone can do something about it, the step. The shell's answers and the
+ * CLI read this one table; a new refusal without text fails the typecheck.
+ * Never which factor of a fresh check failed, and never someone else's
+ * request (`not-found` stays one class).
+ */
+export const APPROVAL_REFUSAL_TEXT: Readonly<Record<ApprovalRefusal | 'not-a-requester', { message: string; hint?: string }>> = {
+  'not-found': { message: 'There is no such approval request for you.' },
+  expired: { message: 'The approval request expired without an answer.', hint: 'Ask again (run the command again).' },
+  'wrong-state': { message: 'The approval request is already decided, used or withdrawn.', hint: 'Ask again for a new approval.' },
+  mismatch: { message: 'The approval belongs to a different request: the retried request differs from the approved one.', hint: 'Send exactly the approved request, or ask again.' },
+  'needs-fresh-auth': { message: 'This approval needs the owner\'s password.', hint: 'Approve it in the AuraOS desktop with your password, or on the host: aura approve <approval id>.' },
+  'not-a-decider': { message: 'Only the owner (or the host operator) decides approval requests.' },
+  'not-a-requester': { message: 'Only the app or user that asked may use or withdraw this approval request.' },
+  'too-many-pending': { message: 'An earlier request is still waiting for the owner (or on hold in the desktop): withdraw it or wait.' },
+  'rate-limited': { message: 'Too many approval requests in the last minute.', hint: 'Retry in a minute.' },
+  blocked: { message: 'The owner blocked approval requests from this app.', hint: 'The owner lifts the block on the host: aura approve --unblock <app id>.' },
+  'not-deferrable': { message: 'This request must be decided now: approve or deny it.' },
+  stale: { message: 'This request is no longer valid and was cancelled. Ask again.' },
+};
+
 export type ApprovalResult =
   /** `resumed` (create only): the requester's own open request for the same thing (D102). */
   | { ok: true; record: ApprovalRecord; resumed?: boolean }

@@ -1,7 +1,7 @@
 import type { APIRoute } from 'astro';
 import { getAppManager, OsEventBus } from '@aura/core';
 import type { AppActivity } from '@aura/core';
-import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
+import { jsonResponse, errorResponse, failureResponse } from '../../../../lib/appResponse.js';
 
 /**
  * Jump to a specific entry in the activity's back stack — the operation
@@ -17,7 +17,7 @@ import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
  * Emits a single `activity:navigated { fromHistory: true }` so the shell
  * rerenders the slot iframe + chrome in one event regardless of stack depth.
  */
-export const POST: APIRoute = async ({ params, request }) => {
+export const POST: APIRoute = async ({ params, request, locals }) => {
   const raw = params['activityId'];
   if (!raw) return errorResponse('Missing activity id', 400);
   const activityId = decodeURIComponent(raw);
@@ -71,6 +71,6 @@ export const POST: APIRoute = async ({ params, request }) => {
     } as never);
     return jsonResponse({ ok: true, activityId, index: targetIndex });
   } catch (err) {
-    return errorResponse(`back-to failed: ${(err as Error).message}`, 500);
+    return failureResponse({ request, locals }, err, { what: 'back-to failed', status: 500 });
   }
 };

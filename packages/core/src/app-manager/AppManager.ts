@@ -55,6 +55,7 @@ import { migrateLegacyRuntimes, migrationReport, processLegacyEnv, type Migratio
 import { defaultRedis } from '@aura/kv-store';
 import { AdminAudit } from '../auth/AdminAudit.js';
 import { CONTRACT_AUDIT_ACTIONS, operationalBlock, OperationalBlockError, operationalBlockOf, type OperationalBlock } from '../contract/types.js';
+import { AuraError } from '../errors/auraError.js';
 import type { AuthServices } from '../auth/services.js';
 import { defaultIdentityKeyFile } from '../auth/identityKey.js';
 import { HomeDeniedError, type HomeResolver, type ResolvedHome } from '../homes/types.js';
@@ -190,6 +191,15 @@ export function adoptedIdentity(user: string | undefined): Pick<AppInstance, 'ru
   // A user's uid (the owner, a member): a System Terminal session host (stream T).
   const range = linuxIdRangeOf(uid);
   return { runAs: range === 'owner' || range === 'user' ? 'user' : 'app', uid, gid };
+}
+
+/** A disabled app refuses launches: 409 `app-disabled` with the way to enable it (D105 Pass B, review row 24). */
+function appDisabledError(appId: string): AuraError {
+  return new AuraError(409, {
+    error: 'app-disabled', category: 'conflict', target: appId,
+    message: `App ${appId} is disabled.`,
+    hint: `Enable it from Settings → Apps or run \`aura enable app ${appId}\`.`,
+  });
 }
 
 /** The auth services the kernel uses, as the composition point hands them in. */
@@ -1097,7 +1107,7 @@ export class AppManager {
     const p = manifest.ports;
     if (!p || (!p.exposes?.length && !p.hostPublish?.length)) return [];
     if (!this.permissions.hasPermission(manifest.id, 'apps.port')) {
-      console.warn(`[AppManager] ${manifest.id} declares ports but lacks 'apps.port' — ignoring`);
+      console.warn(`[AppManager] ${manifest.id} declares ports but lacks 'apps.port' — ignoring (aura grant perms ${manifest.id} apps.port; aura dev validate reports it)`);
       return [];
     }
     const specs: ExposeSpec[] = [];
@@ -2260,7 +2270,7 @@ export class AppManager {
     if (!manifest) throw new Error(`App not found: ${appId}`);
     // Disabled apps refuse launches. Same error class as a missing manifest
     // so callers (HTTP layer, intent dispatcher) translate it uniformly.
-    if (!this.isEnabled(appId)) throw new Error(`App ${appId} is disabled. Enable it from Settings → Apps or run \`aura enable app ${appId}\`.`);
+    if (!this.isEnabled(appId)) throw appDisabledError(appId);
 
     if (manifest.instanceMode === 'single') {
       // Filter out inPool members from existing-instance reuse — pool members
@@ -2461,7 +2471,7 @@ export class AppManager {
           `Instance "${intent.instanceId}" is ${inst.state}.`,
           'Omit instanceId to let the OS pick, or send NEW_INSTANCE.');
       }
-      if (!this.isEnabled(appId)) throw new Error(`App ${appId} is disabled. Enable it from Settings → Apps or run \`aura enable app ${appId}\`.`);
+      if (!this.isEnabled(appId)) throw appDisabledError(appId);
       if (inst.state === 'paused' || inst.state === 'stopped') await this.resume(inst.instanceId);
       return inst.instanceId;
     }
@@ -2489,7 +2499,7 @@ export class AppManager {
         (i) => !i.inPool && i.state !== 'destroyed' && i.state !== 'error' && i.state !== 'destroying',
       );
       if (reuse) {
-        if (!this.isEnabled(appId)) throw new Error(`App ${appId} is disabled. Enable it from Settings → Apps or run \`aura enable app ${appId}\`.`);
+        if (!this.isEnabled(appId)) throw appDisabledError(appId);
         if (reuse.state === 'paused' || reuse.state === 'stopped') await this.resume(reuse.instanceId);
         return reuse.instanceId;
       }
@@ -2516,7 +2526,7 @@ export class AppManager {
     if (manifest.componentType !== 'service') {
       throw new Error(`startService called for non-service app ${appId} (componentType='${manifest.componentType}')`);
     }
-    if (!this.isEnabled(appId)) throw new Error(`Service ${appId} is disabled.`);
+    if (!this.isEnabled(appId)) throw appDisabledError(appId);
     const existing = this.getInstancesByApp(appId).find(
       (i) => i.state !== 'destroyed' && i.state !== 'error',
     );

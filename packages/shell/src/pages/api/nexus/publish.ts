@@ -1,6 +1,7 @@
 import type { APIRoute } from 'astro';
 import { getAppManager, getNexusManager } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../lib/appResponse.js';
+import { nexusFailure } from '../../../lib/nexusErrors.ts';
 import { resolveCaller } from '../../../lib/auth.ts';
 import { mountedSourcePath, type ScopedApp } from '../../../lib/appSource.ts';
 
@@ -33,7 +34,7 @@ async function shellPath(request: Request, path: string): Promise<string> {
  * `to` is the noun-group convenience: for oci it maps to `registry`, for git
  * to `repo`. Explicit `registry`/`repo` win over `to`.
  */
-export const POST: APIRoute = async ({ request }) => {
+export const POST: APIRoute = async ({ request, locals }) => {
   const body = await request.json().catch(() => ({})) as {
     path?:    string;
     source?:  'git' | 'oci';
@@ -106,6 +107,6 @@ export const POST: APIRoute = async ({ request }) => {
 
     return jsonResponse({ ok: true, source: 'oci', result, messages });
   } catch (err) {
-    return errorResponse((err as Error).message, 500);
+    return nexusFailure({ request, locals }, err);
   }
 };

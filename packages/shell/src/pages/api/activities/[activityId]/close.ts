@@ -1,6 +1,6 @@
 import type { APIRoute } from 'astro';
 import { getAppManager } from '@aura/core';
-import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
+import { jsonResponse, errorResponse, failureResponse } from '../../../../lib/appResponse.js';
 import { describeClose } from '../../../../lib/activityClose.js';
 
 /**
@@ -8,7 +8,7 @@ import { describeClose } from '../../../../lib/activityClose.js';
  * Answers `{ closed, close }`: what the close did (lib/activityClose.ts), from
  * which the desktop asks about a background process left running (D101).
  */
-export const POST: APIRoute = async ({ params }) => {
+export const POST: APIRoute = async ({ params, request, locals }) => {
   const raw = params['activityId'];
   if (!raw) return errorResponse('Missing activity id', 400);
   // Astro doesn't auto-decode dynamic path segments — activityIds contain '#'
@@ -17,6 +17,6 @@ export const POST: APIRoute = async ({ params }) => {
     const close = await describeClose(await getAppManager().closeActivity(activityId));
     return jsonResponse({ closed: activityId, close });
   } catch (err) {
-    return errorResponse(String(err), 500);
+    return failureResponse({ request, locals }, err);
   }
 };

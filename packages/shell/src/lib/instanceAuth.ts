@@ -1,7 +1,7 @@
 import { getAppManager, type AccessPrincipal, type ExecBridgeError } from '@aura/core';
 import * as core from '@aura/core';
 import { capabilityRefusal, refusalResponse } from './runtimeCaps.ts';
-import { errorResponse, jsonResponse } from './appResponse.js';
+import { errorResponse, jsonResponse, redactInternal } from './appResponse.js';
 import type { AuraErrorBody } from '@aura/core';
 import { isOwnerPrincipal, isTrustedOwnerAgent } from './access/identify.ts';
 
@@ -67,14 +67,30 @@ export function sidecarError(err: unknown): Response {
   const { status, code, body } = (err ?? {}) as { status?: unknown; code?: unknown; body?: AuraErrorBody };
   const message = err instanceof Error ? err.message : String(err);
   // A refusal that carries its D105 body (e.g. B12 sidecar-identity-conflict) answers it as is.
-  if (typeof status === 'number' && body && typeof body.error === 'string' && typeof body.message === 'string') return errorResponse(status, body);
+  if (typeof status === 'number' && body && typeof body.error === 'string' && typeof body.message === 'string') return errorResponse(status, grantableHint(body));
   if (typeof status === 'number') {
     return typeof code === 'string' && /^[a-z_]{1,32}$/.test(code)
       ? errorResponse(status, { error: code, message }) : errorResponse(message, status);
   }
-  if (/no OS sidecar|not mounted|not found/i.test(message)) return errorResponse(message, 404);
-  if (/already mounted|unavailable|refusing|inherited from|no mount root/i.test(message)) return errorResponse(message, 409);
-  return errorResponse(message, 500);
+  // Anything else is the runtime's own text (docker stderr): the app reads it without host paths (review §4.4 rule 5).
+  const safe = redactInternal(message);
+  if (/no OS sidecar|not mounted|not found/i.test(message)) return errorResponse(safe, 404);
+  if (/already mounted|unavailable|refusing|inherited from|no mount root/i.test(message)) return errorResponse(safe, 409);
+  return errorResponse(safe, 500);
+}
+
+/**
+ * A system app's permissions ship with AuraOS: `aura grant perms` refuses
+ * them, so its missing permission is named without a grant command (review
+ * §4.4 rule 2, as the access layer's refusals).
+ */
+function grantableHint(body: AuraErrorBody): AuraErrorBody {
+  if (!body.permission || body.holder !== 'caller' || !body.target) return body;
+  let scope: string | undefined;
+  try { scope = getAppManager().registry.getScopeId(body.target); } catch { scope = undefined; }
+  if (scope !== 'system') return body;
+  const { hint: _hint, ...rest } = body;
+  return { ...rest, category: 'not-grantable', message: `${body.message} (a system app: its permissions ship with AuraOS)` };
 }
 
 /** Parse a JSON body or return a 400 Response. */

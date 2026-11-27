@@ -95,6 +95,13 @@ export function classifyHealthIdentity(rawBody: string, expectedAppId: string, e
 }
 
 /**
+ * The fix the start refusals name (D105 Pass B, review row 31): what the app
+ * returns, from the SDK it already uses.
+ */
+export const HEALTH_IDENTITY_HINT = 'return healthResponse() from @aura/app-sdk on the health route (it answers {ok, appId, instanceId}; docs: The Aura app contract)';
+export const LIFECYCLE_GUARD_HINT = 'serve /api/lifecycle/* through the @aura/app-sdk integration (or its runtime/lifecycle-guard for a raw server), which checks the lifecycle token (docs: The Aura app contract)';
+
+/**
  * Whether the start may go on with this health identity. Partial or
  * mismatched fails in every mode; legacy passes only in `warn` and only for a
  * known legacy app. Returns the refusal reason, or null to admit.
@@ -105,11 +112,11 @@ export function healthIdentityRefusal(id: HealthIdentity, appId: string, instanc
       return null;
     case 'legacy':
       if (mode === 'warn' && KNOWN_LEGACY_HEALTH_APPS.has(appId)) return null;
-      return `health identity missing for ${instanceId} (${mode} mode${mode === 'warn' ? `, ${appId} is not a known legacy app` : ''})`;
+      return `health identity missing for ${instanceId} (${mode} mode${mode === 'warn' ? `, ${appId} is not a known legacy app` : ''}) — ${HEALTH_IDENTITY_HINT}`;
     case 'partial':
     case 'mismatch':
       return `health identity mismatch for ${instanceId}: expected appId=${appId} instanceId=${instanceId}, ` +
-        `got appId=${id.claimedApp} instanceId=${id.claimedInstance}`;
+        `got appId=${id.claimedApp} instanceId=${id.claimedInstance} — ${HEALTH_IDENTITY_HINT}`;
   }
 }
 
@@ -168,7 +175,7 @@ export function lifecycleStatusRefusal(instanceId: string, status: LifecycleStat
     status.guard === 'accepted-wrong-token' ? 'app does not check the lifecycle token (health accepted a wrong token)'
       : status.guard === 'inconclusive' ? 'lifecycle token check inconclusive (health with a wrong token gave no 401)' : null,
   ].filter(Boolean).join('; ');
-  if (mode === 'strict') return `${instanceId}: ${what} (AURA_LIFECYCLE_STRICT=strict)`;
+  if (mode === 'strict') return `${instanceId}: ${what} (AURA_LIFECYCLE_STRICT=strict) — ${status.identity !== 'match' ? HEALTH_IDENTITY_HINT : LIFECYCLE_GUARD_HINT}`;
   console.warn(`[lifecycle] ${instanceId}: ${what} — admitted in warn mode`);
   return null;
 }

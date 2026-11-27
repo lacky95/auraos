@@ -57,6 +57,11 @@ export type SeriesBase  = z.infer<typeof BaseSchema>;
 export type SeriesPatch = z.infer<typeof PatchSchema>;
 export type Series      = z.infer<typeof SeriesSchema>;
 
+/** A repository URL without its credentials (`https://user:token@host/…` → `https://<redacted>@host/…`, D105 Pass B). */
+function withoutUserinfo(text: string): string {
+  return text.replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, '$1<redacted>@');
+}
+
 export class SeriesError extends Error {}
 
 // Nobody can answer a credential prompt here.
@@ -193,7 +198,7 @@ export function initRepo(dir: string, message: string): string | null {
  */
 export function baseCommitIn(repoDir: string, base: SeriesBase): string {
   const commit = tryGit(repoDir, ['rev-parse', '-q', '--verify', `${base.commit}^{commit}`]);
-  if (!commit) throw new SeriesError(`base commit ${base.commit.slice(0, 12)} is not in ${base.repository ?? repoDir}`);
+  if (!commit) throw new SeriesError(`base commit ${base.commit.slice(0, 12)} is not in ${base.repository ? withoutUserinfo(base.repository) : repoDir}`);
   if (!base.path) return commit;
   const tree = tryGit(repoDir, ['rev-parse', '-q', '--verify', `${commit}:${base.path}`]);
   if (!tree) throw new SeriesError(`${base.path} does not exist at ${commit.slice(0, 12)}`);
@@ -217,7 +222,7 @@ export function checkoutBase(dir: string, base: SeriesBase, opts: { timeout?: nu
     execFileSync('git', ['clone', '-q', '--no-checkout', base.repository, dir],
       { stdio: ['ignore', 'pipe', 'pipe'], timeout: opts.timeout ?? 600_000, env: GIT_ENV });
   } catch (err) {
-    throw new SeriesError(`could not clone ${base.repository}: ${gitError(err)}`);
+    throw new SeriesError(`could not clone ${withoutUserinfo(base.repository)}: ${withoutUserinfo(gitError(err))}`);
   }
   // A commit that is on no branch (e.g. only tagged) may need its own fetch.
   if (!tryGit(dir, ['rev-parse', '-q', '--verify', `${base.commit}^{commit}`])) {

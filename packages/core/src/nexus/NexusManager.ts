@@ -24,6 +24,7 @@ import { CatalogAggregator } from './CatalogAggregator.js';
 import { Installer, removeContained } from './Installer.js';
 import { NexusValidationError, validateStagedDir } from './Validator.js';
 import { operationalBlock, OperationalBlockError } from '../contract/types.js';
+import { AuraError } from '../errors/auraError.js';
 import { hostConflicts, isProtectedHostName, type HostClaim } from '../app-hosts/appHosts.js';
 import type { AppHostLifecycle, AppIdentityFacts, AppRestoreCheck } from '../app-hosts/lifecycle.js';
 import { fetchLocal } from './Fetchers/LocalFetcher.js';
@@ -129,6 +130,8 @@ export class NexusManager {
   private readonly resolver: Resolver;
   /** One installer per non-system scope. */
   private readonly installers: Map<ScopeId, Installer>;
+  /** Scopes that never take installs (system): refused as `scope-immutable`, not `scope-unknown`. */
+  private readonly immutableScopes = new Set<ScopeId>();
   private readonly rootDataDir: string;
   private readonly bus?: OsEventBus;
   /** Currently-known sources config. Snapshot from the singleton's load;
@@ -171,7 +174,7 @@ export class NexusManager {
     });
     this.installers    = new Map();
     for (const scope of opts.scopes) {
-      if (scope.immutable) continue;
+      if (scope.immutable) { this.immutableScopes.add(scope.id); continue; }
       this.installers.set(scope.id, new Installer({
         appsDir: scope.appsDir,
         dataDir: scope.dataDir,
@@ -390,7 +393,12 @@ export class NexusManager {
 
   private installerFor(scopeId: ScopeId): Installer {
     const inst = this.installers.get(scopeId);
-    if (!inst) throw new Error(`Cannot install into scope '${scopeId}' — it is immutable or unknown`);
+    if (!inst) {
+      // D105 Pass B: an immutable scope (system) and an unknown one are different answers.
+      throw this.immutableScopes.has(scopeId)
+        ? new AuraError(409, { error: 'scope-immutable', category: 'not-grantable', message: `Scope '${scopeId}' is immutable: apps are not installed into it.`, hint: 'Install into the user or global scope.' })
+        : new AuraError(404, { error: 'scope-unknown', category: 'invalid-input', message: `There is no scope '${scopeId}'.`, hint: 'aura get scopes lists the scopes.' });
+    }
     return inst;
   }
 
@@ -828,7 +836,7 @@ export class NexusManager {
     const current = this.getRecord(appId);
     if (!current) throw new Error(`'${appId}' is not installed`);
     const scope = (current.scope === 'system' ? undefined : current.scope);
-    if (!scope) throw new Error(`Cannot uninstall '${appId}' from system scope`);
+    if (!scope) throw new SystemAppRemovalError(appId);
     // Routes go first: if this fails, no data has moved or been deleted.
     if (opts.purge) await this.hostLifecycle?.retireApp(appId, scope);
     else await this.hostLifecycle?.reserveApp(appId, scope);

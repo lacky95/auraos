@@ -141,6 +141,58 @@ export const BUILTIN_PERMISSIONS = [
  */
 export const RESERVED_PERMISSION_NAMESPACES: readonly string[] = Object.freeze(['system.provider.']);
 
+/**
+ * The permission families an app may declare besides the built-in names: a
+ * content provider's `data:<authority>:<perm>` and the per-key grants (the
+ * same forms `auth/GrantStore.ts` checks: `context.read:<KEY>`,
+ * `credential.read:<NAME>`, `system.kv.os.<topic>.write`).
+ */
+const PERMISSION_FAMILIES: readonly RegExp[] = [
+  /^data:[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+:[A-Za-z0-9._-]+$/,
+  /^context\.read:[A-Z_][A-Z0-9_]{0,127}$/,
+  /^credential\.read:[A-Z_][A-Z0-9_]{0,63}$/,
+  /^system\.kv\.os\.[A-Za-z0-9_-]{1,128}\.write$/,
+];
+
+/**
+ * Whether AuraOS knows this permission (D105 Pass B, the catalogue check of
+ * `aura dev validate`, the contract report and `aura grant perms`).
+ * `permissions[]` stays a free string: an unknown name is a warning, since
+ * it grants nothing, never a refusal.
+ */
+export function isKnownPermission(p: string): boolean {
+  return (BUILTIN_PERMISSIONS as readonly string[]).includes(p) || PERMISSION_FAMILIES.some((re) => re.test(p));
+}
+
+/** The built-in permission an unknown name most likely means (at most two edits away), or null. */
+export function closestPermission(p: string): string | null {
+  return closestName(p, BUILTIN_PERMISSIONS);
+}
+
+/** The candidate a mistyped name most likely means (at most `max` edits away, ties: the first), or null. */
+export function closestName(name: string, candidates: Iterable<string>, max = 2): string | null {
+  let best: { name: string; d: number } | null = null;
+  for (const c of candidates) {
+    const d = editDistance(name, c, max);
+    if (d <= max && (!best || d < best.d)) best = { name: c, d };
+  }
+  return best?.name ?? null;
+}
+
+/** Levenshtein distance, cut off above `max` (returns max + 1). */
+function editDistance(a: string, b: string, max: number): number {
+  if (Math.abs(a.length - b.length) > max) return max + 1;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(prev[j]! + 1, cur[j - 1]! + 1, prev[j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[b.length]!;
+}
+
 export const PermissionSchema = z.string();
 export type Permission = z.infer<typeof PermissionSchema>;
 

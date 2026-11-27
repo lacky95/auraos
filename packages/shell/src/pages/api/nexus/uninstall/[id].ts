@@ -1,6 +1,7 @@
 import type { APIRoute } from 'astro';
 import { getAppManager, getNexusManager } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
+import { nexusFailure } from '../../../../lib/nexusErrors.ts';
 import { deleteHomeRefusal, deleteHomesAfterRemove, installationBeforeRemove } from '../../../../lib/homesAdmin.ts';
 
 /**
@@ -10,7 +11,7 @@ import { deleteHomeRefusal, deleteHomesAfterRemove, installationBeforeRemove } f
  * default; `?purge=1` removes it too. The App Homes are kept unless
  * `?deleteHome=1` (D65 §13: explicit keep or delete).
  */
-export const POST: APIRoute = async ({ params, url }) => {
+export const POST: APIRoute = async ({ params, url, request, locals }) => {
   const id = params['id'];
   if (!id) return errorResponse('missing app id', 400);
   const mgr   = getAppManager();
@@ -33,7 +34,7 @@ export const POST: APIRoute = async ({ params, url }) => {
     const homeDeleted = home ? await deleteHomesAfterRemove(id, home.installationId) : false;
     return jsonResponse({ ok: true, id, purged: purge, homeDeleted });
   } catch (err) {
-    return errorResponse((err as Error).message, 500);
+    return nexusFailure({ request, locals }, err);
   } finally {
     mgr.markUninstalling(id, false);
   }

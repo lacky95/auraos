@@ -1,7 +1,7 @@
 import type { APIRoute } from 'astro';
 import { getAppManager, OsEventBus, previewTitle } from '@aura/core';
 import type { AppActivity } from '@aura/core';
-import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
+import { jsonResponse, errorResponse, failureResponse } from '../../../../lib/appResponse.js';
 
 /**
  * In-place activity navigation — the "replace-current" launch mode.
@@ -18,7 +18,7 @@ import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
  * picks it up and updates the iframe `src` + view title in place — no new
  * layout slot is created.
  */
-export const POST: APIRoute = async ({ params, request }) => {
+export const POST: APIRoute = async ({ params, request, locals }) => {
   const raw = params['activityId'];
   if (!raw) return errorResponse('Missing activity id', 400);
   const activityId = decodeURIComponent(raw);
@@ -86,6 +86,6 @@ export const POST: APIRoute = async ({ params, request }) => {
     } as never);
     return jsonResponse({ ok: true, activityId, path: body.path, viaFallback: true });
   } catch (err) {
-    return errorResponse(`navigate failed: ${(err as Error).message}`, 500);
+    return failureResponse({ request, locals }, err, { what: 'navigate failed', status: 500 });
   }
 };

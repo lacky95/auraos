@@ -26,6 +26,31 @@ fi
 # Debian sonames shadow newer copies inside foreign images — e.g. a runtime's
 # own OpenSSL — breaking the app itself.
 
+# Why a command is missing in an app's sandbox (D105 Pass B): the OS writes
+# /aura/my-tools/.missing (`<name><TAB><state>`, see provisionAllowlist), and
+# bash calls this instead of printing a bare "command not found". Defined for
+# non-interactive shells too, since agents run their commands in those. Runs
+# only on a miss, so it costs a normal command nothing.
+if [ -n "${BASH_VERSION:-}" ] && [ -d /aura/my-tools ]; then
+  command_not_found_handle() {
+    local name="$1" entry state app="${APP_ID:-${AURA_HOSTNAME:-<this app>}}"
+    if [ -r /aura/my-tools/.missing ]; then
+      while IFS='	' read -r entry state; do
+        [ "$entry" = "$name" ] || continue
+        case "$state" in
+          not-granted) printf '%s: not granted to this app (tools[] in app.manifest.json). The owner grants it: aura grant caps %s %s\n' "$name" "$app" "$name" >&2 ;;
+          not-installed) printf '%s: granted to this app, but not installed. The owner installs it: aura cap install %s\n' "$name" "$name" >&2 ;;
+          needs-libraries) printf '%s: a library it needs is missing. The owner repairs it: aura cap doctor --fix\n' "$name" >&2 ;;
+          *) break ;;
+        esac
+        return 127
+      done < /aura/my-tools/.missing
+    fi
+    printf 'bash: %s: command not found\n' "$name" >&2
+    return 127
+  }
+fi
+
 # Don't run on non-interactive shells (scp, ssh exec, etc.).
 case $- in *i*) ;; *) return ;; esac
 

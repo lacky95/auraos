@@ -14,7 +14,7 @@ import { installGate, runInstall } from '../../../../lib/approvals/nexus.ts';
  * serves a different app under this id (re-POST with `identity`).
  * A dev checkout (`aura dev checkout`) answers 409 unless `force: true`.
  */
-export const POST: APIRoute = async ({ params, request }) => {
+export const POST: APIRoute = async ({ params, request, locals }) => {
   const id = params['id'];
   if (!id) return errorResponse('missing app id', 400);
   const principal = await authenticate(request);
@@ -31,5 +31,5 @@ export const POST: APIRoute = async ({ params, request }) => {
   const gate = installGate(liveApprovalDeps(), principal, request, body.operatorCode);
   return runInstall(nexus.update(id, {
     approval: gate.approval, ...(identity ? { identity } : {}), ...(body.force === true ? { replaceCheckout: true } : {}),
-  }), gate, (ev) => (ev.code === 'dev-checkout' ? 409 : 500));
+  }), gate, (ev) => (ev.code === 'dev-checkout' ? 409 : 500), { request, locals });
 };

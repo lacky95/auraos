@@ -2,7 +2,7 @@ import type { APIRoute } from 'astro';
 // Namespace import: the running shell may cache a core build without newer exports.
 import * as core from '@aura/core';
 import type { FlightPatch } from '@aura/core';
-import { jsonResponse, errorResponse } from '../../../../../lib/appResponse.js';
+import { jsonResponse, errorResponse, failureResponse } from '../../../../../lib/appResponse.js';
 import { flightService } from '../../../../../lib/flight/service.js';
 
 /**
@@ -15,7 +15,7 @@ import { flightService } from '../../../../../lib/flight/service.js';
  *           a user Close then waits for the app). Header `x-aura-tab`
  *           tags the write so the shell tab that made it ignores the echo.
  */
-export const GET: APIRoute = ({ params }) => {
+export const GET: APIRoute = ({ params, request, locals }) => {
   const id = decodeURIComponent(params['activityId'] ?? '');
   const a = core.getAppManager().getActivity(id);
   if (!a) return errorResponse(`Activity not found: ${id}`, 404);
@@ -27,7 +27,7 @@ export const GET: APIRoute = ({ params }) => {
   });
 };
 
-export const PATCH: APIRoute = async ({ params, request }) => {
+export const PATCH: APIRoute = async ({ params, request, locals }) => {
   const id = decodeURIComponent(params['activityId'] ?? '');
   const body = await request.json().catch(() => null) as (FlightPatch & { confirmClose?: boolean | null }) | null;
   if (!body || typeof body !== 'object' || Array.isArray(body)) return errorResponse('Body must be a JSON object (FlightPatch)', 400);
@@ -43,6 +43,6 @@ export const PATCH: APIRoute = async ({ params, request }) => {
     const flight = Object.keys(patch).length ? mgr.updateFlight(id, patch, by) : a.flight;
     return jsonResponse({ activityId: id, flight: { ...flight, confirmClose: flightService().confirmsClose(id) } });
   } catch (err) {
-    return errorResponse((err as Error).message, 400);
+    return failureResponse({ request, locals }, err, { status: 400 });
   }
 };

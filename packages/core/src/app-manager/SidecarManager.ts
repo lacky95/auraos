@@ -19,7 +19,7 @@ import type { ResolvedHome } from '../homes/types.js';
 import { authFailureReason, isAuthFailure, parseImageRef } from '../nexus/RegistryAuth.js';
 import type { PullCredential } from '../nexus/types.js';
 import {
-  SidecarIdentityError, SpecError, resolveSidecarSpec, specHash,
+  SidecarIdentityError, SpecError, resolveSidecarSpec, sidecarPermissionError, specHash,
   type ResolvedSidecarSpec, type SidecarSpawnRequest,
 } from './sidecar-spec.js';
 
@@ -244,6 +244,12 @@ export class SidecarManager {
     return Boolean(appId && this.opts.permissions.hasPermission(appId, 'sidecars.manageAll'));
   }
 
+  /** A sidecar outside its own subtree: the app's `sidecars.manageAll` would lift it (D105 Pass B). */
+  private manageAllRefusal(instanceId: string, message: string): SpecError {
+    const appId = this.opts.instance(instanceId)?.appId;
+    return appId ? sidecarPermissionError(appId, 'sidecars.manageAll', message) : new SpecError(403, message);
+  }
+
   /** Is `name` spawned (directly or further down) by `ancestor`? */
   private static descends(all: OsSidecar[], name: string, ancestor: string): boolean {
     const byName = new Map(all.map((s) => [s.name, s]));
@@ -259,7 +265,7 @@ export class SidecarManager {
   async authorize(instanceId: string, name: string, caller: Caller | undefined): Promise<void> {
     if (this.mayManageAll(instanceId, caller)) return;
     if (!SidecarManager.descends(await this.list(instanceId), name, caller!.sidecar!)) {
-      throw new SpecError(403, `sidecar '${caller!.sidecar}' may only manage the sidecars it spawned — '${name}' is not one of them (the app's permission sidecars.manageAll lifts this)`);
+      throw this.manageAllRefusal(instanceId, `sidecar '${caller!.sidecar}' may only manage the sidecars it spawned — '${name}' is not one of them (the app's permission sidecars.manageAll lifts this)`);
     }
   }
 
@@ -364,7 +370,7 @@ export class SidecarManager {
       // already someone else's is not its to replace.
       if (existing && !this.mayManageAll(instanceId, caller)
         && !(existing.labels['aura.managed'] === 'os' && SidecarManager.descends(await this.listAll(instanceId), spec.name, caller.sidecar!))) {
-        throw new SpecError(403, `sidecar '${caller.sidecar}' may not replace '${spec.name}' — it did not spawn it (the app's permission sidecars.manageAll lifts this)`);
+        throw this.manageAllRefusal(instanceId, `sidecar '${caller.sidecar}' may not replace '${spec.name}' — it did not spawn it (the app's permission sidecars.manageAll lifts this)`);
       }
       if (existing) {
         const managed = existing.labels['aura.managed'] === 'os';
@@ -684,7 +690,7 @@ export class SidecarManager {
     return this.locked(this.wl().ref(instanceId, name), async () => {
       const { appId, sc, own } = await this.toolsTarget(instanceId, name);
       if (!this.opts.permissions.hasPermission(appId, 'sidecars.tools')) {
-        throw new SpecError(403, `${appId} is not granted 'sidecars.tools' (aura grant perms ${appId} sidecars.tools)`);
+        throw sidecarPermissionError(appId, 'sidecars.tools', `${appId} is not granted 'sidecars.tools' (aura grant perms ${appId} sidecars.tools)`);
       }
       if (!own) throw SidecarManager.noOwnTools(sc);
       const consumer = `${instanceId}--${name}`;
