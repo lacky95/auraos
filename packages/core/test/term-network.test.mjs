@@ -9,7 +9,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 
-import { TermNetworks, termNetworkName, TERM_NETWORK_CONTAINER_LABEL } from '../dist/app-manager/TermNetworks.js';
+import { TermNetworks, termNetworkName, TERM_NETWORK_CONTAINER_LABEL } from '../dist/runtimes/container/networks.js';
 import {
   TERMINAL_APP_ID, containerNetworkArgs, containerNetworkEnv, containerShellBase, terminalNetworkUser,
 } from '../dist/app-manager/spawn/networkArgs.js';

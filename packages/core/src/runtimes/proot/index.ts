@@ -24,11 +24,12 @@
 import { existsSync } from 'node:fs';
 import type { SandboxRunner } from '../../app-manager/SandboxRunner.js';
 import { runnerEndpoint, type RuntimeHealthCheck, type RuntimeModule } from '../ari.js';
-import { hostToolsGroup, toolsFeatureOverrides, type ToolsMode } from '../hostTools.js';
+import { hostToolsGroup, toolsFeatureOverrides, type HostToolStore, type ToolsMode } from '../hostTools.js';
 import { RuntimeSettingsError } from '../settingsSchema.js';
 import type { RuntimeSettings } from '../types.js';
 import { prootOwnerActions } from './actions.js';
-import { prootDiagnostics } from './diagnostics.js';
+import { prootDiagnostics, prootDiagnosticsGroup } from './diagnostics.js';
+import { prootOrphans } from './orphans.js';
 import { PROOT_BINARIES, prootUnavailable } from './host.js';
 
 export { prootUnavailable } from './host.js';
@@ -42,6 +43,8 @@ export interface ProotRuntimeOpts {
   env?: Record<string, string | undefined>;
   /** The host's tools mode (tool-provision `currentToolsMode`); absent: not reported. */
   toolsMode?: () => ToolsMode;
+  /** The toolchain store (`tools.status`); absent: no library checks. */
+  toolStore?: () => HostToolStore;
   /** File probe for the binary check (tests). */
   exists?: (path: string) => boolean;
 }
@@ -101,7 +104,9 @@ export function prootRuntime(runner: SandboxRunner, opts: ProotRuntimeOpts): Run
     checkSettings: (settings: RuntimeSettings) => {
       if (settings['placement'] === 'pool') throw new RuntimeSettingsError(PROOT_POOL_UNAVAILABLE);
     },
-    ...(runner.capabilities({}).hostFilesystem ? { tools: hostToolsGroup(runner, toolsMode) } : {}),
+    ...(runner.capabilities({}).hostFilesystem ? { tools: hostToolsGroup(runner, toolsMode, () => opts.toolStore?.() ?? null) } : {}),
+    diagnostics: prootDiagnosticsGroup(opts.baseRootfs),
+    orphans: prootOrphans,
     actions: Object.freeze({ ...prootDiagnostics(opts.baseRootfs), ...prootOwnerActions(opts.baseRootfs) }),
   };
 }

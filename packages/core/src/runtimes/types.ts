@@ -217,6 +217,18 @@ export const CATEGORY_OF_CODE: Readonly<Record<RuntimeRefusalCode, RuntimeErrorC
   'operation-timeout': 'operation-timeout',
 });
 
+/**
+ * A process a runtime could not start or read in a workload (exec, logs;
+ * 5b-2 D-X), by code: `not-found` (no such workload), `not-running`,
+ * `engine` (the runtime's execution engine failed). The exec bridge maps the
+ * code to its HTTP answer; callers read `code`, not the message.
+ */
+export type RuntimeExecErrorCode = 'not-found' | 'not-running' | 'engine';
+export class RuntimeExecError extends Error {
+  override readonly name: string = 'RuntimeExecError';
+  constructor(readonly code: RuntimeExecErrorCode, message: string) { super(message); }
+}
+
 /** Where an installation's runtime came from (§11.2). */
 export type RuntimeSource = 'manifest' | 'default' | 'override' | 'migration';
 

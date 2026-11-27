@@ -11,10 +11,15 @@
 import http from 'node:http';
 import type { Duplex, Readable } from 'node:stream';
 import { DOCKER_SOCKET_PATH } from './spawn/socketArgs.js';
+import { RuntimeExecError } from '../runtimes/types.js';
+import type { RuntimeExecSession, RuntimeLogsRequest, RuntimeLogsStream, RuntimeOutputStream, RuntimeWorkloadExec } from '../runtimes/ari.js';
 
-export class DockerApiError extends Error {
+/** An engine refusal, as the neutral exec error the exec bridge maps (404 not-found, 409 not-running, else engine). */
+export class DockerApiError extends RuntimeExecError {
   override readonly name = 'DockerApiError';
-  constructor(readonly status: number, message: string) { super(message); }
+  constructor(readonly status: number, message: string) {
+    super(status === 404 ? 'not-found' : status === 409 ? 'not-running' : 'engine', message);
+  }
 }
 
 export interface ExecCreateSpec {
@@ -193,4 +198,109 @@ function engineMessage(text: string, status: number | undefined): string {
     if (typeof m === 'string' && m) return m;
   } catch { /* not JSON */ }
   return text.trim() || `docker engine answered ${status ?? 'nothing'}`;
+}
+
+// ─── Exec and logs over the engine (the container runtime's; 5b-2 D-X) ──────
+//
+// Moved from ExecBridge: the session broker, the container runner's sidecar
+// exec and its logs share them. The kernel's exec bridge only sees the
+// `RuntimeExecSession` and `RuntimeLogsStream` they return.
+
+const TTY_SIGNALS: Record<string, string> = { INT: '\x03', QUIT: '\x1c', TSTP: '\x1a' };
+const TTY_SIGNAL = (sig: string): string | undefined => TTY_SIGNALS[String(sig).toUpperCase().replace(/^SIG/, '')];
+const dimension = (v: unknown, fallback: number): number =>
+  Number.isInteger(v) && (v as number) >= 1 && (v as number) <= 1000 ? v as number : fallback;
+
+/** The exit code of an Engine exec once it finished; null if it still runs (a cut session). */
+export async function engineExitCode(engine: EngineClient, id: string): Promise<number | null> {
+  for (let i = 0; i < 20; i++) {
+    const r = await engine.execInspect(id);
+    if (!r.Running) return r.ExitCode;
+    await new Promise((res) => setTimeout(res, 100));
+  }
+  return null;
+}
+
+/**
+ * A `RuntimeExecSession` over a started Engine exec (its hijacked stream):
+ * the sidecar exec and the session broker share it. `onEnd` runs once when
+ * the session is closed by the caller (not when the process exits by
+ * itself): the broker ends the session's processes there. The Engine API
+ * cannot signal an exec process, so a signal without a TTY character ends it.
+ */
+export function engineSession(
+  engine: EngineClient, id: string, sock: Duplex,
+  open: { tty: boolean; cols: number; rows: number },
+  onOutput: (channel: 1 | 2, data: Buffer) => void,
+  opts: { onEnd?: () => void; exitCode?: () => Promise<number | null> } = {},
+): RuntimeExecSession {
+  const resize = (cols: number, rows: number) => {
+    if (open.tty) void engine.execResize(id, dimension(cols, open.cols), dimension(rows, open.rows)).catch(() => undefined);
+  };
+  resize(open.cols, open.rows);
+  const demux = open.tty ? null : new EngineDemux(onOutput);
+  sock.on('data', (d: Buffer) => { if (demux) demux.push(d); else onOutput(1, d); });
+  const exited = new Promise<number | null>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      void (opts.exitCode ?? (() => engineExitCode(engine, id)))().then(resolve, () => resolve(null));
+    };
+    sock.once('end', finish);
+    sock.once('close', finish);
+    sock.once('error', finish);
+  });
+  let ended = false;
+  const close = () => {
+    if (!ended) { ended = true; try { opts.onEnd?.(); } catch { /* best effort */ } }
+    try { sock.destroy(); } catch { /* gone */ }
+  };
+  return {
+    input: (data) => { if (sock.writable) sock.write(data); },
+    endInput: () => { try { sock.end(); } catch { /* gone */ } },
+    resize,
+    signal: (sig) => {
+      const ch = open.tty ? TTY_SIGNAL(sig) : undefined;
+      if (ch && sock.writable) { sock.write(ch); return true; }
+      close();
+      return false;
+    },
+    close,
+    exited,
+  };
+}
+
+/** A process in a running container, as an Engine exec (a sidecar: the image's own user unless `user`). */
+export async function engineExec(
+  engine: EngineClient, container: string, spec: RuntimeWorkloadExec, onOutput: (channel: 1 | 2, data: Buffer) => void,
+): Promise<RuntimeExecSession> {
+  const id = await engine.execCreate(container, {
+    Cmd: spec.argv, Tty: spec.tty,
+    ...(spec.attachStdin !== undefined ? { AttachStdin: spec.attachStdin } : {}),
+    Env: Object.entries(spec.env).map(([k, v]) => `${k}=${v}`),
+    ...(spec.user ? { User: spec.user } : {}),
+    ...(spec.workdir ? { WorkingDir: spec.workdir } : {}),
+  });
+  return engineSession(engine, id, await engine.execStart(id, spec.tty), { tty: spec.tty, cols: spec.cols, rows: spec.rows }, onOutput);
+}
+
+/** A container's log (raw for a TTY container, else the engine's frames, split). */
+export async function engineLogs(
+  engine: EngineClient, container: string, req: RuntimeLogsRequest, onChunk: (stream: RuntimeOutputStream, data: Buffer) => void,
+): Promise<RuntimeLogsStream> {
+  const tty = (await engine.containerInspect(container)).Config?.Tty === true;
+  const stream = await engine.logs(container, {
+    ...(req.tail !== undefined ? { tail: req.tail } : {}),
+    ...(req.since !== undefined ? { since: req.since } : {}),
+    timestamps: req.timestamps === true, follow: req.follow === true,
+  });
+  const demux = tty ? null : new EngineDemux((ch, data) => onChunk(ch === 2 ? 'err' : 'out', data));
+  stream.on('data', (d: Buffer) => { if (demux) demux.push(d); else onChunk('out', d); });
+  const done = new Promise<void>((resolve) => {
+    stream.once('end', resolve);
+    stream.once('close', resolve);
+    stream.once('error', () => resolve());
+  });
+  return { done, close: () => { try { stream.destroy(); } catch { /* gone */ } } };
 }

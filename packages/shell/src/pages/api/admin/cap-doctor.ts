@@ -1,7 +1,6 @@
 import type { APIRoute } from 'astro';
 import { existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { execFileSync } from 'node:child_process';
 import {
   getAppManager, listToolchainBinaries, readSidecarMap, sidecarNames,
   readLibMap, readLinkage, stageLibs, stageIntoRootfs, setLibs, restoreLibsFromStore,
@@ -25,12 +24,13 @@ import { capDoctorFixRequest } from '../../../lib/approvals/maintenance.ts';
  * one by every other check we have — `cap list` says installed, `inspect-tools`
  * says the hardlink resolves. This route resolves each cap's dependency graph
  * per sandbox and turns that silent failure into a visible one.
+ *
+ * The probes run in each runtime (its `diagnostics.probeTools`, 5b-2 D-C):
+ * this route runs no runtime command itself.
  */
 
 const TOOLCHAIN_BIN = join(process.env['AURA_TOOLCHAIN_DIR'] ?? '/os/toolchain', 'bin');
 const BASE_ROOTFS   = process.env['AURA_BASE_ROOTFS'] ?? '/os/base-rootfs';
-const BASE_IMAGE    = process.env['AURA_BASE_IMAGE'] ?? 'aura-base';
-const APP_DATA_VOLUME = process.env['AURA_APP_DATA_VOLUME'] ?? 'aura_aura-app-data';
 
 /** Standard lib dirs to look in when checking a rootfs by hand. */
 const ROOTFS_LIB_DIRS = [
@@ -54,15 +54,6 @@ const PROBE_SCRIPT =
   // The loop's exit status is the last `grep`'s, and grep exits 1 when it finds
   // nothing — i.e. a HEALTHY toolchain would look like a failed probe.
   'exit 0';
-
-function run(cmd: string, args: string[]): string {
-  return execFileSync(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] }).toString();
-}
-
-function imageExists(image: string): boolean {
-  try { execFileSync('docker', ['image', 'inspect', '--format', '{{.Id}}', image], { stdio: 'ignore', timeout: 15_000 }); return true; }
-  catch { return false; }
-}
 
 /** `{ binary: [unresolvable soname, …] }` from a probe's stdout. */
 function parseProbe(out: string): Record<string, string[]> {
@@ -139,32 +130,24 @@ export const GET: APIRoute = async ({ url }) => {
   let inProot: Record<string, string[]> | null = null;
   // Without the base image the container probe can't run — say so instead of
   // a generic "probe unavailable" (it is also why container apps won't start).
-  const baseImageMissing = wantProbe && !imageExists(BASE_IMAGE);
+  const skipped: { missing?: string } = {};
   if (wantProbe) {
-    if (baseImageMissing) {
-      console.warn(`[cap-doctor] container probe skipped: the ${BASE_IMAGE} image is missing — see GET /api/admin/first-boot, or run \`docker compose build aura-base\` on the host`);
-    } else try {
-      inContainer = parseProbe(run('docker', [
-        'run', '--rm',
-        '--mount', `type=volume,source=${APP_DATA_VOLUME},target=/probe/bin,volume-subpath=aura/toolchain/bin,readonly`,
-        '--mount', `type=volume,source=${APP_DATA_VOLUME},target=/probe/lib,volume-subpath=aura/toolchain/lib,readonly`,
-        '-e', 'LD_LIBRARY_PATH=/probe/lib',
-        BASE_IMAGE, 'sh', '-c', PROBE_SCRIPT,
-      ]));
-    } catch (err) {
-      console.warn(`[cap-doctor] container probe unavailable: ${(err as Error).message}`);
-    }
-    try {
-      inProot = parseProbe(run('proot', [
-        `--rootfs=${BASE_ROOTFS}`,
-        `--bind=${mirrorBin}:/probe/bin`,
-        `--bind=${mirrorLib}:/probe/lib`,
-        '--cwd=/',
-        '/bin/sh', '-c', `LD_LIBRARY_PATH=/probe/lib; export LD_LIBRARY_PATH; ${PROBE_SCRIPT}`,
-      ]));
-    } catch (err) {
-      console.warn(`[cap-doctor] proot probe unavailable: ${(err as Error).message}`);
-    }
+    // Each runtime probes in a fresh sandbox of its own; the columns are the runtimes' ids.
+    const probe = (runtime: 'container' | 'proot'): Record<string, string[]> | null => {
+      const run = mgr.runtimes.get(runtime)?.diagnostics?.probeTools;
+      if (!run) { console.warn(`[cap-doctor] ${runtime} probe unavailable: the runtime has no tools probe`); return null; }
+      try {
+        const r = run({ script: PROBE_SCRIPT, binDir: mirrorBin, libDir: mirrorLib });
+        if ('stdout' in r) return parseProbe(r.stdout);
+        if (r.missing) skipped.missing = r.missing;
+        console.warn(`[cap-doctor] ${runtime} probe skipped: ${r.skipped}`);
+      } catch (err) {
+        console.warn(`[cap-doctor] ${runtime} probe unavailable: ${(err as Error).message}`);
+      }
+      return null;
+    };
+    inContainer = probe('container');
+    inProot = probe('proot');
   }
 
   const caps: CapHealth[] = names.map((name) => {
@@ -204,7 +187,7 @@ export const GET: APIRoute = async ({ url }) => {
     ok: true,
     probed: inContainer !== null && inProot !== null,
     probes: { container: inContainer !== null, proot: inProot !== null },
-    ...(baseImageMissing ? { baseImageMissing: BASE_IMAGE } : {}),
+    ...(skipped.missing ? { baseImageMissing: skipped.missing } : {}),
     mirrorBin, mirrorLib, caps,
   }, null, 2), {
     status: 200, headers: { 'Content-Type': 'application/json' },

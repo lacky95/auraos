@@ -1,5 +1,4 @@
 import type { APIRoute } from 'astro';
-import { readFileSync, readdirSync } from 'node:fs';
 import { getAppManager } from '@aura/core';
 import { auditOwner, ownerAction } from '../../../lib/approvals/admin.ts';
 import { reapOrphansRequest } from '../../../lib/approvals/maintenance.ts';
@@ -14,24 +13,6 @@ interface ReapReport {
   errors: string[];
 }
 
-function listAppProcesses(): AppProc[] {
-  const out: AppProc[] = [];
-  let pids: string[];
-  try { pids = readdirSync('/proc').filter((n) => /^\d+$/.test(n)); }
-  catch { return out; }
-  for (const pidStr of pids) {
-    let cmdline = '';
-    try { cmdline = readFileSync(`/proc/${pidStr}/cmdline`, 'utf-8').replace(/\0/g, ' ').trim(); }
-    catch { continue; }
-    const m = cmdline.match(/apps\/(com\.aura\.[a-z.]+(?:-\d+)?)/);
-    if (!m) continue;
-    // Extract bare appId (strip any -N suffix when matching an instance dir)
-    const appId = (m[1] ?? '').replace(/-\d+$/, '');
-    out.push({ pid: Number(pidStr), appId, cmdline });
-  }
-  return out;
-}
-
 /**
  * POST /api/admin/reap-orphans[?dryRun=1]: the owner's (lib/approvals/maintenance.ts).
  * A dry run is a read; the kill one click from the System Terminal.
@@ -43,39 +24,17 @@ export const POST: APIRoute = async (ctx) => {
   const mgr = getAppManager();
   const tracked = mgr.getAllInstances();
 
-  // PIDs the AppManager knows about (the spawn returns the proot's pid).
-  // Each proot has child processes (bash entrypoint, node astro). Those
-  // children are NOT in tracked, so we also walk descendants of every
-  // tracked pid and consider them tracked too.
-  const trackedPids = new Set<number>();
-  for (const t of tracked) if (t.pid != null) trackedPids.add(t.pid);
-  // Walk /proc and accept any pid whose ancestor chain reaches a tracked pid.
-  function getPPid(pid: number): number | null {
-    try {
-      const status = readFileSync(`/proc/${pid}/status`, 'utf-8');
-      const m = status.match(/^PPid:\s+(\d+)/m);
-      return m ? Number(m[1]) : null;
-    } catch { return null; }
-  }
-  function reachesTracked(pid: number): boolean {
-    let cur: number | null = pid;
-    const seen = new Set<number>();
-    while (cur != null && !seen.has(cur)) {
-      if (trackedPids.has(cur)) return true;
-      seen.add(cur);
-      cur = getPPid(cur);
-    }
-    return false;
-  }
-
-  const all = listAppProcesses();
-  const squatters = all.filter((p) => !reachesTracked(p.pid));
+  // The kernel's tracked pids (instance records plus every runtime's in-flight ones) and the app processes
+  // no tracked one reaches, from the runtimes that scan their process space (5b-2 D-#11).
+  const scan = mgr.orphanScan();
+  const all = scan.all;
+  const squatters = scan.squatters;
 
   const report: ReapReport = {
     trackedInstances: tracked.map((i) => ({
       instanceId: i.instanceId, appId: i.appId, port: i.port, pid: i.pid, state: i.state,
     })),
-    trackedPids: Array.from(trackedPids),
+    trackedPids: scan.trackedPids,
     appProcesses: all,
     squatters,
     killed: [],

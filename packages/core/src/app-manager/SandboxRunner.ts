@@ -4,7 +4,7 @@ import type { SpawnContext } from '../scopes/types.js';
 import type { ResourceUsage, SidecarInfo } from '../types/instance.js';
 import type { LifecycleStatus } from './lifecycleGate.js';
 import type { RuntimeCapabilities, RuntimeSettings } from '../runtimes/types.js';
-import type { EngineContainer, ExecSession, SessionSpec } from './ExecBridge.js';
+import type { ExecSession, SessionSpec } from './ExecBridge.js';
 import type { OutputLog } from './outputLog.js';
 
 /**
@@ -104,13 +104,7 @@ export interface SandboxRunner {
    */
   exec?(instanceId: string, argv: string[], opts?: SandboxExecOpts): Promise<{ stdout: string; stderr: string }>;
 
-  /**
-   * Phase 5 stream X: the Engine container behind a running instance, which
-   * the exec bridge enters and reads logs from (ExecBridge.ts). Only runtimes
-   * that have one implement it; the container name stays the runtime's (D85 A7).
-   */
-  engineContainer?(instanceId: string): EngineContainer | null;
-  /** Phase 5 stream X: the instance's own output, for runtimes without an engine log. */
+  /** Phase 5 stream X: the instance's own output, for runtimes whose module has no `logs` (ExecBridge.ts). */
   outputLog?(instanceId: string): OutputLog | null;
   /**
    * Phase 5 stream J (D74, ARI §9.6): open a session INSIDE the running

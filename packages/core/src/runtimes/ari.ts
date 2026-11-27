@@ -327,6 +327,18 @@ export interface RuntimeAdoption {
   removeAllOf(appId: string): Promise<void>;
 }
 
+/** An app process in a runtime's own process space (`orphans`; the pid is local to that space). */
+export interface RuntimeOrphanProcess { pid: number; appId: string; cmdline: string }
+/**
+ * Squatters (5b-2 D-#11): app processes in the runtime's process space that
+ * no tracked process reaches (the kernel's instance records plus every
+ * runtime's in-flight processes). Present on a runtime whose workloads run in
+ * the kernel's own process space; reported only: the kernel decides the kill.
+ */
+export interface RuntimeOrphans {
+  scan(tracked: ReadonlySet<number>): { all: RuntimeOrphanProcess[]; squatters: RuntimeOrphanProcess[] };
+}
+
 /** A session open inside an instance (D74), as listed. */
 export interface RuntimeSessionInfo {
   sessionId: string;
@@ -343,21 +355,113 @@ export interface RuntimeSessions {
   end(sessionId: string): Promise<boolean>;
 }
 
-/** `workload.dynamic`: associated workloads (sidecars; present ⇔ `sidecars`). Create, exec and logs move here in 5b-2 (D-S, D-X). */
+/**
+ * A process running in a workload (a session, an exec), its stdio streamed
+ * (`aura jump`, `aura exec`). A stream handle, not data: it never crosses
+ * a process boundary as is.
+ */
+export interface RuntimeExecSession {
+  input(data: Buffer): void;
+  /** Close the process's stdin (non-TTY: EOF). */
+  endInput(): void;
+  resize(cols: number, rows: number): void;
+  /**
+   * A signal for the process. With a TTY, INT, QUIT and TSTP go in as the
+   * terminal's control characters; anything else (and every signal without a
+   * TTY) ends the session where the runtime cannot signal an exec process.
+   * Returns false when the session was ended instead.
+   */
+  signal(sig: string): boolean;
+  close(): void;
+  /** The exit code; null when it could not be read (the session was cut). */
+  readonly exited: Promise<number | null>;
+}
+
+/** A process to run in an associated workload (5b-2 D-X: `jump --sidecar`, `exec sc`), with the workload's own user unless `user`. */
+export interface RuntimeWorkloadExec {
+  argv: string[];
+  tty: boolean;
+  env: Record<string, string>;
+  cols: number;
+  rows: number;
+  /** Attach stdin (absent: the runtime's default for the kind of session). */
+  attachStdin?: boolean;
+  user?: string;
+  workdir?: string;
+}
+
+/** A workload's output (`aura logs`): `out` or `err`. */
+export type RuntimeOutputStream = 'out' | 'err';
+export interface RuntimeLogsRequest { tail?: number; since?: number; timestamps?: boolean; follow?: boolean }
+/** A running read of a log: `done` resolves when the output ends (never, while following, until `close`). */
+export interface RuntimeLogsStream { done: Promise<void>; close(): void }
+/** Reads a workload's log (`observability.logs`, 5b-2 D-X); `onChunk` gets each piece as it comes. */
+export type RuntimeLogs = (id: string, req: RuntimeLogsRequest, onChunk: (stream: RuntimeOutputStream, data: Buffer) => void) => Promise<RuntimeLogsStream>;
+
+/** `workload.dynamic`: associated workloads (sidecars; present ⇔ `sidecars`). Create moves here in 5b-2 (D-S). */
 export interface RuntimeWorkloads {
   /** Every associated workload; null when the runtime could not be read (never reap on that). */
   list(): Promise<SidecarInfo[] | null>;
   remove(workloadIds: string[]): void;
   /** Removes an instance's app-spawned workloads; those the kept services name stay (a restart). */
   removeOf(instanceId: string, opts?: { keepServices?: string[] }): number;
+  /** Runs a process in a running workload (by its listed id); refusals are `RuntimeExecError`s. */
+  exec(workloadId: string, spec: RuntimeWorkloadExec, onOutput: (channel: 1 | 2, data: Buffer) => void): Promise<RuntimeExecSession>;
+  /** A workload's own output. */
+  logs: RuntimeLogs;
 }
 
 /** The logical tool grant (D100 §5): tool ids, never a host directory. */
 export interface RuntimeToolSet { tools: AppManifest['tools'] }
+/** One provisioned tool of an instance, as its runtime sees it (`tools.status`). */
+export interface RuntimeToolEntry {
+  name: string;
+  /** How the entry is provisioned: `hardlink`, `file`, `symlink` (legacy, advisory) or `unknown`. */
+  kind: string;
+  /** A symlink's target inside the workload; null otherwise. */
+  target: string | null;
+  /** The tool and the libraries it needs are there. */
+  resolves: boolean;
+  libs: { needed: number; missing: string[] };
+}
+/** What an instance's tools are, as provisioned (`tools.status`, 5b-2 D-C; `GET /api/admin/inspect-tools`). Reported only. */
+export interface RuntimeToolsStatus {
+  /** The instance has a provisioned tool set at all. */
+  provisioned: boolean;
+  entries: RuntimeToolEntry[];
+  /** The granted libraries' sonames; null when the instance has none provisioned. */
+  libs: string[] | null;
+}
 /** `tools.*`: physical provisioning of `/aura/my-tools` (present ⇔ `hostFilesystem` in this release). */
 export interface RuntimeTools {
   /** Applies the grant to a running instance; `applied` only when the provider made it so. */
   apply(instanceId: string, set: RuntimeToolSet): RuntimeOperationResult;
+  /** What is provisioned for the instance now. */
+  status(instanceId: string): RuntimeToolsStatus;
+}
+
+/**
+ * Read-only diagnostics a runtime can answer (D100 §§11, 16; 5b-2 D-R, D-C):
+ * reported, never enforced. Every member is optional; a missing one is
+ * reported as not inspectable, never guessed. Instance ids only: the module
+ * maps them to its own workloads.
+ */
+export interface RuntimeDiagnostics {
+  /**
+   * What the workload wrote into its own root filesystem outside every mount
+   * (`aura admin contract`, the dataDir report): one change per line,
+   * `A|C|D <path>` (added, changed, deleted). Null when it can't be read.
+   */
+  inspectWrites?(instanceId: string): Promise<string[] | null>;
+  /** The workload's mounts as it sees them (destination, writable). Null when they can't be read. */
+  workloadMounts?(instanceId: string): Promise<Array<{ destination: string; rw: boolean }> | null>;
+  /**
+   * `aura cap doctor`: runs the tools probe (`script`, which prints its report
+   * on stdout) in a fresh, short-lived sandbox of this runtime over the
+   * toolchain store (`binDir`, `libDir`: its binaries and libraries, with the
+   * libraries on `LD_LIBRARY_PATH`). `skipped`: the probe could not run here.
+   */
+  probeTools?(probe: { script: string; binDir: string; libDir: string }): { stdout: string } | { skipped: string; missing?: string };
 }
 
 /** `mount.*` (5b-2 D-M): a mount by logical source, never a host path. */
@@ -410,7 +514,7 @@ export const GROUP_FEATURE = Object.freeze({
 } as const satisfies Record<string, RuntimeFeatureId>);
 export type RuntimeGroupName = keyof typeof GROUP_FEATURE;
 /** Typed groups whose mechanism moves behind ARI in 5b-2 stream D (at the latest Phase 6). */
-export const GROUPS_PENDING_EXTRACTION = Object.freeze(['mounts', 'endpoints', 'build', 'diagnostics', 'logs'] as const);
+export const GROUPS_PENDING_EXTRACTION = Object.freeze(['mounts', 'endpoints', 'build'] as const);
 
 /**
  * Why a module's groups and features disagree (a group without its
@@ -444,6 +548,15 @@ export interface RuntimeModule extends Pick<AuraRuntime,
   readonly sessions?: RuntimeSessions;
   readonly workloads?: RuntimeWorkloads;
   readonly tools?: RuntimeTools;
+  /** Orphan app processes in the runtime's process space (no feature of its own; D-#11). */
+  readonly orphans?: RuntimeOrphans;
+  /**
+   * An instance's own output as its runtime keeps it (5b-2 D-X). Absent: the
+   * kernel reads the runner's output ring (`outputLog`), or there is none.
+   */
+  readonly logs?: RuntimeLogs;
+  /** Read-only diagnostics (no feature of its own: a missing member is reported as not inspectable). */
+  readonly diagnostics?: RuntimeDiagnostics;
   /** Live usage by instance id and workload id (a record, never a `Map`). */
   usage?(req: { instanceIds: string[]; sidecarIds: string[] }): Promise<RuntimeUsage>;
   /** Owner and diagnose actions, by id (`aura runtime`, the admin routes). */

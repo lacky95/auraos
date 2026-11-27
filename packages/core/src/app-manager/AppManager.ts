@@ -22,11 +22,12 @@ import { OsEventBus } from '../ipc/OsEventBus.js';
 import { AppRegistry } from './AppRegistry.js';
 import { toolsTrackInstalledCaps } from '../capabilities/tool-allowlist.js';
 import { SHARED_HOME_PATH, currentToolsMode, toolchainMirrorBin } from './tool-provision.js';
-import { readLibMap, replaceLibFile, restoreLibsFromStore, toolchainLibFor, toolchainMirrorLib } from './tool-libs.js';
+import { INSTANCE_LIB_DIR, readLibMap, replaceLibFile, restoreLibsFromStore, toolchainLibFor, toolchainMirrorLib } from './tool-libs.js';
 import { legacySharedHomeDir, masterHomeDir, userHomeDir } from '../scopes/home.js';
 import { PortAllocator } from './PortAllocator.js';
 import { LifecycleStateMachine } from './LifecycleStateMachine.js';
 import { ProotRunner, killProcessGroup } from './ProotRunner.js';
+import { BASE_IMAGE } from './BaseImage.js';
 import { ContainerRunner } from './ContainerRunner.js';
 import { appFingerprint, buildFailureReason, discardBuildStaging, installBuild, prepareBuildStaging, prodCapability, sdkFingerprint, serveState, writeBuildStamp, type ServeState } from './appBuild.js';
 import { needsProvisioning, refreshAuraPackages } from './provisioning.js';
@@ -42,7 +43,7 @@ import { RuntimeRegistry, type ResolvedRuntime, type RuntimeModule } from '../ru
 import {
   RESPAWN_FREEZE_MS, readRespawnRecord, respawnEntries, writeRespawnRecord, type RespawnEntry,
 } from '../runtimes/respawn.js';
-import { moduleFeatures, operationResult, type RuntimeFeature, type RuntimeOperationResult, type RuntimeSessionInfo } from '../runtimes/ari.js';
+import { moduleFeatures, operationResult, type RuntimeFeature, type RuntimeOperationResult, type RuntimeDiagnostics, type RuntimeOrphanProcess, type RuntimeSessionInfo, type RuntimeToolsStatus } from '../runtimes/ari.js';
 import { BUILTIN_RUNTIMES } from '../runtimes/builtins/index.js';
 import { RUNTIME_AUDIT_ACTIONS, RuntimeSettingsStore, runtimeSettingsRevision } from '../runtimes/settingsStore.js';
 import { migrateLegacyRuntimes, migrationReport, processLegacyEnv, type MigrationApp, type MigrationReport } from '../runtimes/migrateLegacy.js';
@@ -93,7 +94,6 @@ import { PREVIEW_IDLE_MS, previewTitle } from './preview.js';
 import { MOUNT_DIR_NAME } from './MountManager.js';
 import { ExecBridge } from './ExecBridge.js';
 import { RootGrants } from './rootTabs.js';
-import { DockerApi } from './DockerApi.js';
 
 const RECONCILE_INTERVAL_MS = 5_000;
 const ERROR_GRACE_MS        = 30_000;
@@ -357,6 +357,16 @@ export class AppManager {
     const builtinDeps = {
       container: this.container, proot: new ProotRunner(runnerOpts), baseRootfs: opts.baseRootfs,
       toolsMode: () => currentToolsMode(opts.dataDir),
+      baseImage: BASE_IMAGE,
+      // One read of the store per status: the mirror the allowlists link from and its library map.
+      toolStore: () => {
+        const mirrorBin = toolchainMirrorBin(opts.dataDir);
+        const libs = readLibMap(mirrorBin);
+        return {
+          mirrorBin, libDirName: INSTANCE_LIB_DIR,
+          neededLibs: (tool: string) => (libs[tool] ?? []).filter((d) => d.kind === 'staged').map((d) => d.soname),
+        };
+      },
     };
     for (const module of [...BUILTIN_RUNTIMES.map((b) => b.create(builtinDeps)), ...(opts.runtimes ?? [])]) {
       try { this.runtimes.register(module); } catch (err) {
@@ -458,9 +468,10 @@ export class AppManager {
       },
     });
     this.execBridge  = new ExecBridge({
-      engine:   new DockerApi(),
       instance: (id) => this.instances.get(id),
       runner:   (id) => this.runnerOf(id),
+      logs:     (id) => this.moduleOf(id).logs,
+      workloads: (id) => this.moduleOf(id).workloads,
       sidecars: (id) => this.getSidecars(id),
       sessionContext: (id, req) => this.sessionContext(id, req),
     });
@@ -712,6 +723,18 @@ export class AppManager {
     return this.runtimes.list().filter((m) => m[group] !== undefined) as Array<RuntimeModule & Required<Pick<RuntimeModule, G>>>;
   }
 
+  /** An instance's provisioned tools through its runtime's `tools.status` (5b-2 D-C); null: unknown instance or no tools group. */
+  toolsStatusOf(instanceId: string): RuntimeToolsStatus | null {
+    const sandbox = this.instances.get(instanceId)?.sandbox;
+    return (sandbox ? this.runtimes.get(sandbox)?.tools?.status(instanceId) : undefined) ?? null;
+  }
+
+  /** An instance's runtime diagnostics (5b-2 D-R); null: unknown instance or a runtime without them. */
+  runtimeDiagnosticsOf(instanceId: string): RuntimeDiagnostics | null {
+    const sandbox = this.instances.get(instanceId)?.sandbox;
+    return (sandbox ? this.runtimes.get(sandbox)?.diagnostics : undefined) ?? null;
+  }
+
   /** The capabilities of an instance's runtime (ARI §9.5), or null for an unknown instance. */
   runtimeCapabilitiesOf(instanceId: string): RuntimeCapabilities | null {
     const sandbox = this.instances.get(instanceId)?.sandbox;
@@ -768,14 +791,34 @@ export class AppManager {
   }
 
   /**
-   * Liveness through the runtime's capability, not its id (ARI dup #11): a
-   * runtime whose instances outlive the shell tracks them itself (their pids
-   * are host pids, invisible here); otherwise the pid is the shell's own child.
+   * Liveness through the runtime only (ARI dup #11, 5b-2): every runtime
+   * tracks its own workloads (a container's pid is a host pid, invisible
+   * here; PRoot probes its own child's pid), so the kernel never probes a pid.
    */
   private instanceAlive(inst: AppInstance): boolean {
-    if (this.runtimeCapabilitiesOf(inst.instanceId)?.survivesShellRestart) return this.runnerOf(inst.instanceId).isRunning(inst.instanceId);
-    if (inst.pid == null) return false;
-    try { process.kill(inst.pid, 0); return true; } catch { return false; }
+    return this.runnerOf(inst.instanceId).isRunning(inst.instanceId);
+  }
+
+  /**
+   * App processes no tracked process reaches (D-#11), from every runtime that
+   * scans its process space (`orphans`). Tracked: the instance records' pids
+   * plus every runner's in-flight ones — during spawn(), waitHealthy can poll
+   * for up to 30s before the instance entry's `pid` is set, and a running
+   * build's client is no instance at all. The caller decides the kill.
+   */
+  orphanScan(): { trackedPids: number[]; all: RuntimeOrphanProcess[]; squatters: RuntimeOrphanProcess[] } {
+    const trackedPids = new Set<number>();
+    for (const t of this.instances.values()) if (t.pid != null) trackedPids.add(t.pid);
+    for (const { runner: r } of this.runtimes.list()) {
+      for (const pid of r.getActivePids()) trackedPids.add(pid);
+    }
+    const all: RuntimeOrphanProcess[] = [];
+    const squatters: RuntimeOrphanProcess[] = [];
+    for (const m of this.runtimes.list()) {
+      const r = m.orphans?.scan(trackedPids);
+      if (r) { all.push(...r.all); squatters.push(...r.squatters); }
+    }
+    return { trackedPids: [...trackedPids], all, squatters };
   }
 
   /** The app's current installation (App Host registry), or null when it cannot be read. */
@@ -3936,15 +3979,7 @@ export class AppManager {
     //    waitHealthy can poll for up to 30s before the instance entry's `pid`
     //    field gets set — but the runner already has the live ChildProcess.
     //    Without the runner's view, the reaper would kill mid-spawn instances.
-    const trackedPids = new Set<number>();
-    for (const t of this.instances.values()) if (t.pid != null) trackedPids.add(t.pid);
-    // Union pids from both runners so the reconciler doesn't mistake an
-    // in-flight container-spawn for a dead PRoot (or vice versa).
-    for (const { runner: r } of this.runtimes.list()) {
-      for (const pid of r.getActivePids()) trackedPids.add(pid);
-    }
-    const squatters = listAppOrphans(trackedPids);
-    for (const orphan of squatters) {
+    for (const orphan of this.orphanScan().squatters) {
       console.warn(`[AppManager] reconcile: SIGKILL orphan pid=${orphan.pid} app=${orphan.appId} cmd=${orphan.cmdline.slice(0, 120)}`);
       killProcessGroup(orphan.pid, 'SIGKILL');
     }
@@ -4156,55 +4191,6 @@ export class AppManager {
     OsEventBus.emit('app:crashed',      { instanceId, appId, error: `Process exited with code ${code}` });
     console.error(`[AppManager] ${instanceId} crashed (exit code ${code})`);
   }
-}
-
-interface AppOrphan { pid: number; appId: string; cmdline: string; }
-
-/**
- * Walk /proc and return every process whose cmdline matches an Aura app dir
- * but whose ancestor chain does NOT reach any of the trackedPids. Those are
- * squatters — processes the AppManager doesn't know about that are running
- * under an app identity (likely holding ports we think are free).
- *
- * Same logic as /api/admin/reap-orphans, kept here so the reconciler doesn't
- * depend on the shell package.
- */
-function listAppOrphans(trackedPids: Set<number>): AppOrphan[] {
-  let pids: string[];
-  try { pids = readdirSync('/proc').filter((n) => /^\d+$/.test(n)); }
-  catch { return []; }
-
-  const getPPid = (pid: number): number | null => {
-    try {
-      const status = readFileSync(`/proc/${pid}/status`, 'utf-8');
-      const m = status.match(/^PPid:\s+(\d+)/m);
-      return m ? Number(m[1]) : null;
-    } catch { return null; }
-  };
-  const reachesTracked = (pid: number): boolean => {
-    let cur: number | null = pid;
-    const seen = new Set<number>();
-    while (cur != null && !seen.has(cur)) {
-      if (trackedPids.has(cur)) return true;
-      seen.add(cur);
-      cur = getPPid(cur);
-    }
-    return false;
-  };
-
-  const orphans: AppOrphan[] = [];
-  for (const pidStr of pids) {
-    let cmdline = '';
-    try { cmdline = readFileSync(`/proc/${pidStr}/cmdline`, 'utf-8').replace(/\0/g, ' ').trim(); }
-    catch { continue; }
-    const m = cmdline.match(/apps\/(com\.aura\.[a-z.]+(?:-\d+)?)/);
-    if (!m) continue;
-    const pid = Number(pidStr);
-    if (reachesTracked(pid)) continue;
-    const appId = (m[1] ?? '').replace(/-\d+$/, '');
-    orphans.push({ pid, appId, cmdline });
-  }
-  return orphans;
 }
 
 /**

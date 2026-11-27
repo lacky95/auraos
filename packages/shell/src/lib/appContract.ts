@@ -145,7 +145,7 @@ export interface ContractReportApp {
   /** Its runtime gives instances their own mount namespace (capabilities). */
   ownNamespace: boolean;
   manifest: AppManifest & { context?: string[] };
-  instances: Array<{ instanceId: string; container?: string }>;
+  instances: Array<{ instanceId: string; inspect?: boolean }>;
 }
 
 export interface ContractReportDeps {
@@ -228,11 +228,10 @@ export function liveContractReportDeps(): ContractReportDeps {
         manifest: m as unknown as ContractReportApp['manifest'],
         instances: mgr.getAllInstances()
           .filter((i) => i.appId === m.id && !i.inPool)
-          // An own-namespace workload's layer is inspected by its engine name (core's one name rule, never
-          // re-derived here). 5b-2 D-R moves the inspection behind the module's `diagnostics` group.
+          // A workload whose runtime reports its own writes (`diagnostics.inspectWrites`, 5b-2 D-R).
           .map((i) => ({
             instanceId: i.instanceId,
-            ...(mgr.instanceCapabilities(i.instanceId)?.isolation === 'namespace' ? { container: core.containerName(i.instanceId) } : {}),
+            ...(mgr.runtimeDiagnosticsOf(i.instanceId)?.inspectWrites ? { inspect: true } : {}),
           })),
       };
     }),
@@ -254,6 +253,6 @@ export function liveContractReportDeps(): ContractReportDeps {
       for (const [k, n] of Object.entries(pending?.meta ?? {})) add(k, n);
       return out;
     },
-    dataDir: (apps) => core.dataDirReport(apps, core.liveDataDirDeps()),
+    dataDir: (apps) => core.dataDirReport(apps, core.liveDataDirDeps((id) => mgr.runtimeDiagnosticsOf(id))),
   };
 }

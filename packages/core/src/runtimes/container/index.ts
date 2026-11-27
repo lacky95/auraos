@@ -20,18 +20,27 @@
 import type { ContainerRunner } from '../../app-manager/ContainerRunner.js';
 import type { SandboxRunner } from '../../app-manager/SandboxRunner.js';
 import {
-  runnerEndpoint, type RuntimeAdoption, type RuntimeHealthCheck, type RuntimeModule, type RuntimeSessions, type RuntimeSurvivor, type RuntimeWorkloads,
+  runnerEndpoint, type RuntimeAdoption, type RuntimeLogsRequest, type RuntimeOutputStream, type RuntimeHealthCheck, type RuntimeModule, type RuntimeSessions, type RuntimeSurvivor, type RuntimeWorkloads,
 } from '../ari.js';
-import { hostToolsGroup, toolsEnforcement, toolsFeatureOverrides, type ToolsMode } from '../hostTools.js';
+import { containerDiagnostics } from './diagnostics.js';
+import { RuntimeExecError } from '../types.js';
+import { hostToolsGroup, toolsEnforcement, toolsFeatureOverrides, type HostToolStore, type ToolsMode } from '../hostTools.js';
 
 /** The runner surface the module adapts: the SandboxRunner contract plus the container's own groups. */
-export type ContainerRunnerSurface = SandboxRunner & Partial<Pick<ContainerRunner, 'openSessions' | 'endSession' | 'canPropagateMounts'>>;
+export type ContainerRunnerSurface = SandboxRunner & Partial<Pick<ContainerRunner,
+  'openSessions' | 'endSession' | 'canPropagateMounts' | 'instanceLogs' | 'execWorkload' | 'workloadLogs'>>;
 
 type OrphanRecord = NonNullable<Awaited<ReturnType<NonNullable<SandboxRunner['listOrphanRecords']>>>>[number] & { user?: string };
 
 export interface ContainerRuntimeDeps {
   /** The host's tools mode (tool-provision `currentToolsMode`); absent: not reported. */
   toolsMode?: () => ToolsMode;
+  /** The toolchain store (`tools.status`); absent: no library checks. */
+  toolStore?: () => HostToolStore;
+  /** The image app containers run (BaseImage `BASE_IMAGE`; default `aura-base`). */
+  baseImage?: string;
+  /** Environment (the `cap doctor` probe's volume name; default `process.env`). */
+  env?: Record<string, string | undefined>;
 }
 
 export function containerRuntime(runner: ContainerRunnerSurface, deps: ContainerRuntimeDeps = {}): RuntimeModule {
@@ -106,8 +115,23 @@ export function containerRuntime(runner: ContainerRunnerSurface, deps: Container
       list: async () => (runner.listSidecars ? runner.listSidecars() : []),
       remove: (ids) => { runner.removeSidecars?.(ids); },
       removeOf: (instanceId, opts = {}) => runner.reapSiblingsOf?.(instanceId, opts.keepServices ? { keep: { services: opts.keepServices } } : {}) ?? 0,
+      exec: async (workloadId, spec, onOutput) => {
+        if (!runner.execWorkload) throw new RuntimeExecError('engine', `no exec into ${workloadId}: the runner has no engine`);
+        return runner.execWorkload(workloadId, spec, onOutput);
+      },
+      logs: async (workloadId, req, onChunk) => {
+        if (!runner.workloadLogs) throw new RuntimeExecError('engine', `no log of ${workloadId}: the runner has no engine`);
+        return runner.workloadLogs(workloadId, req, onChunk);
+      },
     } satisfies RuntimeWorkloads } : {}),
-    ...(caps.hostFilesystem ? { tools: hostToolsGroup(runner, toolsMode) } : {}),
+    // The instance's own output: the engine's log (5b-2 D-X).
+    ...(runner.instanceLogs ? { logs: (instanceId: string, req: RuntimeLogsRequest, onChunk: (stream: RuntimeOutputStream, data: Buffer) => void) => runner.instanceLogs!(instanceId, req, onChunk) } : {}),
+    ...(caps.hostFilesystem ? { tools: hostToolsGroup(runner, toolsMode, () => deps.toolStore?.() ?? null) } : {}),
+    diagnostics: containerDiagnostics({
+      baseImage: deps.baseImage ?? 'aura-base',
+      // As the `cap doctor` route always named it (the compose project's app-data volume).
+      appDataVolume: () => (deps.env ?? process.env)['AURA_APP_DATA_VOLUME'] ?? 'aura_aura-app-data',
+    }),
     ...(caps.usage ? { usage: async (req: { instanceIds: string[]; sidecarIds: string[] }) => (runner.usage ? Object.fromEntries(await runner.usage(req)) : {}) } : {}),
   };
 }

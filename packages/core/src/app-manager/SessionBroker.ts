@@ -33,7 +33,8 @@ import { promisify } from 'node:util';
 import type { Duplex } from 'node:stream';
 import { BASE_IMAGE } from './BaseImage.js';
 import type { EngineClient } from './DockerApi.js';
-import { ExecBridgeError, engineSession, type ExecSession, type SessionSpec } from './ExecBridge.js';
+import { ExecBridgeError, type ExecSession, type SessionSpec } from './ExecBridge.js';
+import { engineSession } from './DockerApi.js';
 import { DOCKER_SOCKET_PATH } from './spawn/socketArgs.js';
 
 const execFileAsync = promisify(execFile);

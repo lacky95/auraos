@@ -9,20 +9,21 @@ import { MY_TOOLS_PATH, currentToolsMode, provisionAllowlist, toolchainMirrorBin
 import { containerHomeEnv, containerHomeMount } from './spawn/homeArgs.js';
 import { containerContextEnv, containerContextMounts } from './spawn/contextArgs.js';
 import { containerNetworkArgs, containerNetworkEnv, containerShellBase, rawSocketArgs, terminalNetworkUser } from './spawn/networkArgs.js';
-import { TERM_NETWORK_CONTAINER_LABEL, TermNetworks, type TermNetwork } from './TermNetworks.js';
+import { TERM_NETWORK_CONTAINER_LABEL, TermNetworks, type TermNetwork } from '../runtimes/container/networks.js';
 import { containerIdentityArgs, isNonRootIdentity, writeIdentityFiles } from './spawn/identityArgs.js';
 import { readKernelSessionSecret, sessionHostUser, terminalSessionArgs, writeSessionSecret } from './spawn/sessionArgs.js';
 import { containerName } from '../runtimes/container/names.js';
 import type { RuntimeCapabilities } from '../runtimes/types.js';
+import type { RuntimeLogsRequest, RuntimeLogsStream, RuntimeOutputStream, RuntimeWorkloadExec } from '../runtimes/ari.js';
 import { IDMAP_HELPER_PATH, type ContainerMountBackend, type ContainerPortBackend, type ContainerSidecarBackend, type FacilityProbe, type SidecarRuntimeFacts } from '../runtimes/container/backends.js';
 // Value import, but MountManager imports ContainerRunner type-only, so there
 // is no runtime cycle.
 import { MOUNT_ROOT_PATH } from './MountManager.js';
 import { KEEP_RESTART_LABEL, keptAcrossRestart, type KeepSiblings } from './sidecarParking.js';
 import type { SandboxExecOpts, SandboxRunner, SandboxRunnerOpts } from './SandboxRunner.js';
-import type { EngineContainer, ExecSession, SessionSpec } from './ExecBridge.js';
+import type { ExecSession, SessionSpec } from './ExecBridge.js';
 import { ExecBridgeError } from './ExecBridge.js';
-import { DockerApi, type EngineClient } from './DockerApi.js';
+import { DockerApi, engineExec, engineLogs, type EngineClient } from './DockerApi.js';
 import { SessionBroker, stageSessionEnter } from './SessionBroker.js';
 import type { ResourceUsage, SidecarInfo } from '../types/instance.js';
 import { SIDECAR_PS_FORMAT, USAGE_STATS_FORMAT, parseSidecarPs, parseUsageStats } from './sidecars.js';
@@ -1629,10 +1630,27 @@ export class ContainerRunner implements SandboxRunner, ContainerMountBackend, Co
     });
   }
 
-  /** The exec bridge's target (SandboxRunner `engineContainer`): the app container, in its app dir. */
-  engineContainer(instanceId: string): EngineContainer | null {
-    const c = this.containers.get(instanceId);
-    return c ? { container: this.containerName(instanceId), workdir: `/workspace/apps/${c.appId}` } : null;
+  /**
+   * An instance's own output, the engine's log of its container (the module's
+   * `logs`, 5b-2 D-X). An untracked instance keeps no log here.
+   */
+  async instanceLogs(instanceId: string, req: RuntimeLogsRequest, onChunk: (stream: RuntimeOutputStream, data: Buffer) => void): Promise<RuntimeLogsStream> {
+    if (!this.containers.has(instanceId)) throw new ExecBridgeError(409, 'runtime-unsupported', `${instanceId} keeps no output log`);
+    return engineLogs(this.engine(), this.containerName(instanceId), req, onChunk);
+  }
+
+  /** A process in a running associated workload (`workloads.exec`, 5b-2 D-X): an Engine exec in its container. */
+  execWorkload(workloadId: string, spec: RuntimeWorkloadExec, onOutput: (channel: 1 | 2, data: Buffer) => void): Promise<ExecSession> {
+    return engineExec(this.engine(), workloadId, spec, onOutput);
+  }
+
+  /** An associated workload's own output (`workloads.logs`). */
+  workloadLogs(workloadId: string, req: RuntimeLogsRequest, onChunk: (stream: RuntimeOutputStream, data: Buffer) => void): Promise<RuntimeLogsStream> {
+    return engineLogs(this.engine(), workloadId, req, onChunk);
+  }
+
+  private engine(): EngineClient {
+    return (this.engineClient ??= new DockerApi());
   }
 
   /** The Engine API client (stream X's), shared by the session broker. */

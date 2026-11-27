@@ -73,13 +73,13 @@ export const INVENTORY = [
   { id: 'feat.proot-routes', surface: 'proot-info, inspect-rootfs, upgrade-proot', status: 'fixed', by: '5b PR (module actions)', feature: 'instance.lifecycle' },
   { id: 'feat.bench', surface: 'bench-sandbox', status: 'fixed', by: '5b PR (module actions)', feature: 'instance.lifecycle' },
   // The 24 the delta covers
-  { id: 'cli.logs', surface: 'logs inst (engine log)', status: 'bypass', row: 'D-X', feature: 'observability.logs' },
-  { id: 'cli.logs-sidecar', surface: 'logs sc', status: 'bypass', row: 'D-X', feature: 'observability.logs' },
-  { id: 'cli.sidecar-exec', surface: 'jump --sidecar, exec sc', status: 'bypass', row: 'D-X', feature: 'workload.dynamic' },
+  { id: 'cli.logs', surface: 'logs inst (the runtime\'s logs, else the runner\'s output ring)', status: 'fixed', by: '5b-2 D-X', feature: 'observability.logs' },
+  { id: 'cli.logs-sidecar', surface: 'logs sc (workloads.logs)', status: 'fixed', by: '5b-2 D-X', feature: 'observability.logs', group: 'workloads' },
+  { id: 'cli.sidecar-exec', surface: 'jump --sidecar, exec sc (workloads.exec)', status: 'fixed', by: '5b-2 D-X', feature: 'workload.dynamic', group: 'workloads' },
   { id: 'cli.sessions', surface: 'session list/end, root ls/end', status: 'fixed', by: '5b CR', feature: 'execution.interactive', group: 'sessions' },
   { id: 'cli.cap-status', surface: 'cap grant/revoke applied|failed|unsupported', status: 'fixed', by: '5b CR/G', feature: 'tools.liveGrant', group: 'tools' },
-  { id: 'cli.cap-doctor', surface: 'cap doctor (docker image inspect)', status: 'bypass', row: 'D-C', feature: 'tools.provision' },
-  { id: 'cli.inspect-tools', surface: 'inspect-tools (host dir)', status: 'bypass', row: 'D-C', feature: 'tools.provision' },
+  { id: 'cli.cap-doctor', surface: 'cap doctor (each runtime\'s diagnostics.probeTools)', status: 'fixed', by: '5b-2 D-C', feature: 'tools.provision' },
+  { id: 'cli.inspect-tools', surface: 'inspect-tools (tools.status)', status: 'fixed', by: '5b-2 D-C', feature: 'tools.provision', group: 'tools' },
   { id: 'cli.mount', surface: 'mount ls/add/rm', status: 'bypass', row: 'D-M', feature: 'mount.attach' },
   { id: 'cli.mount-workspace', surface: 'mount workspace', status: 'bypass', row: 'D-M', feature: 'mount.attach' },
   { id: 'cli.patch-mounts', surface: 'dev patch start/save/activate (work, patches mounts)', status: 'bypass', row: 'D-M', feature: 'mount.attach' },
@@ -90,11 +90,11 @@ export const INVENTORY = [
   { id: 'cli.sdk', surface: 'sdk install, refreshSdk', status: 'bypass', row: 'D-B', feature: 'build.execute' },
   { id: 'feat.tools-host-dir', surface: 'tool refresh as a host dir', status: 'fixed', by: '5b K/CR (tools group)', feature: 'tools.liveGrant', group: 'tools' },
   { id: 'cli.whereami', surface: 'whereami (the kernel answers)', status: 'fixed', by: '5b CR', feature: 'instance.lifecycle' },
-  { id: 'feat.reaper', surface: '/proc orphan reaper, reap-orphans', status: 'bypass', row: 'D-#11', feature: 'instance.adoption' },
+  { id: 'feat.reaper', surface: 'orphan reaper, reap-orphans (the runtimes\' orphans.scan; liveness by isRunning)', status: 'fixed', by: '5b-2 D-#11', feature: 'instance.adoption' },
   { id: 'feat.mount-reapply', surface: 'mount reapply, fan-out to sidecars', status: 'bypass', row: 'D-M', feature: 'mount.inheritance' },
   { id: 'feat.sidecar-reconcile', surface: 'OS sidecar reconcile, orphan sidecars', status: 'bypass', row: 'D-S', feature: 'workload.dynamic' },
-  { id: 'feat.term-networks', surface: 'Terminal private networks', status: 'bypass', row: 'D-T', feature: 'network.isolation' },
-  { id: 'feat.datadir-report', surface: 'data-dir and contract report (docker diff)', status: 'bypass', row: 'D-R', feature: 'observability.logs' },
+  { id: 'feat.term-networks', surface: 'Terminal private networks (container module internals)', status: 'fixed', by: '5b-2 D-T', feature: 'network.isolation' },
+  { id: 'feat.datadir-report', surface: 'data-dir and contract report (diagnostics.inspectWrites)', status: 'fixed', by: '5b-2 D-R', feature: 'observability.logs' },
   { id: 'feat.base-install', surface: 'PRoot base-install', status: 'fixed', by: '5b PR (module action)', feature: 'instance.lifecycle' },
   { id: 'feat.container-health', surface: 'container health (was a constant)', status: 'fixed', by: '5b CR', feature: 'instance.lifecycle' },
 ];
@@ -125,16 +125,11 @@ const BASELINE = {
   // AppManager: the composition point (constructs the providers and managers until Phase 6 K bootSystem()),
   // plus the Engine API client it hands ExecBridge (D-X) and the /proc orphan reap (D-#11).
   // Builds and SDK provisioning still call the concrete runner (`this.container.buildApp/provisionApp`, D-B).
-  'packages/core/src/app-manager/AppManager.ts': ['cli.logs', 'cli.logs-sidecar', 'cli.sidecar-exec', 'feat.reaper', 'cli.build', 'cli.sdk'],
-  'packages/core/src/app-manager/ExecBridge.ts': ['cli.logs', 'cli.logs-sidecar', 'cli.sidecar-exec'],
+  'packages/core/src/app-manager/AppManager.ts': ['cli.build', 'cli.sdk'],
   'packages/core/src/app-manager/MountManager.ts': ['cli.mount', 'cli.mount-workspace', 'cli.patch-mounts', 'feat.mount-reapply'],
   'packages/core/src/app-manager/PortManager.ts': ['cli.port'],
   'packages/core/src/app-manager/SidecarManager.ts': ['cli.sidecars', 'cli.sidecar-create', 'feat.sidecar-reconcile'],
-  'packages/core/src/app-manager/TermNetworks.ts': ['feat.term-networks'],
-  'packages/core/src/contract/dataDirReport.ts': ['feat.datadir-report'],
   'packages/core/src/patches/series.ts': ['cli.patch-mounts'],
-  'packages/shell/src/pages/api/admin/cap-doctor.ts': ['cli.cap-doctor'],
-  'packages/shell/src/pages/api/admin/reap-orphans.ts': ['feat.reaper'],
   'packages/shell/src/lib/appSource.ts': ['cli.patch-mounts'],
   'packages/shell/src/pages/api/admin/manifest-edit.ts': ['cli.mount'],
   'packages/shell/src/pages/api/admin/system-mode.ts': ['cli.mount-workspace'],
@@ -143,13 +138,10 @@ const BASELINE = {
   'packages/shell/src/pages/api/instances/[instanceId]/mounts/[mountId].ts': ['cli.mount'],
   'packages/shell/src/pages/api/instances/[instanceId]/ports.ts': ['cli.port'],
   'packages/shell/src/pages/api/instances/[instanceId]/ports/[portId].ts': ['cli.port'],
-  'packages/shell/src/pages/api/instances/[instanceId]/exec.ts': ['cli.sidecar-exec'],
-  'packages/shell/src/pages/api/instances/[instanceId]/logs.ts': ['cli.logs'],
-  'packages/shell/server/exec-bridge.mjs': ['cli.sidecar-exec'],
   'packages/shell/src/pages/api/instances/[instanceId]/sidecars.ts': ['cli.sidecars', 'cli.sidecar-create'],
   'packages/shell/src/pages/api/instances/[instanceId]/sidecars/[name].ts': ['cli.sidecars'],
-  'packages/shell/src/pages/api/instances/[instanceId]/sidecars/[name]/exec.ts': ['cli.sidecar-exec'],
-  'packages/shell/src/pages/api/instances/[instanceId]/sidecars/[name]/logs.ts': ['cli.logs-sidecar'],
+  'packages/shell/src/pages/api/instances/[instanceId]/sidecars/[name]/exec.ts': ['cli.sidecars'],
+  'packages/shell/src/pages/api/instances/[instanceId]/sidecars/[name]/logs.ts': ['cli.sidecars'],
   'packages/shell/src/pages/api/instances/[instanceId]/sidecars/[name]/mounts.ts': ['cli.sidecars', 'feat.mount-reapply'],
   'packages/shell/src/pages/api/instances/[instanceId]/sidecars/[name]/mounts/[mountId].ts': ['cli.sidecars', 'feat.mount-reapply'],
   'packages/shell/src/pages/api/instances/[instanceId]/sidecars/[name]/tools.ts': ['cli.sidecar-create'],
@@ -177,7 +169,7 @@ const DETAIL = [
   ['container name', /`aura-\$\{[^}]*[iI]nstance[^}]*\}/],
 ];
 /** Shell code reaching a kernel manager that holds the Docker mechanism (until 5b-2 D). */
-const MANAGER = /\b(?:mgr|getAppManager\(\)|this\.mgr|deps\.mgr|core\.getAppManager\(\))\.(mounts|portExpose|osSidecars|execBridge|container)\b/;
+const MANAGER = /\b(?:mgr|getAppManager\(\)|this\.mgr|deps\.mgr|core\.getAppManager\(\))\.(mounts|portExpose|osSidecars|container)\b/;
 
 function sourceFiles() {
   const out = [];
@@ -246,8 +238,9 @@ test('ARI coverage: the §2 inventory has its 49 rows, each well-formed (status,
     if (r.status !== 'bypass' && r.group) assert.ok(r.group in GROUP_FEATURE, `${r.id}: ${r.group} is an implemented group`);
   }
   for (const r of INVENTORY) counts[r.status]++;
-  // §2.3: 18 through ARI and 31 bypasses at 283378f; 5b-1 (K..G) and 5-main B6 closed 13 of the 31.
-  assert.deepEqual(counts, { ari: 18, fixed: 13, bypass: 18 });
+  // §2.3: 18 through ARI and 31 bypasses at 283378f; 5b-1 (K..G) and 5-main B6 closed 13 of the 31,
+  // 5b-2 stream D the rest row by row (D-T, D-R, D-C, D-#11, D-X so far).
+  assert.deepEqual(counts, { ari: 18, fixed: 21, bypass: 10 });
 });
 
 test('ARI coverage: every group an ari/fixed row is served by is declared by the reference provider (container)', () => {
@@ -290,8 +283,7 @@ test('ARI coverage: the baseline shrinks: every entry still bypasses, and names 
   // Every open bypass row is still carried by a file (or it is closed: mark it fixed).
   const carried = new Set(Object.values(BASELINE).flat());
   for (const r of ALL.filter((x) => x.status === 'bypass')) {
-    // inspect-tools reads the tools dir by host path: not a pattern the scan can see (5b-2 D-C moves it behind `tools.status`).
-    assert.ok(carried.has(r.id) || r.id === 'cli.inspect-tools', `${r.id} (${r.row}) has no baselined file left: mark it fixed`);
+    assert.ok(carried.has(r.id), `${r.id} (${r.row}) has no baselined file left: mark it fixed`);
   }
 });
 
@@ -299,5 +291,5 @@ test('ARI coverage: every open bypass is a 5b-2 extraction row, at the latest Ph
   const ledger = {};
   for (const r of ALL.filter((x) => x.status === 'bypass')) (ledger[r.row] ??= []).push(r.id);
   // The rows this release leaves to 5b-2 stream D; a skipped row goes to Phase 6, never Phase 8.
-  assert.deepEqual(Object.keys(ledger).sort(), ['D-#11', 'D-B', 'D-C', 'D-M', 'D-P', 'D-R', 'D-S', 'D-SDK', 'D-T', 'D-X']);
+  assert.deepEqual(Object.keys(ledger).sort(), ['D-B', 'D-M', 'D-P', 'D-S', 'D-SDK']);
 });
