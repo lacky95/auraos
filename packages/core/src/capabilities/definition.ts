@@ -26,12 +26,21 @@
  *   mkdir: [paths]
  *   readable: path                        `chmod -R a+rX`
  *
+ * Optional data the platform reads, so no product name lives in its code (D96):
+ *   aliases      other names `tools[]` may use for this binary (`resolveToolBinaries`)
+ *   binary_path  may hold `*` inside a path segment (a platform directory such as
+ *                `pkg-linux-*`): the first existing match is the binary, so one
+ *                entry serves every architecture (`findBinaryPath`)
+ *   tags         free labels; `agent` marks an agent CLI (the welcome checklist)
+ *   login_probe  files under the user's home whose presence means "logged in"
+ *
  * Every write lands under CAPABILITY_WRITE_ROOTS; every name, path, URL and
  * digest is validated here, so a definition cannot carry an option, a shell
  * word, a traversal or a plain-http source. `capabilityDigest()` is what an
  * approval binds.
  */
 import { createHash } from 'node:crypto';
+import { existsSync, readdirSync } from 'node:fs';
 import { posix } from 'node:path';
 
 export type CapabilitySourceKind = 'builtin' | 'apt' | 'npm' | 'steps';
@@ -53,6 +62,9 @@ export interface CapabilityDefinition {
   package?: string;
   steps?: CapabilityStep[];
   sidecars?: string[];
+  aliases?: string[];
+  tags?: string[];
+  login_probe?: string[];
   description?: string;
 }
 
@@ -74,6 +86,10 @@ const FILE_SUFFIX_RE = /\.(deb|udeb|ddeb|dsc|changes|buildinfo)$/;
 const NPM_PACKAGE_RE = /^(@[a-z0-9][a-z0-9._-]{0,63}\/)?[a-z0-9][a-z0-9._-]{0,127}(@[0-9A-Za-z][0-9A-Za-z.+-]{0,63})?$/;
 const BINARY_RE = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/;
 const PATH_RE = /^\/[A-Za-z0-9._+@/-]{1,511}$/;
+/** `binary_path`: an absolute path whose segments may hold `*` (one segment each, never `**`). */
+const BINARY_PATH_RE = /^\/[A-Za-z0-9._+@/*-]{1,511}$/;
+/** `login_probe`: a path relative to the home. */
+const HOME_PATH_RE = /^[A-Za-z0-9._@-][A-Za-z0-9._+@/-]{0,255}$/;
 const MEMBER_RE = /^[A-Za-z0-9._+@-][A-Za-z0-9._+@/-]{0,255}$/;
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const MODE_RE = /^0?[0-7]{3}$/;
@@ -191,25 +207,50 @@ function step(name: string, i: number, raw: unknown): CapabilityStep {
   }
 }
 
+/** An optional list of at most `max` strings, each checked by `check`. */
+function list(name: string, where: string, v: unknown, max: number, check: (s: unknown, w: string) => string): string[] {
+  if (!Array.isArray(v) || v.length > max) fail(name, `${where} must be a list of at most ${max}`);
+  return (v as unknown[]).map((x, i) => check(x, `${where}[${i}]`));
+}
+
+/** A home-relative path: normalized, no traversal. */
+function homePath(name: string, where: string, v: unknown): string {
+  const p = str(name, where, v, HOME_PATH_RE, 256);
+  if (posix.normalize(p) !== p || p.split('/').includes('..') || p.endsWith('/')) fail(name, `${where} must be a normalized path under the home`);
+  return p;
+}
+
 /**
  * The validated definition of capability `name`, or a CapabilityDefinitionError.
  * Strict: an unknown field (an `install_cmd`, say) is an error, not ignored.
  */
 export function parseCapabilityDefinition(name: string, raw: unknown): CapabilityDefinition {
   if (!CAPABILITY_NAME_RE.test(name)) fail(JSON.stringify(name), 'not a capability name');
-  const o = obj(name, 'definition', raw, ['source', 'binary', 'binary_path', 'package', 'steps', 'sidecars', 'description']);
+  const o = obj(name, 'definition', raw, ['source', 'binary', 'binary_path', 'package', 'steps', 'sidecars', 'aliases', 'tags', 'login_probe', 'description']);
   const source = o['source'];
   if (source !== 'builtin' && source !== 'apt' && source !== 'npm' && source !== 'steps') {
     fail(name, `source must be builtin, apt, npm or steps (got ${JSON.stringify(source)})`);
   }
   const def: CapabilityDefinition = { source: source as CapabilitySourceKind };
   if (o['binary'] !== undefined) def.binary = str(name, 'binary', o['binary'], BINARY_RE, 64);
-  if (o['binary_path'] !== undefined) def.binary_path = absPath(name, 'binary_path', o['binary_path']);
+  if (o['binary_path'] !== undefined) {
+    const p = str(name, 'binary_path', o['binary_path'], BINARY_PATH_RE);
+    if (posix.normalize(p) !== p || p.split('/').some((seg) => seg === '..' || seg.includes('**')) || p.endsWith('/')) {
+      fail(name, 'binary_path must be a normalized absolute path (`*` only inside a segment)');
+    }
+    def.binary_path = p;
+  }
   if (o['description'] !== undefined) def.description = str(name, 'description', o['description'], null, 500);
   if (o['sidecars'] !== undefined) {
     if (!Array.isArray(o['sidecars']) || o['sidecars'].length > 64) fail(name, 'sidecars must be a list');
     def.sidecars = (o['sidecars'] as unknown[]).map((s, i) => (typeof s === 'string' && s.startsWith('/') ? absPath(name, `sidecars[${i}]`, s) : str(name, `sidecars[${i}]`, s, BINARY_RE, 64)));
   }
+  if (o['aliases'] !== undefined) {
+    def.aliases = list(name, 'aliases', o['aliases'], 16, (x, w) => str(name, w, x, BINARY_RE, 64));
+    if (def.aliases.includes(def.binary ?? name)) fail(name, 'aliases must not repeat the binary name');
+  }
+  if (o['tags'] !== undefined) def.tags = list(name, 'tags', o['tags'], 16, (x, w) => str(name, w, x, CAPABILITY_NAME_RE, 64));
+  if (o['login_probe'] !== undefined) def.login_probe = list(name, 'login_probe', o['login_probe'], 8, (x, w) => homePath(name, w, x));
   switch (def.source) {
     case 'apt':
       if (!isDebianPackageName(o['package'])) fail(name, `package must be a Debian package name (got ${JSON.stringify(o['package'])})`);
@@ -231,6 +272,29 @@ export function parseCapabilityDefinition(name: string, raw: unknown): Capabilit
   if (def.source !== 'apt' && def.source !== 'npm' && o['package'] !== undefined) fail(name, `package is for apt and npm`);
   if (def.source !== 'steps' && o['steps'] !== undefined) fail(name, `steps are for source: steps`);
   return def;
+}
+
+/**
+ * The binary a `binary_path` names on this machine: the path itself, or for a
+ * pattern the first existing match (segments with `*` are matched against the
+ * directory entries, sorted). Null when nothing exists.
+ */
+export function findBinaryPath(pattern: string | undefined): string | null {
+  if (!pattern) return null;
+  if (!pattern.includes('*')) return existsSync(pattern) ? pattern : null;
+  let dirs = ['/'];
+  for (const seg of pattern.split('/').filter(Boolean)) {
+    const next: string[] = [];
+    for (const dir of dirs) {
+      if (!seg.includes('*')) { next.push(posix.join(dir, seg)); continue; }
+      const re = new RegExp(`^${seg.replace(/[.+@-]/g, '\\$&').replace(/\*/g, '[^/]*')}$`);
+      let names: string[] = [];
+      try { names = readdirSync(dir).sort(); } catch { /* not a directory */ }
+      for (const n of names) if (re.test(n)) next.push(posix.join(dir, n));
+    }
+    dirs = next;
+  }
+  return dirs.find((p) => existsSync(p)) ?? null;
 }
 
 /** Canonical JSON: object keys sorted at every level, so the digest never depends on key order. */

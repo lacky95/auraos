@@ -279,8 +279,8 @@ export class ProotRunner implements SandboxRunner {
    * prootBinds also binds the shared store.
    *
    * Apps with `'*'` in tools[] get every entry in the toolchain; explicit-list
-   * apps get just their declared tools (with the historical `claude-code` →
-   * `claude` rename preserved). Called once at spawn AND on cap
+   * apps get just their declared tools (a registry entry's `aliases:` name
+   * its binary too). Called once at spawn AND on cap
    * grant/revoke/install for live instances — so a running terminal sees a new
    * capability appear in PATH without a respawn.
    */

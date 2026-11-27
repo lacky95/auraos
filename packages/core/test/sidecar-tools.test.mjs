@@ -47,7 +47,7 @@ test('helpers travel with their owner and never alone', () => {
 });
 
 test('claude-code is the claude binary; an empty request holds nothing', () => {
-  assert.deepEqual(effectiveSidecarTools(['claude-code'], ['claude'], [], ['claude'], {}).effective, ['claude']);
+  assert.deepEqual(effectiveSidecarTools(['claude-code'], ['claude'], [], ['claude'], {}, { claude: ['claude-code'] }).effective, ['claude']);
   assert.deepEqual(effectiveSidecarTools(['jq'], [], [], installed, helpers), { effective: [], ignored: [] });
 });
 

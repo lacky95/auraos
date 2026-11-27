@@ -4,6 +4,7 @@
  * step states in and send what these functions return as notifications.
  */
 
+import type { CapabilityDefinition } from '@aura/core';
 import { SETTINGS_APP_ID, TERMINAL_APP_ID } from '../../../server/session-hosts.mjs';
 
 // ─── Setup card ──────────────────────────────────────────────────────────
@@ -116,22 +117,46 @@ export function renderSetupChecklist(steps: SetupStep[]): string {
 export type WelcomeStepId = 'agent' | 'login' | 'theme' | 'firstApp' | 'docs';
 export type WelcomeTarget = 'terminal' | 'settings' | 'docs';
 
+/**
+ * An agent CLI, from the capability registry (D96: data, no product name in
+ * this code): an entry tagged `agent`, the binary it runs and the files under
+ * the home that mean it is logged in (`login_probe`).
+ */
+export interface WelcomeAgent { cap: string; binary: string; loginProbe: string[] }
+
+export const AGENT_TAG = 'agent';
+
+/** The registry's agent CLIs, in registry order. */
+export function welcomeAgents(registry: Record<string, CapabilityDefinition>): WelcomeAgent[] {
+  return Object.entries(registry)
+    .filter(([, def]) => def.tags?.includes(AGENT_TAG))
+    .map(([cap, def]) => ({ cap, binary: def.binary ?? cap, loginProbe: [...(def.login_probe ?? [])] }));
+}
+
 export interface WelcomeStep {
   id: WelcomeStepId;
   title: string;
-  /** Markdown: what to do, with the command where there is one. */
-  how: string;
+  /** Markdown: what to do, with the command where there is one (for the registry's agent CLIs). */
+  how: string | ((agents: readonly WelcomeAgent[]) => string);
   target: WelcomeTarget;
+}
+
+/** `` `a` `` (or `` `b` ``, `` `c` ``): the first command, the others as alternatives. */
+function firstOr(commands: string[]): string {
+  const [first, ...rest] = commands.map((c) => `\`${c}\``);
+  return rest.length ? `${first} (or ${rest.join(', ')})` : first!;
 }
 
 export const WELCOME_STEPS: WelcomeStep[] = [
   {
     id: 'agent', target: 'terminal', title: 'Install an AI agent',
-    how: 'In the Terminal: `aura cap install claude` (or `codex`).',
+    how: (agents) => (agents.length
+      ? `In the Terminal: ${firstOr(agents.map((a, i) => (i === 0 ? `aura cap install ${a.cap}` : a.cap)))}.`
+      : 'In the Terminal: `aura get caps` lists the tools you can install.'),
   },
   {
     id: 'login', target: 'terminal', title: 'Log in to your agent',
-    how: 'Run `claude` (or `codex`) in the Terminal and sign in. The login follows you into every app.',
+    how: (agents) => `Run ${agents.length ? firstOr(agents.map((a) => a.binary)) : 'your agent'} in the Terminal and sign in. The login follows you into every app.`,
   },
   {
     id: 'theme', target: 'settings', title: 'Pick a theme',
@@ -146,6 +171,11 @@ export const WELCOME_STEPS: WelcomeStep[] = [
     how: 'Aura Docs explains apps, sidecars, mounts and the `aura` CLI.',
   },
 ];
+
+/** A step's how-to for these agent CLIs. */
+export function stepHow(step: WelcomeStep, agents: readonly WelcomeAgent[] = []): string {
+  return typeof step.how === 'function' ? step.how(agents) : step.how;
+}
 
 export const TARGET_APP: Record<WelcomeTarget, string> = {
   terminal: TERMINAL_APP_ID,
@@ -183,9 +213,12 @@ export interface WelcomeView {
 /**
  * The welcome card for a set of done steps. `available` limits the buttons to
  * apps that are installed and enabled (a step whose app is missing still shows
- * its how-to, just without a button).
+ * its how-to, just without a button); `agents` (`welcomeAgents`) name the
+ * commands in the agent steps.
  */
-export function renderWelcome(done: ReadonlySet<WelcomeStepId>, available: ReadonlySet<WelcomeTarget>): WelcomeView {
+export function renderWelcome(
+  done: ReadonlySet<WelcomeStepId>, available: ReadonlySet<WelcomeTarget>, agents: readonly WelcomeAgent[] = [],
+): WelcomeView {
   const open = WELCOME_STEPS.filter((s) => !done.has(s.id));
   const count = WELCOME_STEPS.length - open.length;
   if (!open.length) {
@@ -198,7 +231,7 @@ export function renderWelcome(done: ReadonlySet<WelcomeStepId>, available: Reado
   }
   const list = WELCOME_STEPS.map((s) => (done.has(s.id)
     ? `- [x] ~~${s.title}~~`
-    : `- [ ] **${s.title}** — ${s.how}`)).join('\n');
+    : `- [ ] **${s.title}** — ${stepHow(s, agents)}`)).join('\n');
   // One button per distinct target still needed, in checklist order.
   const targets: WelcomeTarget[] = [];
   for (const s of open) if (available.has(s.target) && !targets.includes(s.target)) targets.push(s.target);

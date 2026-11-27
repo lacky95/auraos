@@ -4,10 +4,12 @@
 //   cd packages/shell && npx tsx --test test/onboarding.test.ts
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { CreateInputSchema } from '@aura/core';
+import { readFileSync } from 'node:fs';
+import { parse as parseYaml } from 'yaml';
+import { CreateInputSchema, parseCapabilityRegistry } from '@aura/core';
 import {
   HIDE_BUTTON_ID, WELCOME_STEPS, appForButton, failedSteps, isSettled, openButtonId,
-  renderSetupChecklist, renderWelcome, setupHeadline, setupProgress,
+  renderSetupChecklist, renderWelcome, setupHeadline, setupProgress, welcomeAgents,
   type SetupStep, type WelcomeStepId, type WelcomeTarget,
 } from '../src/lib/onboarding/steps.ts';
 
@@ -58,6 +60,39 @@ test('welcome: done steps are checked off and their app button goes away', () =>
   assert.match(md.text, /- \[ \] \*\*Install an AI agent\*\*/);
   assert.deepEqual(v.components.filter((c) => c.kind === 'button').map((c) => c.id), ['open-terminal', HIDE_BUTTON_ID]);
   assert.match(v.text, /2 of 5 done/);
+});
+
+test('welcome: the agent steps name the registry\'s agent CLIs (tags: [agent]), none in code', () => {
+  const agents = welcomeAgents({
+    'agent-a': { source: 'npm', package: 'a', binary: 'a', tags: ['agent'], login_probe: ['.a/creds.json'] },
+    jq: { source: 'apt', package: 'jq', binary: 'jq' },
+    'agent-b': { source: 'npm', package: 'b', tags: ['agent'] },
+  });
+  assert.deepEqual(agents, [
+    { cap: 'agent-a', binary: 'a', loginProbe: ['.a/creds.json'] },
+    { cap: 'agent-b', binary: 'agent-b', loginProbe: [] },
+  ]);
+  const md = (v: ReturnType<typeof renderWelcome>) => { const c = v.components.find((x) => x.kind === 'markdown'); return c && c.kind === 'markdown' ? c.text : ''; };
+  const text = md(renderWelcome(new Set(), ALL, agents));
+  assert.match(text, /\*\*Install an AI agent\*\* — In the Terminal: `aura cap install agent-a` \(or `agent-b`\)\./);
+  assert.match(text, /\*\*Log in to your agent\*\* — Run `a` \(or `agent-b`\) in the Terminal and sign in\./);
+  // No agent in the registry: still a how-to, without a product name.
+  const none = md(renderWelcome(new Set(), ALL));
+  assert.match(none, /`aura get caps` lists the tools you can install/);
+  assert.match(none, /Run your agent in the Terminal/);
+});
+
+test('welcome: the release registry keeps today\'s agent steps (claude, codex and their login files)', () => {
+  const registry = parseCapabilityRegistry(parseYaml(readFileSync(new URL('../../../.aura/capabilities.yaml', import.meta.url), 'utf8')));
+  const agents = welcomeAgents(registry);
+  assert.deepEqual(agents, [
+    { cap: 'claude', binary: 'claude', loginProbe: ['.claude/.credentials.json'] },
+    { cap: 'codex', binary: 'codex', loginProbe: ['.codex/auth.json'] },
+  ]);
+  const c = renderWelcome(new Set(), ALL, agents).components.find((x) => x.kind === 'markdown');
+  assert.ok(c && c.kind === 'markdown');
+  assert.ok(c.text.includes('In the Terminal: `aura cap install claude` (or `codex`).'));
+  assert.ok(c.text.includes('Run `claude` (or `codex`) in the Terminal and sign in. The login follows you into every app.'));
 });
 
 test('welcome: no button for an app that is not installed or disabled', () => {

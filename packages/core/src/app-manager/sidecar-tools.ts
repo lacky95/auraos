@@ -1,4 +1,4 @@
-import { TOOL_MARKERS, resolveToolBinaries, toolBinaryName, type SidecarMap } from '../capabilities/tool-allowlist.js';
+import { TOOL_MARKERS, resolveToolBinaries, toolBinaryName, type AliasMap, type SidecarMap } from '../capabilities/tool-allowlist.js';
 
 /**
  * The tools an OS sidecar with its OWN allowlist dir gets (template
@@ -23,18 +23,19 @@ export function effectiveSidecarTools(
   runtimeGrants: string[],
   installedBinaries: string[],
   helperMap: SidecarMap = {},
+  aliases: AliasMap = {},
 ): SidecarToolsResult {
-  const app = new Set(resolveToolBinaries(appTools, installedBinaries, helperMap));
+  const app = new Set(resolveToolBinaries(appTools, installedBinaries, helperMap, aliases));
   // Template and runtime lists resolve SEPARATELY, then union: a runtime grant
   // is additive, so it must not land inside a template's `#` deny-list.
   const lists = [templateTools, runtimeGrants];
-  const mine = lists.flatMap((l) => resolveToolBinaries(l, installedBinaries, helperMap));
+  const mine = lists.flatMap((l) => resolveToolBinaries(l, installedBinaries, helperMap, aliases));
   const effective = [...new Set(mine.filter((b) => app.has(b)))].sort();
   // In a list with a marker the named entries are exceptions (`#`) or moot
   // (`*`), not asks — only plain allow-lists can name a tool the app lacks.
   const ignored = [...new Set(lists
     .filter((l) => !l.some((t) => TOOL_MARKERS.has(t)))
-    .flatMap((l) => l.filter((t) => !app.has(toolBinaryName(t)))))].sort();
+    .flatMap((l) => l.filter((t) => !app.has(toolBinaryName(t, aliases)))))].sort();
   return { effective, ignored };
 }
 

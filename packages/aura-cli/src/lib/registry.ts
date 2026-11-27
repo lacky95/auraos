@@ -3,7 +3,7 @@ import { join, dirname } from 'node:path';
 import { execSync } from 'node:child_process';
 import { parse as parseYaml } from 'yaml';
 import {
-  detectSidecars, readSidecarMap, setSidecars,
+  detectSidecars, findBinaryPath, readSidecarMap, setAliases, setSidecars,
   readLinkage, stageLibs, setLibs, readLibMap, orphanedLibs, toolchainLibFor,
 } from '@aura/core';
 import { api } from './client.js';
@@ -31,6 +31,8 @@ export interface CapabilityEntry {
    * detected automatically. Declare a name here only when that doesn't hold.
    */
   sidecars?: string[];
+  /** Other names `tools[]` may use for this binary (core capabilities/definition.ts). */
+  aliases?: string[];
   description?: string;
 }
 
@@ -136,6 +138,7 @@ function linkWithSidecars(src: string, binaryName: string, entry: CapabilityEntr
   const found = detectSidecars({ binaryPath: src, binaryName, declared: entry.sidecars });
   for (const sc of found) ensureSymlink(sc.src, join(TOOLCHAIN_BIN, sc.name));
   setSidecars([TOOLCHAIN_BIN], binaryName, found.map((sc) => sc.name));
+  setAliases([TOOLCHAIN_BIN], binaryName, entry.aliases ?? []);
 
   // Record and stage the shared libraries too. This path is the DEGRADED
   // fallback (see the header comment on why installs normally route through
@@ -159,9 +162,8 @@ export async function installCapability(name: string, entry: CapabilityEntry): P
 
   switch (entry.source) {
     case 'builtin': {
-      const sidecars = entry.binary_path && existsSync(entry.binary_path)
-        ? linkWithSidecars(entry.binary_path, binaryName, entry)
-        : [];
+      const found = findBinaryPath(entry.binary_path);
+      const sidecars = found ? linkWithSidecars(found, binaryName, entry) : [];
       return { symlink: link, version: null, sidecars };
     }
     case 'apt': {
@@ -178,7 +180,7 @@ export async function installCapability(name: string, entry: CapabilityEntry): P
       if (!entry.package) throw new Error(`Registry entry ${name}: npm source requires 'package'`);
       sh(`npm install -g ${entry.package}`);
       // Prefer an explicit binary_path (see the shell's /api/admin/cap for why).
-      const found = entry.binary_path && existsSync(entry.binary_path) ? entry.binary_path : which(binaryName);
+      const found = findBinaryPath(entry.binary_path) ?? which(binaryName);
       if (!found) throw new Error(`npm install succeeded but binary '${binaryName}' not found on PATH`);
       const sidecars = linkWithSidecars(found, binaryName, entry);
       let version: string | null = null;
@@ -203,6 +205,7 @@ export async function removeCapability(name: string, entry: CapabilityEntry): Pr
   }
   setLibs([TOOLCHAIN_BIN], binaryName, []);
   setSidecars([TOOLCHAIN_BIN], binaryName, []);
+  setAliases([TOOLCHAIN_BIN], binaryName, []);
 
   if (entry.source === 'apt' && entry.package) {
     try { sh(`apt-get remove -y -q ${entry.package}`); } catch { /* ignore */ }

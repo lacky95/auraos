@@ -18,8 +18,8 @@ import {
   resolveToolBinaries, toolsGrant, sidecarNames,
 } from '../dist/capabilities/tool-allowlist.js';
 import {
-  detectSidecars, readSidecarMap, writeSidecarMap, setSidecars,
-  listToolchainBinaries, SIDECAR_MANIFEST,
+  detectSidecars, readSidecarMap, writeSidecarMap, setSidecars, readAliasMap, setAliases,
+  listToolchainBinaries, SIDECAR_MANIFEST, ALIAS_MANIFEST,
 } from '../dist/app-manager/tool-provision.js';
 
 const CODEX = { codex: ['codex-code-mode-host'] };
@@ -69,7 +69,8 @@ test('toolsGrant follows the owner, not the helper name', () => {
   assert.equal(toolsGrant(['codex', '#'], 'codex-code-mode-host', CODEX), false);
   assert.equal(toolsGrant(['*'], 'codex-code-mode-host', CODEX), true);
   // claude-code aliasing and plain tools keep working untouched.
-  assert.equal(toolsGrant(['claude-code'], 'claude'), true);
+  assert.equal(toolsGrant(['claude-code'], 'claude', {}, { claude: ['claude-code'] }), true, 'an alias from the registry entry');
+  assert.equal(toolsGrant(['claude-code'], 'claude'), false, 'no alias lives in code');
   assert.equal(toolsGrant(['docker'], 'docker'), true);
 });
 
@@ -167,4 +168,20 @@ test('declared and auto-detected helpers merge without duplicates', () => {
     binaryPath: codex, binaryName: 'codex', declared: ['codex-code-mode-host'],
   });
   assert.deepEqual(found.map((f) => f.name), ['codex-code-mode-host']);
+});
+
+test('aliases: recorded per binary like the sidecar map, resolved to the real binary, never a grantable name', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'aliases-'));
+  setAliases([dir], 'tool', ['tool-cli', 'tool2']);
+  setAliases([dir], 'other', ['o']);
+  assert.deepEqual(readAliasMap(dir), { tool: ['tool-cli', 'tool2'], other: ['o'] });
+  setAliases([dir], 'other', []);
+  assert.deepEqual(readAliasMap(dir), { tool: ['tool-cli', 'tool2'] });
+  assert.equal(ALIAS_MANIFEST.startsWith('.'), true);
+  writeFileSync(join(dir, 'tool'), '');
+  assert.deepEqual(listToolchainBinaries(dir), ['tool'], 'the map is a dotfile');
+  assert.deepEqual(resolveToolBinaries(['tool2', 'git'], ['tool', 'git'], {}, readAliasMap(dir)).sort(), ['git', 'tool']);
+  assert.deepEqual(resolveToolBinaries(['tool-cli', '#'], ['tool', 'git'], {}, readAliasMap(dir)), ['git'], 'an alias in a deny-list denies the binary');
+  writeFileSync(join(dir, ALIAS_MANIFEST), '{not json');
+  assert.deepEqual(readAliasMap(dir), {});
 });
