@@ -401,6 +401,22 @@ export class MountManager {
     return [...(this.mounts.get(instanceId)?.values() ?? [])];
   }
 
+  /**
+   * The instances that have `targetAppId`'s data mounted (a sidecar counts as
+   * its instance), the target's own instances left out: what a change of its
+   * data's ownership affects (the run-as migration, identity/runAsOwnership.ts).
+   */
+  dataConsumers(targetAppId: string): string[] {
+    const out = new Set<string>();
+    for (const [consumer, set] of this.mounts) {
+      for (const m of set.values()) {
+        if (m.kind !== 'data' || m.targetAppId !== targetAppId) continue;
+        out.add(consumer.split(SIDECAR_SEP)[0]!);
+      }
+    }
+    return [...out].sort();
+  }
+
   /** The live binds of a patch workspace (`work` mounts of `subpath`), in every consumer. */
   workspaceBinds(subpath: string): Array<{ instanceId: string; mountId: string }> {
     const out: Array<{ instanceId: string; mountId: string }> = [];

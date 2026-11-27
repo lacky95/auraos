@@ -17,7 +17,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = realpathSync(join(dirname(fileURLToPath(import.meta.url)), '..'));
@@ -123,23 +123,59 @@ function suiteEnv(dir, id) {
   };
 }
 
+// D95: never silently skip tests. Every `node --test` / `tsx --test` suite also
+// runs our file reporter; afterwards the files it saw are compared with the
+// files the script names (globs expanded), and a file with no reported test
+// fails the suite.
+const REPORTER = join(ROOT, 'tools/test-file-reporter.mjs');
+// tools/test-expectations.json: `minTests` = per-suite floor for `# tests` (raise it
+// when tests are added; lower it only when tests are removed on purpose);
+// `delegating` = test files whose tests node attributes to a helper module.
+const EXPECT = existsSync(join(ROOT, 'tools/test-expectations.json')) ? JSON.parse(readFileSync(join(ROOT, 'tools/test-expectations.json'), 'utf-8')) : {};
+const EXPECTATIONS = EXPECT.minTests ?? {};
+
+/** Test files a script names, e.g. `node --test test/*.test.ts test/x.test.mjs` (null: not a node --test script). */
+function discoverFiles(dir, script) {
+  const m = script.match(/--test(?:\s|$)(.*)$/);
+  if (!m) return null;
+  const files = new Set();
+  for (const tok of m[1].split(/\s+/).filter((t) => t && !t.startsWith('-'))) {
+    const d = dirname(tok);
+    const re = new RegExp(`^${basename(tok).replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`);
+    if (!existsSync(join(ROOT, dir, d))) { files.add(tok); continue; }
+    for (const f of readdirSync(join(ROOT, dir, d))) if (re.test(f)) files.add(join(d, f));
+  }
+  return [...files].sort();
+}
+
 function runSuite({ dir, script: declared }) {
-  const script = FORCE_EXIT.has(dir) ? declared.replace('--test ', '--test --test-force-exit ') : declared;
   const id = dir.replace(/\W+/g, '-');
+  const fileLog = join(runDir, `${id}.files`);
+  const files = discoverFiles(dir, declared);
+  let script = FORCE_EXIT.has(dir) ? declared.replace('--test ', '--test --test-force-exit ') : declared;
+  if (files) script = script.replace('--test ', `--test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=${REPORTER} --test-reporter-destination=${join(runDir, `${id}.reporter.out`)} `);
   const logPath = join(runDir, `${id}.log`);
   const log = createWriteStream(logPath);
   return new Promise((resolve) => {
     const started = Date.now();
-    const child = spawn('bash', ['-c', script], { cwd: join(ROOT, dir), env: suiteEnv(dir, id), detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn('bash', ['-c', script], { cwd: join(ROOT, dir), env: { ...suiteEnv(dir, id), AURA_TEST_FILE_LOG: fileLog }, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let timedOut = false;
     const timer = setTimeout(() => { timedOut = true; try { process.kill(-child.pid, 'SIGKILL'); } catch {} }, timeoutMs);
     child.stdout.pipe(log, { end: false });
     child.stderr.pipe(log, { end: false });
     child.on('close', (code) => {
       clearTimeout(timer);
-      log.end(() => resolve({ dir, code, timedOut, logPath, seconds: Math.round((Date.now() - started) / 1000), ...parse(readFileSync(logPath, 'utf-8')) }));
+      log.end(() => resolve({ dir, code, timedOut, logPath, seconds: Math.round((Date.now() - started) / 1000), ...parse(readFileSync(logPath, 'utf-8')), missing: missingFiles(dir, files, fileLog) }));
     });
   });
+}
+
+/** Discovered test files that reported no test. */
+function missingFiles(dir, files, fileLog) {
+  if (!files) return [];
+  const seen = new Set(existsSync(fileLog) ? readFileSync(fileLog, 'utf-8').split('\n').filter(Boolean).map((f) => relative(join(ROOT, dir), f)) : []);
+  const delegating = new Set(EXPECT.delegating?.[dir] ?? []);
+  return files.filter((f) => !seen.has(f) && !delegating.has(f));
 }
 
 function parse(text) {
@@ -156,9 +192,33 @@ function parse(text) {
 
 // --test-force-exit can cut off the summary, so a clean exit with no counted
 // tests proves nothing.
-const incomplete = (r) => r.code === 0 && r.tests === 0;
-const passed = (r) => r.code === 0 && !incomplete(r);
-const label = (r) => r.timedOut ? 'TIMEOUT' : incomplete(r) ? 'FAILED (no test summary)' : r.code === 0 ? 'ok' : `FAILED (exit ${r.code})`;
+const incomplete = (r) => r.tests === 0;
+const tooFew = (r) => r.tests < (EXPECTATIONS[r.dir] ?? 0);
+const passed = (r) => r.code === 0 && !incomplete(r) && !r.missing.length && !tooFew(r);
+const label = (r) => r.timedOut ? 'TIMEOUT'
+  : incomplete(r) ? 'FAILED (no test summary / 0 tests)'
+  : r.missing.length ? `FAILED (${r.missing.length} test file(s) reported no tests)`
+  : tooFew(r) ? `FAILED (${r.tests} tests, expected at least ${EXPECTATIONS[r.dir]})`
+  : r.code === 0 ? 'ok' : `FAILED (exit ${r.code})`;
+
+/** Shell DOM tests (test/dom.ts closes its window in after()): a top-level await other than a dynamic import, followed by test(), can lose the tests registered after it. */
+function lintDomTests() {
+  const dir = join(ROOT, 'packages/shell/test');
+  if (!existsSync(dir)) return [];
+  const hits = [];
+  for (const f of readdirSync(dir).filter((n) => /\.test\.ts$/.test(n))) {
+    const lines = readFileSync(join(dir, f), 'utf-8').split('\n');
+    if (!lines.some((l) => /['"]\.\/dom\.ts['"]/.test(l))) continue;
+    const at = lines.findIndex((l) => /^(?:(?:const|let|var)\s[^=]*=\s*)?await\s(?!import\()/.test(l) || /^for await\b/.test(l));
+    if (at >= 0 && lines.slice(at + 1).some((l) => /^(?:test|it|describe)(?:\.\w+)?\(/.test(l))) hits.push(`packages/shell/test/${f}:${at + 1}`);
+  }
+  return hits;
+}
+const lint = lintDomTests();
+if (lint.length) {
+  console.log('FAILED shell DOM tests register test() after a top-level await (tests can be lost once dom.ts after() closes the window):');
+  for (const l of lint) console.log(`    x ${l}`);
+}
 
 const security = args.includes('--with-security') ? runSecurity() : null;
 const arch = args.includes('--no-arch') ? null : runArch();
@@ -194,6 +254,7 @@ for (const r of results) {
   const result = label(r);
   console.log(`${r.dir.padEnd(30)} ${n(r.tests, 5)} ${n(r.pass, 5)} ${n(r.fail, 5)} ${n(r.cancelled, 7)} ${n(r.skipped, 5)} ${n(r.todo, 5)} ${n(r.seconds, 4)}s  ${result}`);
   for (const f of r.failures) console.log(`    x ${f}`);
+  for (const f of r.missing) console.log(`    x LOST TEST FILE (no test reported: crashed, exited early or registered tests too late): ${f}`);
   if (!passed(r)) console.log(`    log: ${r.logPath}`);
 }
 if (existsSync(guardLog)) {
@@ -211,4 +272,4 @@ if (arch) {
   for (const l of arch.lines.slice(1, 41)) console.log(`    ${l.slice(0, 200)}`);
 }
 console.log(`\nlogs: ${runDir}`);
-process.exit(results.every(passed) && (!security || security.code === 0) && (!arch || arch.code === 0) ? 0 : 1);
+process.exit(!lint.length && results.every(passed) && (!security || security.code === 0) && (!arch || arch.code === 0) ? 0 : 1);

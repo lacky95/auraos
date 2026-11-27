@@ -168,11 +168,20 @@ export class AppHostLifecycle {
    * An approved install or update bound this root request (identity/
    * execution.ts): the installation runs as root with exactly this config.
    * The same digest already approved stays as it was (the update keeps it).
+   *
+   * An installation that runs as its app identity is flipped only when the
+   * record is new (`newRecord`: created by this install, no data restored):
+   * otherwise its data belongs to the app uid, and the flip goes through the
+   * run-as migration (`aura admin apps run-as <app> root`,
+   * identity/runAsOwnership.ts). Throws then; the app does not start.
    */
-  async approveExecution(appId: string, scope: ScopeId, approval: ExecutionApproval): Promise<AppInstallation> {
+  async approveExecution(appId: string, scope: ScopeId, approval: ExecutionApproval, opts: { newRecord?: boolean } = {}): Promise<AppInstallation> {
     const i = await this.registry.findInstallation(appId, scope);
     if (!i || i.state !== 'active') throw new Error(`${appId} has no active installation to record its root approval on`);
     if (i.runAs === 'root' && i.execution?.digest === approval.digest) return i;
+    if (i.runAs === 'app' && !opts.newRecord) {
+      throw new Error(`${appId} runs as its app identity and its data belongs to that uid: its data moves with the run-as migration`);
+    }
     const r = await this.registry.setRunAs(i.installationId, 'root', undefined, approval);
     if (!r.ok || !r.installation) throw new Error(`${appId}: its installation record changed while recording the root approval`);
     return r.installation;

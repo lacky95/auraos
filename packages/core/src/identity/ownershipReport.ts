@@ -32,6 +32,8 @@ export interface OwnershipRowSpec {
   owner?: string;
   /** The target owner; null while its identity is not allocated (shown, never applicable). */
   to: { uid: number; gid: number } | null;
+  /** Only entries owned by this uid change (appOwnership.ts `chownTree`); the rest keep their owner. */
+  onlyFrom?: { uid: number; gid: number };
   /** Octal, e.g. `0700`; or a symbolic note such as `g+rX, setgid dirs`. */
   mode?: string;
   recursive: boolean;
@@ -51,6 +53,8 @@ export interface OwnershipRow {
   /** The top directory's current `uid:gid`; null when the path does not exist. */
   from: string | null;
   to: string | null;
+  /** Only entries owned by this `uid:gid`'s uid change; the rest keep their owner. */
+  onlyFrom?: string;
   mode?: string;
   recursive: boolean;
   exclude?: string[];
@@ -122,7 +126,7 @@ async function walk(spec: OwnershipRowSpec, maxEntries: number): Promise<Walked>
   const count = (st: { uid: number; gid: number; size: number; isFile(): boolean }, inGit: boolean) => {
     out.entries++;
     if (st.isFile()) { out.files++; out.bytes += st.size; }
-    if (spec.to && (st.uid !== spec.to.uid || st.gid !== spec.to.gid)) out.toChange++;
+    if (spec.to && (st.uid !== spec.to.uid || st.gid !== spec.to.gid) && (!spec.onlyFrom || st.uid === spec.onlyFrom.uid)) out.toChange++;
     if (st.uid === 0) {
       if (spec.splitGit && inGit) out.rootOwnedGit++;
       else out.rootOwned++;
@@ -182,6 +186,7 @@ export async function buildOwnershipReport(specs: readonly OwnershipRowSpec[], o
       ...(spec.owner ? { owner: spec.owner } : {}),
       from: w.from,
       to: spec.to ? `${spec.to.uid}:${spec.to.gid}` : null,
+      ...(spec.onlyFrom ? { onlyFrom: `${spec.onlyFrom.uid}:${spec.onlyFrom.gid}` } : {}),
       ...(spec.mode ? { mode: spec.mode } : {}),
       recursive: spec.recursive,
       ...(spec.exclude?.length ? { exclude: [...spec.exclude].sort() } : {}),

@@ -74,6 +74,8 @@ export * from './identity/passwd.js';
 export * from './identity/ownershipReport.js';
 export * from './identity/appOwnership.js';
 export * from './identity/ownershipApply.js';
+export { RUN_AS_MIGRATION_AUDIT_ACTIONS, runAsMigrationBlock, runAsOwnershipPaths, runAsOwnershipPlan } from './identity/runAsOwnership.js';
+export type { RunAsOwnershipApply, RunAsOwnershipInput, RunAsOwnershipPlan, RunAsTarget } from './identity/runAsOwnership.js';
 export * from './identity/privilegeReview.js';
 export * from './identity/appIdentityProvider.js';
 export {

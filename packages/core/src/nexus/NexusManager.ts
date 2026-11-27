@@ -582,6 +582,7 @@ export class NexusManager {
         } catch { /* treat as fresh install */ }
       }
       const diff = computePermissionDiff(currentManifest, manifest);
+      const priorInstallation = await this.hostLifecycle?.installationOf(manifest.id, targetScope).catch(() => null) ?? null;
       const binding: InstallBinding = {
         action: opts.action ?? 'nexus.install',
         appId: manifest.id, name: manifest.name, version: manifest.version,
@@ -592,7 +593,7 @@ export class NexusManager {
         context: [...new Set(manifest.context ?? [])].sort(),
         replaceCheckout: replacesCheckout,
         // A root request (identity/execution.ts) is bound by its digest; `renew` compares with the installation's approval.
-        execution: executionBinding(manifest, await this.hostLifecycle?.installationOf(manifest.id, targetScope).catch(() => null)),
+        execution: executionBinding(manifest, priorInstallation),
         exposure: installExposure(manifest),
       };
 
@@ -640,11 +641,14 @@ export class NexusManager {
         // The approved root request, on the installation, before the app can start (fail closed if it can't be).
         if (executionApproved) {
           try {
+            // A new record with no data from before may start as root at once; an app that ran as its
+            // app identity keeps data that uid owns: its flip goes through the run-as migration.
+            const restored = restore.kind === 'restore' || (restore.kind === 'confirm' && !!restore.installation);
             await this.hostLifecycle?.approveExecution(manifest.id, targetScope, {
               runAs: 'root', digest: executionApproved.digest, approvedAt: Date.now(), via: binding.action,
-            });
+            }, { newRecord: !priorInstallation && !restored });
           } catch (err) {
-            console.warn(`[nexus] ${manifest.id}: its root approval could not be recorded (${(err as Error).message}); it does not start until you approve it again (aura admin apps run-as ${manifest.id} root)`);
+            console.warn(`[nexus] ${manifest.id}: its root approval could not be recorded (${(err as Error).message}); it does not start until you approve it again (aura admin apps run-as ${manifest.id} root: a dry run, then --apply <digest>)`);
           }
         }
       } finally {

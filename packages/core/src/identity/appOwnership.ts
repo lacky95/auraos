@@ -18,6 +18,13 @@
  * Modes are left as they are: the instance dir is mounted only into its own
  * container, and a capability-less root in `aura jump` (5-apps) still reads it.
  *
+ * Only what the app's previous identity owns changes (`from`, default root):
+ * an entry owned by anyone else (a sidecar's uid, the owner) keeps its owner,
+ * and a group other than the previous identity's group is kept. So the same
+ * rows run both ways (owner decision 5-main, run-as reversible:
+ * identity/runAsOwnership.ts): root -> app, and app -> root. Another app's
+ * files bound under `<instance>/.mnt` (MountManager) are never walked.
+ *
  * Apply walks each row through directory file descriptors
  * (`/proc/self/fd/<fd>/<name>`, `O_NOFOLLOW`): a path component can't be
  * swapped for a symlink between the check and the chown, so a process of the
@@ -50,6 +57,12 @@ export interface AppOwnershipInput {
   /** The target; null while the identity is not allocated (shown, never applicable). */
   identity: LinuxIdentity | null;
   /**
+   * The identity the app ran as: only its entries change. Default root (a
+   * `runAs: app` start; the flip to app). The flip back to root passes the
+   * app identity with `identity` root.
+   */
+  from?: LinuxIdentity;
+  /**
    * The installation's App Homes (D65, stream H): `apphomes/<installationId>/…`,
    * recursively to the app uid. A home created while the app ran as root is
    * handed over at its first `runAs: app` start; one created afterwards is
@@ -57,6 +70,12 @@ export interface AppOwnershipInput {
    */
   appHomes?: readonly string[];
 }
+
+/**
+ * Never walked inside an instance directory: MountManager's legacy mount root
+ * (`MOUNT_DIR_NAME`), where other apps' files are bound in.
+ */
+export const APP_DATA_EXCLUDE = ['.mnt'] as const;
 
 /** The dev-server caches of an Astro app, relative to its source dir. */
 export const DEV_CACHE_DIRS = ['.astro', 'node_modules/.vite', 'node_modules/.vite-temp', 'node_modules/.astro'] as const;
@@ -77,19 +96,24 @@ export function existingInstanceDirs(appDataRoot: string, appId: string): string
 /** The rows of one installation, as the report and the spawn prep both read them. */
 export function appOwnershipSpecs(input: AppOwnershipInput): Array<OwnershipRowSpec & { kind: AppOwnershipKind }> {
   const to = input.identity ? { uid: input.identity.uid, gid: input.identity.gid } : null;
+  const onlyFrom = input.from ? { uid: input.from.uid, gid: input.from.gid } : { uid: 0, gid: 0 };
   const owner = input.installationId ?? input.appId;
-  const note = to ? 'applied at each start with runAs: app (P5-3)' : 'app identity not allocated yet (allocated at the first runAs: app start)';
+  const note = !to ? 'app identity not allocated yet (allocated at the first runAs: app start)'
+    : to.uid === 0 ? 'with the flip back to root (aura admin apps run-as <app> root)'
+      : 'with the flip to app (aura admin apps run-as <app> app), and at each start with runAs: app (P5-3)';
   const re = instanceDirRe(input.appId);
   const dirs = (input.instanceDirs ?? existingInstanceDirs(input.appDataRoot, input.appId)).filter((d) => re.test(d));
   const rows: Array<OwnershipRowSpec & { kind: AppOwnershipKind }> = dirs.map((d) => ({
-    section: 'plannedAppPaths' as const, path: join(input.appDataRoot, d), kind: 'app-data' as const, owner, to, recursive: true, note,
+    section: 'plannedAppPaths' as const, path: join(input.appDataRoot, d), kind: 'app-data' as const, owner, to, onlyFrom,
+    recursive: true, exclude: [...APP_DATA_EXCLUDE], note,
   }));
   for (const home of [...(input.appHomes ?? [])].sort()) {
-    rows.push({ section: 'plannedAppPaths', path: home, kind: 'app-home', owner, to, recursive: true, mode: '0700', note });
+    // 0700 when handed to the app; back to root, its mode stays as it is.
+    rows.push({ section: 'plannedAppPaths', path: home, kind: 'app-home', owner, to, onlyFrom, recursive: true, ...(to?.uid === 0 ? {} : { mode: '0700' }), note });
   }
   if (input.devServed) {
     for (const rel of DEV_CACHE_DIRS) {
-      rows.push({ section: 'plannedAppPaths', path: join(input.appDir, rel), kind: 'dev-cache', owner, to, recursive: true, note });
+      rows.push({ section: 'plannedAppPaths', path: join(input.appDir, rel), kind: 'dev-cache', owner, to, onlyFrom, recursive: true, note });
     }
   }
   return rows;
@@ -130,7 +154,9 @@ export function applyAppOwnership(rows: readonly OwnershipRowSpec[], target: Lin
     }
     if (st.isSymbolicLink()) { out.skipped.push(`${row.path}: a symbolic link, never followed`); continue; }
     if (!st.isDirectory()) { out.skipped.push(`${row.path}: not a directory`); continue; }
-    const r = chownTree(row.path, target, { recursive: row.recursive });
+    const r = chownTree(row.path, target, {
+      recursive: row.recursive, ...(row.exclude?.length ? { exclude: new Set(row.exclude) } : {}), ...(row.onlyFrom ? { onlyFrom: row.onlyFrom } : {}),
+    });
     out.changed += r.changed;
     out.skipped.push(...r.skipped);
   }
@@ -150,6 +176,19 @@ export interface ChownTreeOptions {
   topMode?: number;
   /** `g+rX` on every entry and setgid on directories (own app source, P5-2). */
   groupReadable?: boolean;
+  /**
+   * Only entries owned by this uid change (left alone otherwise: an owner
+   * someone chose on purpose); their group becomes the target's only when it
+   * is this gid. The run-as migration (identity/runAsOwnership.ts).
+   */
+  onlyFrom?: { uid: number; gid: number };
+}
+
+/** The owner an entry gets: the target, or (with `onlyFrom`) unchanged when it is not the previous identity's. */
+function newOwner(st: { uid: number; gid: number }, t: LinuxIdentity, opts: ChownTreeOptions): { uid: number; gid: number } | null {
+  if (!opts.onlyFrom) return { uid: t.uid, gid: t.gid };
+  if (st.uid !== opts.onlyFrom.uid) return null;
+  return { uid: t.uid, gid: st.gid === opts.onlyFrom.gid ? t.gid : st.gid };
 }
 
 export interface ChownTreeResult { changed: number; skipped: string[] }
@@ -173,7 +212,8 @@ export function chownTree(path: string, target: LinuxIdentity, opts: ChownTreeOp
     changeFd(fd, path, target, opts, true, out);
     if (opts.topMode !== undefined) {
       const st = fstatSync(fd);
-      if ((st.mode & 0o7777) !== opts.topMode) {
+      // Only a top directory that is now the target's (with `onlyFrom`, one left alone keeps its mode too).
+      if ((st.mode & 0o7777) !== opts.topMode && st.uid === target.uid) {
         opts.journal?.({ path, uid: st.uid, gid: st.gid, mode: st.mode & 0o7777 });
         fchmodSync(fd, opts.topMode);
       }
@@ -192,11 +232,13 @@ function wantedMode(mode: number, dir: boolean, opts: ChownTreeOptions): number 
 
 function changeFd(fd: number, shown: string, t: LinuxIdentity, opts: ChownTreeOptions, dir: boolean, out: ChownTreeResult): void {
   const st = fstatSync(fd);
+  const to = newOwner(st, t, opts);
+  if (!to) return;
   const mode = wantedMode(st.mode, dir, opts);
-  const owner = st.uid !== t.uid || st.gid !== t.gid;
+  const owner = st.uid !== to.uid || st.gid !== to.gid;
   if (!owner && mode === (st.mode & 0o7777)) return;
   opts.journal?.({ path: shown, uid: st.uid, gid: st.gid, mode: st.mode & 0o7777 });
-  if (owner) fchownSync(fd, t.uid, t.gid);
+  if (owner) fchownSync(fd, to.uid, to.gid);
   // chown clears setgid on some filesystems: set the mode after it.
   if (opts.groupReadable) fchmodSync(fd, mode);
   out.changed++;
@@ -222,13 +264,15 @@ function walk(dirFd: number, shown: string, dev: number, t: LinuxIdentity, opts:
       } finally { closeSync(fd); }
       continue;
     }
+    const to = newOwner(st, t, opts);
+    if (!to) continue;
     if (st.isFile() && st.nlink > 1) {
-      if (st.uid !== t.uid || st.gid !== t.gid) out.skipped.push(`${join(shown, name)}: a file with ${st.nlink} links, left as it is`);
+      if (st.uid !== to.uid || st.gid !== to.gid) out.skipped.push(`${join(shown, name)}: a file with ${st.nlink} links, left as it is`);
       continue;
     }
     if (st.isFile() || st.isSymbolicLink() || !opts.groupReadable) {
       const mode = st.isSymbolicLink() ? st.mode & 0o7777 : wantedMode(st.mode, false, opts);
-      const owner = st.uid !== t.uid || st.gid !== t.gid;
+      const owner = st.uid !== to.uid || st.gid !== to.gid;
       if (!owner && mode === (st.mode & 0o7777)) continue;
       if (st.isFile()) {
         // Through an O_NOFOLLOW descriptor: the entry can't be swapped for a link meanwhile.
@@ -243,7 +287,7 @@ function walk(dirFd: number, shown: string, dev: number, t: LinuxIdentity, opts:
       }
       // lchown: a symlink's own owner, never its target.
       opts.journal?.({ path: join(shown, name), uid: st.uid, gid: st.gid, mode: st.mode & 0o7777 });
-      try { lchownSync(p, t.uid, t.gid); out.changed++; } catch { out.skipped.push(`${join(shown, name)}: cannot change its owner`); }
+      try { lchownSync(p, to.uid, to.gid); out.changed++; } catch { out.skipped.push(`${join(shown, name)}: cannot change its owner`); }
     }
   }
 }
