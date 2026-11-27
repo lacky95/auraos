@@ -10,7 +10,8 @@ import { dom, resetDom } from './dom.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-const { renderSchemaForm } = await import('../../../apps/com.aura.settings/src/components/schemaForm.ts');
+// The one schema-form renderer lives in @aura/ui (D108 W2); Settings imports it as @aura/ui/schema-form.
+const { renderSchemaForm } = await import('../../ui/src/setup/schemaForm.ts');
 const { renderRuntimes } = await import('../../../apps/com.aura.settings/src/components/runtimesView.ts');
 type RuntimesState = import('../../../apps/com.aura.settings/src/components/runtimesView.ts').RuntimesState;
 // Every import before the first test: the DOM closes when the file's top level is done.

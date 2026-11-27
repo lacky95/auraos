@@ -7,7 +7,7 @@
  * Hooks are `data-*` attributes; classes are styling (`is:global` styles in
  * the page, since these rows are built at runtime).
  */
-import { renderSchemaForm, type SchemaForm, type SettingsSchemaLike } from './schemaForm';
+import { renderSchemaForm, type SchemaForm, type SettingsSchemaLike } from '@aura/ui/schema-form';
 
 /**
  * The derived feature view (D100 §12), when the shell serves it: feasibility
@@ -218,7 +218,7 @@ export function renderRuntimes(root: HTMLElement, s: RuntimesState, selected: st
   set.append(el(doc, 'span', 'rt-title', 'Settings'));
   const formRoot = el(doc, 'div', 'sf-form');
   formRoot.dataset['settingsForm'] = '';
-  const form = renderSchemaForm(formRoot, current.settingsSchema, current.settings);
+  const form = renderSchemaForm(formRoot, current.settingsSchema, current.settings, { emptyText: 'This runtime has no settings.' });
   set.append(formRoot);
   if (Object.keys(current.settingsSchema.properties).length) {
     const save = button(doc, 'SAVE…', { action: 'save-settings' });
