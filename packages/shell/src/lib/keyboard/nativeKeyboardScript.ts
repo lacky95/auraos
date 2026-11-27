@@ -28,6 +28,10 @@
  * as leaving: a frame that relays these messages (the Browser app's engine)
  * reports its own field, and a "left" from here would race it and close the
  * keyboard.
+ * A tap that ends with a text field focused reports it again, even when
+ * focus never moved: a terminal (xterm) keeps its input focused, so tapping
+ * it after the keyboard was closed, or coming back from another window, fires
+ * no focusin. Taps on buttons, links and other controls don't count.
  *
  * Kept as ES5-style source in a string because it is injected verbatim as a
  * <script>; do not reference anything outside the IIFE.
@@ -46,6 +50,7 @@ function post(m){try{P.postMessage(m,P===window?location.origin:${target});}catc
 function setOn(v){v=!!v;if(v===on)return;on=v;if(on)mute(focused());else unmuteAll();}
 addEventListener('pointerdown',function(e){if(on)mute(deepTarget(e));},true);
 addEventListener('focusin',function(e){var t=deepTarget(e);if(on)mute(t);if(editable(t)&&coarse()){clearTimeout(blurTimer);post({type:'aura.keyboard.field',focused:true});}},true);
+addEventListener('pointerup',function(e){var t=deepTarget(e);if(t&&t.closest&&t.closest('button,a[href],select,label,summary,[role=button],[role=menuitem],[role=tab],[role=checkbox],[role=switch]'))return;setTimeout(function(){if(coarse()&&document.hasFocus()&&editable(focused())){clearTimeout(blurTimer);post({type:'aura.keyboard.field',focused:true});}},0);},true);
 addEventListener('focusout',function(e){if(!editable(deepTarget(e))||!coarse())return;clearTimeout(blurTimer);blurTimer=setTimeout(function(){var f=focused();if(!editable(f)&&!(P!==window&&f&&f.tagName==='IFRAME'))post({type:'aura.keyboard.field',focused:false});},200);},true);
 addEventListener('message',function(ev){${guard}var d=ev.data;if(!d||d.type!=='aura.keyboard.policy'||ev.source!==P)return;setOn(d.suppressNative);});
 post({type:'aura.keyboard.hello'});

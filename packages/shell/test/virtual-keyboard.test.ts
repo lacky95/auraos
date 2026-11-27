@@ -302,6 +302,26 @@ test('device keyboard: hello on load, field focus/blur reports on touch screens,
   assert.equal(fields().pop()?.focused, false);
 });
 
+test('device keyboard: a tap with a field still focused reports it again (xterm keeps its input focused)', async () => {
+  const { doc, win, tick, fields } = setupNative('<div id="screen">terminal</div><textarea id="t"></textarea><button id="b">x</button>');
+  win.eval('document.hasFocus = function () { return true; }');
+  const t = doc.getElementById('t') as unknown as HTMLTextAreaElement;
+  t.focus();
+  await tick(20);
+  const before = fields().length;
+  doc.getElementById('screen')!.dispatchEvent(new win.Event('pointerup', { bubbles: true, composed: true }) as unknown as Event);
+  await tick(20);
+  assert.equal(fields().length, before + 1);
+  assert.equal(fields().pop()?.focused, true);
+  doc.getElementById('b')!.dispatchEvent(new win.Event('pointerup', { bubbles: true, composed: true }) as unknown as Event);
+  await tick(20);
+  assert.equal(fields().length, before + 1);                // a button tap is not a field tap
+  t.blur();
+  doc.getElementById('screen')!.dispatchEvent(new win.Event('pointerup', { bubbles: true, composed: true }) as unknown as Event);
+  await tick(260);
+  assert.equal(fields().pop()?.focused, false);             // nothing focused: only the blur report
+});
+
 test('device keyboard: no field reports on a mouse (fine-pointer) screen', async () => {
   const { doc, tick, fields } = setupNative('<input id="i" type="text">', false);
   (doc.getElementById('i') as unknown as HTMLInputElement).focus();
