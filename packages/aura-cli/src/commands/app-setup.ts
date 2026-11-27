@@ -2,7 +2,7 @@ import type { Command } from 'commander';
 import { readFileSync } from 'node:fs';
 import { FIELD_NAME_RE, isCredentialHandle } from '@aura/core';
 import type {
-  ProfileOption, SetupErrorBody, SetupOutcome, SetupPlan, SetupProposal, SetupStateView, SetupValuesView,
+  HomePrivateGrantView, LastAppliedView, ProfileOption, SetupChangePlan, SetupErrorBody, SetupOutcome, SetupProposal, SetupStateView, SetupValuesView,
 } from '@aura/core';
 import { EXIT_ON_HOLD, exitOnHold, outcomeText, printApprovalResult, waitForApproval, waitsOnHold } from '../lib/approval.js';
 import { color, table } from '../lib/format.js';
@@ -20,6 +20,12 @@ import { shellUrl } from '../lib/shell-url.js';
  * operator decides with `aura approve`. Exit codes: 0 ready, 3 needs setup or
  * blocked (D105 `needs-setup`, an unsupported or unauthorized requirement), 5
  * invalid input (`invalid-request`), 75 on hold, 1 anything else.
+ *
+ * P8: `profile use` shows the change plan first (what privileges it adds and
+ * removes, the data that stays behind); `config restore-last` restores the
+ * last applied configuration (decision 13; revalidated, app data is not
+ * rolled back); `config revoke-private-home` revokes the caller's own
+ * Private Home grant of an app (the app becomes blocked).
  */
 
 /** Exit when the app needs setup or is blocked (D105 `needs-setup`). */
@@ -274,7 +280,7 @@ function printValues(app: string, state: SetupStateView, v: SetupValuesView): vo
   for (const d of v.degraded) console.log(color.yellow(`  degraded: ${d.reason}`));
 }
 
-function printPlanChanges(plan: SetupPlan): void {
+function printPlanChanges(plan: SetupChangePlan): void {
   const adds = plan.approval?.adds;
   if (adds) {
     const lines = [
@@ -287,7 +293,12 @@ function printPlanChanges(plan: SetupPlan): void {
     ];
     if (lines.length) process.stderr.write(`This change needs the owner's approval for:\n${lines.map((l) => `  + ${l}\n`).join('')}`);
   }
-  process.stderr.write(color.dim('Data stays where it is: nothing is copied between environments.\n'));
+  const removed = plan.grantDiff?.removed ?? [];
+  if (removed.length) process.stderr.write(`It gives up:\n${removed.map((r) => `  - ${r}\n`).join('')}`);
+  for (const c of plan.compatibility ?? []) for (const l of errorLines(c)) process.stderr.write(`${l}\n`);
+  const behind = plan.dataStaysBehind ?? [];
+  if (behind.length) process.stderr.write(`Stays behind (not copied):\n${behind.map((d) => `  · ${d.where}: ${d.why}\n`).join('')}`);
+  process.stderr.write(color.dim(`${plan.note ?? 'Data stays where it is: nothing is copied between environments.'}\n`));
 }
 
 // ── commands ────────────────────────────────────────────────────────────────
@@ -349,6 +360,48 @@ export function registerAppSetup(app: Command): void {
       return finish(appId, await call('PUT', setupPath(appId, '/values'), proposal), out);
     });
 
+  config
+    .command('restore-last <app>')
+    .description('Restore the last successfully applied configuration (revalidated; more privileges ask the owner). App data and outside effects are not rolled back.')
+    .option('-o, --output <format>', 'json for machine-readable output')
+    .action(async (appId: string, opts: { output?: string }) => {
+      const out = outputOf(opts.output);
+      const last = await getView<{ lastApplied: LastAppliedView | null; notice: string }>(setupPath(appId, '/restore'), out);
+      if (!out.json) {
+        if (!last.lastApplied) exitWith(EXIT_NEEDS_SETUP, `${appId} has no applied configuration to restore`);
+        const l = last.lastApplied;
+        process.stderr.write(`Restoring the configuration applied ${l.appliedAt}${l.profile ? ` (profile ${l.profile})` : ''}.\n`);
+        process.stderr.write(color.yellow(`${last.notice}\n`));
+      }
+      return finish(appId, await call('POST', setupPath(appId, '/restore'), {}), out);
+    });
+  config
+    .command('revoke-private-home <app>')
+    .description('Revoke the Private Home you gave this app (with every sidecar grant, or one with --sidecar). The app becomes blocked; it never switches to its App Home.')
+    .option('--sidecar <name>', 'revoke only this sidecar\'s grant')
+    .option('-o, --output <format>', 'json for machine-readable output')
+    .action(async (appId: string, opts: { sidecar?: string; output?: string }) => {
+      const out = outputOf(opts.output);
+      const q = opts.sidecar !== undefined ? `?sidecar=${encodeURIComponent(opts.sidecar)}` : '';
+      const a = await call('DELETE', setupPath(appId, `/home-private${q}`));
+      if (a.status !== 200) refuse(a, out);
+      const r = a.body as { revoked: string[]; state: SetupStateView };
+      if (out.json) { printJson(r); return; }
+      if (!r.revoked.length) { process.stderr.write(`${appId} holds no Private Home grant of yours${opts.sidecar ? ` for sidecar ${opts.sidecar}` : ''}.\n`); return; }
+      process.stderr.write(`${color.green('✓')} revoked ${r.revoked.join(', ')}; ${appId} is ${r.state.state}\n`);
+    });
+  config
+    .command('private-home <app>')
+    .description('List the Private Home grants you gave this app.')
+    .option('-o, --output <format>', 'json for machine-readable output')
+    .action(async (appId: string, opts: { output?: string }) => {
+      const out = outputOf(opts.output);
+      const grants = await getView<HomePrivateGrantView[]>(setupPath(appId, '/home-private'), out);
+      if (out.json) { printJson(grants); return; }
+      if (!grants.length) { console.log(color.dim(`${appId} holds no Private Home grant of yours.`)); return; }
+      for (const g of grants) console.log(g.sidecar ? `home.private.sidecar:${g.sidecar}  (sidecar ${g.sidecar})` : 'home.private  (the app)');
+    });
+
   const profile = app.command('profile').description('List or change an app\'s operating profile.');
   profile
     .command('ls <app>')
@@ -380,9 +433,9 @@ export function registerAppSetup(app: Command): void {
       await refuseSecretValues(appId, values);
       const proposal: SetupProposal = { profile: profileId, ...(values ? { values } : {}) };
       if (!out.json) {
-        const plan = await call('POST', setupPath(appId, '/plan'), proposal);
+        const plan = await call('POST', setupPath(appId, '/change'), proposal);
         if (plan.status !== 200) refuse(plan, out);
-        printPlanChanges(plan.body as SetupPlan);
+        printPlanChanges(plan.body as SetupChangePlan);
       }
       return finish(appId, await call('POST', setupPath(appId, '/reconfigure'), proposal), out);
     });

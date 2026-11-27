@@ -38,7 +38,7 @@ import type { MaintenanceStarter } from '../app-manager/maintenance.js';
 import { toolchainMirrorBin } from '../app-manager/tool-provision.js';
 import { payloadHash } from '../approvals/state.js';
 import {
-  appGrantCounts, canonicalPermission, contextReadPermission, credentialReadPermission, isPrivilegedPermission, userScope,
+  appGrantCounts, canonicalPermission, contextReadPermission, credentialReadPermission, HOME_PRIVATE_PERMISSION_RE, isPrivilegedPermission, userScope,
 } from '../auth/GrantStore.js';
 import { DEFAULT_OWNER_ID } from '../auth/identityContracts.js';
 import { OS_SCOPE } from '../auth/types.js';
@@ -415,6 +415,11 @@ export function createSetupEngine(mgr: AppManager, opts: { home?: HomeEnvironmen
         await auth().grants.grant({ kind: 'app', id: appId }, contextReadPermission(key), { by, installationId, ...(appScope ? { appScope } : {}) });
       },
       grantable: (p) => isPrivilegedPermission(p),
+      // P8: the user's own Private Home grants (scope = their user id), revoked by that user only.
+      revokeHomePrivate: async ({ appId, userId, permission }) =>
+        HOME_PRIVATE_PERMISSION_RE.test(permission) && (await auth().grants.revoke({ kind: 'app', id: appId }, permission, userScope(userId))) !== null,
+      homePrivateHeld: async ({ appId, userId }) => (await auth().grants.listFor({ kind: 'app', id: appId }))
+        .filter((g) => HOME_PRIVATE_PERMISSION_RE.test(g.permission) && g.scope.kind === 'user' && g.scope.id === userId).map((g) => g.permission),
     },
     readGranted: async (appId, userId, name) =>
       appGrantCounts(await auth().grants.get({ kind: 'app', id: appId }, credentialReadPermission(name), userScope(userId)), await mgr.appGrantBinding(appId)),

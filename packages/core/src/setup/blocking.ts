@@ -51,6 +51,8 @@ export function blockingDecision(summary: InstallationSetupSummary, r: Resolutio
 
 export interface BlockingWatcherDeps {
   recheck(appId: string): Promise<void>;
+  /** P8: an install or update landed (`app:installed`, AppManager.reloadScopedApp): re-resolve the stored configuration (§3.5). */
+  manifestChanged?(appId: string): Promise<unknown>;
   /** The installed apps that declare setup or profiles. */
   appIds(): string[];
   /** Periodic pass (ms); default 60 s. 0 disables it (tests). */
@@ -62,11 +64,16 @@ export class BlockingWatcher {
   private timer: ReturnType<typeof setInterval> | null = null;
   private pending: ReturnType<typeof setTimeout> | null = null;
   private readonly onPermissions = () => this.soon();
+  private readonly onInstalled = ({ appId }: { appId: string }) => {
+    if (!this.deps.manifestChanged || !this.deps.appIds().includes(appId)) return;
+    void this.deps.manifestChanged(appId).catch((err) => console.warn(`[setup] re-resolution of ${appId} failed: ${(err as Error).message}`));
+  };
 
   constructor(private readonly deps: BlockingWatcherDeps) {}
 
   start(): void {
     OsEventBus.on('permissions:changed', this.onPermissions);
+    OsEventBus.on('app:installed', this.onInstalled);
     const every = this.deps.intervalMs ?? 60_000;
     if (every > 0) {
       this.timer = setInterval(() => { void this.pass(); }, every);
@@ -76,6 +83,7 @@ export class BlockingWatcher {
 
   stop(): void {
     OsEventBus.off('permissions:changed', this.onPermissions);
+    OsEventBus.off('app:installed', this.onInstalled);
     if (this.timer) clearInterval(this.timer);
     if (this.pending) clearTimeout(this.pending);
     this.timer = null;

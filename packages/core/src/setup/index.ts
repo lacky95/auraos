@@ -47,6 +47,13 @@ export {
 } from './values.js';
 
 // ── P8 configuration and change management ─────────────────────────────────
+export {
+  grantItems, grantDiff, compatibilityIssues, dataStaysBehind, migrateDesired, takeMigratedValues, fieldScopesOf, appliedRecordKey,
+  DATA_STAYS_NOTE, RESTORE_NOTICE,
+  type AppliedSnapshot, type DataStaysBehind, type FieldScopes, type GrantDiff, type HomePrivateGrantView, type LastAppliedView,
+  type ManifestChangeOutcome, type DesiredMigration, type SetupChangeContract, type SetupChangePlan,
+} from './change.js';
+export { parseAppliedSnapshot } from './store.js';
 
 // ── P9 D107-a owner subset ──────────────────────────────────────────────────
 export {

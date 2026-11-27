@@ -1,5 +1,6 @@
 ---
 import '@aura/ui/styles/scificn-bridge.css';
+import '@aura/ui/styles/setup.css';
 import '../styles/settings.css';
 import Icon from '../components/Icon.astro';
 import { shellFetch } from '../lib/shellClient';
@@ -25,6 +26,8 @@ interface AppDto {
   enabled: boolean;
   /** D48: built for a newer Aura contract (never started): the refusal message. */
   incompatible?: string | null;
+  /** D108: the operational state of an app that declares setup or profiles (absent otherwise). */
+  setupState?: string;
   instances: Array<{ instanceId: string; state: string }>;
 }
 
@@ -77,6 +80,12 @@ apps.sort((a, b) => {
     .ar-no { color: var(--aura-color-warning); }
     .app-runtime .btn { font: inherit; font-size: 0.58rem; letter-spacing: 0.08em; padding: 2px 7px; background: var(--aura-color-surface); color: var(--aura-color-text); border: var(--aura-border); cursor: pointer; }
     .app-runtime .btn:disabled { opacity: 0.4; cursor: default; }
+    /* Settings → Apps → Configuration (D108 P8): built at runtime (components/appConfigView.ts, @aura/ui/setup). */
+    .app-config { margin-top: 4px; font-size: 0.62rem; color: var(--aura-color-text-dim); }
+    .app-config .btn { font: inherit; font-size: 0.58rem; letter-spacing: 0.08em; padding: 2px 7px; background: var(--aura-color-surface); color: var(--aura-color-text); border: var(--aura-border); cursor: pointer; }
+    .app-config .btn:disabled { opacity: 0.4; cursor: default; }
+    .app-config .ac-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+    .app-config .ac-status[data-tone="error"] { color: var(--aura-color-danger); }
     .app-runtime .sf-select { font: inherit; font-size: 0.62rem; background: var(--aura-color-surface); color: var(--aura-color-text); border: var(--aura-border); padding: 2px 4px; }
   </style>
   <style>
@@ -391,6 +400,12 @@ apps.sort((a, b) => {
                 {m.category && <span class="app-tag">{m.category}</span>}
               </div>
               <div class="app-runtime" data-app-runtime></div>
+              {app.setupState && (
+                <div class="app-config" data-app-config>
+                  <div class="ar-line">Setup: {app.setupState} <button class="btn" type="button" data-action="config-open">CONFIGURATION…</button></div>
+                  <div class="ar-panel" data-config-panel hidden></div>
+                </div>
+              )}
             </div>
             <button
               class="toggle"
@@ -591,6 +606,7 @@ apps.sort((a, b) => {
     import { ownerFetch } from '../scripts/os.ts';
     import { initActivitiesProcesses } from '../scripts/activitiesProcesses.ts';
     import { renderAppRuntime, type RuntimeCheck } from '../components/appRuntimeView';
+    import { renderAppConfig } from '../components/appConfigView';
     import type { RuntimesState } from '../components/runtimesView';
 
     // Settings → Apps → Runtime (ARI-3): each row's effective runtime, its source and the owner override.
@@ -639,6 +655,31 @@ apps.sort((a, b) => {
       },
     };
     void loadRuntimes().catch(() => {});
+
+    // Settings → Apps → Configuration (D108 P8): the same setup API as the wizard and the CLI.
+    const configIo = {
+      async read<T>(path: string, body?: unknown): Promise<T> {
+        const r = await fetch(osUrl(path), body === undefined ? { cache: 'no-store' } : {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+        });
+        const data = await r.json().catch(() => ({})) as T & { message?: string; error?: string };
+        if (!r.ok) throw new Error(String(data.message || data.error || `HTTP ${r.status}`));
+        return data;
+      },
+      async change(path: string, method: string, body?: unknown) {
+        const r = await ownerFetch(path as `/${string}`, method, body);
+        return { status: r.status, body: await r.json().catch(() => ({})) as unknown };
+      },
+    };
+    for (const box of document.querySelectorAll<HTMLElement>('[data-app-config]')) {
+      const appId = box.closest<HTMLElement>('.app-row')?.dataset['appId'];
+      const panel = box.querySelector<HTMLElement>('[data-config-panel]');
+      box.querySelector<HTMLButtonElement>('[data-action="config-open"]')?.addEventListener('click', () => {
+        if (!appId || !panel) return;
+        panel.hidden = !panel.hidden;
+        if (!panel.hidden) void renderAppConfig(panel, appId, configIo);
+      });
+    }
     // getElements (not `selector`) because it is re-resolved on every
     // keypress: a row hidden by the filter must drop out of the arrow-walk,
     // and a static selector would keep walking onto invisible rows.
