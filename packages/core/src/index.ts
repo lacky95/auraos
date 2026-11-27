@@ -131,6 +131,12 @@ export { infraBootStatus, reloadInfrastructure } from './infra/kernel.js';
 export { runInfraDoctor, type InfraCheck, type InfraDoctorReport } from './infra/doctor.js';
 export { InfraPublicFallbackError, infraDownloadUrl, readInfraPolicy, refusePublic, type InfraPolicy } from './infra/policy.js';
 export { DEFAULT_ENDPOINTS, infraEndpoints } from './infra/endpoints.js';
+export { releaseBuildInfra } from './infra/build.js';
+export {
+  InfraAdminError, applyInfra, infraDiff, removeInfraCredential, setInfraCredential, showInfra, validateInfra,
+  type InfraApplyResult, type InfraShow, type InfraSubmission, type InfraValidation,
+} from './infra/admin.js';
+export type { InfraCredential, InfraCredentialInput } from './infra/credentials.js';
 // Phase 6 O: the settings overlay (the owner's grants beside the installed tree), the effective
 // capability registry (release + the owner's sealed entries) and the one-shot migration of local edits.
 export {

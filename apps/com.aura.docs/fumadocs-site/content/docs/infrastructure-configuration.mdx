@@ -7,7 +7,23 @@ AuraOS keeps one infrastructure configuration: `/data/aura/infra/config.yaml`. W
 behaves exactly as a default install (public registries, the host's DNS). With it, every part of
 AuraOS that reaches the network, and every app by default, uses the corporate proxy, the
 corporate CAs and the internal mirrors. It is set at install
-(`install.sh --config`, see [Install in a corporate network](/docs/install-corporate-network)).
+(`install.sh --config`, see [Install in a corporate network](/docs/install-corporate-network)) and
+changed later with the CLI (your password; on the host the operator applies directly):
+
+```bash
+aura admin infra show                       # the stored config (references only) and each credential's state
+aura admin infra validate -f infra.yaml     # schema, certificates; writes nothing
+aura admin infra diff -f infra.yaml         # what would change
+aura admin infra apply -f infra.yaml        # stored (the previous kept), rendered, reloaded in the shell
+aura admin infra credential set artifactory --user svc-aura < password-file
+aura admin infra credential set artifactory-mtls-key --key-file client.key
+aura admin infra credential rm artifactory
+```
+
+The CA and certificate files a config names are read relative to it and sent with it. A
+credential set this way backs a `system:INFRA_<NAME>` reference and is bound to the hosts the
+config uses it for. The `policy:` block is refused after the install: change the switches with
+`aura admin security set`.
 
 ## The file
 

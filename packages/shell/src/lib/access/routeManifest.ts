@@ -185,8 +185,20 @@ const routes: RouteAccessManifest['routes'] = {
     methods: on(['GET', 'POST', 'DELETE'], ownerManages('API keys: the owner decides; creating one needs the password.')),
   },
   '/api/admin/audit': { methods: { GET: ownerManages('The audit trail: an owner view.') } },
+  '/api/admin/infra': {
+    methods: {
+      GET: ownerManages('The infrastructure configuration (D94 IC-1): references only, never a credential. An owner view.'),
+      PUT: ownerManages('Applies an infrastructure configuration (D94 IC-1): the owner decides with the password (fresh, bound to the config digest); the operator directly. Audited.'),
+    },
+  },
+  '/api/admin/infra/validate': {
+    methods: { POST: ownerManages('Checks an infrastructure configuration and diffs it against the stored one (D94 IC-1); writes nothing.') },
+  },
+  '/api/admin/infra/credentials/[name]': {
+    methods: on(['PUT', 'DELETE'], ownerManages('Sets or removes an infrastructure credential (D94 IC-1): fresh, sealed, never readable, audited by name.')),
+  },
   '/api/admin/infra/doctor': {
-    methods: { POST: ownerManages('The infrastructure doctor (D94 IC-7): checks the config, its render, the certificates and the configured endpoints; categories only, never a value. An owner view.') },
+    methods: { GET: ownerManages('The infrastructure doctor (D94 IC-7): checks the config, its render, the certificates and the configured endpoints; categories only, never a value. An owner view.') },
   },
   '/api/admin/security-options': {
     methods: {

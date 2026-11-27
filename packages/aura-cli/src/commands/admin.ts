@@ -1,4 +1,6 @@
 import type { Command } from 'commander';
+import { readFileSync } from 'node:fs';
+import { dirname, isAbsolute, resolve } from 'node:path';
 import { registerAdminHomes } from './admin-homes.js';
 import { registerAdminUsers } from './admin-users.js';
 import { registerAdminApps } from './admin-apps.js';
@@ -257,14 +259,23 @@ function registerAdminSecurity(admin: Command): void {
     });
 }
 
+interface InfraShowDto {
+  configured: boolean; text: string | null; configDigest: string | null; renderDigest: string | null;
+  warnings: Array<{ path: string; message: string }>;
+  credentials: Array<{ ref: string; path: string; hosts: string[]; status: 'ok' | 'missing' }>;
+}
+interface InfraValidationDto { configDigest: string; warnings: Array<{ path: string; message: string }>; diff: string[]; changed: boolean }
+interface InfraApplyDto { changed: boolean; configDigest: string; renderDigest: string | null; restartRequired: boolean; issues: string[]; diff: string[] }
+
 interface InfraDoctorDto {
   configured: boolean; ok: boolean; digest: string | null;
   checks: Array<{ id: string; status: 'ok' | 'warn' | 'fail' | 'skip'; message: string }>;
 }
 
 /**
- * `aura admin infra doctor` (D94 IC-7, O9): the infrastructure configuration
- * checked against the running system. Categories and plain words only, never
+ * `aura admin infra show|validate|diff|apply|credential|doctor` (D94 IC-1,
+ * IC-7, O9). `doctor`: the infrastructure configuration checked against the
+ * running system. Categories and plain words only, never
  * a value; exits 1 when a check fails. On the host:
  * `docker exec aura-shell aura admin infra doctor`.
  */
@@ -272,13 +283,91 @@ function registerAdminInfra(admin: Command): void {
   const infra = admin
     .command('infra')
     .description('Infrastructure configuration (D94): proxy, CAs, mirrors and registries for corporate networks.');
+  const bodyOf = (file: string): { config: string; files: Record<string, string> } => {
+    // The config and the public files it names (CA and client certificates), relative to the config.
+    const config = readFileSync(file, 'utf8');
+    const files: Record<string, string> = {};
+    for (const m of config.matchAll(/\bfile:\s*["']?([^"',}\s]+)/g)) {
+      const rel = m[1]!;
+      if (isAbsolute(rel)) { fail(`${rel}: use a path relative to the config file`); process.exit(64); }
+      files[rel] = readFileSync(resolve(dirname(file), rel), 'utf8');
+    }
+    return { config, files };
+  };
+  const printIssues = (r: { warnings?: Array<{ path: string; message: string }> }) => {
+    for (const w of r.warnings ?? []) warn(`${w.path}: ${w.message}`);
+  };
+  infra
+    .command('show')
+    .description('The stored infrastructure config (references only, never a credential) and the state of each credential.')
+    .option('-o, --output <fmt>', 'json for the full record')
+    .action(async (opts: { output?: string }) => {
+      const r = await api.get<InfraShowDto>('/api/admin/infra');
+      if (opts.output === 'json') { console.log(JSON.stringify(r, null, 2)); return; }
+      if (!r.configured) { info('no infrastructure configuration: AuraOS uses the public defaults'); return; }
+      process.stdout.write(r.text ?? '');
+      info(`config ${r.configDigest?.slice(0, 19)}…, render ${r.renderDigest ? `${r.renderDigest.slice(0, 19)}…` : 'none'}`);
+      printIssues(r);
+      if (r.credentials.length) console.log(table(r.credentials.map((c) => ({ REF: c.ref, USED_FOR: c.path, HOSTS: c.hosts.join(','), STATE: c.status === 'ok' ? color.green('ok') : color.red('missing') }))));
+    });
+  infra
+    .command('validate')
+    .description('Check an infrastructure config file (schema, no secrets, no TLS weakening, certificates); writes nothing.')
+    .requiredOption('-f, --file <file>', 'the config (YAML)')
+    .action(async (opts: { file: string }) => {
+      const r = await api.post<InfraValidationDto>('/api/admin/infra/validate', bodyOf(opts.file));
+      printIssues(r);
+      ok(`valid: config ${r.configDigest.slice(0, 19)}…${r.changed ? '' : ' (the same as the stored one)'}`);
+    });
+  infra
+    .command('diff')
+    .description('What applying a config file would change in the stored one.')
+    .requiredOption('-f, --file <file>', 'the config (YAML)')
+    .action(async (opts: { file: string }) => {
+      const r = await api.post<InfraValidationDto>('/api/admin/infra/validate', bodyOf(opts.file));
+      if (!r.diff.length) { info('no change'); return; }
+      for (const l of r.diff) console.log(l.startsWith('+') ? color.green(l) : color.red(l));
+    });
+  infra
+    .command('apply')
+    .description('Apply a config file: validated, stored (the previous kept), rendered, reloaded in the running shell. Needs the owner\'s password; on the host the operator applies directly.')
+    .requiredOption('-f, --file <file>', 'the config (YAML)')
+    .action(async (opts: { file: string }) => {
+      const r = await api.put<InfraApplyDto>('/api/admin/infra', bodyOf(opts.file));
+      if (!r.changed) { info('no change: the stored config is the same'); return; }
+      ok(`applied: config ${r.configDigest.slice(0, 19)}…, render ${r.renderDigest ? `${r.renderDigest.slice(0, 19)}…` : 'none'}`);
+      for (const i of r.issues) warn(i);
+      if (r.restartRequired) warn('the shell needs `aura restart os` for part of it (see above)');
+      info('running apps get the new settings at their next start');
+    });
+  const cred = infra.command('credential').description('The credentials behind system:INFRA_<NAME> references (sealed; never readable).');
+  cred
+    .command('set <name>')
+    .description('Set or rotate a credential: --user with the password on stdin, or --key-file for a client certificate\'s PEM key.')
+    .option('--user <user>', 'username (Basic auth); the password is read from stdin')
+    .option('--key-file <file>', 'a PEM private key (a client certificate, mTLS)')
+    .action(async (name: string, opts: { user?: string; keyFile?: string }) => {
+      if (!!opts.user === !!opts.keyFile) { fail('give --user (password on stdin) or --key-file'); process.exit(64); }
+      const body = opts.keyFile
+        ? { kind: 'private-key', pem: readFileSync(opts.keyFile, 'utf8') }
+        : { kind: 'basic', user: opts.user, password: readFileSync(0, 'utf8').replace(/\r?\n$/, '') };
+      const r = await api.put<{ key: string; hosts: string[] }>(`/api/admin/infra/credentials/${encodeURIComponent(name)}`, body);
+      ok(`${r.key} set, bound to ${r.hosts.join(', ')}`);
+    });
+  cred
+    .command('rm <name>')
+    .description('Remove a credential (builds that need it are refused until it is set again).')
+    .action(async (name: string) => {
+      const r = await api.del<{ removed: boolean }>(`/api/admin/infra/credentials/${encodeURIComponent(name)}`);
+      if (r.removed) ok(`${name} removed`); else info(`${name} was not set`);
+    });
   infra
     .command('doctor')
     .description('Check the infrastructure config, its render, certificates, the infra-* security options and the configured endpoints.')
     .option('--offline', 'skip the network probes (proxy, registries)')
     .option('-o, --output <fmt>', 'json for the full report')
     .action(async (opts: { offline?: boolean; output?: string }) => {
-      const r = await api.post<InfraDoctorDto>(`/api/admin/infra/doctor${opts.offline ? '?offline=1' : ''}`, {});
+      const r = await api.get<InfraDoctorDto>(`/api/admin/infra/doctor${opts.offline ? '?offline=1' : ''}`);
       if (opts.output === 'json') { console.log(JSON.stringify(r, null, 2)); if (!r.ok) process.exitCode = 1; return; }
       const mark = { ok: color.green('ok'), warn: color.yellow('warn'), fail: color.red('FAIL'), skip: color.dim('skip') } as const;
       console.log(table(r.checks.map((c) => ({ CHECK: c.id, STATUS: mark[c.status], DETAIL: c.message }))));

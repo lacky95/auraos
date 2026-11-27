@@ -21,7 +21,7 @@
  * Developer Mode (live): 409 `developer-mode` with the workflow: the
  * Developer update is `aura update` (fast-forward only, SelfUpdater `update`).
  */
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import * as core from '@aura/core';
@@ -29,6 +29,7 @@ import type { APIContext } from 'astro';
 import type { CallerPrincipal } from '../access/identify.ts';
 import { auditOwner, ownerAction, type AdminRequest, type OwnerActor } from '../approvals/admin.ts';
 import { json } from '../approvals/service.ts';
+import { failureResponse } from '../appResponse.ts';
 import { isDeveloperMode } from '../systemMode.ts';
 import { TERMINAL_APP_ID } from '../../../server/session-hosts.mjs';
 
@@ -112,6 +113,8 @@ export interface ReleaseAdminDeps {
   /** Step 11: changed system apps onto the new release (M's updateInstance; D35 for the Terminal). */
   switchSystemApps(appIds: string[], when: 'now' | 'next-start'): Promise<void>;
   notify(title: string, text: string): Promise<void>;
+  /** D94: the build's infrastructure inputs (core releaseBuildInfra); null without a config. Optional: absent = none. */
+  buildInfra?(runId: string): Promise<{ file: string; dir: string } | null>;
 }
 
 const readJson = <T>(f: string): T | null => { try { return JSON.parse(readFileSync(f, 'utf8')) as T; } catch { return null; } };
@@ -187,7 +190,17 @@ export async function postBuild(ctx: RouteCtx, deps: ReleaseAdminDeps, body: { r
     ],
   });
   if (actor instanceof Response) return actor;
-  const r = deps.updater().startBuild({ fetchFrom: source.url, channel, ...(ref ? { ref } : {}), ...(maturity ? { maturity } : {}), composition: curRec?.composition ?? 'desktop' });
+  // D94: the build's proxy, CA, mirrors and credentials (secret files removed when the build ends).
+  let infra: { file: string; dir: string } | null = null;
+  try { infra = (await deps.buildInfra?.(`build-${Date.now()}`)) ?? null; }
+  catch (err) {
+    // Names refs and paths only (core infra/propagate.ts), never a value.
+    const code = (err as { code?: string }).code ?? 'infra-inputs';
+    await deps.audit(actor, RELEASE_AUDIT.build, { target: 'system', outcome: 'failed', detail: { channel, ref: ref ?? null, reason: code } });
+    return failureResponse(ctx, err, { status: 409, error: 'build-refused', what: 'the infrastructure inputs of the build' });
+  }
+  const r = deps.updater().startBuild({ fetchFrom: source.url, channel, ...(ref ? { ref } : {}), ...(maturity ? { maturity } : {}), composition: curRec?.composition ?? 'desktop', infra });
+  if (!r.ok && infra) rmSync(infra.dir, { recursive: true, force: true });
   await deps.audit(actor, RELEASE_AUDIT.build, { target: 'system', outcome: r.ok ? 'ok' : 'failed', detail: { channel, ref: ref ?? null, ...(r.ok ? { job: r.jobId } : { reason: r.reason }) } });
   return r.ok ? json({ ok: true, job: r.jobId }, 202) : json({ ok: false, error: 'build-refused', message: r.reason }, 409);
 }
@@ -423,6 +436,7 @@ export function liveReleaseDeps(): ReleaseAdminDeps {
   };
   return {
     dataDir,
+    buildInfra: (runId) => core.releaseBuildInfra({ runId, dataDir }),
     developerMode: isDeveloperMode,
     activation: async () => {
       const base = trustedTree() ?? process.env['AURA_WORKSPACE_DIR'] ?? '/workspace';

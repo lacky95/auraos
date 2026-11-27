@@ -95,6 +95,8 @@ export async function plannedRestart(opts: PlannedRestartOpts = {}): Promise<Pla
     ...(opts.when ? { when: opts.when } : {}),
     ...(opts.restoreData ? { restoreData: true } : {}),
     ...(opts.confirmInsecure ? { confirmInsecure: opts.confirmInsecure } : {}),
+    // D94 IC-6: the updater's compose download follows infra-public-fallback.
+    publicFallback: await core.readInfraPolicy().then((p) => p.publicFallback, () => 'deny' as const),
     drained: true,
   });
   if (!res.ok) {

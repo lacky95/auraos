@@ -68,6 +68,7 @@ import {
 } from '../identity/execution.js';
 import { securityPolicyValue } from '../security/options.js';
 import { infraSpawnView } from '../infra/policy.js';
+import { infraEnvFor } from '../runtimes/spawn/infraArgs.js';
 import type { InfraSpawnView } from '../infra/types.js';
 import { LINUX_ID_RANGES, ROOT_SPAWN_IDENTITY, TERMINAL_SERVICE_UID, linuxIdRangeOf, type AppRunAs, type SpawnIdentity, type SpawnIdentityProvider } from '../identity/types.js';
 import { appIdentityProvider, sessionHostIdentityProvider } from '../identity/appIdentityProvider.js';
@@ -252,6 +253,8 @@ export class AppManager {
   /** The D64 switch `app-root-execution` (identity/execution.ts); a read failure throws (the start fails closed). */
   private readonly rootExecutionPolicy: () => Promise<AppRootExecutionPolicy>;
   private readonly infraView: () => Promise<InfraSpawnView | null>;
+  /** D94: the infrastructure defaults each instance was started with (its sessions get the same env). */
+  private readonly instanceInfra = new Map<string, InfraSpawnView>();
   private instances = new Map<string, AppInstance>();
   private nextInstanceNum = new Map<string, number>();
   private activities = new Map<string, AppActivity>();
@@ -2764,7 +2767,11 @@ export class AppManager {
     const app = nonRoot ? { uid: inst.uid!, gid: inst.gid! } : { uid: 0, gid: 0 };
     const appAccount: PasswdEntry[] = nonRoot ? [{ name: identityAccountName({ ...app, range: 'app' }, installation.installationId), uid: app.uid, gid: app.gid, gecos: 'AuraOS app' }] : [];
     const runtime = this.runnerOf(instanceId).capabilities();
-    const base = { HOME: '/home/aura', SHELL: '/bin/bash', TMPDIR: '/run/aura-session', AURA_SESSION_HOME: req.mode };
+    // D94 IC-5 (the H5-3 session hook): a session's env is built here, not inherited from the
+    // container, so the infrastructure defaults this instance was started with (and whose render it
+    // has mounted) come along; an instance adopted after a shell restart gets them at its next start.
+    // Non-secret only; a user's own credentials stay theirs (BT-I).
+    const base = { ...infraEnvFor(this.instanceInfra?.get(instanceId)), HOME: '/home/aura', SHELL: '/bin/bash', TMPDIR: '/run/aura-session', AURA_SESSION_HOME: req.mode };
     const files = (accounts: PasswdEntry[]) => ({
       passwd: renderPasswd(BASE_PASSWD, accounts),
       group: renderGroup(BASE_GROUP, accounts.map((a) => ({ name: a.name, gid: a.gid }))),
@@ -3047,6 +3054,7 @@ export class AppManager {
       const installation = await this.installationRunAs(appId);
       const spawnCtx = await this.spawnContext(appId, instanceId, { manifest, runtime, owner, inPool: opts.inPool, preview: !!opts.preview, installation });
       if (spawnCtx.home) this.instanceHomes.set(instanceId, spawnCtx.home);
+      if (spawnCtx.infra) this.instanceInfra?.set(instanceId, spawnCtx.infra); else this.instanceInfra?.delete(instanceId);
       if (spawnCtx.home?.kind === 'private' && spawnCtx.home.hostPath) this.seedPrivateHome(spawnCtx.home.hostPath);
       if (opts.inPool) this.poolHomes.set(instanceId, this.poolHomeUser(appId, manifest) ?? '');
       const appDir = opts.preview?.appDir ?? manifest.appDir;
@@ -3419,6 +3427,7 @@ export class AppManager {
     this.releaseHostSlot(appId, instanceId);
     this.instances.delete(instanceId);
     this.instanceHomes.delete(instanceId);
+    this.instanceInfra?.delete(instanceId);
     this.fsm.delete(instanceId);
     this.nextActivityNum.delete(instanceId);
   }
@@ -3469,6 +3478,7 @@ export class AppManager {
       // Refused before it had a runtime (resolveRuntime): nothing runs, only the record goes.
       this.instances.delete(instanceId);
       this.instanceHomes.delete(instanceId);
+      this.instanceInfra?.delete(instanceId);
       this.fsm.delete(instanceId);
       return;
     }
@@ -3496,6 +3506,7 @@ export class AppManager {
     this.releaseHostSlot(appId, instanceId);
     this.instances.delete(instanceId);
     this.instanceHomes.delete(instanceId);
+    this.instanceInfra?.delete(instanceId);
     this.fsm.delete(instanceId);
     this.nextActivityNum.delete(instanceId);
     this.noteRespawn();
@@ -4439,6 +4450,7 @@ export class AppManager {
         this.releaseHostSlot(inst.appId, inst.instanceId);
         this.instances.delete(inst.instanceId);
         this.instanceHomes.delete(inst.instanceId);
+        this.instanceInfra?.delete(inst.instanceId);
         this.fsm.delete(inst.instanceId);
         this.nextActivityNum.delete(inst.instanceId);
       }

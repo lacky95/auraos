@@ -51,6 +51,7 @@ import { DEFAULT_OWNER_ID } from '../auth/identityContracts.js';
 import { loadInfrastructure } from '../infra/kernel.js';
 import { seedInfraPolicy } from '../infra/policy.js';
 import { importBootstrapCredentials } from '../infra/credentials.js';
+import { sweepInfraRuns } from '../infra/build.js';
 
 const SYSTEM_KEY = Symbol.for('aura.system');
 /** Docker stops after 10 s; the kernel shutdown stays under it. */
@@ -249,6 +250,8 @@ async function bootKernel(state: SystemState, { first }: { first: boolean }): Pr
       },
     });
     // D94: the install seed (policy, O2) and the bootstrap credentials (O3) into their stores; never blocks boot.
+    // A crashed build's secret files (infra/run) never outlive it (D94 §6.3).
+    try { sweepInfraRuns(dataDir); } catch { /* none */ }
     if (st.infra?.configured) {
       try {
         const auth = getAuthServices();

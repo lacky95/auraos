@@ -18,6 +18,9 @@ import { ContextStore } from '../context/ContextStore.js';
 import { loadOsInfra } from './osInfra.js';
 import { INFRA_DIR } from './types.js';
 
+/** A credential as a client submits it (validated by setInfraCredential). */
+export type InfraCredentialInput = InfraCredential;
+
 export type InfraCredential =
   | { kind: 'basic'; user: string; password: string }
   | { kind: 'private-key'; pem: string };

@@ -48,7 +48,9 @@
  * detached container.
  */
 import { artifactUrl } from '../infra/policy.js';
-import { renderDigest } from '../infra/propagate.js';
+import { readInfraManifest, renderDigest, renderedSubpath } from '../infra/propagate.js';
+import type { InfraSpawnView } from '../infra/types.js';
+import { containerInfraArgs } from '../runtimes/spawn/infraArgs.js';
 import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
@@ -564,7 +566,8 @@ export class SelfUpdater {
     // D94 IC-6: the compose plugin download through the artifact mirrors; under
     // infra-public-fallback=deny with no mirror for it, the script refuses instead of going public.
     const compose = artifactUrl(COMPOSE_PLUGIN_URL);
-    const deny = (opts.publicFallback ?? (renderDigest() ? 'deny' : 'allow')) === 'deny';
+    // The switch governs what a config does not cover: no config, no refusal (D94 acceptance 6).
+    const deny = renderDigest(this.dataDir) !== null && (opts.publicFallback ?? 'deny') === 'deny';
     const composeUrl = compose.rewritten || !deny ? compose.url : null;
     const script = updaterScript({
       composeUrl,
@@ -644,7 +647,16 @@ export class SelfUpdater {
    * tree, in a detached container like the updater's. The builder takes the
    * activation lock and writes its job to `aura/release/jobs/<id>.json`.
    */
-  startBuild(opts: { fetchFrom: string; channel: 'signed' | 'main'; maturity?: string; ref?: string; composition: 'desktop' | 'server' }):
+  startBuild(opts: {
+    fetchFrom: string; channel: 'signed' | 'main'; maturity?: string; ref?: string; composition: 'desktop' | 'server';
+    /**
+     * D94: the build's infrastructure inputs (infra/build.ts `releaseBuildInfra`, prepared by the async
+     * caller): `file` goes to the builder as `--infra`, `dir` (its secrets) is removed when the build ends.
+     * Absent with an infrastructure config: refused (a build never silently skips the configured proxy, CA or
+     * credentials, D94 acceptance 3).
+     */
+    infra?: { file: string; dir: string } | null;
+  }):
       { ok: true; jobId: string } | { ok: false; reason: string } {
     if (this.isRunning()) return { ok: false, reason: 'An update or release job is already running.' };
     const L = layout(this.dataDir);
@@ -653,6 +665,9 @@ export class SelfUpdater {
     if (!/^(https:\/\/|\/)\S+$/.test(opts.fetchFrom)) return { ok: false, reason: 'The release source must be an https URL or a local path (aura/release/source.json).' };
     if (opts.ref !== undefined && !/^v?[0-9A-Za-z][0-9A-Za-z.+_-]{0,100}$/.test(opts.ref)) return { ok: false, reason: `Invalid release ref: ${opts.ref}` };
     if (opts.maturity !== undefined && !['alpha', 'beta', 'stable'].includes(opts.maturity)) return { ok: false, reason: `Invalid maturity: ${opts.maturity}` };
+    if (renderDigest(this.dataDir) !== null && !opts.infra) {
+      return { ok: false, reason: 'An infrastructure configuration is set but its build inputs were not prepared: refused rather than building without them.' };
+    }
     const probed = this.probe();
     if (!probed.ok) return { ok: false, reason: probed.reason };
     const jobId = new Date().toISOString().replace(/[:.]/g, '-');
@@ -663,8 +678,11 @@ export class SelfUpdater {
       ...(opts.channel === 'signed' ? ['--keys', `${trusted}/os/release-keys`, ...(existsSync(L.trustedKeys) ? ['--keys', '/data/aura/release/trusted-keys'] : [])] : []),
       ...(opts.maturity ? ['--maturity', opts.maturity] : []),
       ...(opts.ref ? ['--ref', opts.ref] : []),
+      ...(opts.infra ? ['--infra', opts.infra.file] : []),
     ];
-    const script = `set -uo pipefail\nmkdir -p /data/aura/release/jobs\n${argv.map(shq).join(' ')} > /data/aura/release/jobs/${jobId}.out 2>&1\n`;
+    // The build's secret files go when it ends, whatever the outcome (D94 §6.3).
+    const cleanup = opts.infra ? `trap ${shq(`rm -rf ${shq(opts.infra.dir)}`)} EXIT\n` : '';
+    const script = `set -uo pipefail\n${cleanup}mkdir -p /data/aura/release/jobs\n${argv.map(shq).join(' ')} > /data/aura/release/jobs/${jobId}.out 2>&1\n`;
     const launched = this.launch(`aura-release-build-${jobId}`, probed, script);
     return launched.ok ? { ok: true, jobId } : launched;
   }
@@ -697,6 +715,9 @@ export class SelfUpdater {
       // intermittent 401, which git turns into a username prompt it cannot
       // answer — an update that fails on GitHub's throttle, not on our state.
       '-e', `HOME=${updaterHome()}`,
+      // D94 IC-5: the infrastructure defaults (proxy without credentials, CA, git/npm config) for its
+      // git fetch and builds; the render read-only at /etc/aura/infra. None without a config.
+      ...containerInfraArgs({ infra: updaterInfraView(this.dataDir), appDataVolume: probed.appDataVolume, noProxyExtra: ['aura-shell'] }),
       probed.image,
       'bash', '-lc', script,
     ];
@@ -737,6 +758,12 @@ function updaterHome(): string {
     if (real === '/data' || real.startsWith('/data/')) return real;
   } catch { /* no home to resolve */ }
   return '/root';
+}
+
+/** The rendered infrastructure config for an updater container (the system's own: no infra-inherit). */
+function updaterInfraView(dataDir: string): InfraSpawnView | null {
+  const m = readInfraManifest(dataDir);
+  return m ? { digest: m.digest, subpath: renderedSubpath(dataDir)!, env: { ...m.env } } : null;
 }
 
 /** Human label for a release activation or rollback. */
