@@ -23,6 +23,7 @@ import * as core from '@aura/core';
 import type { AccessPrincipal, ApprovalLevel, InstallBinding, InstallRecord, NexusProgressEvent, PermissionDiff } from '@aura/core';
 import { installDisplay, installLevel } from './display.ts';
 import { actionGate, json, presentedApproval, type ApprovalServiceDeps } from './service.ts';
+import { errorResponse } from '../appResponse.js';
 
 type InstallGenerator = AsyncGenerator<NexusProgressEvent, InstallRecord | null, { approve: boolean } | void>;
 
@@ -121,7 +122,7 @@ export async function runInstall(
         return gate.needsApproval(ev.binding, ev.diff);
       }
       // The start gate (D48, D108 A1): an app this AuraOS never starts is 422 with its D105 body on every install path.
-      if (ev.type === 'error' && ev.body) return json(ev.body, 422);
+      if (ev.type === 'error' && ev.body) return errorResponse(422, ev.body);
       if (ev.type === 'error') return json({ error: ev.message }, errorStatus(ev));
       if (ev.type === 'install.done') { await gate.grantContext(); await gate.auditExecution(); return json({ ok: true, record: ev.record }); }
       cursor = await it.next();

@@ -7,6 +7,7 @@ import { relayCaller, relayClaimFor, type RelaySigner } from '../../../../lib/ac
 import { actingUser } from '../../../../lib/access/decide.ts';
 import { SESSION_HOST_APPS } from '../../../../lib/access/identify.ts';
 import { requestUserId } from '../../../../lib/userContext.ts';
+import { errorResponse } from '../../../../lib/appResponse.js';
 
 /**
  * The machine proxy: a call to a running app's server, for machine callers
@@ -169,7 +170,7 @@ const forward = async ({ params, request, locals }: APIContext): Promise<Respons
       } catch (err) {
         // The start gate (D48, D108): never started; say why (its D105 body).
         const blocked = operationalBlockOf(err);
-        if (blocked) return jsonError(409, { ...blocked });
+        if (blocked) return errorResponse(409, blocked);
         console.error(`[proxy] cold-start of ${id} failed: ${(err as Error).message}`);
       }
     }

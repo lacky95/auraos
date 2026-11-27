@@ -24,7 +24,7 @@ export const POST: APIRoute = async ({ params, request }) => {
   } catch (err) {
     // The start gate (D48, D108): the app is listed but never started, with its D105 body.
     const blocked = operationalBlockOf(err);
-    if (blocked) return jsonResponse(blocked, 409);
+    if (blocked) return errorResponse(409, blocked);
     return errorResponse(String(err), 500);
   }
 };
