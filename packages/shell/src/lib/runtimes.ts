@@ -10,7 +10,11 @@
  *   PUT    /api/admin/runtimes/:id/settings {…}       settings, validated against the runtime's schema
  *   POST   /api/admin/runtimes/:id/enable|disable     disable: refused while instances run unless
  *                                                     `{stopInstances: true}` (they are stopped)
+ *   PUT    /api/admin/runtimes/overrides/:installationId {runtime, settings?, expected?}   the owner's
+ *                                                     override (ARI-3), capability-checked now and at
+ *                                                     every start; refusals carry `missing` and `suggest`
  *   DELETE /api/admin/runtimes/overrides/:installationId   remove an override (applies at the next start)
+ *   GET    /api/admin/runtimes/migration              the D75 report, read-only (`aura runtime migrate --report`)
  *   POST   /api/admin/runtimes/migrate {appId, decision: 'adopt-default'|'keep', runtime?}  a D75 decision
  *   POST   /api/admin/runtimes/check {runtime, appId?, needs?}  a read-only capability dry run (diagnose)
  *
@@ -31,7 +35,7 @@ type Mgr = ReturnType<typeof core.getAppManager>;
 export interface RuntimesDeps {
   ownerAction(ctx: Ctx, req: Parameters<typeof ownerAction>[1]): Promise<OwnerActor | Response>;
   audit(actor: OwnerActor, action: string, opts: Parameters<typeof auditOwner>[2]): Promise<void>;
-  mgr: Pick<Mgr, 'runtimes' | 'runtimeSettings' | 'runtimeApps' | 'getAllInstances' | 'stop'>;
+  mgr: Pick<Mgr, 'runtimes' | 'runtimeSettings' | 'runtimeApps' | 'getAllInstances' | 'stop' | 'runtimeMigrationReport'>;
   env: Record<string, string | undefined>;
 }
 
@@ -56,40 +60,55 @@ async function readBody(ctx: Ctx): Promise<Record<string, unknown> | Response> {
 function errorResponse(err: unknown): Response {
   if (err instanceof core.RuntimeChangeError) {
     const status = err.code === 'not-found' ? 404 : err.code === 'unknown-runtime' ? 404 : err.code === 'invalid-settings' ? 400 : 409;
-    return json({ error: err.code, message: err.message }, status);
+    return json({
+      error: err.code, message: err.message,
+      ...(err.missing ? { missing: err.missing } : {}), ...(err.suggest ? { suggest: err.suggest } : {}),
+    }, status);
   }
   throw err;
 }
 
 const conflict = () => json({ error: 'conflict', message: 'The Runtime Settings changed meanwhile. Try again.' }, 409);
 
-/** The resolution of every installed app, as a start would see it now (no side effects). */
+/**
+ * The resolution of every installed app, as a start would see it now (no
+ * side effects; core `resolutionOf`): runtime, source, the revision of its
+ * effective settings, or the refusal with `missing` and `suggest`; plus what
+ * it needs (core `requirementsOf`, the one derivation) and whether it has an
+ * override.
+ */
 async function installations(deps: RuntimesDeps, record: RuntimeSettingsRecord) {
   const apps = await deps.mgr.runtimeApps();
-  return apps.map((a) => {
-    const row = { appId: a.appId, installationId: a.installationId, sandbox: (a.manifest.sandbox ? 'explicit' : 'omitted') as 'explicit' | 'omitted', sourceMode: a.sourceMode };
-    try {
-      const r = deps.mgr.runtimes.resolve({ manifest: a.manifest, installationId: a.installationId, sourceMode: a.sourceMode, record });
-      return { ...row, runtime: r.runtime, source: r.source };
-    } catch (err) {
-      let chosen: { runtime: string; source: string } | null = null;
-      try { chosen = deps.mgr.runtimes.choose({ manifest: a.manifest, installationId: a.installationId, record }); } catch { /* the error says why */ }
-      const e = err as Error & { code?: string };
-      return { ...row, runtime: chosen?.runtime ?? null, source: chosen?.source ?? null, error: { code: e.code ?? 'error', message: e.message } };
-    }
-  });
+  return apps.map((a) => ({
+    appId: a.appId, installationId: a.installationId, sandbox: (a.manifest.sandbox ? 'explicit' : 'omitted') as 'explicit' | 'omitted', sourceMode: a.sourceMode,
+    needs: core.requirementsOf(a.manifest, { sourceMode: a.sourceMode }).capabilities,
+    override: Boolean(a.installationId && record.overrides[a.installationId]),
+    ...core.resolutionOf(deps.mgr.runtimes, a, record),
+  }));
 }
 
 /** GET: the whole picture for Settings → Runtimes, `aura runtime ls|show` and diagnose. */
 export async function getRuntimes(_ctx: Ctx, deps: RuntimesDeps = liveRuntimesDeps()): Promise<Response> {
   const { record, trusted } = await deps.mgr.runtimeSettings.read();
   const instances = deps.mgr.getAllInstances();
+  const rows = await installations(deps, record);
+  // An instance runs on older settings, or on a runtime its installation no longer resolves to: restart to apply.
+  const restartToApply = (i: { appId: string; sandbox?: string; runtimeSettingsRev?: string }): boolean => {
+    const r = rows.find((x) => x.appId === i.appId);
+    if (!r || !r.runtime || r.error) return false;
+    return r.runtime !== i.sandbox || (i.runtimeSettingsRev !== undefined && r.settingsRev !== i.runtimeSettingsRev);
+  };
   const runtimes = deps.mgr.runtimes.list().map((m) => {
     const id = m.descriptor.id;
     const state = deps.mgr.runtimes.settingsState(id, record);
     const settings = state.ok ? state.settings : core.settingsDefaults(m.descriptor.settingsSchema);
     const health = deps.mgr.runtimes.healthOf(id, record);
     const refusal = core.healthRefusal(health);
+    const on = instances.filter((i) => i.sandbox === id && i.state !== 'destroyed')
+      .map((i) => ({
+        instanceId: i.instanceId, appId: i.appId, state: i.state, ...(i.runtimeSource ? { source: i.runtimeSource } : {}),
+        ...(i.runtimeSettingsRev ? { settingsRev: i.runtimeSettingsRev } : {}), restartToApply: restartToApply(i),
+      }));
     return {
       id, title: m.descriptor.title, description: m.descriptor.description, builtIn: m.descriptor.builtIn,
       version: m.descriptor.version, ari: m.descriptor.ari, settingsVersion: m.descriptor.settingsVersion,
@@ -103,8 +122,9 @@ export async function getRuntimes(_ctx: Ctx, deps: RuntimesDeps = liveRuntimesDe
       features: core.moduleFeatures(m, settings),
       // `detail` stays for the clients that read it (Settings, `aura runtime show`); `checks` is the ARI shape.
       health: { status: health.status, checks: health.checks, ...(refusal ? { detail: refusal } : {}) },
-      instances: instances.filter((i) => i.sandbox === id && i.state !== 'destroyed')
-        .map((i) => ({ instanceId: i.instanceId, appId: i.appId, state: i.state, ...(i.runtimeSource ? { source: i.runtimeSource } : {}) })),
+      instances: on,
+      /** 5b S: "N instances run on the old settings; restart to apply". */
+      restartToApply: on.filter((i) => i.restartToApply).length,
     };
   });
   return json({
@@ -112,7 +132,7 @@ export async function getRuntimes(_ctx: Ctx, deps: RuntimesDeps = liveRuntimesDe
     trusted,
     useProotEnv: deps.env['AURA_USE_PROOT'] ?? null,
     runtimes,
-    installations: await installations(deps, record),
+    installations: rows,
     overrides: Object.entries(record.overrides).map(([installationId, o]) => ({ installationId, ...o })),
     pending: Object.entries(record.pending ?? {}).map(([installationId, p]) => ({ installationId, ...p })),
     migration: { d75: record.migrations?.d75 ?? null },
@@ -234,6 +254,61 @@ export async function deleteOverride(ctx: Ctx, installationId: string | undefine
   if (!r.ok) return conflict();
   await deps.audit(actor, A.overrideRemoved, { target: `installation:${installationId}`, detail: { appId: o.appId, runtime: o.runtime, source: o.source } });
   return json({ ok: true, removed: { installationId, ...r.result } });
+}
+
+/**
+ * PUT overrides/:installationId `{runtime, settings?, expected?}` (ARI-3): the
+ * owner's runtime for one installation. Dry-run checked before the prompt
+ * (a refusal needs no password) and checked again when written (core
+ * `setOverride`); every start checks again (`registry.resolve`). The approval
+ * covers the override the owner saw (`from`): a change meanwhile makes the
+ * approval not match, and a change after it is a `conflict`.
+ */
+export async function putOverride(ctx: Ctx, installationId: string | undefined, deps: RuntimesDeps = liveRuntimesDeps()): Promise<Response> {
+  if (!installationId || !/^[A-Za-z0-9-]{1,64}$/.test(installationId)) return json({ error: 'invalid-request', message: 'an installation id is required' }, 400);
+  const body = await readBody(ctx);
+  if (body instanceof Response) return body;
+  const rid = known(deps, body['runtime']);
+  if (rid instanceof Response) return rid;
+  const settings = body['settings'];
+  if (settings !== undefined && (!settings || typeof settings !== 'object' || Array.isArray(settings))) {
+    return json({ error: 'invalid-request', message: 'settings must be an object' }, 400);
+  }
+  const app = (await deps.mgr.runtimeApps()).find((a) => a.installationId === installationId);
+  if (!app) return json({ error: 'not-found', message: `no installed app has installation ${installationId}` }, 404);
+  const target = { installationId, appId: app.appId, manifest: app.manifest, sourceMode: app.sourceMode };
+  const record = await deps.mgr.runtimeSettings.get();
+  const from = record.overrides[installationId] ?? null;
+  const expected = body['expected'] === undefined ? undefined : body['expected'] === null ? null : String(body['expected']);
+  if (expected !== undefined && (from?.runtime ?? null) !== expected) {
+    return json({ error: 'conflict', message: `the runtime override of ${app.appId} changed meanwhile (now ${from?.runtime ?? 'none'}); try again` }, 409);
+  }
+  // The dry run: the same check the write and every start run, before anyone is asked.
+  try { core.checkOverride(deps.mgr.runtimes, record, target, rid, settings as Record<string, unknown> | undefined); }
+  catch (err) { return errorResponse(err); }
+  const shown = settings && Object.keys(settings).length ? ` (${Object.entries(settings).map(([k, v]) => `${k}: ${JSON.stringify(v)}`).join(', ')})` : '';
+  const actor = await act(ctx, deps, `Run ${app.appId} on ${rid}${shown}: ${from ? `replaces its ${from.source} override (${from.runtime})` : 'an owner override'}`,
+    { overrideSet: installationId, runtime: rid, settings: settings ?? null, from: from ? { runtime: from.runtime, source: from.source, recordedAt: from.recordedAt } : null },
+    ['It wins over the app\'s manifest and the default runtime, and is checked against the runtime at every start (no bypass).',
+      'The installation, its data, permissions and configuration stay; only its runtime changes. Remove the override to undo it.']);
+  if (actor instanceof Response) return actor;
+  let r;
+  try {
+    r = await deps.mgr.runtimeSettings.setOverride(target, rid, { ...(settings ? { settings: settings as Record<string, unknown> } : {}), expected: from?.runtime ?? null });
+  } catch (err) { return errorResponse(err); }
+  if (!r.ok) return conflict();
+  if (r.changed) {
+    await deps.audit(actor, A.overrideSet, {
+      target: `installation:${installationId}`,
+      detail: { appId: app.appId, runtime: rid, ...(settings ? { settings } : {}), from: from ? { runtime: from.runtime, source: from.source } : null },
+    });
+  }
+  return json({ ok: true, changed: r.changed, override: { installationId, ...r.result.override } });
+}
+
+/** GET migration: the D75 report (core `migrationReport`), read-only. */
+export async function getMigration(_ctx: Ctx, deps: RuntimesDeps = liveRuntimesDeps()): Promise<Response> {
+  return json(await deps.mgr.runtimeMigrationReport());
 }
 
 /** POST migrate `{appId, decision: 'adopt-default' | 'keep', runtime?}` (D75 step 5). */

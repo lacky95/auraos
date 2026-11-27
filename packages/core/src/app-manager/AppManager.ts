@@ -43,8 +43,8 @@ import {
 } from '../runtimes/respawn.js';
 import { moduleFeatures, operationResult, type RuntimeFeature, type RuntimeOperationResult, type RuntimeSessionInfo } from '../runtimes/ari.js';
 import { BUILTIN_RUNTIMES } from '../runtimes/builtins/index.js';
-import { RUNTIME_AUDIT_ACTIONS, RuntimeSettingsStore } from '../runtimes/settingsStore.js';
-import { migrateLegacyRuntimes, processLegacyEnv, type MigrationApp } from '../runtimes/migrateLegacy.js';
+import { RUNTIME_AUDIT_ACTIONS, RuntimeSettingsStore, runtimeSettingsRevision } from '../runtimes/settingsStore.js';
+import { migrateLegacyRuntimes, migrationReport, processLegacyEnv, type MigrationApp, type MigrationReport } from '../runtimes/migrateLegacy.js';
 import { defaultRedis } from '@aura/kv-store';
 import { AdminAudit } from '../auth/AdminAudit.js';
 import type { AuthServices } from '../auth/services.js';
@@ -757,6 +757,18 @@ export class AppManager {
       out.push({ appId: m.id, manifest: m, installationId: await this.installationIdOf(m.id), sourceMode: this.sourceModeOf(m.id)?.mode ?? 'closed' });
     }
     return out;
+  }
+
+  /**
+   * The D75 migration report (5b M, `aura runtime migrate --report`): a dry
+   * run of the classification over today's installations, their recorded
+   * overrides and decisions, what a start would do now, and the recorded
+   * report files. Read-only (runtimes/migrateLegacy.ts `migrationReport`).
+   */
+  async runtimeMigrationReport(): Promise<MigrationReport> {
+    return migrationReport(await this.runtimeApps(), {
+      registry: this.runtimes, record: await this.runtimeSettings.get(), env: processLegacyEnv(this.baseRootfs), dataDir: this.dataDir,
+    });
   }
 
   /**
@@ -2496,7 +2508,7 @@ export class AppManager {
       this.transition(instanceId, appId, 'error', null, err instanceof Error ? err.message : String(err));
       throw err;
     }
-    this.upsertInstance(instanceId, appId, { sandbox: runtime.runtime, runtimeSource: runtime.source });
+    this.upsertInstance(instanceId, appId, { sandbox: runtime.runtime, runtimeSource: runtime.source, runtimeSettingsRev: runtimeSettingsRevision(runtime.settings) });
     this.transition(instanceId, appId, 'creating', null);
     // Honor manifest.serverPort when present (currently used by
     // com.aura.registry to pin :4090 so RegistryConfig URLs stay stable).

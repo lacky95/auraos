@@ -8,7 +8,7 @@ import './helpers/dev-env.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Command } from 'commander';
-import { capabilityText, parseAssignments, registerRuntime, runtimeRows, type RuntimesState } from '../src/commands/runtime.js';
+import { capabilityText, featureText, parseAssignments, refusalKind, registerRuntime, reportRows, runtimeRows, type MigrationReportView, type RuntimesState } from '../src/commands/runtime.js';
 import { manifestFromConfig, printRuntimeRequirements, registerDev } from '../src/commands/dev.js';
 import { AppManifestSchema, requirementsOf } from '@aura/core';
 
@@ -21,7 +21,8 @@ test('set: key=value pairs, values kept as strings for the schema', () => {
 test('capabilities read for people: a missing fail-closed one says so', () => {
   assert.equal(capabilityText('privateHomeSession', false), 'no, fails closed');
   assert.equal(capabilityText('readOnlyBinds', false), 'no, fails closed');
-  assert.equal(capabilityText('sidecars', false), 'no');
+  assert.equal(capabilityText('sidecars', false), 'no, fails closed');
+  assert.equal(capabilityText('survivesShellRestart', false), 'no', 'a fact, never a need');
   assert.equal(capabilityText('mounts', true), 'yes');
   assert.equal(capabilityText('isolation', 'ptrace'), 'ptrace');
 });
@@ -49,7 +50,9 @@ test('the command tree: ls, show, set, enable, disable, default, check, override
   const rt = program.commands.find((c) => c.name() === 'runtime')!;
   assert.deepEqual(rt.commands.map((c) => c.name()).sort(),
     ['check', 'default', 'disable', 'enable', 'ls', 'migrate', 'override', 'set', 'show']);
-  assert.deepEqual(rt.commands.find((c) => c.name() === 'override')!.commands.map((c) => c.name()).sort(), ['ls', 'rm']);
+  assert.deepEqual(rt.commands.find((c) => c.name() === 'override')!.commands.map((c) => c.name()).sort(), ['ls', 'rm', 'set']);
+  const migrate = rt.commands.find((c) => c.name() === 'migrate')!;
+  assert.ok(migrate.options.some((o) => o.long === '--report'), 'migrate --report');
 });
 
 test('dev new writes no sandbox unless one is chosen; --sandbox has no default', () => {
@@ -107,4 +110,38 @@ test('dev validate: without a reachable AuraOS the requirements print, unchecked
   const out = await captured(() => printRuntimeRequirements([{ manifest, req: requirementsOf(manifest) }], client));
   assert.match(out, /org\.v\.plain: nothing beyond the basics/);
   assert.match(out, /runtimes: not checked \(no AuraOS reachable\)/);
+});
+
+test('refusals say what kind of no they are (D100 §17): category first, else the code', () => {
+  assert.equal(refusalKind({ category: 'PERMISSION_DENIED' }), 'not authorized');
+  assert.equal(refusalKind({ category: 'UNSUPPORTED_FEATURE' }), 'not supported');
+  assert.equal(refusalKind({ category: 'RESTART_REQUIRED' }), 'restart required');
+  assert.equal(refusalKind({ category: 'RUNTIME_UNAVAILABLE' }), 'temporarily failed');
+  assert.equal(refusalKind({ category: 'ENFORCEMENT_FAILED' }), 'not applied');
+  assert.equal(refusalKind({ error: 'capability-missing' }), 'not supported');
+  assert.equal(refusalKind({ error: 'conflict' }), 'temporarily failed');
+  assert.equal(refusalKind({ error: 'invalid-request' }), null);
+});
+
+test('features read for people; advisory stays visible as a constraint, never "enforced"', () => {
+  assert.equal(featureText({ id: 'tools.liveRevoke', support: 'conditional', applyMode: 'live', constraints: { enforcement: 'advisory' } }),
+    'conditional, live, enforcement: advisory');
+  assert.equal(featureText({ id: 'mount.live', support: 'supported' }), 'supported');
+});
+
+test('migrate --report rows: before, the D75 row, what is recorded and what a start does now', () => {
+  const r = {
+    d75: '2026-11-26T12:00:00.000Z', env: { useProotEnv: 'true', rootfsPresent: true }, reports: [],
+    installations: [
+      { appId: 'a', installationId: 'i-a', sandbox: 'omitted', legacy: 'proot-master', decision: 'override', reason: '',
+        override: { installationId: 'i-a', runtime: 'proot', source: 'migration', recordedAt: 'x' }, pending: null, current: { runtime: 'proot', source: 'migration' } },
+      { appId: 'b', installationId: 'i-b', sandbox: 'omitted', legacy: 'master-direct', decision: 'incompatible', reason: '', override: null,
+        pending: { installationId: 'i-b', appId: 'b', legacy: 'master-direct', reason: 'master-direct', sandbox: 'omitted', recordedAt: 'x' },
+        current: { runtime: null, source: null, error: { code: 'runtime-decision-needed', message: 'm' } } },
+    ],
+  } as MigrationReportView;
+  const rows = reportRows(r);
+  assert.deepEqual([rows[0]!['RECORDED'], rows[0]!['NOW']], ['migration → proot', 'proot (migration)']);
+  assert.match(rows[1]!['RECORDED']!, /decision open \(master-direct\)/);
+  assert.match(rows[1]!['NOW']!, /runtime-decision-needed/);
 });

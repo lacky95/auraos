@@ -291,7 +291,13 @@ const routes: RouteAccessManifest['routes'] = {
     methods: { POST: ownerManages('Disables a runtime (and stops its instances when asked): the owner decides with the password (fresh).') },
   },
   '/api/admin/runtimes/overrides/[installationId]': {
-    methods: { DELETE: ownerManages('Removes a runtime override (D75 step 6): the owner decides with the password (fresh).') },
+    methods: {
+      PUT: ownerManages('Sets an installation\'s runtime override (ARI-3), capability-checked: the owner decides with the password (fresh).'),
+      DELETE: ownerManages('Removes a runtime override (D75 step 6): the owner decides with the password (fresh).'),
+    },
+  },
+  '/api/admin/runtimes/migration': {
+    methods: { GET: rule(OWNER, 'system', why('The D75 runtime migration report (`aura runtime migrate --report`): read-only, an owner view.')) },
   },
   '/api/admin/runtimes/migrate': {
     methods: { POST: ownerManages('A D75 runtime migration decision: the owner decides with the password (fresh).') },

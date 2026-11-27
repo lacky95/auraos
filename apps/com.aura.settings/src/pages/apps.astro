@@ -55,6 +55,17 @@ apps.sort((a, b) => {
   <meta charset="UTF-8" />
   <title>Settings · Apps — AuraOS</title>
   <link rel="stylesheet" href="/api/os/theme.css" />
+  <style is:global>
+    /* Settings → Apps → Runtime: built at runtime (components/appRuntimeView.ts). */
+    .app-runtime { margin-top: 4px; font-size: 0.62rem; color: var(--aura-color-text-dim); }
+    .ar-line, .ar-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .ar-panel { margin-top: 6px; display: flex; flex-direction: column; gap: 6px; }
+    .ar-note { font-size: 0.6rem; color: var(--aura-color-text-dim); margin: 0; }
+    .ar-no { color: var(--aura-color-warning); }
+    .app-runtime .btn { font: inherit; font-size: 0.58rem; letter-spacing: 0.08em; padding: 2px 7px; background: var(--aura-color-surface); color: var(--aura-color-text); border: var(--aura-border); cursor: pointer; }
+    .app-runtime .btn:disabled { opacity: 0.4; cursor: default; }
+    .app-runtime .sf-select { font: inherit; font-size: 0.62rem; background: var(--aura-color-surface); color: var(--aura-color-text); border: var(--aura-border); padding: 2px 4px; }
+  </style>
   <style>
     .apps-list {
       display: flex;
@@ -318,6 +329,7 @@ apps.sort((a, b) => {
                 {m.autoStart && <span class="app-tag">autostart</span>}
                 {m.category && <span class="app-tag">{m.category}</span>}
               </div>
+              <div class="app-runtime" data-app-runtime></div>
             </div>
             <button
               class="toggle"
@@ -513,8 +525,57 @@ apps.sort((a, b) => {
        picker's penalty for off-axis movement naturally prevents up/down
        from jumping sideways into the trash button. -->
   <script>
-    import { OsClient } from '@aura/app-sdk';
-    import '../scripts/os.ts';
+    import { OsClient, osUrl } from '@aura/app-sdk';
+    import { ownerFetch } from '../scripts/os';
+    import { renderAppRuntime, type RuntimeCheck } from '../components/appRuntimeView';
+    import type { RuntimesState } from '../components/runtimesView';
+
+    // Settings → Apps → Runtime (ARI-3): each row's effective runtime, its source and the owner override.
+    // The runtimes are an owner read; without them (an older shell) the rows simply show no runtime line.
+    const runtimeStatus = document.getElementById('status') as HTMLElement;
+    let runtimes: RuntimesState | null = null;
+    const enc = encodeURIComponent;
+    async function loadRuntimes(): Promise<void> {
+      const r = await fetch(osUrl('/api/admin/runtimes'), { cache: 'no-store' });
+      if (!r.ok) return;
+      runtimes = await r.json() as RuntimesState;
+      for (const slot of document.querySelectorAll<HTMLElement>('[data-app-runtime]')) {
+        const appId = slot.closest<HTMLElement>('.app-row')?.dataset['appId'];
+        if (appId && runtimes) renderAppRuntime(slot, appId, runtimes, runtimeActions);
+      }
+    }
+    async function runtimeChange(label: string, method: string, path: `/${string}`, body?: unknown): Promise<void> {
+      runtimeStatus.textContent = `${label}…`;
+      try {
+        const r = await ownerFetch(path, method, body);
+        const data = await r.json().catch(() => ({})) as Record<string, unknown>;
+        if (r.status === 403 && data['error'] === 'cancelled') { runtimeStatus.textContent = 'Not approved: nothing changed.'; return; }
+        if (!r.ok) throw new Error(String(data['message'] || data['error'] || `HTTP ${r.status}`));
+        runtimeStatus.textContent = `${label}: done. Applies at its next start.`;
+      } catch (err) {
+        runtimeStatus.textContent = (err as Error).message;
+        runtimeStatus.dataset['tone'] = 'error';
+      } finally {
+        await loadRuntimes().catch(() => {});
+      }
+    }
+    const runtimeActions = {
+      async check(appId: string, runtime: string): Promise<RuntimeCheck> {
+        const r = await fetch(osUrl('/api/admin/runtimes/check'), {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runtime, appId }),
+        });
+        const data = await r.json().catch(() => ({})) as RuntimeCheck & { message?: string };
+        if (!r.ok) throw new Error(data.message ?? `HTTP ${r.status}`);
+        return data;
+      },
+      setOverride(installationId: string, appId: string, runtime: string, expected: string | null) {
+        void runtimeChange(`Running ${appId} on ${runtime}`, 'PUT', `/api/admin/runtimes/overrides/${enc(installationId)}`, { runtime, expected });
+      },
+      removeOverride(installationId: string, appId: string) {
+        void runtimeChange(`Removing the runtime override of ${appId}`, 'DELETE', `/api/admin/runtimes/overrides/${enc(installationId)}`);
+      },
+    };
+    void loadRuntimes().catch(() => {});
     // getElements (not `selector`) because it is re-resolved on every
     // keypress: a row hidden by the filter must drop out of the arrow-walk,
     // and a static selector would keep walking onto invisible rows.

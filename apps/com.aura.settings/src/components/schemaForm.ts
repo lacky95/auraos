@@ -11,11 +11,16 @@
  * rows are not Astro-rendered). Hooks are `data-*` attributes.
  */
 
+/**
+ * `readOnlySource: 'env'`: the value comes from the environment (e.g.
+ * `AURA_USE_PROOT`, set on the container); shown read-only and never sent.
+ */
+type FieldBase = { title: string; description?: string; readOnlySource?: 'env' };
 export type SchemaField =
-  | { type: 'boolean'; title: string; description?: string; default?: boolean }
-  | { type: 'integer'; title: string; description?: string; default?: number; minimum?: number; maximum?: number }
-  | { type: 'string'; title: string; description?: string; default?: string; enum?: string[]; enumTitles?: Record<string, string> }
-  | { type: 'array'; items: { type: 'string' }; title: string; description?: string; default?: string[] };
+  | FieldBase & { type: 'boolean'; default?: boolean }
+  | FieldBase & { type: 'integer'; default?: number; minimum?: number; maximum?: number }
+  | FieldBase & { type: 'string'; default?: string; enum?: string[]; enumTitles?: Record<string, string> }
+  | FieldBase & { type: 'array'; items: { type: 'string' }; default?: string[] };
 
 export interface SettingsSchemaLike {
   type: 'object';
@@ -98,7 +103,8 @@ export function renderSchemaForm(
     title.className = 'sf-title';
     title.textContent = f.title;
     const el = control(doc, key, f, values[key] ?? f.default);
-    if (opts.disabled) (el as HTMLInputElement).disabled = true;
+    if (opts.disabled || f.readOnlySource) (el as HTMLInputElement).disabled = true;
+    if (f.readOnlySource) el.dataset['readOnlySource'] = f.readOnlySource;
     row.append(title, el);
     if (f.description) {
       const d = doc.createElement('span');
@@ -106,11 +112,18 @@ export function renderSchemaForm(
       d.textContent = f.description;
       row.append(d);
     }
+    if (f.readOnlySource === 'env') {
+      const d = doc.createElement('span');
+      d.className = 'sf-desc';
+      d.textContent = 'Set in the environment of the AuraOS container: read-only here.';
+      row.append(d);
+    }
     root.append(row);
   }
   const read = (): Record<string, unknown> => {
     const out: Record<string, unknown> = {};
     for (const [key, f] of fields) {
+      if (f.readOnlySource) continue;
       const el = root.querySelector<HTMLElement>(`[data-setting="${key}"]`);
       if (!el) continue;
       const v = valueOf(el, f);

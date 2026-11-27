@@ -9,17 +9,46 @@
  */
 import { renderSchemaForm, type SchemaForm, type SettingsSchemaLike } from './schemaForm';
 
+/**
+ * The derived feature view (D100 §12), when the shell serves it: feasibility
+ * only; capabilities and permissions stay the one authorization gate.
+ */
+export interface FeatureEntry {
+  id: string; support: 'supported' | 'conditional' | 'unsupported';
+  applyMode?: 'live' | 'restart-required' | 'recreate-required'; constraints?: Record<string, string | number | boolean>;
+}
 export interface RuntimeEntry {
   id: string; title: string; description: string; builtIn: boolean; alwaysEnabled: boolean; enabled: boolean; isDefault: boolean;
+  version?: string; ari?: number; settingsVersion?: number;
   settingsSchema: SettingsSchemaLike; settings: Record<string, unknown>;
   capabilities: Record<string, unknown>;
-  health: { status: 'ok' | 'unavailable'; detail?: string };
-  instances: Array<{ instanceId: string; appId: string; state: string; source?: string }>;
+  features?: FeatureEntry[];
+  health: { status: 'ok' | 'degraded' | 'unavailable'; detail?: string; checks?: Array<{ id: string; ok: boolean; detail?: string }> };
+  instances: Array<{ instanceId: string; appId: string; state: string; source?: string; restartToApply?: boolean }>;
+  /** Instances on older settings or on a runtime their installation no longer resolves to. */
+  restartToApply?: number;
+}
+export interface InstallationEntry {
+  appId: string; installationId: string | null; sandbox: string; sourceMode?: string; runtime: string | null; source: string | null;
+  needs?: string[]; override?: boolean;
+  error?: { code: string; message: string; category?: string; missing?: string[]; suggest?: string[] };
+}
+/** `GET /api/admin/runtimes/migration` (core `migrationReport`), read-only. */
+export interface MigrationReportEntry {
+  d75: string | null;
+  installations: Array<{
+    appId: string; installationId: string | null; sandbox: string; legacy: string; decision: string; reason: string;
+    override: { runtime: string; source: string } | null; pending: { reason: string } | null;
+    current: { runtime: string | null; source: string | null; error?: { code: string; message: string } };
+  }>;
+  reports: Array<{ file: string; recordedAt: string | null; installations: number; counts: Record<string, number>; error?: string }>;
 }
 export interface RuntimesState {
   default: string; trusted: boolean; useProotEnv: string | null;
   runtimes: RuntimeEntry[];
-  installations: Array<{ appId: string; installationId: string | null; sandbox: string; runtime: string | null; source: string | null; error?: { code: string; message: string } }>;
+  installations: InstallationEntry[];
+  /** The migration report, when the page loaded it. */
+  report?: MigrationReportEntry | null;
   overrides: Array<{ installationId: string; appId?: string; runtime: string; source: string; legacy?: string; recordedAt: string; settings?: Record<string, unknown> }>;
   pending: Array<{ installationId: string; appId: string; legacy: string; reason: string; sandbox: string; recordedAt: string }>;
   migration: { d75: string | null };
@@ -34,19 +63,34 @@ export interface RuntimesActions {
   decide(appId: string, decision: 'adopt-default' | 'keep', runtime?: string): void;
 }
 
-/** What each capability means for people; a `false` on a fail-closed one says so. */
+/**
+ * Every capability (core `RUNTIME_CAPABILITY_KEYS`, in its order) and what it
+ * means for people. A request that needs a `false` one fails closed (never a
+ * weaker substitute); the two facts that no request needs just say "no".
+ */
 export const CAPABILITY_ROWS: Array<{ key: string; label: string; failsClosed?: boolean }> = [
   { key: 'isolation', label: 'Isolation' },
+  { key: 'network', label: 'Network' },
+  { key: 'appHome', label: 'App Home', failsClosed: true },
   { key: 'privateHomeSession', label: 'Private Home in jump', failsClosed: true },
   { key: 'sessionExec', label: 'Isolated jump session', failsClosed: true },
   { key: 'identity', label: 'Per-app identities' },
   { key: 'readOnlyBinds', label: 'Read-only binds (closed apps)', failsClosed: true },
-  { key: 'mounts', label: 'Cross-app mounts' },
-  { key: 'portExpose', label: 'Port expose' },
-  { key: 'sidecars', label: 'Sidecars' },
-  { key: 'warmPool', label: 'Warm pool' },
+  { key: 'hostFilesystem', label: 'Host filesystem', failsClosed: true },
+  { key: 'mounts', label: 'Cross-app mounts', failsClosed: true },
+  { key: 'idmappedMounts', label: 'Writable cross-uid mounts', failsClosed: true },
+  { key: 'portExpose', label: 'Port expose', failsClosed: true },
+  { key: 'sidecars', label: 'Sidecars', failsClosed: true },
+  { key: 'warmPool', label: 'Warm pool', failsClosed: true },
   { key: 'survivesShellRestart', label: 'Survives a shell restart' },
+  { key: 'usage', label: 'Usage metering' },
+  { key: 'gpu', label: 'GPU', failsClosed: true },
 ];
+
+/** A feature for people: support, how a change applies, its constraints (advisory stays advisory). */
+export function featureText(f: FeatureEntry): string {
+  return [f.support, ...(f.applyMode ? [f.applyMode] : []), ...Object.entries(f.constraints ?? {}).map(([k, v]) => `${k}: ${String(v)}`)].join(', ');
+}
 
 export function capabilityText(v: unknown, failsClosed = false): string {
   if (v === true) return 'yes';
@@ -54,7 +98,7 @@ export function capabilityText(v: unknown, failsClosed = false): string {
   return String(v);
 }
 
-const SOURCE_TEXT: Record<string, string> = {
+export const SOURCE_TEXT: Record<string, string> = {
   manifest: 'named by the app', default: 'the default', override: 'owner override', migration: 'kept by the runtime migration',
 };
 
@@ -106,9 +150,20 @@ export function renderRuntimes(root: HTMLElement, s: RuntimesState, selected: st
   };
   fact('Enabled', current.enabled ? (current.alwaysEnabled ? 'yes (always)' : 'yes') : 'no', 'fact-enabled');
   fact('Default', current.isDefault ? 'yes: apps that name no runtime start on it' : 'no');
-  fact('Health', current.health.status === 'ok' ? 'ok' : `unavailable: ${current.health.detail ?? ''}`, 'fact-health');
+  fact('Version', `${current.version ?? '-'} · ARI ${current.ari ?? '-'} · settings v${current.settingsVersion ?? '-'}`, 'fact-version');
+  fact('Health', current.health.status === 'ok' ? 'ok' : `${current.health.status}${current.health.detail ? `: ${current.health.detail}` : ''}`, 'fact-health');
   if (current.id === 'proot') fact('AURA_USE_PROOT', `${s.useProotEnv ?? '(unset)'} (set on the container, read-only)`);
   head.append(facts);
+  if (current.health.checks?.length) {
+    const checks = el(doc, 'ul', 'rt-list');
+    checks.dataset['healthChecks'] = '';
+    for (const c of current.health.checks) {
+      const li = el(doc, 'li', c.ok ? undefined : 'rt-no', `${c.ok ? 'ok' : 'failed'} · ${c.id}${c.detail ? ` · ${c.detail}` : ''}`);
+      li.dataset['check'] = c.id;
+      checks.append(li);
+    }
+    head.append(checks);
+  }
 
   const acts = el(doc, 'div', 'rt-actions');
   if (!current.alwaysEnabled) {
@@ -139,6 +194,19 @@ export function renderRuntimes(root: HTMLElement, s: RuntimesState, selected: st
     table.append(tr);
   }
   caps.append(table);
+  if (current.features?.length) {
+    caps.append(el(doc, 'span', 'rt-title', 'Features'));
+    caps.append(el(doc, 'p', 'rt-note', 'What this runtime can technically do. An app still needs the capability and the permission: both must hold.'));
+    const ft = el(doc, 'table', 'rt-table');
+    ft.dataset['features'] = '';
+    for (const f of current.features) {
+      const tr = el(doc, 'tr');
+      tr.dataset['feature'] = f.id;
+      tr.append(el(doc, 'th', undefined, f.id), el(doc, 'td', f.support === 'supported' ? undefined : 'rt-no', featureText(f)));
+      ft.append(tr);
+    }
+    caps.append(ft);
+  }
   root.append(caps);
 
   // ── settings (from the schema) ──
@@ -154,7 +222,11 @@ export function renderRuntimes(root: HTMLElement, s: RuntimesState, selected: st
     set.append(el(doc, 'div', 'rt-actions'));
     set.lastElementChild!.append(save);
   }
-  set.append(el(doc, 'p', 'rt-note', 'Changes apply to new starts: running instances keep their runtime and settings until they restart.'));
+  const stale = current.restartToApply ?? 0;
+  const applies = el(doc, 'p', stale ? 'rt-note rt-stale' : 'rt-note',
+    `Changes apply to new starts: running instances keep their runtime and settings until they restart.${stale ? ` ${stale} instance(s) run on the old settings or another runtime: restart to apply.` : ''}`);
+  applies.dataset['restartToApply'] = String(stale);
+  set.append(applies);
   root.append(set);
 
   // ── apps on it ──
@@ -168,6 +240,7 @@ export function renderRuntimes(root: HTMLElement, s: RuntimesState, selected: st
     li.dataset['app'] = a.appId;
     const running = current.instances.filter((i) => i.appId === a.appId).length;
     li.append(el(doc, 'code', undefined, a.appId), ` ${a.error ? `· ${a.error.message}` : `· ${SOURCE_TEXT[a.source ?? ''] ?? a.source ?? ''}`}${running ? ` · ${running} running` : ''}`);
+    if (a.needs?.length) li.append(el(doc, 'span', 'rt-dim', ` · needs ${a.needs.join(', ')}`));
     list.append(li);
   }
   if (on.length) apps.append(list);
@@ -215,5 +288,31 @@ export function renderRuntimes(root: HTMLElement, s: RuntimesState, selected: st
   });
   if (s.overrides.length) ov.append(ul);
   root.append(ov);
+  if (s.report) root.append(renderReport(doc, s.report));
   return form;
+}
+
+/** The D75 migration report (read-only): before the release, what is recorded, what a start does now. */
+function renderReport(doc: Document, r: MigrationReportEntry): HTMLElement {
+  const sec = el(doc, 'section', 'rt-section');
+  sec.dataset['migrationReport'] = '';
+  sec.append(el(doc, 'span', 'rt-title', 'Runtime migration report'));
+  sec.append(el(doc, 'p', 'rt-note', r.d75
+    ? `Recorded ${r.d75.slice(0, 10)}. How each app ran before the runtime release, what was recorded for it, and what its next start does. Read-only.`
+    : 'Not recorded yet: a dry run of how each app would be migrated. Read-only.'));
+  const t = el(doc, 'table', 'rt-table');
+  const hr = el(doc, 'tr');
+  for (const h of ['App', 'Before', 'Recorded', 'Next start']) hr.append(el(doc, 'th', undefined, h));
+  t.append(hr);
+  for (const i of r.installations) {
+    const tr = el(doc, 'tr');
+    tr.dataset['reportRow'] = i.appId;
+    const rec = i.pending ? `decision needed (${i.pending.reason})` : i.override ? `${SOURCE_TEXT[i.override.source] ?? i.override.source}: ${i.override.runtime}` : '-';
+    const now = i.current.error ? `not started: ${i.current.error.code}` : `${i.current.runtime} (${SOURCE_TEXT[i.current.source ?? ''] ?? i.current.source})`;
+    tr.append(el(doc, 'td', undefined, i.appId), el(doc, 'td', undefined, i.legacy), el(doc, 'td', undefined, rec), el(doc, 'td', i.current.error ? 'rt-no' : undefined, now));
+    t.append(tr);
+  }
+  sec.append(t);
+  for (const f of r.reports) sec.append(el(doc, 'p', 'rt-note', `${f.file}: ${f.error ? `unreadable (${f.error})` : `${f.installations} installation(s)`}`));
+  return sec;
 }
