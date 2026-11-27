@@ -19,6 +19,13 @@
  * Enter) — but only when the app didn't preventDefault the keydown, so apps
  * that handle keys themselves are never edited twice.
  *
+ * WebKit (Safari, every iPad/iPhone browser) still runs one default action
+ * for an untrusted key event: a synthetic `keypress` " " scrolls the nearest
+ * scrollable box (or the page) by a screen. On a text target the receiver
+ * types the space itself, so it cancels that default once every app listener
+ * has seen the keypress (see `keypress()` below). With nothing editable
+ * focused the keypress is left as it is.
+ *
  * Contenteditable edits go through document.execCommand. WebKit (Safari, so
  * every iPad/iPhone browser) fires its own trusted `beforeinput` for it,
  * Chromium does not. The app must see exactly one: editors that queue an edit
@@ -79,6 +86,19 @@ function insertText(t,text){
     else{var d=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(t),'value');if(d&&d.set)d.set.call(t,(t.value||'')+text);else t.value=(t.value||'')+text;}
   });
 }
+// Dispatch a keypress. On a text target (field, contenteditable, xterm's
+// textarea) the engine's own default is cancelled after the app's listeners
+// ran: a listener on window, bubble phase, added last, so it runs after every
+// other one. It reads the app's decision before cancelling; the return value
+// is that decision (true = the app did not cancel). An app that stops
+// propagation keeps the old behaviour.
+function keypress(t,kp){
+  if(!isField(t)&&!t.isContentEditable)return t.dispatchEvent(kp);
+  var app=null,last=function(e){if(e!==kp)return;app=e.defaultPrevented;e.preventDefault();};
+  window.addEventListener('keypress',last,false);
+  var r;try{r=t.dispatchEvent(kp);}finally{window.removeEventListener('keypress',last,false);}
+  return app===null?r:!app;
+}
 function editKey(t,key,shift,ctrl){
   if(t.isContentEditable){
     var sel=window.getSelection&&window.getSelection();
@@ -115,7 +135,7 @@ window.addEventListener('message',function(ev){
   var t=target();
   var mods={ctrlKey:!!d.ctrl,altKey:!!d.alt,shiftKey:!!d.shift,metaKey:!!d.meta};
   if(d.action==='text'){if(d.text&&!isXterm(t))insertText(t,String(d.text));
-    else if(d.text&&isXterm(t)){for(var i=0;i<d.text.length;i++){var ch=d.text[i];var ki={key:ch,code:'',keyCode:ch.charCodeAt(0),which:ch.charCodeAt(0),charCode:ch.charCodeAt(0),bubbles:true,cancelable:true,composed:true};t.dispatchEvent(new KeyboardEvent('keypress',ki));}}
+    else if(d.text&&isXterm(t)){for(var i=0;i<d.text.length;i++){var ch=d.text[i];var ki={key:ch,code:'',keyCode:ch.charCodeAt(0),which:ch.charCodeAt(0),charCode:ch.charCodeAt(0),bubbles:true,cancelable:true,composed:true};keypress(t,new KeyboardEvent('keypress',ki));}}
     return;}
   var init={key:d.key||'',code:d.code||'',keyCode:d.keyCode||0,which:d.keyCode||0,repeat:!!d.repeat,ctrlKey:mods.ctrlKey,altKey:mods.altKey,shiftKey:mods.shiftKey,metaKey:mods.metaKey,bubbles:true,cancelable:true,composed:true};
   if(d.action==='keyup'){t.dispatchEvent(new KeyboardEvent('keyup',init));return;}
@@ -125,7 +145,7 @@ window.addEventListener('message',function(ev){
   if(printable||k==='Enter'){
     var cc=k==='Enter'?13:k.charCodeAt(0);
     var kp=new KeyboardEvent('keypress',{key:k,code:init.code,keyCode:cc,which:cc,charCode:cc,ctrlKey:mods.ctrlKey,altKey:mods.altKey,shiftKey:mods.shiftKey,metaKey:mods.metaKey,bubbles:true,cancelable:true,composed:true});
-    if(!t.dispatchEvent(kp))return;
+    if(!keypress(t,kp))return;
     if(isXterm(t))return;
     if(printable){insertText(t,k);return;}
     if(t.tagName==='TEXTAREA'||t.isContentEditable){insertText(t,'\n');return;}
