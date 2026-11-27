@@ -23,7 +23,7 @@
 //
 // ── Trust and maturity are separate (owner, Phase 8 decision 5) ─────────────
 // Every release of every maturity is a signed tag. The channel says which
-// trust an install follows: `stable` = signed release tags only (default),
+// trust an install follows: `signed` = signed release tags only (default),
 // `main` = the unsigned development head (owner opt-in). Within the signed
 // channel, `maturity` is a signed label that must match the version's
 // prerelease part (`-alpha.N` → alpha, `-beta.N`/`-rc.N` → beta, none →
@@ -49,7 +49,7 @@
 //
 // CLI (exit 0 ok, 1 refused, 64 usage; JSON on stdout):
 //   release-verify.mjs tag --repo DIR --tag vX.Y.Z [--keys DIR]... [--key FILE]... [--pin ID]... [--maturity FLOOR]
-//   release-verify.mjs select --repo DIR [--channel stable|main] [--maturity alpha|beta|stable] [--ref REF] [--keys DIR]... [--key FILE]... [--pin ID]...
+//   release-verify.mjs select --repo DIR [--channel signed|main] [--maturity alpha|beta|stable] [--ref REF] [--keys DIR]... [--key FILE]... [--pin ID]...
 //   release-verify.mjs files --meta FILE --sig FILE [--commit SHA] [--tree SHA] [--keys DIR]... [--key FILE]...
 //   release-verify.mjs tree DIR                 the git tree id of a plain directory (no .git needed)
 //   release-verify.mjs fingerprint FILE...      key id and fingerprint of public key files
@@ -61,7 +61,7 @@ import { fileURLToPath } from 'node:url';
 
 export const META_VERSION = 1;
 export const SIG_DOMAIN = 'AURAOS-RELEASE-META-V1\n';
-export const CHANNELS = Object.freeze(['stable', 'main']);
+export const CHANNELS = Object.freeze(['signed', 'main']);
 export const MATURITIES = Object.freeze(['alpha', 'beta', 'stable']);
 export const SEVERITIES = Object.freeze(['low', 'medium', 'high', 'critical']);
 export const PROVENANCES = Object.freeze(['upstream-signed', 'upstream-unsigned', 'locally-modified']);
@@ -433,18 +433,19 @@ export function verifyTagWithChain(repo, tag, trust, expect = {}) {
 
 /**
  * Picks the release to install or update to.
- *  stable, no ref: the newest release tag at or above the maturity floor (by
+ *  signed, no ref: the newest release tag at or above the maturity floor (by
  *    its name) that carries release metadata. It must verify: there is no
  *    fallback to an older or an unsigned one (no silent downgrade); name an
  *    older one with `ref`.
- *  stable, ref:    that release tag, any maturity (an explicit choice); verified the
+ *  signed, ref:    that release tag, any maturity (an explicit choice); verified the
  *    same way. A bare commit is refused.
  *  main:           `ref` (default: the branch head `refs/heads/main`), unsigned.
  * Returns `{ channel, maturity, ref, commit, gitTree, signed, provenance, meta?, keyId?, metaDigest?, chain? }`.
  */
-export function selectRelease(repo, { channel = 'stable', maturity = 'alpha', ref, trust }) {
+export function selectRelease(repo, { channel = 'signed', maturity = 'alpha', ref, trust }) {
   if (!CHANNELS.includes(channel)) refuse('malformed', `unknown channel ${channel}`);
   if (!MATURITIES.includes(maturity)) refuse('malformed', `unknown maturity ${maturity}`);
+  // The default floor is alpha while only alpha releases exist; it rises once beta/stable releases do (owner, 2026-11-27).
   if (channel === 'main') {
     const r = ref ?? 'refs/heads/main';
     const { commit, gitTree } = resolveCommit(repo, r);
@@ -460,7 +461,7 @@ export function selectRelease(repo, { channel = 'stable', maturity = 'alpha', re
         : 'no signed release tag found in the source');
     }
   } else if (!isReleaseTagName(tag)) {
-    refuse('no-signature', `the stable channel installs signed release tags only (vX.Y.Z), not ${tag}; use the main channel for unsigned revisions`);
+    refuse('no-signature', `the signed channel installs signed release tags only (vX.Y.Z), not ${tag}; use the main channel for unsigned revisions`);
   }
   const r = verifyTagWithChain(repo, tag, trust, ref === undefined ? { maturity } : {});
   return {
@@ -502,7 +503,7 @@ export function gitTreeOfDir(dir, { algo = 'sha1' } = {}) {
 // ── provenance ──────────────────────────────────────────────────────────────
 
 /**
- * upstream-signed    a verified stable release, unchanged (empty patch series)
+ * upstream-signed    a verified signed release (any maturity), unchanged (empty patch series)
  * upstream-unsigned  the main channel (or anything else not verified)
  * locally-modified   any local change: a non-empty system patch series, or a
  *                    build from a Developer checkout (dirty or not)
@@ -510,7 +511,7 @@ export function gitTreeOfDir(dir, { algo = 'sha1' } = {}) {
  */
 export function provenanceOf({ channel, signed, seriesLength = 0, developerCheckout = false }) {
   if (developerCheckout || seriesLength > 0) return 'locally-modified';
-  return channel === 'stable' && signed === true ? 'upstream-signed' : 'upstream-unsigned';
+  return channel === 'signed' && signed === true ? 'upstream-signed' : 'upstream-unsigned';
 }
 
 /** True only for what may be labelled "signed" anywhere. */
@@ -560,12 +561,12 @@ export function main(argv = process.argv.slice(2)) {
       case 'tag': {
         if (!a.repo || !a.tag) return usage();
         const r = verifyTagWithChain(a.repo, a.tag, trustFrom(a), a.maturity ? { maturity: a.maturity } : {});
-        jsonOut({ ok: true, ...r, provenance: provenanceOf({ channel: 'stable', signed: true }) });
+        jsonOut({ ok: true, ...r, provenance: provenanceOf({ channel: 'signed', signed: true }) });
         return 0;
       }
       case 'select': {
         if (!a.repo) return usage();
-        const channel = a.channel ?? 'stable';
+        const channel = a.channel ?? 'signed';
         const r = selectRelease(a.repo, { channel, maturity: a.maturity ?? 'alpha', ref: a.ref === true ? undefined : a.ref, trust: channel === 'main' ? emptyTrust() : trustFrom(a) });
         jsonOut({ ok: true, ...r });
         return 0;

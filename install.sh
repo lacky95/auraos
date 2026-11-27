@@ -23,10 +23,11 @@
 #   --state-dir DIR          installer state on the host (default /etc/auraos; outside any checkout)
 #   --dir DIR                where the Developer layout's checkout goes (default /opt/auraos)
 #   --source URL             the AuraOS Git repository (default https://github.com/lacky95/auraos.git)
-#   --channel stable|main    stable (default): signed release tags only; main: the unsigned development head (owner opt-in)
-#   --maturity alpha|beta|stable   the lowest release maturity to install (default alpha: the newest signed
-#                            release of any maturity; every maturity is signed, owner Phase 8 decision 5)
-#   --ref REF                a specific release tag (stable) or ref/commit (main)
+#   --channel signed|main    signed (default): signed release tags only; main: the unsigned development head (owner opt-in)
+#   --maturity alpha|beta|stable   the lowest release maturity to install (default alpha for now: the newest
+#                            signed release of any maturity; it rises once beta/stable releases exist; every
+#                            maturity is signed, owner Phase 8 decision 5)
+#   --ref REF                a specific release tag (signed) or ref/commit (main)
 #   --trusted-key FILE|ID    pin the release key (a public key file or a key id/fingerprint); repeatable
 #   --accept-shipped-key     trust the key(s) shipped with this installer without asking (unattended)
 #   --developer              the Developer layout (a git checkout at --dir, today's compose layout)
@@ -46,7 +47,7 @@ HELPER="$INSTALLER_ROOT/os/install/installer.mjs"
 STATE_DIR=/etc/auraos
 DIR=/opt/auraos
 SOURCE=https://github.com/lacky95/auraos.git
-CHANNEL=stable
+CHANNEL=signed
 MATURITY=alpha
 REF=
 MODE=normal
@@ -92,7 +93,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 [ -t 0 ] || UNATTENDED=1
-case $CHANNEL in stable|main) ;; *) echo "install.sh: --channel must be stable or main" >&2; exit 64 ;; esac
+case $CHANNEL in signed|main) ;; *) echo "install.sh: --channel must be signed or main" >&2; exit 64 ;; esac
 case $MATURITY in alpha|beta|stable) ;; *) echo "install.sh: --maturity must be alpha, beta or stable" >&2; exit 64 ;; esac
 
 # ── output: everything also goes to a log, redacted ─────────────────────────
@@ -335,7 +336,7 @@ fi
 # ── 3. release selection and verification (D71, owner answers a and c) ──────
 KEYARGS="--keys $INSTALLER_ROOT/os/release-keys"
 [ -d "$STATE_DIR/release-keys" ] && KEYARGS="$KEYARGS --keys $STATE_DIR/release-keys"
-if [ "$CHANNEL" = stable ]; then
+if [ "$CHANNEL" = signed ]; then
   if [ -n "$TRUSTED_KEYS" ]; then
     KEYARGS= PINS=
     for k in $TRUSTED_KEYS; do
@@ -376,7 +377,7 @@ fi
 
 MIRROR="$STATE_DIR/source.git"
 [ -d "$MIRROR" ] || git init -q --bare "$MIRROR"
-say "Fetching $SOURCE (channel $CHANNEL${REF:+, ref $REF}$([ "$CHANNEL" = stable ] && [ -z "$REF" ] && echo ", maturity $MATURITY or later"))"
+say "Fetching $SOURCE (channel $CHANNEL${REF:+, ref $REF}$([ "$CHANNEL" = signed ] && [ -z "$REF" ] && echo ", maturity $MATURITY or later"))"
 logged git_net -C "$MIRROR" fetch --prune --force --tags --no-recurse-submodules "$SOURCE" '+refs/heads/main:refs/heads/main' \
   || die 1 "fetching $SOURCE failed (see the log)"
 hmount "$MIRROR" ro
@@ -391,7 +392,7 @@ if [ "$REL_OK" != 1 ]; then
   redact < "$TMP/select.err" | tee -a "$LOG"
   die 3 "release verification refused ($REL_CODE): nothing from the candidate was run or built"
 fi
-if [ "$CHANNEL" = stable ]; then
+if [ "$CHANNEL" = signed ]; then
   say "Verified $REL_MATURITY release ${REL_VERSION} ($REL_REF): commit $REL_COMMIT, tree $REL_TREE, signed by key $REL_KEYID${REL_CHAIN:+ (key chain via $REL_CHAIN)}"
   [ -n "$REL_SECURITY" ] && say "  this is a security update (severity $REL_SECURITY)"
 else

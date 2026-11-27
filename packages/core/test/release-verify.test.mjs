@@ -19,7 +19,7 @@ test('keys: Ed25519 PEM only; key id = 16 hex of sha256(raw), fingerprint = 64',
   assert.equal(code(() => V.parsePublicKey(rsaPub)), 'bad-key');
 });
 
-test('a signed stable release verifies and is upstream-signed', () => {
+test('a signed release verifies and is upstream-signed', () => {
   const k = throwawayKey();
   const dir = makeRepo();
   const r = release(dir, '0.1.0', k);
@@ -69,7 +69,7 @@ test('the signature is bound to the exact commit and tree', () => {
   assert.equal(code(() => V.verifyTag(dir, 'v0.2.0', trustOf(k))), 'version-mismatch');
 });
 
-test('stable never installs unsigned: no silent fallback to an older release, no bare commits', () => {
+test('the signed channel never installs unsigned: no silent fallback to an older release, no bare commits', () => {
   const k = throwawayKey();
   const dir = makeRepo();
   release(dir, '0.1.0', k);
@@ -121,6 +121,7 @@ test('main channel: unsigned, upstream-unsigned, opt-in only', () => {
   assert.equal(s.provenance, 'upstream-unsigned');
   assert.equal(s.commit, git(dir, 'rev-parse', 'main'));
   assert.equal(V.showsAsSigned(s.provenance), false);
+  assert.equal(code(() => V.selectRelease(dir, { channel: 'stable', trust: V.emptyTrust() })), 'malformed', 'the trust channel is signed|main; stable is a maturity');
 });
 
 test('rotation: a verified release introduces its successor key; a candidate never trusts itself', () => {
@@ -172,11 +173,11 @@ test('metadata schema: unknown fields, a newer version and missing severity are 
 });
 
 test('provenance: locally modified is never shown as signed', () => {
-  assert.equal(V.provenanceOf({ channel: 'stable', signed: true }), 'upstream-signed');
-  assert.equal(V.provenanceOf({ channel: 'stable', signed: true, seriesLength: 2 }), 'locally-modified');
-  assert.equal(V.provenanceOf({ channel: 'stable', signed: true, developerCheckout: true }), 'locally-modified');
+  assert.equal(V.provenanceOf({ channel: 'signed', signed: true }), 'upstream-signed');
+  assert.equal(V.provenanceOf({ channel: 'signed', signed: true, seriesLength: 2 }), 'locally-modified');
+  assert.equal(V.provenanceOf({ channel: 'signed', signed: true, developerCheckout: true }), 'locally-modified');
   assert.equal(V.provenanceOf({ channel: 'main', signed: true }), 'upstream-unsigned');
-  assert.equal(V.provenanceOf({ channel: 'stable', signed: false }), 'upstream-unsigned');
+  assert.equal(V.provenanceOf({ channel: 'signed', signed: false }), 'upstream-unsigned');
   const label = V.provenanceLabel({ provenance: 'locally-modified', baseVersion: '0.1.0', patches: 2 });
   assert.match(label, /based on 0\.1\.0, locally modified \(2 patches\); not a signed release/);
   assert.equal(V.showsAsSigned('locally-modified'), false);

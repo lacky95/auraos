@@ -33,13 +33,14 @@ node tools/release/verify.mjs select --repo .      # what a fresh install would 
 **Maturity is separate from trust** (owner, Phase 8 decision 5). Every release is a signed
 tag, whatever its maturity; the version names it: `0.1.0-alpha.1` → `alpha` (the first
 public release), `0.1.0-beta.1` / `0.1.0-rc.1` → `beta`, `0.1.0` → `stable`. The signed
-`maturity` field must match. The **channel** is about trust: `stable` follows signed tags
+`maturity` field must match. The **channel** is about trust: `signed` follows signed tags
 only (default), `main` is the unsigned development head (owner opt-in). Within the signed
 channel an install or update takes the newest release at or above its maturity floor
-(`install.sh --maturity alpha|beta|stable`, default `alpha` = the newest signed release of
-any maturity). It never accepts an unsigned tag, and never falls back to an older release
-when the newest one fails (no silent downgrade). No separate pipeline or artifact per
-maturity exists.
+(`install.sh --maturity alpha|beta|stable`). **The default floor is `alpha` for now** (only
+alpha releases exist; always signed); it moves to a higher floor once beta/stable releases
+exist. It never accepts an unsigned tag, and never falls back to an older release when the
+newest one fails (no silent downgrade). No separate pipeline or artifact per maturity
+exists.
 
 ## Formats
 
@@ -64,7 +65,7 @@ maturity exists.
 base64-armored in the tag message, so no byte can drift.
 
 Provenance (shown by `aura status`, Settings → About, diagnostics, the installer):
-`upstream-signed` (a verified stable release, no local patches), `upstream-unsigned`
+`upstream-signed` (a verified signed release of any maturity, no local patches), `upstream-unsigned`
 (the `main` channel), `locally-modified` (any system patch series, or a Developer
 checkout). A locally modified system is **never** labelled signed (`provenanceOf`,
 `showsAsSigned`, `provenanceLabel` in the verifier).

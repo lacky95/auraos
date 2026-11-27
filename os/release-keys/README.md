@@ -9,5 +9,5 @@ signed by a trusted key that adds a key here introduces its successor
 
 No key is shipped yet: the maintainer adds the public half of the release key
 here (`node tools/release/sign.mjs --key … --export-public`). Until then a
-`stable` install needs `install.sh --trusted-key <file>`. The private key never
+signed-channel install needs `install.sh --trusted-key <file>`. The private key never
 enters this repository or any AuraOS system. See `tools/release/README.md`.

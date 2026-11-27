@@ -126,7 +126,7 @@ up in seconds.
 
 ```bash
 sh install.sh --check-only                          # preflight only: Docker, Compose, buildx, disk, network
-sh install.sh --trusted-key release.pub --developer # signed stable release, Developer layout at /opt/auraos
+sh install.sh --trusted-key release.pub --developer # newest signed release, Developer layout at /opt/auraos
 sh install.sh --config infrastructure.yaml --credentials-dir ./creds …   # corporate proxy, CA, mirrors, DNS, mTLS (D94)
 ```
 

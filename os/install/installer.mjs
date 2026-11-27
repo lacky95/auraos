@@ -227,7 +227,7 @@ function envLines(obj) {
 }
 
 function cmdSelect(a) {
-  const channel = a.channel ?? 'stable';
+  const channel = a.channel ?? 'signed';
   try {
     const trust = channel === 'main' ? emptyTrust() : trustFrom(a);
     const r = selectRelease(a.repo, { channel, maturity: a.maturity ?? 'alpha', ref: typeof a.ref === 'string' ? a.ref : undefined, trust });

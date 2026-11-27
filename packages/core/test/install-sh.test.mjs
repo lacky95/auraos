@@ -47,7 +47,7 @@ function install(args, { fake = fakeBin(), env = {} } = {}) {
   return { ...r, out: r.stdout + r.stderr, state, calls: fake.calls(), log: logs };
 }
 
-/** A source repo with a signed stable release; returns { url, key, keyFile }. */
+/** A source repo with a signed release; returns { url, key, keyFile }. */
 function signedSource({ tamper = false, version = '0.1.0' } = {}) {
   const key = throwawayKey();
   const dir = makeRepo();
@@ -144,7 +144,7 @@ test('with a config: endpoints probed through the proxy and CA; no credential in
   assert.equal(existsSync(join(r.state, 'compose.secrets.yml')), false);
 });
 
-test('stable without a trust anchor is refused when unattended', () => {
+test('the signed channel without a trust anchor is refused when unattended', () => {
   const src = signedSource();
   const r = install(['--source', src.url]);
   assert.equal(r.status, 3, r.out);
@@ -184,6 +184,7 @@ test('maturity floor: an alpha-only source is refused for --maturity stable, ins
   assert.equal(r.status, 3, r.out);
   assert.match(r.out, /no release at maturity stable or later \(newest: v0\.1\.0-alpha\.1\)/);
   assert.equal(install(['--maturity', 'nightly']).status, 64);
+  assert.equal(install(['--channel', 'stable']).status, 64, 'stable is a maturity, not a channel');
 });
 
 test('Developer layout: verified checkout, first-boot handoff, then compose up', () => {
