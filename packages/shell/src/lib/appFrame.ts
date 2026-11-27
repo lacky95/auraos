@@ -11,7 +11,7 @@
  * Nothing here reads a frame's document or location: those frames are
  * cross-origin, so load state comes from the `load` event only.
  */
-import type { ResolvedAppFrame } from '@aura/core';
+import type { ResolvedAppHostFrame, ResolvedSetupFrame, SetupStateView } from '@aura/core';
 import {
   AURA_RESERVED_PATHS,
   classifyDesktopHost,
@@ -120,11 +120,44 @@ export interface ResolveAppFrameDeps {
   fetch?: typeof fetch;
 }
 
+/** A window in setup state (D108 W1): the app, no instance yet. */
+export interface SetupFrameTarget {
+  kind: 'setup';
+  appId: string;
+}
+
 /**
- * What `target` loads. This spends a fresh one-time code, so call it once per
- * navigation and never cache the result.
+ * What `target` loads. For an app this spends a fresh one-time code, so call
+ * it once per navigation and never cache the result. A setup target loads
+ * no frame: it reads the app's setup state for the shell's setup view
+ * (lib/setupWindow.ts), on any address (the view is the shell's own DOM).
  */
-export async function resolveAppFrame(target: AppFrameTarget, deps: ResolveAppFrameDeps = {}): Promise<ResolvedAppFrame> {
+export function resolveAppFrame(target: SetupFrameTarget, deps?: ResolveAppFrameDeps): Promise<ResolvedSetupFrame>;
+export function resolveAppFrame(target: AppFrameTarget, deps?: ResolveAppFrameDeps): Promise<ResolvedAppHostFrame>;
+export async function resolveAppFrame(
+  target: AppFrameTarget | SetupFrameTarget, deps: ResolveAppFrameDeps = {},
+): Promise<ResolvedAppHostFrame | ResolvedSetupFrame> {
+  if ('kind' in target && target.kind === 'setup') return resolveSetupFrame(target, deps);
+  return resolveHostFrame(target as AppFrameTarget, deps);
+}
+
+/** The setup branch: the setup API's state, or its refusal (503 `unavailable` without an engine). Never a made-up state. */
+async function resolveSetupFrame(target: SetupFrameTarget, deps: ResolveAppFrameDeps): Promise<ResolvedSetupFrame> {
+  const res = await (deps.fetch ?? fetch)(`/api/apps/${encodeURIComponent(target.appId)}/setup`, { credentials: 'same-origin' });
+  const body = await res.json().catch(() => null) as Record<string, unknown> | null;
+  if (res.ok && body && typeof body['state'] === 'string') return { kind: 'setup', appId: target.appId, state: body as unknown as SetupStateView };
+  const text = (k: string): string | undefined => (typeof body?.[k] === 'string' ? body[k] as string : undefined);
+  const hint = text('hint');
+  return {
+    kind: 'setup', appId: target.appId, state: null,
+    refusal: {
+      status: res.status, error: text('error') ?? 'unavailable',
+      message: text('message') ?? `the app's setup state could not be read (${res.status})`, ...(hint ? { hint } : {}),
+    },
+  };
+}
+
+async function resolveHostFrame(target: AppFrameTarget, deps: ResolveAppFrameDeps): Promise<ResolvedAppHostFrame> {
   const shellOrigin = deps.shellOrigin ?? window.location.origin;
   if (!appHostsAvailable(new URL(shellOrigin).host)) throw new AppFrameBlockedError();
 
