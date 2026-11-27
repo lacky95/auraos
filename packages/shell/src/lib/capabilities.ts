@@ -106,6 +106,7 @@ export function describeDefinition(def: CapabilityDefinition): string[] {
     else if ('readable' in s) lines.push(`Make readable ${s.readable}`);
   }
   if (def.binary_path) lines.push(`Binary: ${def.binary_path}`);
+  if (def.package_root) lines.push(`Package (copied whole into the toolchain): ${def.package_root}`);
   return lines;
 }
 

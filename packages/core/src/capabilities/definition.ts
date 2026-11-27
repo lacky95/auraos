@@ -15,6 +15,11 @@
  *   steps    a fixed set of structured steps (below), each an argv or a file
  *            write the master performs; there is no free-form command
  *
+ * `package_root` (optional, any source): the directory the binary must run
+ * from, copied whole into the toolchain and granted as one unit — for tools
+ * that find their resources relative to their own executable (Codex).
+ * `binary_path`, when given, must lie inside it.
+ *
  * Steps (each a one-key map in YAML):
  *   apt: [names]                          verified apt-get install
  *   download: {url, sha256, to, mode?}    one https file, checked against sha256
@@ -53,6 +58,7 @@ export interface CapabilityDefinition {
   package?: string;
   steps?: CapabilityStep[];
   sidecars?: string[];
+  package_root?: string;
   description?: string;
 }
 
@@ -197,7 +203,7 @@ function step(name: string, i: number, raw: unknown): CapabilityStep {
  */
 export function parseCapabilityDefinition(name: string, raw: unknown): CapabilityDefinition {
   if (!CAPABILITY_NAME_RE.test(name)) fail(JSON.stringify(name), 'not a capability name');
-  const o = obj(name, 'definition', raw, ['source', 'binary', 'binary_path', 'package', 'steps', 'sidecars', 'description']);
+  const o = obj(name, 'definition', raw, ['source', 'binary', 'binary_path', 'package', 'steps', 'sidecars', 'package_root', 'description']);
   const source = o['source'];
   if (source !== 'builtin' && source !== 'apt' && source !== 'npm' && source !== 'steps') {
     fail(name, `source must be builtin, apt, npm or steps (got ${JSON.stringify(source)})`);
@@ -205,6 +211,10 @@ export function parseCapabilityDefinition(name: string, raw: unknown): Capabilit
   const def: CapabilityDefinition = { source: source as CapabilitySourceKind };
   if (o['binary'] !== undefined) def.binary = str(name, 'binary', o['binary'], BINARY_RE, 64);
   if (o['binary_path'] !== undefined) def.binary_path = absPath(name, 'binary_path', o['binary_path']);
+  if (o['package_root'] !== undefined) {
+    def.package_root = absPath(name, 'package_root', o['package_root']);
+    if (def.binary_path && !def.binary_path.startsWith(`${def.package_root}/`)) fail(name, 'binary_path must be inside package_root');
+  }
   if (o['description'] !== undefined) def.description = str(name, 'description', o['description'], null, 500);
   if (o['sidecars'] !== undefined) {
     if (!Array.isArray(o['sidecars']) || o['sidecars'].length > 64) fail(name, 'sidecars must be a list');

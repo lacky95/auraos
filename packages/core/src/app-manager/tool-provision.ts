@@ -35,6 +35,7 @@ import {
   INSTANCE_LIB_DIR, libsForBinaries, materialiseLibs, readLibMap, toolchainLibFor,
   toolchainMirrorLib,
 } from './tool-libs.js';
+import { PACKAGE_DIR, materialisePackages, readPackageMap } from './tool-packages.js';
 
 /** Path the legacy ('symlink') mode binds the whole toolchain store at. */
 export const ALL_TOOLS_PATH = '/aura/all-tools';
@@ -73,15 +74,26 @@ export const MY_TOOLS_BIN_PATH = `${MY_TOOLS_PATH}/${INSTANCE_BIN_DIR}`;
 /**
  * The wrapper placed at `/aura/my-tools/<name>` when the instance's `.lib`
  * is non-empty. Prepends rather than assigns so a caller-supplied
- * LD_LIBRARY_PATH still wins for its own entries.
+ * LD_LIBRARY_PATH still wins for its own entries. A package-tree tool gets
+ * one too, with `target` set to its in-package executable.
  */
-export function wrapperScript(name: string): string {
+export function wrapperScript(name: string, opts: { target?: string; libs?: boolean } = {}): string {
   return [
     '#!/bin/sh',
-    `export LD_LIBRARY_PATH="${MY_TOOLS_LIB_PATH}\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"`,
-    `exec "${MY_TOOLS_BIN_PATH}/${name}" "\$@"`,
+    ...(opts.libs === false ? [] : [`export LD_LIBRARY_PATH="${MY_TOOLS_LIB_PATH}\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"`]),
+    `exec "${opts.target ?? `${MY_TOOLS_BIN_PATH}/${name}`}" "\$@"`,
     '',
   ].join('\n');
+}
+
+/**
+ * Where the wrapper of a package-tree tool execs it (see tool-packages.ts):
+ * the in-package executable, so `/proc/self/exe` resolves inside its package.
+ * Hardlink mode links the tree into the instance's own `.pkg`; symlink mode
+ * reaches it in the store, which that mode binds at /aura/all-tools.
+ */
+export function packageExecPath(owner: string, entry: string, mode: ToolsMode): string {
+  return `${mode === 'hardlink' ? MY_TOOLS_PATH : ALL_TOOLS_PATH}/${PACKAGE_DIR}/${owner}/${entry}`;
 }
 
 /**
@@ -340,7 +352,8 @@ export function provisionAllowlist(opts: {
       // exists. Both must also be SKIPPED here: a non-recursive rmSync on a
       // directory throws ERR_FS_EISDIR, and the catch that used to wrap this
       // whole loop would have swallowed it and abandoned every entry after it.
-      if (name === INSTANCE_LIB_DIR || name === INSTANCE_BIN_DIR) continue;
+      // `.pkg` likewise, by materialisePackages.
+      if (name === INSTANCE_LIB_DIR || name === INSTANCE_BIN_DIR || name === PACKAGE_DIR) continue;
       try { rmSync(join(dir, name), { recursive: true, force: true }); } catch { /* ignore */ }
     }
   } catch { /* dir was already empty */ }
@@ -369,6 +382,19 @@ export function provisionAllowlist(opts: {
   // that does is exactly the loader error this module exists to prevent.
   const wrap = libs.length > 0;
 
+  // Package trees, also before the names that exec them. A granted owner whose
+  // package the store lacks (installed before packages were tracked) keeps the
+  // flat binary it always had — a lone codex still logs in and runs the app
+  // server, which beats no codex at all.
+  const packageMap = readPackageMap(storeBin);
+  const { linked: packaged } = materialisePackages({
+    toolsDir: dir,
+    storeBin,
+    owners: wanted.filter((b) => packageMap[b] !== undefined),
+    mode,
+  });
+  const packagedSet = new Set(packaged);
+
   // Reconcile `.bin` in place (same mount-by-inode care as `.lib`): the real
   // binaries live here and the top-level names become wrapper scripts. When
   // nothing needs wrapping the whole subdir goes away — path resolution walks
@@ -376,7 +402,7 @@ export function provisionAllowlist(opts: {
   const binDir = join(dir, INSTANCE_BIN_DIR);
   if (wrap) {
     mkdirSync(binDir, { recursive: true });
-    const keep = new Set(wanted);
+    const keep = new Set(wanted.filter((b) => !packagedSet.has(b)));
     try {
       for (const name of readdirSync(binDir)) {
         if (keep.has(name)) continue;
@@ -403,7 +429,14 @@ export function provisionAllowlist(opts: {
   for (const bin of wanted) {
     const src = mode === 'hardlink' ? join(mirrorBin, bin) : `${ALL_TOOLS_PATH}/${bin}`;
     let ok: boolean;
-    if (wrap) {
+    if (packagedSet.has(bin)) {
+      // Always a wrapper: a hardlink of the executable outside its package
+      // would make /proc/self/exe point away from the package again.
+      try {
+        writeFileSync(join(dir, bin), wrapperScript(bin, { target: packageExecPath(bin, packageMap[bin]!, mode), libs: wrap }), { mode: 0o755 });
+        ok = true;
+      } catch { ok = false; }
+    } else if (wrap) {
       // Real binary first, wrapper second — a name must never be on PATH
       // before the file it execs exists.
       ok = place(src, join(binDir, bin));
