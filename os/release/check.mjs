@@ -24,9 +24,12 @@
 //                     capped check at a time, since the sum of capped containers can still exceed the host
 //   --no-lock         run without the slot
 //   --no-git          do not mount the worktree's git directory (read-only; dep-check lists files through git)
+//   --user UID:GID    the container's user (default: the worktree's owner)
 //   --target T        where the check runs (env AURA_CHECK_TARGET), default `live`: the Docker daemon this runs
 //                     against. The build/test VM (D106 §3 item 5) becomes the default once it is registered as a
-//                     build target in auraos-e2e config/targets.yaml; until then any other target is refused (3)
+//                     build target in auraos-e2e config/targets.yaml (it is driven from there: `aura-e2e check
+//                     --target <build>` copies a bundle of the ref and runs this file on that host with
+//                     `--target local`, the build host's own daemon). Any other target is refused (3)
 //
 // Every check container is labelled (CHECK_LABELS: aura.role=check, the worktree, its branch, the start time
 // and the timeout), so diagnose/containers (auraos-e2e) tells a capped check from an orphan and flags one that
@@ -61,7 +64,7 @@ export const CHECK_LOCK = '/data/dev/.cpu.lock';
 export const CHECK_TIMEOUT_S = 2400;
 export const CHECK_NETWORKS = Object.freeze(['none', 'bridge']);
 /** Registered check targets; the first is the default. The build/test VM goes first once it is registered. */
-export const CHECK_TARGETS = Object.freeze(['live']);
+export const CHECK_TARGETS = Object.freeze(['live', 'local']);
 /** The labels of every check container (diagnose/containers reads them). */
 export const CHECK_LABELS = Object.freeze({
   role: 'aura.role', worktree: 'aura.check.worktree', branch: 'aura.check.branch', started: 'aura.check.started', timeout: 'aura.check.timeout',
@@ -101,8 +104,10 @@ export function parseCheckArgs(argv) {
   if (!CHECK_TARGETS.includes(target)) {
     throw new CheckError('no-target', `check target ${target} is not registered (known: ${CHECK_TARGETS.join(', ')}): the build/test VM becomes a target once it is in auraos-e2e config/targets.yaml (D106)`);
   }
+  const user = str('user');
+  if (user !== undefined && !/^\d+:\d+$/.test(user)) throw new CheckError('usage', `--user needs UID:GID, got ${user}`, 64);
   return {
-    target,
+    target, user,
     worktree: str('worktree') ?? process.cwd(),
     image: str('image') ?? CHECK_IMAGE,
     limits, network, timeoutS, env,
@@ -244,7 +249,7 @@ export async function check(o, { docker = 'docker', log = (s) => process.stderr.
   const slot = o.lock ? await takeSlot(o.lock) : null;
   const remove = () => spawnSync(docker, ['rm', '-f', name], { stdio: 'ignore', timeout: 20_000 });
   try {
-    const args = checkRunArgs(run, { name, mounts, owner: `${st.uid}:${st.gid}`, started: new Date().toISOString() });
+    const args = checkRunArgs(run, { name, mounts, owner: o.user ?? `${st.uid}:${st.gid}`, started: new Date().toISOString() });
     const c = spawnSync(docker, args, { encoding: 'utf8', timeout: 120_000 });
     if (c.status !== 0) throw new CheckError('create', `docker create failed: ${(c.stderr ?? '').trim().split('\n').slice(-3).join(' / ')}`);
     const i = spawnSync(docker, ['inspect', '-f', '{{json .HostConfig}}\t{{json .Config.Labels}}', name], { encoding: 'utf8', timeout: 20_000 });

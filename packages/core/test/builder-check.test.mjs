@@ -146,8 +146,11 @@ test('branchOf: a linked worktree\'s branch, a clone\'s, a detached HEAD', () =>
   assert.equal(CHK.branchOf('/none', { read }), null);
 });
 
-test('check target: live by default (--target / AURA_CHECK_TARGET); an unregistered target is refused (3)', () => {
-  assert.deepEqual([...CHK.CHECK_TARGETS], ['live']);
+test('check target and user: live by default (--target / AURA_CHECK_TARGET); an unregistered target is refused (3)', () => {
+  assert.deepEqual([...CHK.CHECK_TARGETS], ['live', 'local'], 'local: the build host\'s own daemon (auraos-e2e check --target <build>)');
+  assert.equal(CHK.parseCheckArgs(['--target', 'local']).target, 'local');
+  assert.equal(CHK.parseCheckArgs(['--user', '0:0']).user, '0:0');
+  assert.throws(() => CHK.parseCheckArgs(['--user', 'root']), (e) => e.exit === 64);
   assert.equal(CHK.parseCheckArgs([]).target, 'live');
   assert.throws(() => CHK.parseCheckArgs(['--target', 'build-vm']), (e) => e.code === 'no-target' && e.exit === 3);
 });
