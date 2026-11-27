@@ -6,8 +6,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { hostname } from 'node:os';
 import { ROOT, commitAll, git, release, throwawayKey, tmp, trustOf, write } from './release-fixtures.mjs';
 import { auraSource, fakeDocker } from './release-builder-fixtures.mjs';
@@ -250,6 +250,124 @@ test('GC keeps current and previous (and the new release); other releases and st
   const st = B.status(s.data);
   assert.equal(st.pointer.current, 'cur-1');
   assert.equal(st.lock.held, false);
+});
+
+const GC = await import(join(ROOT, 'os/release/gc.mjs'));
+
+/** A fake complete release `id` with its images. */
+function fakeRelease(L, id, shell = `aura-shell:${id}`) {
+  mkdirSync(join(L.releases, id), { recursive: true });
+  writeFileSync(join(L.releases, id, '.complete'), 'x\n');
+  writeFileSync(join(L.releases, id, 'release.json'), JSON.stringify({ images: { shell, base: 'aura-base:shared' } }));
+}
+function fakeSnapshot(L, name, rec) {
+  mkdirSync(join(L.snapshots, name, 'kv'), { recursive: true });
+  writeFileSync(join(L.snapshots, name, 'kv', 'dump.rdb'), 'x');
+  if (rec) writeFileSync(join(L.snapshots, name, 'snapshot.json'), JSON.stringify({ v: 1, id: name, ...rec }));
+}
+
+test('GC keeps the snapshot of the switch previous -> current; snapshots of removed releases go; one without a record is left to U', async () => {
+  const s = setup();
+  for (const id of ['old-1', 'prev-1', 'cur-1']) fakeRelease(s.L, id);
+  mkdirSync(dirname(s.L.pointer), { recursive: true });
+  writeFileSync(s.L.pointer, JSON.stringify({ v: 1, current: 'cur-1', previous: 'prev-1' }));
+  fakeSnapshot(s.L, 'old-1-1', { fromRelease: 'old-1', toRelease: 'prev-1' });
+  fakeSnapshot(s.L, 'prev-1-2', { fromRelease: 'prev-1', toRelease: 'cur-1' });
+  fakeSnapshot(s.L, 'cur-1-3', { fromRelease: 'cur-1', toRelease: 'gone-1' });
+  fakeSnapshot(s.L, 'cur-1-4', null);
+  const g = await withEnv(s.fake.env, () => GC.gc({ dataRoot: s.data, pruneStore: 'never' }));
+  assert.deepEqual(g.removed, ['old-1']);
+  assert.deepEqual(g.snapshots, { removed: ['cur-1-3', 'old-1-1'], kept: ['prev-1-2'], unknown: ['cur-1-4'] });
+  assert.deepEqual(readdirSync(s.L.snapshots).sort(), ['cur-1-4', 'prev-1-2']);
+  assert.deepEqual(g.store, { pruned: false, detail: 'skipped' });
+});
+
+test('GC: the pnpm store is pruned monthly, after the releases go, in a throwaway container of the current shell image (store only, offline)', async () => {
+  const s = setup();
+  fakeRelease(s.L, 'cur-1', 'aura-shell:cur');
+  fakeRelease(s.L, 'old-1');
+  mkdirSync(dirname(s.L.pointer), { recursive: true });
+  writeFileSync(s.L.pointer, JSON.stringify({ v: 1, current: 'cur-1', previous: null }));
+  mkdirSync(s.L.pnpmStore, { recursive: true });
+  const stamp = join(s.L.pnpmStore, GC.STORE_PRUNE_STAMP);
+  const t0 = Date.parse('2026-11-01T00:00:00Z');
+  const go = (o) => withEnv(s.fake.env, () => GC.gc({ dataRoot: s.data, dataVolume: 'test_aura-app-data', dataSubpath: 'sub', activeJob: '2026-11-01T00-00-00-000Z', ...o }));
+  // First GC: the clock starts, nothing is pruned.
+  let g = await go({ now: t0 });
+  assert.match(g.store.detail, /first GC/);
+  assert.equal(JSON.parse(readFileSync(stamp, 'utf8')).at, '2026-11-01T00:00:00.000Z');
+  assert.doesNotMatch(s.fake.calls(), /store prune/);
+  // Not due yet.
+  g = await go({ now: t0 + GC.STORE_PRUNE_INTERVAL_MS - 1 });
+  assert.match(g.store.detail, /not due/);
+  assert.doesNotMatch(s.fake.calls(), /store prune/);
+  // Due: pruned with the current release's shell image, after the release removal.
+  fakeRelease(s.L, 'old-2');
+  g = await go({ now: t0 + GC.STORE_PRUNE_INTERVAL_MS });
+  assert.equal(g.store.pruned, true);
+  assert.deepEqual(g.removed, ['old-2']);
+  const calls = s.fake.calls().split('\n');
+  const prune = calls.find((l) => / store prune /.test(l));
+  assert.match(prune, /^docker run --rm --name aura-release-prune-2026-11-01t00-00-00-000z --network none /);
+  assert.match(prune, /--cap-drop ALL .*--security-opt no-new-privileges/);
+  assert.match(prune, /--mount type=volume,source=test_aura-app-data,target=\/pnpm-store,volume-subpath=sub\/aura\/pnpm-store -e HOME=\/tmp /);
+  assert.equal((prune.match(/--mount/g) ?? []).length, 1, 'the store only: no staging, no socket, no home');
+  assert.match(prune, /--entrypoint pnpm aura-shell:cur store prune --store-dir \/pnpm-store$/);
+  assert.ok(calls.indexOf(prune) > calls.findIndex((l) => /image rm aura-shell:old-2/.test(l)), 'after the releases (and their images) are gone');
+  assert.equal(JSON.parse(readFileSync(stamp, 'utf8')).at, new Date(t0 + GC.STORE_PRUNE_INTERVAL_MS).toISOString());
+  // `now` forces it; `never` skips it; a failed prune keeps the old record and does not fail the GC.
+  const before = readFileSync(stamp, 'utf8');
+  g = await go({ pruneStore: 'now', now: t0 + GC.STORE_PRUNE_INTERVAL_MS + 5 });
+  assert.equal(g.store.pruned, true);
+  assert.equal((await go({ pruneStore: 'never' })).store.detail, 'skipped');
+  writeFileSync(join(s.fake.bin, 'docker'), '#!/bin/sh\necho "ERR_PNPM_STORE broken" >&2\nexit 1\n');
+  const failed = readFileSync(stamp, 'utf8');
+  g = await go({ pruneStore: 'now' });
+  assert.equal(g.store.pruned, false);
+  assert.match(g.store.detail, /pnpm store prune failed \(exit 1\): ERR_PNPM_STORE broken/);
+  assert.equal(readFileSync(stamp, 'utf8'), failed);
+  assert.notEqual(before, '');
+  await assert.rejects(go({ pruneStore: 'weekly' }), /pruneStore must be one of auto\|now\|never/);
+});
+
+test('gc CLI --held-by: runs under the caller\'s activation lock (stream U\'s switch job) and leaves it held; refused when that job does not hold it', () => {
+  const s = setup();
+  fakeRelease(s.L, 'old-1');
+  const cli = (...args) => spawnSync(process.execPath, [join(ROOT, 'os/release/builder.mjs'), 'gc', '--data-root', s.data, ...args],
+    { env: { ...process.env, ...s.fake.env }, encoding: 'utf8' });
+  let r = cli('--held-by', '2026-02-02T00-00-00-000Z', '--prune-store', 'never');
+  assert.equal(r.status, 3);
+  assert.equal(JSON.parse(r.stdout).code, 'activation-busy');
+  assert.match(JSON.parse(r.stdout).error, /the activation lock is not held/);
+  assert.ok(existsSync(join(s.L.releases, 'old-1')), 'nothing removed');
+  const held = LOCK.acquireLock(s.L.lock, { jobId: '2026-02-02T00-00-00-000Z', by: 'system.release.activate', autoHeartbeat: false });
+  r = cli('--held-by', '2026-02-03T00-00-00-000Z');
+  assert.equal(r.status, 3);
+  assert.match(JSON.parse(r.stdout).error, /held by 2026-02-02T00-00-00-000Z/);
+  r = cli('--held-by', '2026-02-02T00-00-00-000Z', '--prune-store', 'never');
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(JSON.parse(r.stdout).removed, ['old-1']);
+  assert.equal(held.owned(), true, 'the lock stays the caller\'s');
+  held.release();
+  assert.equal(cli('--prune-store', 'weekly').status, 64);
+});
+
+test('IC-5 call site: without --infra inputs the build asks the propagation API; a rendered config before IC-5 is refused before any fetch', async () => {
+  const s = setup();
+  const r = await s.go();
+  assert.equal(r.release.infraDigest, null, 'no config = today');
+  const s2 = setup();
+  const hex = 'c'.repeat(64);
+  mkdirSync(join(s2.data, 'aura/infra/generated', hex), { recursive: true });
+  symlinkSync(hex, join(s2.data, 'aura/infra/generated/current'));
+  const e = await err(s2.go());
+  assert.equal(e.code, 'infra-not-propagated');
+  assert.equal(e.exit, 3);
+  assert.equal(e.step, 'source');
+  assert.equal(existsSync(s2.L.mirror), false, 'refused before the mirror fetch');
+  assert.equal(s2.fake.calls(), '', 'nothing ran');
+  // Explicit inputs (install.sh's --infra) are the caller's: the propagation API is not asked.
+  assert.equal((await s2.go({ infra: { digest: 'sha256:given' } })).release.infraDigest, 'sha256:given');
 });
 
 test('D94: configured build secrets refuse the legacy (non-BuildKit) builder; secrets are mounts, never args', async () => {

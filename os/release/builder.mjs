@@ -28,7 +28,8 @@
 //   check      server.mjs --check in a throwaway container (--network none)
 //   manifest   release.json v1 (components, composition, provenance, digests)
 //   finalize   read-only, atomic rename to releases/<id>, `.complete` last
-//   gc         keep current + previous (+ the new release); other releases, staging, images go
+//   gc         keep current + previous (+ the new release); other releases, staging, images, their snapshots
+//              go; the pnpm store is pruned monthly (gc.mjs)
 // A failure at any step leaves the current release, the pointer and every
 // other release untouched; the staging tree is removed.
 //
@@ -38,7 +39,9 @@
 //                     [--keys DIR]... [--key FILE]... [--pin ID]... [--composition desktop|server]
 //                     [--infra FILE] [--first-install] [--job ID]
 //   builder.mjs status --data-root D
-//   builder.mjs gc --data-root D [--data-volume V]
+//   builder.mjs gc --data-root D [--data-volume V [--data-subpath P]] [--prune-store auto|now|never] [--held-by JOB]
+//     --held-by: the caller (stream U's switch job) holds the activation lock as JOB; gc runs under it
+//     and leaves it held. Without it, gc takes the lock itself.
 //   builder.mjs check [--only=PKGS] [--worktree DIR] [--cpus N --memory 6g --pids N] [--network none|bridge]
 //                     [--timeout SEC] [--env K=V]... [--lock FILE | --no-lock] [--no-git] [-- CMD...]
 //     D106 item 1: a package suite, typecheck, lint or build of a worktree in the same throwaway
@@ -47,10 +50,15 @@
 // Every throwaway container (build steps and check) comes from container.mjs with a
 // resources.limits profile (limits.mjs = core runtimes/container/limits.ts): RELEASE_BUILD_LIMITS
 // for a release build, DEFAULT_CHECK_LIMITS for a check.
-import { spawn, spawnSync } from 'node:child_process';
+//
+// D94 (IC-5 call site): the build's infrastructure inputs are either given (`--infra FILE`: install.sh
+// renders them on the host before any data volume config exists) or come from the propagation API
+// (os/infra/propagate.mjs = core infra/propagate.ts): `propagatedInfra()` below, before the first
+// network access. No config = today's behaviour; a config before IC-5 is refused, never ignored.
+import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
-  chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync,
+  chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -58,15 +66,20 @@ import {
   ReleaseVerifyError, gitTreeOfDir, parseArgs, provenanceOf, selectRelease, emptyTrust, trustFrom,
 } from '../release-verify.mjs';
 import { renameDurable, writeFileDurable, writeJsonDurable } from './durable.mjs';
-import { LockError, acquireLock, lockStatus } from './lock.mjs';
+import { ACTIVATION_BUSY, LockError, acquireLock, lockStatus } from './lock.mjs';
 import { checkMain } from './check.mjs';
-import { throwawayArgs } from './container.mjs';
+import { throwawayArgs, volumeSubpath } from './container.mjs';
+import { PRUNE_MODES, gc, listReleases, readPointer } from './gc.mjs';
 import { imageFingerprint, satisfiesNode, targetsOf } from './images.mjs';
 import { RELEASE_BUILD_LIMITS } from './limits.mjs';
 import {
-  COMPLETE_MARKER, RELEASE_RECORD, STAGING_PREFIX, assertReleaseId, layout, newJobId, subpathOf,
+  COMPLETE_MARKER, RELEASE_RECORD, STAGING_PREFIX, assertReleaseId, layout, newJobId,
 } from './layout.mjs';
+import { readJson, removeTree, run } from './proc.mjs';
 import { seriesForBuild } from './series-slot.mjs';
+import * as infraPropagation from '../infra/propagate.mjs';
+
+export { gc, listReleases, readPointer, removeTree, run };
 
 export const RELEASE_RECORD_VERSION = 1;
 export const COMPOSITIONS = Object.freeze(['desktop', 'server']);
@@ -98,32 +111,6 @@ const refuse = (code, message) => { throw new BuildError(code, message, { exit: 
 
 // ── process helpers ─────────────────────────────────────────────────────────
 
-/** Runs a command asynchronously (the lock heartbeat keeps ticking); resolves { code, out }. */
-export function run(cmd, args, { env, cwd, input, timeoutMs = 0, onLine, name } = {}) {
-  return new Promise((resolve) => {
-    let out = '';
-    const keep = (d) => {
-      const s = d.toString();
-      out = (out + s).slice(-64_000);
-      if (onLine) for (const l of s.split('\n')) if (l) onLine(l);
-    };
-    const child = spawn(cmd, args, { env: env ?? process.env, cwd, stdio: [input ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
-    child.stdout.on('data', keep);
-    child.stderr.on('data', keep);
-    if (input) input(child.stdin);
-    let timer = null;
-    if (timeoutMs) {
-      timer = setTimeout(() => {
-        keep(`\n[builder] timed out after ${Math.round(timeoutMs / 1000)} s\n`);
-        if (name) spawnSync('docker', ['rm', '-f', name], { stdio: 'ignore', timeout: 20_000 });
-        child.kill('SIGKILL');
-      }, timeoutMs);
-    }
-    child.on('error', (e) => { if (timer) clearTimeout(timer); resolve({ code: 127, out: `${out}\n${e.message}` }); });
-    child.on('close', (code) => { if (timer) clearTimeout(timer); resolve({ code: code ?? 1, out }); });
-  });
-}
-
 /** `git archive <commit> | tar -x -C dir`, both statuses checked. */
 function archiveInto(mirror, commit, dir, env) {
   return new Promise((resolve) => {
@@ -140,21 +127,6 @@ function archiveInto(mirror, commit, dir, env) {
 }
 
 const sha256File = (f) => `sha256:${createHash('sha256').update(readFileSync(f)).digest('hex')}`;
-const readJson = (f) => { try { return JSON.parse(readFileSync(f, 'utf8')); } catch { return null; } };
-
-/** Makes a tree writable again (u+w on dirs and files; symlinks untouched) so it can be removed. */
-function makeWritable(p) {
-  let st;
-  try { st = lstatSync(p); } catch { return; }
-  if (st.isSymbolicLink()) return;
-  try { chmodSync(p, st.mode | 0o200); } catch { /* best effort */ }
-  if (st.isDirectory()) for (const n of readdirSync(p)) makeWritable(join(p, n));
-}
-export function removeTree(p) {
-  if (!existsSync(p)) return;
-  makeWritable(p);
-  rmSync(p, { recursive: true, force: true });
-}
 
 /** Read-only for everyone (a-w), except the top dir (finalize writes `.complete` into it last). */
 function makeReadOnly(top) {
@@ -169,8 +141,6 @@ function makeReadOnly(top) {
 
 // ── pointer (the first install writes it; switching is stream U's activate) ─
 
-export const readPointer = (dataRoot) => readJson(layout(dataRoot).pointer);
-
 /** The very first pointer of an install: there is no previous release, no data to snapshot. */
 export function writeFirstPointer(dataRoot, { id, jobId, now = new Date() }) {
   const L = layout(dataRoot);
@@ -181,62 +151,6 @@ export function writeFirstPointer(dataRoot, { id, jobId, now = new Date() }) {
   const p = { v: 1, current: id, previous: null, switchedAt: now.toISOString(), jobId };
   writeJsonDurable(L.pointer, p);
   return p;
-}
-
-/** Releases on disk: [{ id, complete, record }] (staging dirs excluded). */
-export function listReleases(dataRoot) {
-  const L = layout(dataRoot);
-  if (!existsSync(L.releases)) return [];
-  return readdirSync(L.releases).filter((n) => !n.startsWith('.')).sort().map((id) => ({
-    id,
-    complete: existsSync(join(L.releases, id, COMPLETE_MARKER)),
-    record: readJson(join(L.releases, id, RELEASE_RECORD)),
-  }));
-}
-
-// ── GC (Q34: keep current + previous) ───────────────────────────────────────
-
-/**
- * Removes every release that is not current, previous or in `keep`, every
- * staging dir but `activeJob`'s, and leftover per-job secret dirs. Images of
- * removed releases go too unless a kept release uses them (a running image
- * refuses removal; that is fine). Call it under the activation lock only.
- */
-export async function gc({ dataRoot, keep = [], activeJob = null, docker = 'docker', log = () => {} }) {
-  const L = layout(dataRoot);
-  const ptr = readPointer(dataRoot);
-  const kept = new Set([ptr?.current, ptr?.previous, ...keep].filter(Boolean));
-  const removed = [];
-  const imagesInUse = new Set();
-  const imagesOfRemoved = new Set();
-  for (const r of listReleases(dataRoot)) {
-    const imgs = [r.record?.images?.shell, r.record?.images?.base].filter(Boolean);
-    if (kept.has(r.id)) { imgs.forEach((i) => imagesInUse.add(i)); continue; }
-    imgs.forEach((i) => imagesOfRemoved.add(i));
-    removeTree(join(L.releases, r.id));
-    removed.push(r.id);
-    log(`gc: removed release ${r.id}`);
-  }
-  if (existsSync(L.releases)) {
-    for (const n of readdirSync(L.releases)) {
-      if (!n.startsWith(STAGING_PREFIX) || n === `${STAGING_PREFIX}${activeJob}`) continue;
-      removeTree(join(L.releases, n));
-      removed.push(n);
-      log(`gc: removed stale staging ${n}`);
-    }
-  }
-  if (existsSync(L.jobs)) {
-    for (const n of readdirSync(L.jobs)) {
-      if (n.endsWith('.d') && n !== `${activeJob}.d`) removeTree(join(L.jobs, n));
-    }
-  }
-  const images = [];
-  for (const img of imagesOfRemoved) {
-    if (imagesInUse.has(img)) continue;
-    const r = await run(docker, ['image', 'rm', img]);
-    if (r.code === 0) images.push(img);
-  }
-  return { removed, images, kept: [...kept] };
 }
 
 // ── the build ───────────────────────────────────────────────────────────────
@@ -265,6 +179,22 @@ export function infraInputs(x) {
     caBundle: i.caBundle ?? null,
     gitConfig: i.gitConfig ?? null,
   };
+}
+
+/**
+ * The IC-5 call site: the build's D94 inputs from the propagation API (os/infra/propagate.mjs, the
+ * twin of core infra/propagate.ts) when no `--infra` inputs are given (the updater's builds, from
+ * the running release). Secret files land in the job's own dir (`jobDir`, removed after the run);
+ * the caller calls `dispose()` in a `finally`. No rendered config: empty inputs (today). A rendered
+ * config before IC-5: `infra-not-propagated`, refused before anything reaches the network.
+ * IC-5 fills the remaining fields (build args, the public context, the CA bundle, the git config)
+ * here, in this one function.
+ */
+export async function propagatedInfra({ dataRoot, jobDir }) {
+  const digest = infraPropagation.renderDigest(dataRoot);
+  const env = infraPropagation.infraExecEnv('release-build', { dataDir: dataRoot });
+  const s = await infraPropagation.buildSecrets({ jobDir, dataDir: dataRoot });
+  return { inputs: infraInputs({ digest, env: { ...env }, secrets: { ...s.secrets } }), dispose: s.dispose };
 }
 
 /** The throwaway build's container (container.mjs): staging + store only, no socket, no home, the release limits profile. */
@@ -334,10 +264,11 @@ export async function build(o) {
   if (!COMPOSITIONS.includes(composition)) refuse('usage', `unknown composition ${composition}`);
   const channel = o.channel ?? 'signed';
   if (!o.dataRoot || !o.dataVolume) refuse('usage', 'dataRoot and dataVolume are required');
-  const prefix = o.dataSubpath ? `${o.dataSubpath.replace(/^\/+|\/+$/g, '')}/` : '';
-  if (prefix.split('/').includes('..')) refuse('usage', 'dataSubpath must stay inside the volume');
+  if (o.dataSubpath && o.dataSubpath.split('/').includes('..')) refuse('usage', 'dataSubpath must stay inside the volume');
   const L = layout(o.dataRoot);
-  const infra = infraInputs(o.infra);
+  // Given inputs (install.sh) or, in the source step, the propagation API (propagatedInfra).
+  let infra = o.infra ? infraInputs(o.infra) : null;
+  let disposeInfra = null;
   const timeouts = { deps: 30 * 60_000, build: 45 * 60_000, check: 5 * 60_000, image: 60 * 60_000, ...(o.timeouts ?? {}) };
   mkdirSync(L.jobs, { recursive: true });
   const job = newJob(jobId, { ...o, channel, composition });
@@ -372,6 +303,14 @@ export async function build(o) {
     // 2. source: the bare mirror under /data, never /workspace
     begin('source');
     if (!o.fetchFrom) refuse('usage', 'fetchFrom is required');
+    if (!infra) {
+      try {
+        ({ inputs: infra, dispose: disposeInfra } = await propagatedInfra({ dataRoot: o.dataRoot, jobDir: jobFiles }));
+      } catch (e) {
+        if (e?.code === 'infra-not-propagated') throw new BuildError(e.code, e.message, { exit: 3 });
+        throw e;
+      }
+    }
     const gitEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1' };
     if (infra.gitConfig) gitEnv.GIT_CONFIG_GLOBAL = infra.gitConfig;
     if (!existsSync(join(L.mirror, 'HEAD'))) {
@@ -428,7 +367,7 @@ export async function build(o) {
       finalized = true;
       if (o.firstInstall && !readPointer(o.dataRoot)) writeFirstPointer(o.dataRoot, { id, jobId });
       begin('gc');
-      const g = await gc({ dataRoot: o.dataRoot, keep: [id], activeJob: jobId, docker, log });
+      const g = await gc({ dataRoot: o.dataRoot, keep: [id], activeJob: jobId, docker, log, dataVolume: o.dataVolume, dataSubpath: o.dataSubpath, pruneStore: o.pruneStore ?? 'auto', limits: o.limits });
       done('gc', g.removed.length ? `removed ${g.removed.join(', ')}` : 'nothing to remove');
       return finish({ ok: true, id, reused: true, release: readJson(join(L.release(id), RELEASE_RECORD)) });
     }
@@ -478,7 +417,7 @@ export async function build(o) {
     // 8.–10. throwaway container: deps, build, check
     mkdirSync(L.pnpmStore, { recursive: true });
     // dataSubpath: where dataRoot sits inside the volume ('' = its root; a scratch dir in e2e checks).
-    const sub = (abs) => `${prefix}${subpathOf(o.dataRoot, abs)}`;
+    const sub = (abs) => volumeSubpath(o.dataRoot, o.dataSubpath, abs);
     let publicSub = null;
     const env = { ...infra.env, AURA_COMPOSITION: composition };
     if (infra.caBundle) {
@@ -597,7 +536,7 @@ export async function build(o) {
 
     // 13. gc (Q34): current + previous, and the new release until U activates it
     begin('gc');
-    const g = await gc({ dataRoot: o.dataRoot, keep: [id], activeJob: jobId, docker, log });
+    const g = await gc({ dataRoot: o.dataRoot, keep: [id], activeJob: jobId, docker, log, dataVolume: o.dataVolume, dataSubpath: o.dataSubpath, pruneStore: o.pruneStore ?? 'auto', limits: o.limits });
     done('gc', g.removed.length ? `removed ${g.removed.join(', ')}` : 'nothing to remove');
     return finish({ ok: true, id, reused: false, release: record });
   } catch (e) {
@@ -611,6 +550,7 @@ export async function build(o) {
     finish(null);
     throw err;
   } finally {
+    if (disposeInfra) { try { await disposeInfra(); } catch { /* the job dir goes next */ } }
     removeTree(jobFiles);
     if (ownLock && lock) lock.release();
   }
@@ -673,9 +613,24 @@ export async function main(argv = process.argv.slice(2)) {
       }
       case 'gc': {
         if (!a['data-root']) return usage();
+        const prune = typeof a['prune-store'] === 'string' ? a['prune-store'] : 'auto';
+        if (!PRUNE_MODES.includes(prune)) return usage();
+        const opts = {
+          dataRoot: a['data-root'], dataVolume: typeof a['data-volume'] === 'string' ? a['data-volume'] : null,
+          dataSubpath: typeof a['data-subpath'] === 'string' ? a['data-subpath'] : undefined, pruneStore: prune,
+        };
         const L = layout(a['data-root']);
+        if (typeof a['held-by'] === 'string') {
+          // Stream U's switch job holds the lock and runs gc under it; the lock stays the caller's.
+          const holder = lockStatus(L.lock).holder;
+          if (holder?.jobId !== a['held-by']) {
+            throw new BuildError(ACTIVATION_BUSY, `${ACTIVATION_BUSY}: gc --held-by ${a['held-by']}, but the activation lock is ${holder ? `held by ${holder.jobId}` : 'not held'}`, { exit: 3 });
+          }
+          jsonOut({ ok: true, ...(await gc({ ...opts, activeJob: holder.jobId })) });
+          return 0;
+        }
         const lock = acquireLock(L.lock, { jobId: newJobId(), by: 'system.release.gc' });
-        try { jsonOut({ ok: true, ...(await gc({ dataRoot: a['data-root'], activeJob: lock.jobId })) }); } finally { lock.release(); }
+        try { jsonOut({ ok: true, ...(await gc({ ...opts, activeJob: lock.jobId })) }); } finally { lock.release(); }
         return 0;
       }
       default: return usage();

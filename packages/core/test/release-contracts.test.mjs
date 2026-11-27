@@ -73,19 +73,32 @@ test('infra/types.ts constants = os/infra (config version, render version, store
   assert.deepEqual([...I.BUILD_SECRET_IDS], [...ADAPTERS.BUILD_SECRET_IDS]);
 });
 
-test('infra propagation before IC-5: no config = today (empty env, no secrets); a rendered config is refused, not ignored', async () => {
+// os/infra/propagate.mjs is the dependency-free twin (the release builder's IC-5 call site): both run here.
+const PROP_MJS = await import(join(ROOT, 'os/infra/propagate.mjs'));
+const PROPAGATIONS = [['infra/propagate.ts', { InfraPropagationError, buildSecrets, infraExecEnv, renderDigest }], ['os/infra/propagate.mjs', PROP_MJS]];
+
+test('infra propagation before IC-5: no config = today (empty env, no secrets); a rendered config is refused, not ignored (propagate.ts and its .mjs twin)', async () => {
+  assert.equal(PROP_MJS.INFRA_CURRENT_LINK, I.INFRA_CURRENT_LINK);
+  for (const [name, X] of PROPAGATIONS) {
+    const data = tmp('b0-infra');
+    assert.equal(X.renderDigest(data), null, name);
+    assert.deepEqual(X.infraExecEnv('release-build', { dataDir: data }), {}, name);
+    const s = await X.buildSecrets({ jobDir: join(data, 'job'), dataDir: data });
+    assert.deepEqual(s.secrets, {}, name);
+    await s.dispose();
+    const hex = 'a'.repeat(64);
+    mkdirSync(join(data, I.INFRA_GENERATED_DIR, hex), { recursive: true });
+    symlinkSync(hex, join(data, I.INFRA_CURRENT_LINK));
+    assert.equal(X.renderDigest(data), `sha256:${hex}`, name);
+    assert.throws(() => X.infraExecEnv('app', { dataDir: data }), (e) => e instanceof X.InfraPropagationError && e.code === 'infra-not-propagated', name);
+    await assert.rejects(X.buildSecrets({ jobDir: join(data, 'job'), dataDir: data }), (e) => e.code === 'infra-not-propagated', name);
+  }
+  // The same messages, word for word.
   const data = tmp('b0-infra');
-  assert.equal(renderDigest(data), null);
-  assert.deepEqual(infraExecEnv('release-build', { dataDir: data }), {});
-  const s = await buildSecrets({ jobDir: join(data, 'job'), dataDir: data });
-  assert.deepEqual(s.secrets, {});
-  await s.dispose();
-  const hex = 'a'.repeat(64);
-  mkdirSync(join(data, I.INFRA_GENERATED_DIR, hex), { recursive: true });
-  symlinkSync(hex, join(data, I.INFRA_CURRENT_LINK));
-  assert.equal(renderDigest(data), `sha256:${hex}`);
-  assert.throws(() => infraExecEnv('app', { dataDir: data }), (e) => e instanceof InfraPropagationError && e.code === 'infra-not-propagated');
-  await assert.rejects(buildSecrets({ jobDir: join(data, 'job'), dataDir: data }), (e) => e.code === 'infra-not-propagated');
+  mkdirSync(join(data, I.INFRA_GENERATED_DIR), { recursive: true });
+  symlinkSync('b'.repeat(64), join(data, I.INFRA_CURRENT_LINK));
+  const msg = (X) => { try { X.infraExecEnv('nexus', { dataDir: data }); } catch (e) { return e.message; } return null; };
+  assert.equal(msg(PROP_MJS), msg(PROPAGATIONS[0][1]));
 });
 
 test('D64: the release update options (Stage 1b): signed|main default signed at fresh; hold; reserved; the key record', () => {

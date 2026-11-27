@@ -4,6 +4,7 @@
 // (check.mjs). Always `--rm`, no capabilities, no-new-privileges, an explicit
 // network, the resources.limits profile (limits.mjs), and only the mounts the
 // caller names: never the Docker socket, a home or the rest of /data.
+import { subpathOf } from './layout.mjs';
 import { limitArgs } from './limits.mjs';
 
 /**
@@ -31,4 +32,14 @@ export function throwawayArgs({ verb = 'run', name, image, network, limits, work
   for (const [k, v] of Object.entries(env)) a.push('-e', `${k}=${v}`);
   a.push('--entrypoint', entrypoint, image);
   return a;
+}
+
+/**
+ * The data-volume subpath of `abs` (a path under `dataRoot`) for a volume mount, when `dataRoot`
+ * sits at `dataSubpath` inside the volume ('' or undefined = the volume's root).
+ */
+export function volumeSubpath(dataRoot, dataSubpath, abs) {
+  const prefix = dataSubpath ? `${dataSubpath.replace(/^\/+|\/+$/g, '')}/` : '';
+  if (prefix.split('/').includes('..')) throw new Error('dataSubpath must stay inside the volume');
+  return `${prefix}${subpathOf(dataRoot, abs)}`;
 }
