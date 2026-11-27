@@ -262,6 +262,8 @@ export class AppManager {
    * Until a reconciler pass adopts them, nothing is reaped as an orphan.
    */
   private adoptionPending = false;
+  /** The adoption retry under way (one at a time: the reconciler's and a spawn's share it). */
+  private adoptionRetry: Promise<void> | null = null;
   /** Last known sidecars per backend, refreshed by `syncSidecars` (reconciler cadence). */
   private sidecars: Array<{ module: RuntimeModule; info: SidecarInfo }> = [];
   /** Consecutive syncs each sidecar's parent was absent — see selectOrphanSidecars. */
@@ -1836,7 +1838,11 @@ export class AppManager {
         };
         this.instances.set(o.instanceId, inst);
         // Its port stays its own: the allocator starts empty with this shell.
-        if (o.port) this.ports.reserve(o.port);
+        if (o.port) {
+          const sharer = [...this.instances.values()].find((i) => i.instanceId !== o.instanceId && i.port === o.port);
+          if (sharer) console.warn(`[AppManager] adopted ${o.instanceId} on port ${o.port}, which ${sharer.instanceId} holds too (a restart of either gives it its own port)`);
+          this.ports.reserve(o.port);
+        }
         // The FSM must agree with the record: left at its default
         // ('installed'), every lifecycle call on an adopted instance failed —
         // `stop` answered "Invalid lifecycle transition: installed → pausing".
@@ -1907,6 +1913,27 @@ export class AppManager {
   }
 
   /** After adoption: drop the mounts, port forwards and OS sidecars of instances that did not survive. */
+  /**
+   * The boot scan failed (`adoptionPending`): scan again and adopt. The
+   * reconciler calls it each pass, and a spawn first (spawnInstance): a spawn
+   * while the survivors are unknown would take a survivor's port or name.
+   */
+  private retryAdoption(): Promise<void> {
+    this.adoptionRetry ??= (async () => {
+      try {
+        if (!this.adoptionPending || !(await this.adoptOrphans())) return;
+        this.adoptionPending = false;
+        console.log('[AppManager] reconcile: surviving containers adopted');
+        await this.reconcileSurvivors();
+        await this.stopTokenlessSurvivors();
+        if (this.appHostsReady) {
+          await this.settleAdoptedSlots().catch((err) => console.warn(`[AppManager] app host slots after adoption: ${(err as Error).message}`));
+        }
+      } finally { this.adoptionRetry = null; }
+    })();
+    return this.adoptionRetry;
+  }
+
   private async reconcileSurvivors(): Promise<void> {
     // Cross-app mounts live in the HOST kernel, so they outlive this process
     // entirely. Run AFTER orphan adoption so the live-instance set is complete
@@ -2727,6 +2754,12 @@ export class AppManager {
   ): Promise<string> {
     const manifest = this.registry.getById(appId);
     if (!manifest) throw new Error(`App not found: ${appId}`);
+    // Survivors unknown (the boot scan failed): adopt them first, so this
+    // spawn's port and instance name are not a survivor's.
+    if (this.adoptionPending) {
+      await this.retryAdoption();
+      if (this.adoptionPending) console.warn(`[AppManager] ${appId}: starting while the survivors of the last shell are unknown (adoption scan failed): its port may be a survivor's`);
+    }
 
     const scope = this.scopeRegistry.getById(manifest.scopeId);
     // A preview is one more instance of the app (`<appId>-<n>`), whatever its instanceMode.
@@ -4081,15 +4114,7 @@ export class AppManager {
   private async reconcileOnce(): Promise<void> {
     // 0) The boot scan for surviving containers failed: retry it. Until it
     //    succeeds, syncSidecars and reconcileSurvivors reap nothing.
-    if (this.adoptionPending && await this.adoptOrphans()) {
-      this.adoptionPending = false;
-      console.log('[AppManager] reconcile: surviving containers adopted');
-      await this.reconcileSurvivors();
-      await this.stopTokenlessSurvivors();
-      if (this.appHostsReady) {
-        await this.settleAdoptedSlots().catch((err) => console.warn(`[AppManager] app host slots after adoption: ${(err as Error).message}`));
-      }
-    }
+    if (this.adoptionPending) await this.retryAdoption();
     await this.reapIdlePreviews().catch((err: unknown) => console.warn(`[AppManager] preview reaper failed: ${(err as Error).message}`));
     // 1) Tracked-instance liveness: any pid we believe is alive but isn't
     //    must be flagged error, port released, view dropped.

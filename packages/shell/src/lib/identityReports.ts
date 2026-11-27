@@ -65,7 +65,7 @@ export async function liveOwnershipSpecs(): Promise<OwnershipRowSpec[]> {
 
   specs.push({
     section: 'plannedUserPaths', path: WORKSPACE_DIR, kind: 'developer-mode-tree', owner: core.DEFAULT_OWNER_ID, to: ownerTo,
-    recursive: true, exclude: ['node_modules'], only: 'when Developer Mode is on', splitGit: true,
+    recursive: true, exclude: [...core.SOURCE_TREE_EXCLUDE], only: 'when Developer Mode is on', splitGit: true,
   });
   const patches = join(root, 'aura', 'patches');
   for (const name of subdirs(patches)) {
@@ -94,7 +94,7 @@ export async function liveOwnershipSpecs(): Promise<OwnershipRowSpec[]> {
     if (mode === 'open' && m.scopeId === 'user') {
       specs.push({
         section: 'plannedUserPaths', path: m.appDir, kind: 'own-app-source', owner: installationId ?? m.id,
-        to: ownerTo && app ? { uid: ownerTo.uid, gid: app.gid } : null, mode: 'g+rX, setgid dirs', recursive: true, exclude: ['node_modules'],
+        to: ownerTo && app ? { uid: ownerTo.uid, gid: app.gid } : null, mode: 'g+rX, setgid dirs', recursive: true, exclude: [...core.SOURCE_TREE_EXCLUDE],
       });
     } else {
       specs.push({
@@ -219,7 +219,7 @@ export async function handOwnAppSourceToOwner(dir: string, appId: string): Promi
     if (core.effectiveSourceMode(scope, { id: appId }).mode !== 'open') return null;
     const id = await core.getAuthServices().identity.getUser(core.DEFAULT_OWNER_ID);
     if (!id || id.state !== 'active') return null;
-    const r = core.chownTree(dir, { uid: id.uid, gid: id.gid }, { recursive: true, exclude: new Set(['node_modules']), groupReadable: true });
+    const r = core.chownTree(dir, { uid: id.uid, gid: id.gid }, { recursive: true, exclude: new Set(core.SOURCE_TREE_EXCLUDE), groupReadable: true });
     return r.skipped.length ? `${r.skipped.length} entries kept their owner` : null;
   } catch (err) {
     return `not handed to the owner: ${(err as Error).message}`;

@@ -80,6 +80,16 @@ export const APP_DATA_EXCLUDE = ['.mnt'] as const;
 /** The dev-server caches of an Astro app, relative to its source dir. */
 export const DEV_CACHE_DIRS = ['.astro', 'node_modules/.vite', 'node_modules/.vite-temp', 'node_modules/.astro'] as const;
 
+/**
+ * Never handed to the owner with a source tree (the Developer Mode tree,
+ * an open app's own source): the builder's `node_modules` and the dev caches
+ * (DEV_CACHE_DIRS: `.astro`, the rest lies in node_modules). A cache handed
+ * to the owner is no longer root's, so the dev-cache rows (only from root)
+ * skip it, and an app running as its own uid can't write it (console:
+ * EACCES on `.astro/types.d.ts`).
+ */
+export const SOURCE_TREE_EXCLUDE = ['node_modules', '.astro'] as const;
+
 function instanceDirRe(appId: string): RegExp {
   return new RegExp(`^${appId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(-\\d+)?$`);
 }
