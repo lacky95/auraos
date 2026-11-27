@@ -54,11 +54,15 @@ export function sidecarTarget(
   return { mgr, instance, caller: { instanceId, ...(p.sidecar ? { sidecar: p.sidecar } : {}) } };
 }
 
-/** Map a SidecarManager / MountManager failure to a status. */
+/** Map a SidecarManager / MountManager failure to a status (and its `code`,
+ *  e.g. `image_auth`, when the failure names one). */
 export function sidecarError(err: unknown): Response {
-  const status = (err as { status?: unknown })?.status;
+  const { status, code } = (err ?? {}) as { status?: unknown; code?: unknown };
   const message = err instanceof Error ? err.message : String(err);
-  if (typeof status === 'number') return errorResponse(message, status);
+  if (typeof status === 'number') {
+    return typeof code === 'string' && /^[a-z_]{1,32}$/.test(code)
+      ? jsonResponse({ error: message, code }, status) : errorResponse(message, status);
+  }
   if (/no OS sidecar|not mounted|not found/i.test(message)) return errorResponse(message, 404);
   if (/already mounted|unavailable|refusing|inherited from|no mount root/i.test(message)) return errorResponse(message, 409);
   return errorResponse(message, 500);

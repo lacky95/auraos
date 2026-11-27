@@ -31,6 +31,24 @@ app-managed path; the notes below say where the two differ.
 | `readiness` | `{ path?, timeoutMs? }` (default `/`, 10 min). The sidecar is ready when `path` answers HTTP below 500. `wait: { ready: true }` waits for it; `createSidecars` does so for every service that declares it. |
 | `prePull` | Pull the image when the app is installed (and at shell start), not at its first spawn. Background, missing images only. |
 
+### Private images
+
+An image in a private registry is pulled with the registry login of the
+Nexus source the app was **installed from**, and only when the image lives
+inside the app's own repository on that source: the repository its release
+was installed from, or a path below it. For an app published to
+`registry.example.com/team/apps/my-app`, `registry.example.com/team/apps/my-app/runtime:1`
+qualifies (GitLab: the project's own container registry). Set the login once
+with `aura nexus registry login <source>`; its token needs read access to that
+repository (GitLab: a deploy token with `read_registry`). The OS writes it to a
+throwaway auth file for that one pull and deletes it again; the app and its
+sidecars never see it.
+
+An app never uses another source's login or another repository's, and an
+app Nexus did not install (`aura dev new`, a clone) pulls anonymously. A
+refused pull fails the spawn with code `image_auth` (HTTP 502, `code` in the
+JSON answer) and a message that names the source, the repository and the fix.
+
 ## Inheritance
 
 A sidecar is isolated by default: its own env, volumes and network, none of
