@@ -48,6 +48,10 @@
     "./workers/home-seed": {
       "default": "./dist/app-manager/homeSeedWorker.js"
     },
+    "./system-apps": {
+      "import": "./dist/system/systemApps.js",
+      "types": "./dist/system/systemApps.d.ts"
+    },
     "./workload-env": {
       "import": "./dist/runtimes/workloadEnv.js",
       "types": "./dist/runtimes/workloadEnv.d.ts"

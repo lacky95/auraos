@@ -15,6 +15,7 @@
  */
 import type { Command } from 'commander';
 import { env as procEnv, stdin, stdout } from 'node:process';
+import { TERMINAL_APP_ID } from '@aura/core/system-apps';
 import { api } from '../lib/client.js';
 import { color, fail, info, ok, warn } from '../lib/format.js';
 import { runSession } from '../lib/exec-client.js';
@@ -29,7 +30,7 @@ export function registerRoot(program: Command): void {
     .description('Open a dedicated root session in your own System Terminal: root with Docker\'s default capabilities, your home, and the Docker socket in that session only. Needs your approval with the password (or `aura approve` on the host). `exit` ends it.')
     .action(async (cmd: string[]) => {
       const instanceId = procEnv['APP_INSTANCE_ID'];
-      if (!instanceId || procEnv['APP_ID'] !== 'com.aura.terminal') fail('aura root runs in your System Terminal (it opens a root tab in that Terminal)');
+      if (!instanceId || procEnv['APP_ID'] !== TERMINAL_APP_ID) fail('aura root runs in your System Terminal (it opens a root tab in that Terminal)');
       if (procEnv['AURA_ROOT_SESSION'] === '1') fail('this already is a root tab');
       const oneShot = cmd.length > 0;
       if (!oneShot && (!stdin.isTTY || !stdout.isTTY)) fail('aura root needs a TTY (or a command: aura root -- <cmd…>)');

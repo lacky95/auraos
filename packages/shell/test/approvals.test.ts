@@ -14,7 +14,7 @@ import {
   type ApprovalRouteDeps, type RouteCtx,
 } from '../src/lib/approvals/routes.ts';
 import { installGate, runInstall } from '../src/lib/approvals/nexus.ts';
-import { agentHooksDisplay, contextWrite, installDisplay, installLevel, installRisks, requesterReason } from '../src/lib/approvals/display.ts';
+import { adapterChangeDisplay, adapterFiles, contextWrite, installDisplay, installLevel, installRisks, requesterReason } from '../src/lib/approvals/display.ts';
 import { approvedOrAsk, presentsApproval } from '../src/lib/approvals/service.ts';
 import {
   approvalReply, freshViaOf, outcomeOf, parseApprovalView, passwordTransportNote, PASSWORD_OVER_HTTP_NOTE,
@@ -483,19 +483,22 @@ test('docker or privileged sidecars make an install fresh; the host operator con
   assert.equal((await install(ANON, {}, BINDING, 'OP')).body.ok, true);
 });
 
-test('agent hooks: an app installs them once per owner approval', async () => {
+test('adapter change (audit #1): an app has the Terminal install its session hooks once per owner approval; the files come from the adapter', async () => {
   const TX: Principal = { kind: 'instance', appId: 'io.lakner.terminalx', instanceId: 'io.lakner.terminalx-1', userId: 'default', verification: 'verified' };
+  const files = adapterFiles({ a: '/home/aura/.agent-a/settings.json', b: '/home/aura/.agent-b/conf', junk: 3 });
+  assert.deepEqual(files, ['~/.agent-a/settings.json', '~/.agent-b/conf']);
   const ask = async (op: 'install' | 'remove', headers: Record<string, string> = {}) => {
+    const change = { what: 'the Terminal\'s session hooks', op, files };
     const r = await approvedOrAsk(deps(), TX, ctx('POST', '/api/terminal/agent-hooks', undefined, headers).request, {
-      action: 'terminal.agent-hooks', payload: { op }, level: 'session', display: (by) => agentHooksDisplay({ op }, by),
+      action: 'app.adapter-change', payload: change, level: 'session', display: (by) => adapterChangeDisplay(change, by),
     });
     return r ? read(r) : null;
   };
   const first = await ask('install');
   assert.equal(first?.status, 202);
-  assert.equal(first?.body.action, 'terminal.agent-hooks');
-  assert.equal(first?.body.display.title, 'Install the Terminal\'s agent hooks');
-  assert.match(first?.body.display.details[0], /~\/\.claude\/settings\.json/);
+  assert.equal(first?.body.action, 'app.adapter-change');
+  assert.equal(first?.body.display.title, 'Install the Terminal\'s session hooks');
+  assert.match(first?.body.display.details[0], /~\/\.agent-a\/settings\.json, ~\/\.agent-b\/conf/);
   const id = first!.body.approvalId as string;
   assert.equal((await ask('install', { 'x-aura-approval': id }))?.status, 202, 'not approved yet');
   await decide(id, 'approve');

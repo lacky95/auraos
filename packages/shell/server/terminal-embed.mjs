@@ -27,7 +27,7 @@
  * of this file see the same grants and apps.
  */
 import { RELAY_CLAIM_HEADER } from '@aura/core/relay-claim';
-import { SESSION_HOST_APPS, TERMINAL_APP_ID } from './session-hosts.mjs';
+import { SESSION_HOST_APPS, TERMINAL_APP_ID, isInstanceIdOf } from './session-hosts.mjs';
 
 // The ids live in a dependency-free leaf (session-hosts.mjs); re-exported for this module's importers.
 export { TERMINAL_APP_ID, SESSION_HOST_APPS };
@@ -40,7 +40,7 @@ const SESSION_RE = /^([A-Za-z0-9][A-Za-z0-9._-]{0,199})#([A-Za-z0-9._-]{1,64})$/
 /** The Terminal instance a session id names (`com.aura.terminal-2#a3` → `com.aura.terminal-2`), or null. */
 export function terminalSessionInstance(sessionId) {
   const m = typeof sessionId === 'string' ? SESSION_RE.exec(sessionId) : null;
-  if (!m || !(m[1] === TERMINAL_APP_ID || m[1].startsWith(`${TERMINAL_APP_ID}-`))) return null;
+  if (!m || !isInstanceIdOf(m[1], TERMINAL_APP_ID)) return null;
   return m[1];
 }
 

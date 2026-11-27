@@ -292,6 +292,10 @@ sidecars.privileged    sidecars.mounts
 sidecars.tools         sidecars.manageAll
 ```
 
+Reserved: the namespace `system.provider.*` (app-provided system services,
+later). No permission in it exists, and nothing grants one by a wildcard;
+activating a provider will be the owner's own decision.
+
 Plus dynamic content-provider perms in the form
 `data:<authority>:<perm-name>`. Declare what you need in
 `manifest.permissions`; the `PermissionManager` checks them at the

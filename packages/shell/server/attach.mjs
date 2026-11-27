@@ -12,7 +12,7 @@
  */
 import { createAppHostRouter } from './app-hosts.mjs';
 import { loadAppHostServices } from './app-host-auth.mjs';
-import { SESSION_HOST_APPS, terminalEmbedAncestors, watchTerminalInstances } from './terminal-embed.mjs';
+import { SESSION_HOST_APPS, TERMINAL_APP_ID, terminalEmbedAncestors, watchTerminalInstances } from './terminal-embed.mjs';
 import { buildAppHost } from '@aura/core/host-rules';
 import { originOf, plainProxyPath } from './host-policy.mjs';
 import {
@@ -114,7 +114,7 @@ const WS_PING_MS = 25_000;
  * @param {string} proxyPath  the path after `/api/proxy/<id>/`, already plainProxyPath
  */
 export function wsProxySubject(appId, proxyPath) {
-  return appId === 'com.aura.terminal' && new URL(`/${proxyPath}`, 'http://upstream').pathname === '/ws'
+  return appId === TERMINAL_APP_ID && new URL(`/${proxyPath}`, 'http://upstream').pathname === '/ws'
     ? 'terminal-pty' : 'ws-proxy';
 }
 

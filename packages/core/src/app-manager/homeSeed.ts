@@ -11,19 +11,16 @@
  *      so homes seeded before the section existed get it too. The user's own
  *      text is left as it is. Once there, the section is the user's too:
  *      edits stay, and it is appended again only if its start marker is gone.
- *   3. `~/CLAUDE.md` exactly as an older AuraOS seeded it (`@AGENTS.md`) is
- *      removed once `~/.claude/CLAUDE.md` imports `~/AGENTS.md`: Claude loads
- *      the user memory in every directory, `~` included, so the home pointer
- *      only repeated it. Edited, it stays. Codex reads `~/AGENTS.md` itself.
+ *
+ * The generic home-seeding contract (philosophy audit #2, 5b): the seeder
+ * copies only. It never reads, rewrites or deletes a file because of what a
+ * product does with it; which files exist and what they say is the seed's
+ * (os/home-seed, an adapter), never the kernel's.
  */
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { coreWorkerPath } from '../system/workerPath.js';
-
-/** `~/CLAUDE.md` as the seed shipped it before `~/.claude/CLAUDE.md` existed. */
-export const LEGACY_HOME_CLAUDE_MD =
-  '# AuraOS\n\nThe single source of truth for this home is AGENTS.md (Codex reads it too). Edit that file, not this one.\n\n@AGENTS.md\n';
 
 const SECTION = /<!-- aura:section ([a-z0-9-]+) -->\n[\s\S]*?<!-- \/aura:section \1 -->\n?/g;
 
@@ -37,13 +34,11 @@ export interface HomeSeedResult {
   copied: string[];
   /** Sections appended to an existing ~/AGENTS.md. */
   appended: string[];
-  /** Whether the legacy ~/CLAUDE.md pointer was removed. */
-  removedLegacyClaudeMd: boolean;
 }
 
 /** Seed `home` from `seedDir`. Idempotent; see the file comment. */
 export function seedHome(seedDir: string, home: string, warn: (msg: string) => void = () => undefined): HomeSeedResult {
-  const result: HomeSeedResult = { copied: [], appended: [], removedLegacyClaudeMd: false };
+  const result: HomeSeedResult = { copied: [], appended: [] };
   const agents = join(home, 'AGENTS.md');
   const hadAgents = existsSync(agents);
 
@@ -76,14 +71,6 @@ export function seedHome(seedDir: string, home: string, warn: (msg: string) => v
     }
   }
 
-  const homeClaude = join(home, 'CLAUDE.md');
-  try {
-    const user = readFileSync(join(home, '.claude', 'CLAUDE.md'), 'utf-8');
-    if (/^@~\/AGENTS\.md\s*$/m.test(user) && readFileSync(homeClaude, 'utf-8') === LEGACY_HOME_CLAUDE_MD) {
-      unlinkSync(homeClaude);
-      result.removedLegacyClaudeMd = true;
-    }
-  } catch { /* one of them is missing: nothing to tidy */ }
   return result;
 }
 
@@ -97,10 +84,10 @@ export function seedHome(seedDir: string, home: string, warn: (msg: string) => v
  */
 export function seedHomeAs(seedDir: string, home: string, warn: (msg: string) => void = () => undefined): HomeSeedResult {
   let st;
-  try { st = lstatSync(home); } catch { return { copied: [], appended: [], removedLegacyClaudeMd: false }; }
+  try { st = lstatSync(home); } catch { return { copied: [], appended: [] }; }
   if (st.isSymbolicLink() || !st.isDirectory()) {
     warn(`${home} is not a directory; not seeded`);
-    return { copied: [], appended: [], removedLegacyClaudeMd: false };
+    return { copied: [], appended: [] };
   }
   if (st.uid === 0) return seedHome(seedDir, home, warn);
   try {
@@ -112,9 +99,9 @@ export function seedHomeAs(seedDir: string, home: string, warn: (msg: string) =>
     });
     const r = JSON.parse(out) as HomeSeedResult & { warnings?: string[] };
     for (const w of r.warnings ?? []) warn(w);
-    return { copied: r.copied, appended: r.appended, removedLegacyClaudeMd: r.removedLegacyClaudeMd };
+    return { copied: r.copied, appended: r.appended };
   } catch (err) {
     warn(`could not seed ${home} as its owner: ${(err as Error).message.split('\n')[0]}`);
-    return { copied: [], appended: [], removedLegacyClaudeMd: false };
+    return { copied: [], appended: [] };
   }
 }

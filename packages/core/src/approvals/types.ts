@@ -45,8 +45,11 @@ export const FINAL_APPROVAL_STATES: ReadonlySet<ApprovalState> = new Set(['denie
  *   nexus.update       update an app: same binding as install
  *   os.context.write   write Aura Context (`/api/os/context`, needs-fresh-auth)
  *   user.confirm       an app asks the owner to confirm (D49, `osClient.user.confirm`)
- *   terminal.agent-hooks  an app installs or removes the Terminal's agent hooks in
- *                      the owner's home (`/api/terminal/agent-hooks`)
+ *   app.adapter-change an app asks a system app's adapter to change files in
+ *                      the owner's home (the Terminal's session hooks,
+ *                      `/api/terminal/agent-hooks`). Generic (philosophy audit
+ *                      #1): the adapter names the files it changes, the shell
+ *                      shows them and the owner decides; no product in the kind
  *   credential.store   an app or the CLI asks the owner for a secret (D56,
  *                      `osClient.credentials.request`, `aura secret ask`); the
  *                      owner types it into the shell's dialog, which stores
@@ -74,7 +77,7 @@ export const FINAL_APPROVAL_STATES: ReadonlySet<ApprovalState> = new Set(['denie
  *                      (`/api/apps/<id>/source-mode`, `aura dev open`)
  */
 export const APPROVAL_ACTIONS = [
-  'nexus.install', 'nexus.update', 'os.context.write', 'user.confirm', 'terminal.agent-hooks',
+  'nexus.install', 'nexus.update', 'os.context.write', 'user.confirm', 'app.adapter-change',
   'credential.store', 'credential.read',
   'admin.grant', 'admin.revoke', 'admin.api-key', 'admin.manifest-edit', 'admin.read', 'admin.change',
   'app.patch.activate', 'app.source.open',

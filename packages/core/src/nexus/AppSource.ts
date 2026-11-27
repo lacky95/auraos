@@ -27,6 +27,7 @@ import { promisify } from 'node:util';
 import { appendFileSync, existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
+import { NEXUS_APP_ID, SETTINGS_APP_ID, TERMINAL_APP_ID } from '../system/systemApps.js';
 
 /** Marker written into every published bundle (git work tree and OCI tarball). */
 export const PUBLISH_MARKER = '.nexus-published.json';
@@ -426,7 +427,7 @@ export const SYSTEM_APP_LATER = 'system-app-later';
 export const SYSTEM_APP_LATER_MESSAGE = 'Built-in apps are patched by system patches (Phase 7) or in Developer Mode';
 
 /** Apps whose source mode changes need the owner's password (D9). */
-export const SENSITIVE_APPS: ReadonlySet<string> = new Set(['com.aura.settings', 'com.aura.terminal', 'com.aura.nexus']);
+export const SENSITIVE_APPS: ReadonlySet<string> = new Set([SETTINGS_APP_ID, TERMINAL_APP_ID, NEXUS_APP_ID]);
 
 // ─── Patch workspaces (Track P) ─────────────────────────────────────────────
 //

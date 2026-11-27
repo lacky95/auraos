@@ -4,7 +4,7 @@ The sector rules are in `packages/core/AGENTS.md`. This module is the Aura Runti
 
 ## Files
 
-- **`ari.ts`**: the contract (`ARI_VERSION`, `RuntimeDescriptor`, `AuraRuntime`, `RuntimeModule`, `SpawnSpec`, `SessionSpec`, health, endpoint, `ariRefusal`). **`types.ts`**: capabilities (`RUNTIME_CAPABILITY_KEYS`), errors, the settings record. **`requirements.ts`**: `requirementsOf()` and `requestNeeds()`. These three are contract leaves (`pnpm arch` rule `contract-leaf`): no runtime import of another core module.
+- **`ari.ts`**: the contract (`ARI_VERSION`, `RuntimeDescriptor`, `AuraRuntime`, `RuntimeModule`, `SpawnSpec`, `SessionSpec`, health, endpoint, `ariRefusal`). **`types.ts`**: capabilities (`RUNTIME_CAPABILITY_KEYS`), errors, the settings record. **`requirements.ts`**: `requirementsOf()` and `requestNeeds()`. **`workloadEnv.ts`**: the `AURA_*` a session must never see vs may see (`@aura/core/workload-env`; a golden test covers every variable the spawn args set). These four are contract leaves (`pnpm arch` rule `contract-leaf`): no runtime import of another core module.
 - **`registry.ts`**: registration (refuses an ARI above `ARI_VERSION`, a bad id or descriptor, a duplicate), settings (migrated by `settingsVersion`; failure disables the runtime, never guessed values), health, `suggest`, `resolve`.
 - **`settingsStore.ts`**: the sealed `user:policy:runtimes` record (owned here). **`migrateLegacy.ts`**: D75.
 - **`builtins/`**: `BUILTIN_RUNTIMES` (container, proot) over today's runners. 5b CR/PR move them to `runtimes/<id>/`.

@@ -164,3 +164,12 @@ test('AppManager runner selection: a latched runtime id that is not installed is
   assert.throws(() => AppManager.prototype.runnerOf.call(self, 'n-1'), /has no runtime/, 'no latched runtime: no fallback');
   assert.throws(() => AppManager.prototype.runnerOf.call(self, 'unknown-1'), /has no runtime/);
 });
+
+test('R10: system.provider.* is reserved; no built-in or grantable permission is in it', async () => {
+  const { RESERVED_PERMISSION_NAMESPACES, BUILTIN_PERMISSIONS } = await import('../dist/types/manifest.js');
+  const { GRANTABLE_PERMISSIONS } = await import('../dist/auth/GrantStore.js');
+  assert.deepEqual([...RESERVED_PERMISSION_NAMESPACES], ['system.provider.']);
+  for (const p of [...BUILTIN_PERMISSIONS, ...GRANTABLE_PERMISSIONS]) {
+    assert.ok(!RESERVED_PERMISSION_NAMESPACES.some((ns) => p.startsWith(ns)), p);
+  }
+});

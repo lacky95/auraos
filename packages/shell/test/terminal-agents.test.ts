@@ -68,15 +68,21 @@ test('agent events: a revoked grant ends the stream; a client that leaves ends t
   assert.equal(upstreamSignal!.aborted, true);
 });
 
-test('agent hooks: status as is; an app\'s install or removal waits for the owner\'s approval', async () => {
+test('agent hooks: status as is; an app\'s install or removal waits for the owner\'s approval of the files the Terminal names', async () => {
   const forwarded: string[] = [];
+  const changes: unknown[] = [];
   let approved = false;
   const route = createAgentHooksRoute({
     caller: async (r) => (r.headers.get('x-owner') ? null : TX),
-    approve: async (_r, change) => (approved ? null : Response.json({ error: 'needs-approval', op: change.op }, { status: 202 })),
+    approve: async (_r, change) => {
+      changes.push(change);
+      return approved ? null : Response.json({ error: 'needs-approval', op: change.op }, { status: 202 });
+    },
     forward: async (id, method) => {
       forwarded.push(`${method} ${id}`);
-      return id === INST ? Response.json({ claude: method === 'POST' }) : null;
+      if (id !== INST) return null;
+      // The adapter's own status names its files (audit #1): the shell takes them from here.
+      return Response.json({ installed: method === 'POST', paths: { a: '/home/aura/.agent-a/settings.json', b: '/home/aura/.agent-b/conf', s: '/home/aura/.aura/hook.sh' } });
     },
   });
   const at = `/api/terminal/agent-hooks?instance=${INST}`;
@@ -84,14 +90,16 @@ test('agent hooks: status as is; an app\'s install or removal waits for the owne
   const asked = await route(req(at, 'POST'));
   assert.equal(asked.status, 202);
   assert.deepEqual(await asked.json(), { error: 'needs-approval', op: 'install' });
+  assert.deepEqual(changes[0], { what: 'the Terminal\'s session hooks', op: 'install', files: ['~/.agent-a/settings.json', '~/.agent-b/conf', '~/.aura/hook.sh'] });
   assert.equal((await route(req(at, 'DELETE'))).status, 202);
-  assert.deepEqual(forwarded, [`GET ${INST}`], 'nothing changed before the approval');
+  assert.deepEqual(forwarded, [`GET ${INST}`, `GET ${INST}`, `GET ${INST}`], 'nothing changed before the approval (only the status was read)');
   approved = true;
-  assert.deepEqual(await (await route(req(at, 'POST'))).json(), { claude: true });
+  assert.equal((await (await route(req(at, 'POST'))).json()).installed, true);
   approved = false;
   const owner = new Request(`http://shell.test${at}`, { method: 'DELETE', headers: { 'x-owner': '1' } });
   assert.equal((await route(owner)).status, 200, 'the owner (or the System Terminal) needs no approval');
-  assert.deepEqual(forwarded, [`GET ${INST}`, `POST ${INST}`, `DELETE ${INST}`]);
+  assert.deepEqual(forwarded.slice(3), [`GET ${INST}`, `POST ${INST}`, `DELETE ${INST}`]);
   assert.equal(await status(await route(req('/api/terminal/agent-hooks?instance=gone'))), '404 instance-not-running');
+  assert.equal(await status(await route(req('/api/terminal/agent-hooks?instance=gone', 'POST'))), '404 instance-not-running');
   assert.equal(await status(await route(req('/api/terminal/agent-hooks', 'POST'))), '400 instance required');
 });

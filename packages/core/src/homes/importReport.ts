@@ -6,8 +6,9 @@
  * selectively (`aura admin homes import`, appHomeAdmin.ts: it copies, never
  * moves, and leaves the Private Home untouched). It combines:
  *
- *   - a static table of known apps (Board, dev.box, TerminalX);
- *   - a heuristic: the dot-dirs the app's granted tools are known to use.
+ *   - the known apps' home paths (the import markers, data: importMarkers.ts);
+ *   - a heuristic: the dot-dirs the app's granted tools are known to use (the
+ *     markers' `tools`).
  *
  * It only `lstat`s the candidate paths (never opens or reads a file) and
  * never uses `atime` (relatime makes it unreliable). Personal credentials are
@@ -17,26 +18,8 @@
 import { lstat, opendir } from 'node:fs/promises';
 import { join } from 'node:path';
 
-/** Known apps and the home paths they use (phase5-plan.md stream I). */
-export const IMPORT_STATIC_TABLE: Readonly<Record<string, readonly string[]>> = Object.freeze({
-  'io.lakner.improvementboard': ['.claude.json', '.claude', '.codex'],
-  'dev.box': ['.config/code-server', '.local/share/code-server', '.config/gh', '.config/glab-cli', '.gitconfig'],
-  'io.lakner.terminalx': ['.gitconfig', '.config/glab-cli'],
-});
+import { isPersonalHomePath, type HomeImportMarkers } from './importMarkers.js';
 
-/** Tool (capability) name → the home paths it keeps its state in. */
-export const IMPORT_TOOL_PATHS: Readonly<Record<string, readonly string[]>> = Object.freeze({
-  claude: ['.claude.json', '.claude'],
-  codex: ['.codex'],
-  gh: ['.config/gh'],
-  glab: ['.config/glab-cli'],
-  git: ['.gitconfig'],
-  ssh: ['.ssh'],
-  npm: ['.npmrc'],
-});
-
-/** Paths whose contents are a personal login (prefix match on the relative path). */
-const PERSONAL = ['.claude/.credentials.json', '.ssh', '.config/gh/hosts.yml', '.config/glab-cli/config.yml', '.npmrc', '.codex/auth.json'];
 export const PERSONAL_NOTE = 'personal: copying shares your login with the app (D66: prefer a fresh login)';
 
 export interface ImportReportInstallation {
@@ -70,21 +53,17 @@ export interface ImportReport {
 
 const MAX_WALK = 50_000;
 
-/** Whether a home-relative path is (inside) a personal login. */
-export const isPersonalHomePath = (rel: string): boolean => PERSONAL.some((p) => rel === p || rel.startsWith(`${p}/`));
-const isPersonal = isPersonalHomePath;
-
-async function measure(home: string, rel: string): Promise<Omit<ImportCandidate, 'path' | 'source' | 'tool'> | null> {
+async function measure(home: string, rel: string, markers: HomeImportMarkers): Promise<Omit<ImportCandidate, 'path' | 'source' | 'tool'> | null> {
   let st;
   try { st = await lstat(join(home, rel)); } catch { return null; }
   if (st.isSymbolicLink()) return { type: 'link', files: 0, bytes: 0 };
   if (!st.isDirectory()) {
-    return { type: st.isFile() ? 'file' : 'other', files: 1, bytes: st.size, ...(isPersonal(rel) ? { personal: [rel] } : {}) };
+    return { type: st.isFile() ? 'file' : 'other', files: 1, bytes: st.size, ...(isPersonalHomePath(rel, markers) ? { personal: [rel] } : {}) };
   }
   let files = 0;
   let bytes = 0;
   const personal = new Set<string>();
-  if (isPersonal(rel)) personal.add(rel);
+  if (isPersonalHomePath(rel, markers)) personal.add(rel);
   const stack = [rel];
   let truncated = false;
   while (stack.length && !truncated) {
@@ -94,7 +73,7 @@ async function measure(home: string, rel: string): Promise<Omit<ImportCandidate,
     for await (const ent of handle) {
       if (files >= MAX_WALK) { truncated = true; break; }
       const r = `${dir}/${ent.name}`;
-      if (isPersonal(r) && !isPersonal(dir)) personal.add(r);
+      if (isPersonalHomePath(r, markers) && !isPersonalHomePath(dir, markers)) personal.add(r);
       if (ent.isDirectory()) { stack.push(r); continue; }
       let s;
       try { s = await lstat(join(home, r)); } catch { continue; }
@@ -111,18 +90,19 @@ async function measure(home: string, rel: string): Promise<Omit<ImportCandidate,
 
 /** The candidates in `home` for each installation. Never writes, never reads a file's contents. */
 export async function buildImportReport(
-  home: string, installations: readonly ImportReportInstallation[], opts: { now?: () => number } = {},
+  home: string, installations: readonly ImportReportInstallation[], opts: { markers: HomeImportMarkers; now?: () => number },
 ): Promise<ImportReport> {
+  const markers = opts.markers;
   const out: ImportReport = { version: 1, generatedAt: new Date((opts.now ?? Date.now)()).toISOString(), home, installations: [] };
   for (const inst of [...installations].sort((a, b) => a.appId.localeCompare(b.appId) || a.installationId.localeCompare(b.installationId))) {
     const wanted = new Map<string, { source: 'static' | 'tool'; tool?: string }>();
-    for (const p of IMPORT_STATIC_TABLE[inst.appId] ?? []) wanted.set(p, { source: 'static' });
+    for (const p of markers.apps[inst.appId] ?? []) wanted.set(p, { source: 'static' });
     for (const tool of [...(inst.tools ?? [])].sort()) {
-      for (const p of IMPORT_TOOL_PATHS[tool] ?? []) if (!wanted.has(p)) wanted.set(p, { source: 'tool', tool });
+      for (const p of markers.tools[tool] ?? []) if (!wanted.has(p)) wanted.set(p, { source: 'tool', tool });
     }
     const candidates: ImportCandidate[] = [];
     for (const [path, why] of [...wanted].sort(([a], [b]) => a.localeCompare(b))) {
-      const m = await measure(home, path);
+      const m = await measure(home, path, markers);
       if (!m) continue;
       candidates.push({
         path, source: why.source, ...(why.tool ? { tool: why.tool } : {}), ...m,

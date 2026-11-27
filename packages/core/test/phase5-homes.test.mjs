@@ -23,6 +23,7 @@ import {
   importIntoAppHome, resetAppHome, deleteInstallationHomes, normalizeHomePath, AppHomeAdminError,
 } from '../dist/homes/appHomeAdmin.js';
 import { seedHomeAs } from '../dist/app-manager/homeSeed.js';
+import { loadHomeImportMarkers } from '../dist/homes/importMarkers.js';
 import { appOwnershipSpecs, applyAppOwnership } from '../dist/identity/appOwnership.js';
 import { buildOwnershipReport } from '../dist/identity/ownershipReport.js';
 import {
@@ -35,6 +36,8 @@ const PROOT = ProotRunner.prototype.capabilities.call({});
 /** What stream J declares once in-environment sessions exist. */
 const SESSIONS = { ...CONTAINER, sessionExec: true, privateHomeSession: true };
 const APP = { uid: 200001, gid: 200001 };
+/** The shipped import markers (os/home-import/markers.json, data: audit #11). */
+const MARKERS = loadHomeImportMarkers({ AURA_HOME_IMPORT_MARKERS: new URL('../../../os/home-import/markers.json', import.meta.url).pathname });
 const OWNER = { userId: 'default', role: 'owner' };
 const MEMBER = { userId: 'u-bob', role: 'member' };
 const USERS = { default: { uid: 1000, gid: 1000 }, 'u-bob': { uid: 100000, gid: 100000 } };
@@ -235,8 +238,8 @@ test('import: a dry run measures, the apply copies (app-owned, modes kept), neve
   const home = await resolver(d).resolve(req({}));
   const src = join(d, 'aura/home/default');
   const paths = ['.claude.json', '.claude', '.ssh', '.missing', '../etc'];
-  assert.throws(() => importIntoAppHome({ source: src, target: home.hostPath, paths, owner: APP, apply: false }), AppHomeAdminError);
-  const dry = importIntoAppHome({ source: src, target: home.hostPath, paths: paths.slice(0, 4), owner: APP, apply: false });
+  assert.throws(() => importIntoAppHome({ source: src, target: home.hostPath, paths, owner: APP, markers: MARKERS, apply: false }), AppHomeAdminError);
+  const dry = importIntoAppHome({ source: src, target: home.hostPath, paths: paths.slice(0, 4), owner: APP, markers: MARKERS, apply: false });
   assert.deepEqual(dry.items.map((i) => [i.path, i.action]), [['.claude', 'copy'], ['.claude.json', 'copy'], ['.missing', 'missing'], ['.ssh', 'personal']]);
   assert.equal(dry.copiedFiles, 3, '.claude.json, settings.json, projects/a.jsonl');
   assert.deepEqual(readdirSync(home.hostPath), [], 'a dry run copies nothing');
@@ -244,7 +247,7 @@ test('import: a dry run measures, the apply copies (app-owned, modes kept), neve
   assert.ok(claude.skipped.some((s) => s.includes('.credentials.json') && s.includes('personal')));
   assert.ok(claude.skipped.some((s) => s.includes('link') && s.includes('symbolic link')));
 
-  const done = importIntoAppHome({ source: src, target: home.hostPath, paths: paths.slice(0, 4), owner: APP, apply: true });
+  const done = importIntoAppHome({ source: src, target: home.hostPath, paths: paths.slice(0, 4), owner: APP, markers: MARKERS, apply: true });
   assert.equal(done.copiedFiles, 3);
   assert.equal(readFileSync(join(home.hostPath, '.claude.json'), 'utf-8'), '{"projects":{}}');
   assert.equal(owner(join(home.hostPath, '.claude.json')), '200001:200001');
@@ -257,12 +260,12 @@ test('import: a dry run measures, the apply copies (app-owned, modes kept), neve
 
   // Never overwritten; a second run copies only what is new.
   writeFileSync(join(home.hostPath, '.claude.json'), 'mine');
-  const again = importIntoAppHome({ source: src, target: home.hostPath, paths: ['.claude.json', '.claude'], owner: APP, apply: true });
+  const again = importIntoAppHome({ source: src, target: home.hostPath, paths: ['.claude.json', '.claude'], owner: APP, markers: MARKERS, apply: true });
   assert.equal(readFileSync(join(home.hostPath, '.claude.json'), 'utf-8'), 'mine');
   assert.deepEqual(again.items.map((i) => [i.path, i.action]), [['.claude', 'exists'], ['.claude.json', 'exists']]);
   assert.equal(again.copiedFiles, 0);
   // Asked for, a personal login is copied.
-  const personal = importIntoAppHome({ source: src, target: home.hostPath, paths: ['.claude/.credentials.json'], owner: APP, apply: true, includePersonal: true });
+  const personal = importIntoAppHome({ source: src, target: home.hostPath, paths: ['.claude/.credentials.json'], owner: APP, markers: MARKERS, apply: true, includePersonal: true });
   assert.equal(personal.copiedFiles, 1);
 });
 
@@ -273,12 +276,12 @@ test('import: a link planted in the App Home (by the app) or the source is never
   const victim = join(d, 'victim');
   mkdirSync(victim);
   symlinkSync(victim, join(home.hostPath, '.claude'));
-  const r = importIntoAppHome({ source: src, target: home.hostPath, paths: ['.claude'], owner: APP, apply: true });
+  const r = importIntoAppHome({ source: src, target: home.hostPath, paths: ['.claude'], owner: APP, markers: MARKERS, apply: true });
   assert.equal(r.items[0].action, 'unsafe');
   assert.deepEqual(readdirSync(victim), []);
   mkdirSync(join(src, 'sub'));
   symlinkSync('/etc', join(src, 'sub/etc'));
-  const r2 = importIntoAppHome({ source: src, target: home.hostPath, paths: ['sub/etc/hostname'], owner: APP, apply: false });
+  const r2 = importIntoAppHome({ source: src, target: home.hostPath, paths: ['sub/etc/hostname'], owner: APP, markers: MARKERS, apply: false });
   assert.equal(r2.items[0].action, 'unsafe');
   assert.equal(normalizeHomePath('a//b/'), 'a/b');
 });

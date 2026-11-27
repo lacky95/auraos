@@ -1,6 +1,6 @@
 {
   "about": "Known architecture debt (tools/dep-check.mjs, D97). The check fails only on violations not listed here; the summary prints the count, which must shrink. Remove an entry when its violation is gone (the check reports it). Never add an entry to make new coupling pass without a review; see modular-kernel-review.md.",
-  "generatedAt": "6da5517",
+  "generatedAt": "31c606b",
   "rules": {
     "core-cycle": "No runtime import cycle between files of @aura/core (type-only imports are exempt).",
     "core-module-cycle": "No entangled modules in @aura/core: a runtime import A/f -> B/g where g (transitively) imports module A again. Shared contracts belong in leaf files that import no other module.",
@@ -15,19 +15,9 @@
     "agents-docs": "Every AGENTS.md has a sibling CLAUDE.md that is exactly `@AGENTS.md`; the chain of AGENTS.md files from the root to any directory stays under 28 KiB (Codex stops adding files at project_doc_max_bytes, 32 KiB by default); the sector map in packages/core/AGENTS.md names every core module exactly once."
   },
   "entries": {
-    "agent-agnostic: core/src/app-manager/AppManager.ts -> claude": "Audit #2: the legacy ~/CLAUDE.md cleanup log line of the home seeder. Owner: Phase 5b (generic home-seeding contract; the seeder copies only).",
-    "agent-agnostic: core/src/app-manager/homeSeed.ts -> claude": "Audit #2: the core home seeder knows Claude's legacy CLAUDE.md migration and product paths. Owner: Phase 5b (copy-only seeder; product steps move to seed-side adapters).",
-    "agent-agnostic: core/src/app-manager/homeSeed.ts -> codex": "Audit #2: the core home seeder knows Claude's legacy CLAUDE.md migration and product paths. Owner: Phase 5b (copy-only seeder; product steps move to seed-side adapters).",
     "agent-agnostic: core/src/capabilities/tool-allowlist.ts -> claude": "Audit #5 (file moved to capabilities/ in 5-main): the claude-code -> claude alias in core code. Owner: Phase 6 (an aliases field on the capability registry entry; D94/D96).",
     "agent-agnostic: core/src/capabilities/tool-allowlist.ts -> claude-code": "Audit #5 (file moved to capabilities/ in 5-main): the claude-code -> claude alias in core code. Owner: Phase 6 (an aliases field on the capability registry entry; D94/D96).",
-    "agent-agnostic: core/src/homes/importReport.ts -> claude": "Audit #10/#11 (owner decision 11): product home-import paths and personal-credential markers hard-coded in core homes. Owner: Phase 5b (stream H follow-up: the marker list becomes data).",
-    "agent-agnostic: core/src/homes/importReport.ts -> codex": "Audit #10/#11 (owner decision 11): product home-import paths and personal-credential markers hard-coded in core homes. Owner: Phase 5b (stream H follow-up: the marker list becomes data).",
     "agent-agnostic: core/src/identity/privilegeReview.ts -> claude": "Audit #11 and repeat audit N1: the privilege-review table (APP_MIGRATION) is install-specific data in kernel code: this installation's customer app ids (io.lakner.*) with notes naming the claude tool; a different install gets them too. Owner: Phase 5b (owner decision 11: data, not code); the one-shot table itself is deleted once the 5-main migration has run (5-post).",
-    "agent-agnostic: shell/src/lib/access/routeManifest.ts -> claude": "Audit #1 area: rule rationale text naming the Claude Code/Codex MCP entries and agent hooks. Owner: Phase 5b (reword generically with the approval contract).",
-    "agent-agnostic: shell/src/lib/access/routeManifest.ts -> codex": "Audit #1 area: rule rationale text naming the Claude Code/Codex MCP entries and agent hooks. Owner: Phase 5b (reword generically with the approval contract).",
-    "agent-agnostic: shell/src/lib/approvals/display.ts -> claude": "Audit #1: the terminal.agent-hooks approval text names ~/.claude/settings.json and ~/.codex/config.toml. Owner: Phase 5b (generic approval kind; the adapter supplies the operation context).",
-    "agent-agnostic: shell/src/lib/approvals/display.ts -> codex": "Audit #1: the terminal.agent-hooks approval text names ~/.claude/settings.json and ~/.codex/config.toml. Owner: Phase 5b (generic approval kind; the adapter supplies the operation context).",
-    "agent-agnostic: shell/src/lib/approvals/display.ts -> config.toml": "Audit #1: the terminal.agent-hooks approval text names ~/.claude/settings.json and ~/.codex/config.toml. Owner: Phase 5b (generic approval kind; the adapter supplies the operation context).",
     "agent-agnostic: shell/src/lib/onboarding/steps.ts -> claude": "Audit #4: onboarding steps name the Claude/Codex caps. Owner: Phase 6 (generic agent cap tag and login probes declared by the cap entry).",
     "agent-agnostic: shell/src/lib/onboarding/steps.ts -> codex": "Audit #4: onboarding steps name the Claude/Codex caps. Owner: Phase 6 (generic agent cap tag and login probes declared by the cap entry).",
     "agent-agnostic: shell/src/lib/onboarding/welcome.ts -> claude": "Audit #4: the welcome checklist probes Claude/Codex binaries and login files. Owner: Phase 6 (probe list declared by the capability entry).",

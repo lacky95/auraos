@@ -54,6 +54,7 @@ export * from './security/options.js';
 export * from './security/SecurityPolicyStore.js';
 export * from './capabilities/index.js';
 export * from './system/systemIdentity.js';
+export * from './system/systemApps.js';
 export * from './users/profileRegistry.js';
 export * from './users/userData.js';
 export * from './patches/series.js';
@@ -88,4 +89,5 @@ export type {
 } from './identity/execution.js';
 export { renderIdentityFiles, identityFilesSubpath, isNonRootIdentity } from './app-manager/spawn/identityArgs.js';
 export * from './homes/importReport.js';
+export * from './homes/importMarkers.js';
 export * from './homes/plan.js';

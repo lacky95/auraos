@@ -8,7 +8,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { LEGACY_HOME_CLAUDE_MD, seedHome, seedSections } from '../dist/app-manager/homeSeed.js';
+import { seedHome, seedSections } from '../dist/app-manager/homeSeed.js';
+
+/** A file an older AuraOS seeded at ~/CLAUDE.md: the copy-only seeder never touches it (audit #2). */
+const OLD_HOME_POINTER = '# AuraOS\n\n@AGENTS.md\n';
 
 const REAL_SEED = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'os', 'home-seed');
 const put = (p, text) => { mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, text); };
@@ -34,16 +37,16 @@ test('a fresh home gets every seed file, and nothing is appended twice', () => {
   assert.equal(readFileSync(join(home, 'AGENTS.md'), 'utf-8'), readFileSync(join(seed, 'AGENTS.md'), 'utf-8'));
 });
 
-test('an existing home: the section is appended once after the user\'s text; ~/.claude/CLAUDE.md is created; the legacy ~/CLAUDE.md goes', () => {
+test('an existing home: the section is appended once after the user\'s text; missing files are copied; nothing else is touched', () => {
   const { seed, home } = world();
   const mine = '# AuraOS — agent primer\n\nOld text.\n\n## Your notes\n\n- my convention\n';
   put(join(home, 'AGENTS.md'), mine);
-  put(join(home, 'CLAUDE.md'), LEGACY_HOME_CLAUDE_MD);
+  put(join(home, 'CLAUDE.md'), OLD_HOME_POINTER);
   const r = seedHome(seed, home);
   assert.deepEqual(r.copied, ['.claude/CLAUDE.md']);
   assert.deepEqual(r.appended, ['working-on-aura-apps']);
-  assert.equal(r.removedLegacyClaudeMd, true);
-  assert.equal(existsSync(join(home, 'CLAUDE.md')), false);
+  assert.deepEqual(Object.keys(r).sort(), ['appended', 'copied'], 'the seeder copies only (audit #2)');
+  assert.equal(readFileSync(join(home, 'CLAUDE.md'), 'utf-8'), OLD_HOME_POINTER, 'a file the seed does not ship is never removed');
   const after = readFileSync(join(home, 'AGENTS.md'), 'utf-8');
   assert.ok(after.startsWith(mine), 'the user\'s text is untouched');
   assert.equal(after, `${mine}\n${SECTION}`);
@@ -51,26 +54,18 @@ test('an existing home: the section is appended once after the user\'s text; ~/.
   // Idempotent, and the user's later edits inside the section stay.
   writeFileSync(join(home, 'AGENTS.md'), after.replace('Run `aura dev status <app>`.', 'My own wording.'));
   const again = seedHome(seed, home);
-  assert.deepEqual([again.copied, again.appended, again.removedLegacyClaudeMd], [[], [], false]);
+  assert.deepEqual([again.copied, again.appended], [[], []]);
   assert.match(readFileSync(join(home, 'AGENTS.md'), 'utf-8'), /My own wording\./);
 });
 
-test('user edits are never overwritten: an edited ~/CLAUDE.md stays, an own ~/.claude/CLAUDE.md is not replaced', () => {
+test('user edits are never overwritten: an own ~/.claude/CLAUDE.md is not replaced', () => {
   const { seed, home } = world();
   put(join(home, 'AGENTS.md'), 'mine, no trailing newline');
-  put(join(home, 'CLAUDE.md'), `${LEGACY_HOME_CLAUDE_MD}\n- also my rule\n`);
   put(join(home, '.claude', 'CLAUDE.md'), '# my global rules\n');
   const r = seedHome(seed, home);
   assert.deepEqual(r.copied, []);
   assert.equal(readFileSync(join(home, '.claude', 'CLAUDE.md'), 'utf-8'), '# my global rules\n');
-  assert.equal(r.removedLegacyClaudeMd, false);
-  assert.ok(existsSync(join(home, 'CLAUDE.md')), 'edited: kept');
   assert.equal(readFileSync(join(home, 'AGENTS.md'), 'utf-8'), `mine, no trailing newline\n\n${SECTION}`);
-
-  // An unedited legacy pointer stays too while ~/.claude/CLAUDE.md does not load AGENTS.md (no second copy then).
-  writeFileSync(join(home, 'CLAUDE.md'), LEGACY_HOME_CLAUDE_MD);
-  assert.equal(seedHome(seed, home).removedLegacyClaudeMd, false);
-  assert.ok(existsSync(join(home, 'CLAUDE.md')));
 });
 
 test('the shipped seed: AGENTS.md has the marked sections, ~/.claude/CLAUDE.md imports it, no ~/CLAUDE.md', () => {

@@ -937,7 +937,6 @@ export class AppManager {
     const r = seedHomeAs(seedDir, target, (msg) => console.warn(`[AppManager] ${msg}`));
     if (r.copied.length) console.log(`[AppManager] seeded Private Home ${target} (${r.copied.join(', ')})`);
     if (r.appended.length) console.log(`[AppManager] ${target}/AGENTS.md: added section(s) ${r.appended.join(', ')}`);
-    if (r.removedLegacyClaudeMd) console.log(`[AppManager] removed ${target}/CLAUDE.md: ~/.claude/CLAUDE.md loads AGENTS.md in every directory`);
   }
 
   /**
