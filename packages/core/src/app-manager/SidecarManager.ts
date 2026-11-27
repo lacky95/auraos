@@ -18,8 +18,9 @@ import { authFailureReason, isAuthFailure, parseImageRef } from '../nexus/Regist
 import type { PullCredential } from '../nexus/types.js';
 import {
   SpecError, resolveSidecarSpec, specHash,
-  type ResolvedSidecarSpec, type SidecarSpawnRequest,
+  type ResolvedSidecarSpec, type SidecarSetupValues, type SidecarSpawnRequest,
 } from './sidecar-spec.js';
+import { isEnvValueRef } from '../types/setupManifest.js';
 
 /**
  * OS-managed sidecars: the official way for an app to run a foreign image
@@ -168,6 +169,13 @@ interface SidecarManagerOpts {
    * registry). Asked before anything is created for an isolated sidecar.
    */
   requireNetwork?(level: 'instance'): void;
+  /**
+   * D108: the setup values of the instance's app (its effective
+   * configuration), or null when it has none (not `ready`). Asked only for a
+   * template whose env references a setup value; absent or null, such a
+   * template is refused (fail closed).
+   */
+  setupValues?(instanceId: string): Promise<SidecarSetupValues | null>;
 }
 
 /**
@@ -315,6 +323,9 @@ export class SidecarManager {
       const name = `aura-${inst.appId}-${v.name}`;
       if (await this.wl().storageExists(name)) legacy.add(name);
     }
+    // D108: setup values only for a template that references one (every other spawn is unchanged).
+    const refs = Object.values((manifest.services ?? []).find((s) => s.name === req.template)?.env ?? {}).some(isEnvValueRef);
+    const setupValues = refs ? (await this.opts.setupValues?.(instanceId)) ?? null : null;
     const spec = resolveSidecarSpec(req, {
       appId: inst.appId,
       instanceId,
@@ -323,6 +334,7 @@ export class SidecarManager {
       appDataSubpath,
       appDataVolume: rt.appDataVolume,
       legacyVolumeExists: (n) => legacy.has(n),
+      ...(setupValues ? { setupEnv: setupValues } : {}),
     });
     // D107: mandatory isolation, refused before anything is made when the runtime can't enforce it.
     if (spec.network === 'instance') this.opts.requireNetwork?.('instance');
@@ -406,7 +418,8 @@ export class SidecarManager {
       const undoTools = spec.ownTools ? grantSpawnTools() : () => undefined;
       const tools = spec.ownTools ? this.provisionTools(instanceId, spec.name, inst.appId, spec.template) : null;
 
-      const env = await this.environment(instanceId, inst.appId, spec);
+      let env: Record<string, string>;
+      try { env = await this.environment(instanceId, inst.appId, spec, setupValues); } catch (err) { undoTools(); throw err; }
       if (spec.seed) await this.seed(instanceId, spec, appDataSubpath, env);
 
       // The sidecar acts for the instance's owner (5.8).
@@ -507,11 +520,16 @@ export class SidecarManager {
   }
 
   /**
-   * Env from envInherit, then the spec's own. A Context key comes only from
-   * the parent's granted keys (stream C: a sidecar never sees more than its
-   * app); any other name from the app container's env.
+   * Env from envInherit, then the spec's own, then the setup secrets. A
+   * Context key comes only from the parent's granted keys (stream C: a
+   * sidecar never sees more than its app); any other name from the app
+   * container's env. A setup secret (D108 `secretEnv`) is read here, at
+   * create, through the app's own handle; one that can't be read refuses the
+   * sidecar (the error names the variable and field, never a value).
    */
-  private async environment(instanceId: string, appId: string, spec: ResolvedSidecarSpec): Promise<Record<string, string>> {
+  private async environment(
+    instanceId: string, appId: string, spec: ResolvedSidecarSpec, setupValues: SidecarSetupValues | null = null,
+  ): Promise<Record<string, string>> {
     const env: Record<string, string> = {};
     if (spec.envInherit.length) {
       const ctx = await this.opts.context(instanceId).catch(() => ({ env: {} as Record<string, string>, known: null }));
@@ -524,8 +542,15 @@ export class SidecarManager {
         if (parentEnv[name] !== undefined) env[name] = parentEnv[name];
       }
     }
-    void appId;
-    return { ...env, ...spec.env };
+    const secrets: Record<string, string> = {};
+    for (const [k, ref] of Object.entries(spec.secretEnv ?? {})) {
+      const value = setupValues ? await setupValues.readSecret(ref.handle) : null;
+      if (value === null) {
+        throw new SpecError(409, `template '${spec.template}' env ${k}: the secret of setup field ${ref.field} can't be read for ${appId} (unknown or revoked handle, or no credential.read grant)`);
+      }
+      secrets[k] = value;
+    }
+    return { ...env, ...spec.env, ...secrets };
   }
 
   /**

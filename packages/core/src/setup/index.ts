@@ -30,6 +30,10 @@ export {
 // ── P3 engine, gate, hooks ──────────────────────────────────────────────────
 
 // ── P4 value delivery ───────────────────────────────────────────────────────
+export {
+  setupConfigView, setupEnvLiteral, sidecarSetupValues, secretReadableWithoutGrant, vaultSecretReader, generateSetupSecrets,
+  SetupValueError, type SecretReader, type VaultSecretReaderOptions,
+} from './values.js';
 
 // ── P8 configuration and change management ─────────────────────────────────
 

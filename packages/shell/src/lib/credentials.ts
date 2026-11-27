@@ -189,7 +189,9 @@ export async function readCredential(request: Request, handle: string | undefine
   // Another user's handle, another app's handle, a revoked one: all unknown.
   if (!held || held.consumer !== p.appId) return json({ error: 'not-found' }, 404);
 
-  if (!(await holdsRead(deps, p.appId, userId, held.name))) {
+  // D108: the installation's own generated setup secret needs no grant (nobody typed it; core setup/values.ts).
+  const own = core.secretReadableWithoutGrant(held, (await deps.appBinding(p.appId)).installationId);
+  if (!own && !(await holdsRead(deps, p.appId, userId, held.name))) {
     const binding = await deps.appBinding(p.appId);
     if (!binding.installationId) {
       return json({ error: 'no-installation', message: `${p.appId} has no installation record: a read grant is given to one installation of it.` }, 409);

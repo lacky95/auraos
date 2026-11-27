@@ -1,7 +1,8 @@
 import type { APIRoute } from 'astro';
+import { liveSetupSelfDeps, readSetupSelf } from '../../../lib/setupSelf.ts';
 
 /**
- * GET (instance token): the calling app's own effective setup values (SetupConfigView); secrets as handles.
- * D108 P0 stub: the contract and the access row exist; P4 implements it (setup/contracts.ts).
+ * GET (instance token): the calling app's own effective setup values
+ * (SetupConfigView, D108); secrets as D56 handles. lib/setupSelf.ts.
  */
-export const GET: APIRoute = () => new Response(JSON.stringify({ error: 'not-implemented', message: 'app setup is not implemented yet (P4)' }), { status: 501, headers: { 'Content-Type': 'application/json' } });
+export const GET: APIRoute = ({ request }) => readSetupSelf(request, liveSetupSelfDeps());

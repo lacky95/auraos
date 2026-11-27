@@ -11,6 +11,7 @@ The sector rules are in `packages/core/AGENTS.md`. Design: D108 (`app-profiles-s
 - **`digest.ts`** (P1): `configDigestOf` (secrets by field name only) and `grantDigestOf` (`GrantBearing`), `sha256:<hex>` over canonical JSON.
 - **`store.ts`** (P2): `SetupConfigStore`, the sealed `app:config:*` records (`read` → `{value, stored, tampered}`, `compareAndSet`, `update`, `forgetInstallation` revoking handles via `vaultHandleRevoker`). Wiring: `onTampered` → audit `tamperAuditInput`; lifecycle `forgetSetup`.
 - **`state.ts`** (P2): `SetupStateMachine` over `AppHostStore.setSetup`: `state`, `begin`, `transition`, `progress`, `markReady` (the only way into `ready`), `desired` (tamper → `resetTampered`, once). Errors carry `code`.
+- **`values.ts`** (P4): value delivery, by reference only. `setupConfigView` (the app's `/api/setup/self` view: values, secrets as handles); `sidecarSetupValues` (the `SpecEnvResolver` SidecarManager gets through `opts.setupValues`: `fromSetup` → literal, `map` must contain the value, arrays refused, inactive/unset fields leave the variable unset; `fromSecret` → a `{field, handle}` reference in the spec, the value read at create by `vaultSecretReader`); `secretReadableWithoutGrant` (a generated secret of the same installation needs no `credential.read` grant; shared with the shell's credentials.get); `generateSetupSecrets` over `CredentialVault.generate`.
 - **`index.ts`**: the module's public surface, re-exported by the core barrel. Named exports only; one region per work package.
 - Related leaves outside this directory: `config/schema.ts` (the one field model, also behind runtime settings) and `types/setupManifest.ts` (the manifest blocks `setup`, `profiles`, `homeEnvironments`, env references).
 
@@ -24,5 +25,5 @@ The sector rules are in `packages/core/AGENTS.md`. Design: D108 (`app-profiles-s
 - **Simple apps unchanged:** no `setup` and no `profiles` → no record, no state, `ready` by derivation; launch, spawn argv and `aura dev validate` identical.
 - **Never a fallback:** an unmet required requirement, a missing grant, a policy `off` or an invalid field leaves NO effective configuration (D105 body); never Private→App Home, instance→shared network, unenforced limits or root.
 - **Requests never grant:** profiles only add requests; authorization is the install approval, `app.setup.apply` (bound to `grantDigest` + `configDigest`) and existing grants.
-- **Secrets only as vault handles:** never in a record, digest, log, error body or CLI output.
+- **Secrets only as vault handles:** never in a record, digest, log, error body or CLI output. A sidecar spec and its hash carry a secret by reference (`secretEnv`), the value only reaches the container env.
 - `ready` is written only by the engine, by CAS with the validated `configDigest`.
