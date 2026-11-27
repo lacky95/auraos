@@ -56,7 +56,7 @@ export async function postOwnershipApply(ctx: Ctx): Promise<Response> {
   }
   const report = await ownershipReport();
   if (report.digest !== digest) {
-    return json({ error: 'digest-mismatch', message: 'The ownership report changed since you reviewed it: review the new one (aura admin homes ownership --dry-run).', digest: report.digest }, 409);
+    return json({ error: 'digest-mismatch', message: 'A path, owner, mode, filesystem identity, symlink or containment in the ownership report changed since you reviewed it (content and size changes do not count): review the new one (aura admin homes ownership --dry-run).', digest: report.digest }, 409);
   }
   const { rows, notApplied } = core.selectApplyRows(report, { holds });
   if (!rows.length) return json({ ok: true, changed: false, digest, rows: [], notApplied });

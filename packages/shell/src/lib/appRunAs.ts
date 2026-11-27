@@ -216,7 +216,7 @@ export async function postRunAs(ctx: Ctx, deps: RunAsDeps = liveRunAsDeps()): Pr
     return json({ ok: true, changed: false, dryRun: true, appId, installationId: inst.installationId, from: before, runAs, running, plan });
   }
   if (digest !== plan.digest) {
-    return json({ error: 'digest-mismatch', message: `${appId}'s data changed since your dry run: review the new one (aura admin apps run-as ${appId} ${runAs}).`, digest: plan.digest, plan }, 409);
+    return json({ error: 'digest-mismatch', message: `a path, owner, mode, filesystem identity, symlink or containment of ${appId}'s data changed since your dry run: review the new one (aura admin apps run-as ${appId} ${runAs}).`, digest: plan.digest, plan }, 409);
   }
   const changes = plan.rows.reduce((n, r) => n + r.toChange, 0);
   const actor = await deps.ownerAction(ctx, {

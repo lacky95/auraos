@@ -24,13 +24,12 @@
  * an interrupted one blocks the app's start until it is recovered
  * (`runAsMigrationBlock`): the journal restored exactly.
  */
-import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
 import type { AppRunAsMigration } from '../app-hosts/contracts.js';
 import { appOwnershipSpecs, type AppOwnershipInput } from './appOwnership.js';
 import type { ApplyRow, JournalRestore } from './ownershipApply.js';
-import { buildOwnershipReport, type OwnershipRow } from './ownershipReport.js';
+import { buildOwnershipReport, ownershipDigest, type OwnershipRow } from './ownershipReport.js';
 import type { LinuxIdentity } from './types.js';
 
 export type RunAsTarget = 'root' | 'app';
@@ -118,7 +117,8 @@ export async function runAsOwnershipPlan(
     version: 1 as const, appId: input.appId, installationId: input.installationId, runAs: input.runAs,
     from: ids(input.from), to: ids(input.to), rows, refused: report.refused, findings: report.findings, restore,
   };
-  const digest = createHash('sha256').update(JSON.stringify(body)).digest('hex');
+  // D5: bound to the rows' security-relevant facts, not their counts (ownershipReport.ts ownershipDigest).
+  const digest = ownershipDigest(body);
   return { plan: { ...body, digest }, apply };
 }
 

@@ -4,7 +4,7 @@
 import { test, after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -212,6 +212,7 @@ test('the ownership report: deterministic, read-only, refuses blanket and symlin
   assert.deepEqual(a.refused.map((x) => x.path).sort(), ['/', join(root, 'link'), root].sort());
   assert.ok(a.refused.find((x) => x.path === root).reason.includes('no blanket chown'));
   const home = a.planned.find((x) => x.kind === 'private-home');
+  const statMode = Number.parseInt(home.topMode, 8);
   assert.equal(home.files, 1);
   assert.equal(home.bytes, 5);
   assert.equal(home.entries, 3);
@@ -224,8 +225,26 @@ test('the ownership report: deterministic, read-only, refuses blanket and symlin
   assert.equal(app.exists, false);
   assert.equal(app.to, null);
   assert.equal(readFileSync(join(root, 'home', 'default', '.claude', 'x.json'), 'utf8'), before);
+  // D5 (owner 2026-11-27): ordinary content and byte counts never change the digest; a security-relevant fact does.
   writeFileSync(join(root, 'home', 'default', 'new'), 'n');
-  assert.notEqual((await buildOwnershipReport(specs, opts)).digest, a.digest, 'a changed tree changes the digest');
+  writeFileSync(join(root, 'home', 'default', '.claude', 'x.json'), 'a longer content');
+  const grown = await buildOwnershipReport(specs, opts);
+  assert.equal(grown.digest, a.digest, 'new files and other sizes keep the digest');
+  assert.notEqual(grown.planned.find((x) => x.kind === 'private-home').files, home.files, 'the counts still show the change');
+  assert.match(home.fsId, /^\d+:\d+$/);
+  chmodSync(join(root, 'home', 'default'), statMode === 0o711 ? 0o700 : 0o711);
+  const chmodded = await buildOwnershipReport(specs, opts);
+  assert.notEqual(chmodded.digest, a.digest, 'a changed mode of a row changes the digest');
+  chmodSync(join(root, 'home', 'default'), statMode);
+  assert.equal((await buildOwnershipReport(specs, opts)).digest, a.digest, 'back to the reviewed facts');
+  renameSync(join(root, 'home', 'default'), join(root, 'home', 'moved'));
+  mkdirSync(join(root, 'home', 'default'), { mode: statMode });
+  assert.notEqual((await buildOwnershipReport(specs, opts)).digest, a.digest, 'another directory at the path (filesystem identity) changes it');
+  rmSync(join(root, 'home', 'default'), { recursive: true });
+  symlinkSync(join(root, 'home', 'moved'), join(root, 'home', 'default'));
+  const linked = await buildOwnershipReport(specs, opts);
+  assert.notEqual(linked.digest, a.digest, 'a symlink at the path changes it (refused, never followed)');
+  assert.ok(linked.refused.some((x) => x.path === join(root, 'home', 'default')));
 });
 
 test('the ownership report flags nested rows and truncated walks', async () => {
