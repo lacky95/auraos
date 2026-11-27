@@ -235,7 +235,9 @@ test('patch start + save: patches/NNNN-*.patch and aura-patches.yaml in one patc
   assert.deepEqual(git(repo, 'show', '--name-only', '--format=', 'HEAD').split('\n').sort(),
     ['aura-patches.yaml', 'patches/0001-Status-shows-busy.patch']);
   const yaml = readFileSync(join(repo, 'aura-patches.yaml'), 'utf-8');
-  assert.match(yaml, new RegExp(`app: ${APP.replace(/\./g, '\\.')}`));
+  assert.match(yaml, /^v: 2$/m, 'series v2 (Phase 7a)');
+  assert.match(yaml, new RegExp(`appId: ${APP.replace(/\./g, '\\.')}`));
+  assert.match(yaml, /sha256: [0-9a-f]{64}\n\s+enabled: true/);
   assert.match(yaml, new RegExp(`commit: ${git(w.upstream, 'rev-parse', 'HEAD')}`));
   // A second start binds the same workspace; a fresh one replays the saved series.
   const again = await quiet(() => startWorkspace(APP));
@@ -264,6 +266,9 @@ test('activate: builds a fresh tree, calls the install route, 202 → owner appr
   assert.equal(posts.length, 2);
   assert.equal(posts[0]!.approval, undefined);
   assert.equal(posts[1]!.approval, APPROVAL, 'the retry names the approval');
+  // Phase 7a: the system binds the revision (it reads the series there), and it recorded the save.
+  assert.equal(posts[1]!.body['rev'], saved.commit);
+  assert.ok(seen.some((r) => r.url.startsWith(`/api/instances/`) && r.url.endsWith('/app-source') && r.body?.['saved'] === saved.commit), 'the save was reported');
   // The installed workspace is a fresh one holding base + series, not the working one.
   const n = posts[1]!.body['workspace'] as number;
   assert.equal(n, 2);
@@ -415,7 +420,7 @@ test('Track P v1: patch start / activate / update refuse a built-in app with the
     activeInstallationId: '00000000-1111-4222-8333-444444444444', mode: 'closed', defaultMode: 'closed', modeFrom: 'system',
     upstream: { repository: 'https://example.invalid/auraos.git', commit: 'a'.repeat(40) },
     source: { path: '/mnt/aura/com.aura.terminal', writable: false, mounted: true }, workspace: null, workspaces: [],
-    next: 'Read the source at /mnt/aura/com.aura.terminal (read-only). Built-in apps are patched by system patches (Phase 7) or in Developer Mode.',
+    next: 'Read the source at /mnt/aura/com.aura.terminal (read-only). Built-in apps are changed with system patches (`aura system patch start`, Normal mode) or in Developer Mode.',
   };
   const seen = await fakeShell((r) => (r.url.startsWith(`/api/instances/${INST}/app-source`) ? [200, view] : undefined));
   const said = async (fn: () => Promise<unknown>) => {
@@ -429,7 +434,7 @@ test('Track P v1: patch start / activate / update refuse a built-in app with the
   for (const run of [() => startWorkspace('com.aura.terminal'), () => activateRevision('com.aura.terminal'), () => updateSeries('com.aura.terminal')]) {
     const out = await said(run);
     assert.equal(out.ok, false);
-    assert.match(out.text, /com\.aura\.terminal is a built-in app\. Built-in apps are patched by system patches \(Phase 7\) or in Developer Mode\./);
+    assert.match(out.text, /com\.aura\.terminal is a built-in app\. Built-in apps are changed with system patches \(`aura system patch start`, Normal mode\) or in Developer Mode\./);
   }
   assert.deepEqual(seen.filter((r) => !r.url.includes('/app-source')), [], 'no workspace was bound, nothing activated');
 
@@ -439,7 +444,7 @@ test('Track P v1: patch start / activate / update refuse a built-in app with the
   const status = await said(() => program.parseAsync(['node', 'aura', 'dev', 'status', 'com.aura.terminal']));
   assert.equal(status.ok, true);
   assert.match(status.text, /\/mnt\/aura\/com\.aura\.terminal\s+.*read-only/);
-  assert.match(status.text, /built-in app — Built-in apps are patched by system patches \(Phase 7\) or in Developer Mode/);
+  assert.match(status.text, /built-in app — Built-in apps are changed with system patches \(`aura system patch start`, Normal mode\) or in Developer Mode/);
 });
 
 test('the patch repo is the installation\'s, bound from the volume (no AURA_PATCHES_DIR): two Terminals share the series, and it outlives the one that saved it', async () => {

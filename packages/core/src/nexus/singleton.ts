@@ -6,7 +6,7 @@
 import { NexusManager } from './NexusManager.js';
 import { getAppManager } from '../app-manager/AppManager.js';
 import { OsEventBus } from '../ipc/OsEventBus.js';
-import { getAppHostServices } from '../app-hosts/services.js';
+import { getAppHostServices } from '../app-hosts/index.js';
 import type { SourcesConfig } from './SourcesConfig.js';
 import { DEFAULT_SOURCES_CONFIG } from './SourcesConfig.js';
 import * as Publisher from './Publisher.js';
@@ -68,6 +68,8 @@ export function getNexusManager(): NexusManager {
     hostLifecycle: getAppHostServices().lifecycle,
     // Dependencies install in the throwaway builder, never in the shell (P5-3).
     provision:     (id, onLine) => getAppManager().provisionApp(id, { onLine }),
+    // Phase 7a: provision and build the staged tree before the swap, in the builder.
+    prepare:       (id, dir, manifest, onLine) => getAppManager().prepareStagedTree(id, dir, manifest, { onLine }),
   });
   g[GLOBAL_KEY] = instance;
   g[CODE_KEY] = CODE;

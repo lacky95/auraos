@@ -50,7 +50,7 @@ function customize(u, base) {
 }
 
 test('series file round-trips and rejects bad input', () => {
-  const s = { app: 'io.test.app', base: { repository: 'file:///x', commit: 'abcdef1' }, patches: [{ file: 'patches/0001-a.patch', subject: 'A' }] };
+  const s = { v: 2, target: { kind: 'app', appId: 'io.test.app' }, base: { repository: 'file:///x', commit: 'abcdef1' }, patches: [{ file: 'patches/0001-a.patch', subject: 'A', enabled: true }] };
   assert.deepEqual(parseSeries(formatSeries(s)), s);
   assert.throws(() => parseSeries('app: x\nbase: { commit: nothex }\n'), SeriesError);
   assert.throws(() => parseSeries('app: x\nbase: { commit: abcdef1, path: ../etc }\n'), SeriesError);
@@ -80,20 +80,20 @@ test('save: patches/NNNN-*.patch plus aura-patches.yaml in one patch-repo commit
   assert.equal(patches.length, 1);
   assert.equal(patches[0].file, 'patches/0001-Status-shows-busy.patch');
   assert.equal(patches[0].subject, 'Status shows busy');
-  const r = saveSeries(repo, { app: 'io.test.app', base, patches, message: 'save: Status shows busy' });
+  const r = saveSeries(repo, { target: { kind: 'app', appId: 'io.test.app' }, base, patches, message: 'save: Status shows busy' });
   assert.equal(r.changed, true);
   assert.deepEqual(git(repo, 'show', '--name-only', '--format=', 'HEAD').split('\n').sort(),
     [SERIES_FILE, 'patches/0001-Status-shows-busy.patch']);
   assert.equal(git(repo, 'rev-list', '--count', 'HEAD'), '1');
   assert.deepEqual(readSeries(repo, r.commit), r.series);
   // Same change again: nothing new to commit.
-  const again = saveSeries(repo, { app: 'io.test.app', base, patches: exportPatches(ws, baseCommit), message: 'save again' });
+  const again = saveSeries(repo, { target: { kind: 'app', appId: 'io.test.app' }, base, patches: exportPatches(ws, baseCommit), message: 'save again' });
   assert.equal(again.changed, false);
   assert.equal(again.commit, r.commit);
   // A second change: the series grows, old files are replaced, one more commit.
   writeFileSync(join(ws, 'extra.js'), 'export default 1;\n');
   git(ws, 'add', '-A'); git(ws, 'commit', '-qm', 'Add extra');
-  const two = saveSeries(repo, { app: 'io.test.app', base, patches: exportPatches(ws, baseCommit), message: 'save: Add extra' });
+  const two = saveSeries(repo, { target: { kind: 'app', appId: 'io.test.app' }, base, patches: exportPatches(ws, baseCommit), message: 'save: Add extra' });
   assert.deepEqual(two.series.patches.map((p) => p.file), ['patches/0001-Status-shows-busy.patch', 'patches/0002-Add-extra.patch']);
   assert.deepEqual(readdirSync(join(repo, 'patches')).sort(), ['0001-Status-shows-busy.patch', '0002-Add-extra.patch']);
   assert.equal(git(repo, 'rev-list', '--count', 'HEAD'), '2');
@@ -104,7 +104,7 @@ test('apply to a new base: compatible keeps the change, conflicting names the pa
   const base = { repository: u.repo, commit: u.base };
   const { ws, baseCommit } = customize(u, base);
   const repo = join(u.root, 'patches-repo');
-  const saved = saveSeries(repo, { app: 'io.test.app', base, patches: exportPatches(ws, baseCommit), message: 'save' });
+  const saved = saveSeries(repo, { target: { kind: 'app', appId: 'io.test.app' }, base, patches: exportPatches(ws, baseCommit), message: 'save' });
   const patches = readPatches(repo, saved.series, saved.commit);
 
   // Compatible upstream change (another line of the same file).
@@ -170,7 +170,7 @@ test('git ownership: a patch repo or workspace another user owns works; any othe
     git(ws, 'checkout', '-q', '-b', 'patches');
     writeFileSync(join(ws, 'status.js'), readFileSync(join(ws, 'status.js'), 'utf-8').replace('"idle"', '"busy"'));
     git(ws, 'commit', '-qam', 'busy');
-    saveSeries(repo, { app: 'io.test.app', base: { repository: u.repo, commit: u.base }, patches: exportPatches(ws, u.base), message: 'save' });
+    saveSeries(repo, { target: { kind: 'app', appId: 'io.test.app' }, base: { repository: u.repo, commit: u.base }, patches: exportPatches(ws, u.base), message: 'save' });
     chownAll(repo);
     const plain = () => execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD'], { stdio: ['ignore', 'pipe', 'pipe'] });
     assert.throws(plain, /dubious ownership/, 'git refuses it by default');

@@ -21,6 +21,7 @@
  * source or an index entry's `sources.oci`) and direct git repo (a 'git-app'
  * source or an index entry's `sources.git`).
  */
+import { NEXUS_LEGACY_REGISTRIES_KEY, NEXUS_SOURCES_KEY } from './keys.js';
 import {
   DEFAULT_REGISTRY_CONFIG, LOCAL_REGISTRY_DEFAULT_URL,
   type RegistryConfig, type RegistryEntry,
@@ -125,8 +126,8 @@ export const DEFAULT_SOURCES_CONFIG: SourcesConfig = {
 export const DEFAULT_APP_REPO_PREFIX = 'aura-apps';
 
 // ─── KV I/O ─────────────────────────────────────────────────────────────
-const KV_KEY        = 'nexus/sources';
-const LEGACY_KV_KEY = 'nexus/registries';
+const KV_KEY        = NEXUS_SOURCES_KEY;
+const LEGACY_KV_KEY = NEXUS_LEGACY_REGISTRIES_KEY;
 
 /**
  * Read the stored sources config (in process, osKv.ts). When the new key is

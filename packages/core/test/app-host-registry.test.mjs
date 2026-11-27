@@ -18,6 +18,7 @@ import { ManifestHostGuard, manifestHostClaim } from '../dist/app-hosts/manifest
 import { Installer, isTrashEntryOf, removeContained } from '../dist/nexus/Installer.js';
 import { NexusManager } from '../dist/nexus/NexusManager.js';
 import { AppManager } from '../dist/app-manager/AppManager.js';
+import { exchangeHelper } from './rename-exchange-helper.mjs';
 
 const ROOT = mkdtempSync(join(tmpdir(), 'aura-apphost-'));
 const server = new KvServer();
@@ -403,7 +404,7 @@ function installerWorld() {
   const dataDir = join(root, 'data');
   const appsDir = join(dataDir, 'apps');
   mkdirSync(appsDir, { recursive: true });
-  return { root, dataDir, appsDir, installer: new Installer({ appsDir, dataDir, scope: 'user' }) };
+  return { root, dataDir, appsDir, installer: new Installer({ exchangeHelper: exchangeHelper(), appsDir, dataDir, scope: 'user' }) };
 }
 const write = (p, text = 'x') => { mkdirSync(join(p, '..'), { recursive: true }); writeFileSync(p, text); };
 
@@ -503,7 +504,7 @@ test('retained data: set aside for its installation, then restored', () => {
 
 function nexusWorld() {
   const defs = scopes();
-  const nexus = new NexusManager({ scopes: defs, rootDataDir: join(defs[2].dataDir, '..'), hostLifecycle: lifecycle });
+  const nexus = new NexusManager({ exchangeHelper: exchangeHelper(), scopes: defs, rootDataDir: join(defs[2].dataDir, '..'), hostLifecycle: lifecycle });
   const srcRoot = mkdtempSync(join(ROOT, 'src-'));
   const source = (name, manifest) => {
     const dir = join(srcRoot, name);
@@ -666,7 +667,7 @@ test('built-in: a patch activation of a built-in app is refused before anyone is
   await lifecycle.sync({ appId: id, originId, scope: 'system', source: { kind: 'system', ref: id } });
 
   const refused = await w.run({ ref: w.source('ws1', { id, originId }), action: 'app.patch.activate' });
-  assert.match(String(refused.error?.message), /^system-app-later: Built-in apps are patched by system patches \(Phase 7\) or in Developer Mode$/);
+  assert.match(String(refused.error?.message), /^system-app-later: Built-in apps are changed with system patches \(`aura system patch start`, Normal mode\) or in Developer Mode$/);
   assert.equal(refused.events.some((e) => e.type === 'permission.needed' || e.type === 'install.start'), false);
   assert.equal(await registry.findInstallation(id, 'user'), null);
   assert.equal(existsSync(join(w.user.appsDir, id)), false);

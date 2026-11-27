@@ -78,14 +78,15 @@ import type { AppRegistry } from './AppRegistry.js';
 import type { ScopeRegistry } from '../scopes/ScopeRegistry.js';
 import type { ContainerRunner } from './ContainerRunner.js';
 import { BASE_IMAGE } from './BaseImage.js';
-import { SYSTEM_APP_LATER, SYSTEM_APP_LATER_MESSAGE } from '../nexus/AppSource.js';
+import { SYSTEM_APP_LATER, SYSTEM_APP_LATER_MESSAGE } from './contracts.js';
 
 const HELPER_IMAGE = BASE_IMAGE;
 /**
  * Canonical mount root inside a consumer container. Provisioned at spawn by
  * `ContainerRunner`, so only containers started since that change have it.
  */
-export const MOUNT_ROOT_PATH = '/mnt/aura';
+export { MOUNT_ROOT_PATH, PATCHES_DIR_NAME, WORK_DIR_NAME } from './contracts.js';
+import { MOUNT_ROOT_PATH, PATCHES_DIR_NAME, WORK_DIR_NAME } from './contracts.js';
 /**
  * Legacy root, relative to the consumer's own `/data`. Every container has a
  * `/data` volume mount regardless of age, and docker leaves it a slave of the
@@ -101,10 +102,6 @@ export const WORKSPACE_MOUNT_ID = 'workspace';
 /** The AuraOS checkout, as the shell sees it. */
 const WORKSPACE_DIR = '/workspace';
 
-/** Where `work` mounts appear under a consumer's mount root. */
-export const WORK_DIR_NAME = 'work';
-/** Where `patches` mounts appear under a consumer's mount root. */
-export const PATCHES_DIR_NAME = 'patches';
 const PATCHES_SUBPATH = /^aura\/patches\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 /**
  * What each mount kind does (F11): one table instead of kind checks spread

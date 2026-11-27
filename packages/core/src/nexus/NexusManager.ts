@@ -22,7 +22,8 @@ type OsEventBus = typeof OsEventBusSingleton;
 import { CatalogAggregator } from './CatalogAggregator.js';
 import { Installer, removeContained } from './Installer.js';
 import { NexusValidationError, validateStagedDir } from './Validator.js';
-import { hostConflicts, isProtectedHostName, type HostClaim } from '../app-hosts/appHosts.js';
+import { hostConflicts, type HostClaim } from '../app-hosts/index.js';
+import { isProtectedHostName } from '../types/hostRules.js';
 import type { AppHostLifecycle, AppIdentityFacts, AppRestoreCheck } from '../app-hosts/lifecycle.js';
 import { fetchLocal } from './Fetchers/LocalFetcher.js';
 import { fetchGit } from './Fetchers/GitFetcher.js';
@@ -45,6 +46,9 @@ import {
   type InstalledIdentity,
 } from '../app-manager/AppIdentity.js';
 import { compareVersions } from './version.js';
+import { ActivationBusyError, acquireActivation, activationHolder, appActivationTarget, heldAppActivations } from '../release/index.js';
+import { injectFault } from '../release/index.js';
+import type { PatchBinding } from '../patches/types.js';
 import type { CatalogEntry } from './CatalogAggregator.js';
 
 /**
@@ -103,6 +107,39 @@ export interface NexusManagerOpts {
   provision?: (appId: string, onLine: (line: string) => void) => Promise<{ ok: boolean; ran: boolean; output: string }>;
   /** App Host records follow the install lifecycle. Injected by the singleton. */
   hostLifecycle?: AppHostLifecycle;
+  /**
+   * Validate before the swap (Q23, owner decision 2): provision and build the
+   * staged tree in the throwaway builder, after the approval is consumed and
+   * before anything moves. A failure ends the install with the running app
+   * untouched. The built output is installed with the tree. Injected by the
+   * singleton (AppManager.prepareStagedTree); without it the tree installs
+   * unbuilt and provisioning happens after the swap.
+   */
+  prepare?: (appId: string, dir: string, manifest: AppManifest, onLine: (line: string) => void) => Promise<PreparedTree>;
+  /** The atomic-switch helper (Installer); tests pass a built copy. */
+  exchangeHelper?: string;
+}
+
+/** What `prepare` did to a staged tree. */
+export interface PreparedTree {
+  ok: boolean;
+  /** The failing step, when not ok. */
+  step?: 'provision' | 'build';
+  output: string;
+  /** Provisioned dependencies and/or built output. */
+  provisioned: boolean;
+  built: boolean;
+  /** Build inputs of a built tree (D68 reproducibility). */
+  lockfileHash?: string | null;
+  builderImage?: string | null;
+}
+
+/** An install that ended before the swap (validate before activate); the running app is untouched. */
+export class InstallPrepareError extends Error {
+  readonly code = 'install-prepare-failed';
+  constructor(readonly appId: string, readonly step: 'provision' | 'build', readonly output: string) {
+    super(`install-prepare-failed: ${appId} did not ${step === 'build' ? 'build' : 'install its dependencies'} — nothing was installed, the current version keeps running: ${output.trim().split('\n').slice(-3).join(' | ')}`);
+  }
 }
 
 export class NexusManager {
@@ -128,10 +165,31 @@ export class NexusManager {
   /** Every scope, system included — the identity check looks at all of them. */
   private readonly scopeDefs: ScopeDefinition[];
 
-  /** True while an install for this id/ref is in flight. */
-  isInstalling(id: string): boolean { return this.installing.has(id); }
-  /** Snapshot of everything currently installing (ids + refs). */
-  getInstallingIds(): string[] { return [...this.installing]; }
+  private readonly prepare?: NexusManagerOpts['prepare'];
+
+  /** True while an install for this id/ref is in flight (here, or by a held activation lock). */
+  isInstalling(id: string): boolean { return this.installing.has(id) || this.getInstallingIds().includes(id); }
+  /** Snapshot of everything currently installing (ids + refs), including activation locks held by another process. */
+  getInstallingIds(): string[] {
+    return [...new Set([...this.installing, ...heldAppActivations(this.rootDataDir).map((h) => h.appId)])];
+  }
+
+  /**
+   * Boot recovery of interrupted installs (Installer.reconcile), every scope.
+   * Run before the registry scans the scopes (AppManager `installRecovery`).
+   */
+  reconcileInstalls(): Array<{ scope: ScopeId; appId: string; outcome: string; detail?: string }> {
+    const out: Array<{ scope: ScopeId; appId: string; outcome: string; detail?: string }> = [];
+    for (const [scope, installer] of this.installers) {
+      for (const r of installer.reconcile()) out.push({ scope, ...r });
+    }
+    return out;
+  }
+
+  /** Whether installs can switch atomically in every scope (diagnose/app-install-atomic). */
+  atomicInstallState(): Array<{ scope: ScopeId; ok: boolean; reason?: string }> {
+    return [...this.installers].map(([scope, i]) => ({ scope, ...i.probeAtomic() }));
+  }
 
   constructor(opts: NexusManagerOpts) {
     this.rootDataDir   = opts.rootDataDir;
@@ -140,6 +198,7 @@ export class NexusManager {
     this.onAppChanged  = opts.onAppChanged;
     this.provision     = opts.provision;
     this.hostLifecycle = opts.hostLifecycle;
+    this.prepare       = opts.prepare;
     this.sourcesConfig = opts.sourcesConfig ?? cloneDefaultSources();
     this.catalog       = new CatalogAggregator({
       rootDataDir: opts.rootDataDir,
@@ -156,6 +215,8 @@ export class NexusManager {
         appsDir: scope.appsDir,
         dataDir: scope.dataDir,
         scope:   scope.id,
+        ...(opts.exchangeHelper ? { exchangeHelper: opts.exchangeHelper } : {}),
+        fault:   (point) => injectFault(opts.rootDataDir, point),
       }));
     }
   }
@@ -402,6 +463,10 @@ export class NexusManager {
     /** Replace the app even when it is a dev checkout (`aura dev checkout`).
      *  The old dir, `.git` included, still goes to nexus/trash. */
     replaceCheckout?: boolean;
+    /** `app.patch.activate` of a series: what the approval binds besides the tree (route-computed). */
+    patch?: PatchBinding;
+    /** `app.patch.activate`: the series facts the install record keeps (D68 reproducibility). */
+    patched?: { patches: number };
   }): AsyncGenerator<NexusProgressEvent, InstallRecord, { approve: boolean } | void> {
     let targetScope: 'global' | 'user' = opts.scope ?? 'global';
     const stagingDir  = join(this.rootDataDir, 'nexus', 'staging', `pending-${Date.now()}`);
@@ -534,6 +599,11 @@ export class NexusManager {
         throw new Error(`${SYSTEM_APP_LATER}: ${SYSTEM_APP_LATER_MESSAGE}`);
       }
       keys.add(manifest.id); this.installing.add(manifest.id);
+      // Serialized activation (Q23): another activation of this installation
+      // is running. Checked here, before anyone is asked; taken for real below.
+      const lockTarget = appActivationTarget(targetScope, manifest.id);
+      const busy = activationHolder(this.rootDataDir, lockTarget);
+      if (busy) throw new ActivationBusyError(lockTarget, busy);
       // After the identity step, which may have given the app another local id.
       // Under another id it is a copy of the artifact: the source's host names
       // aren't its to claim, so it installs without the ones it can't have.
@@ -594,6 +664,7 @@ export class NexusManager {
         // A root request (identity/execution.ts) is bound by its digest; `renew` compares with the installation's approval.
         execution: executionBinding(manifest, await this.hostLifecycle?.installationOf(manifest.id, targetScope).catch(() => null)),
         exposure: installExposure(manifest),
+        ...(opts.patch ? { patch: opts.patch } : {}),
       };
 
       // Installing code is always the owner's decision (D31), not only when
@@ -618,38 +689,63 @@ export class NexusManager {
 
       yield { type: 'install.start' };
       let record: InstallRecord;
-      this.hostLifecycle?.beginInstall(manifest.id, targetScope);
+      let prepared: PreparedTree | null = null;
+      // The activation itself, under the target's lock (Q23): no yield inside,
+      // so the lock is always released (a caller may abandon this generator
+      // at any yield). Build before the swap (owner decision 2), then the
+      // atomic switch (Installer), then the App Host records.
+      const lock = acquireActivation(this.rootDataDir, lockTarget, { by: binding.action });
       try {
-        if (restore.kind === 'deny') {
-          installer.setAsideRetainedData(manifest.id, restore.installation.installationId);
-        } else if (restore.kind === 'restore' || (restore.kind === 'confirm' && restore.installation)) {
-          installer.restoreRetainedData(manifest.id, restore.installation!.installationId);
+        if (this.prepare) {
+          prepared = await this.prepare(manifest.id, stagingDir, manifest, (line) => {
+            this.bus?.emit('nexus:install.progress', { id: manifest.id, line });
+          });
+          if (!prepared.ok) throw new InstallPrepareError(manifest.id, prepared.step ?? 'build', prepared.output);
         }
-        record = await installer.install(stagingDir, manifest, resolved, link, { keepProvenance: opts.action === 'app.patch.activate' });
-        // A patch activation keeps the release's provenance on the record: the
-        // installation's source is that record's, as every later sync reads it.
-        const landed: AppIdentityFacts = opts.action === 'app.patch.activate'
-          ? { ...hostFacts, source: { kind: record.source, ref: record.ref, ...(record.digest ? { digest: record.digest } : {}) } }
-          : hostFacts;
-        // Before the registry reload below, so its host guard accepts this manifest.
+        this.hostLifecycle?.beginInstall(manifest.id, targetScope);
         try {
-          await this.hostLifecycle?.completeInstall(landed, restore, manifest.hosts.map((h) => h.name));
-        } catch (err) {
-          console.warn(`[nexus] app host update for ${manifest.id} failed: ${(err as Error).message}`);
-        }
-        // The approved root request, on the installation, before the app can start (fail closed if it can't be).
-        if (executionApproved) {
-          try {
-            await this.hostLifecycle?.approveExecution(manifest.id, targetScope, {
-              runAs: 'root', digest: executionApproved.digest, approvedAt: Date.now(), via: binding.action,
-            });
-          } catch (err) {
-            console.warn(`[nexus] ${manifest.id}: its root approval could not be recorded (${(err as Error).message}); it does not start until you approve it again (aura admin apps run-as ${manifest.id} root)`);
+          if (restore.kind === 'deny') {
+            installer.setAsideRetainedData(manifest.id, restore.installation.installationId);
+          } else if (restore.kind === 'restore' || (restore.kind === 'confirm' && restore.installation)) {
+            installer.restoreRetainedData(manifest.id, restore.installation!.installationId);
           }
+          const patched = opts.patch && opts.action === 'app.patch.activate' ? {
+            baseCommit: opts.patch.baseCommit, seriesRev: opts.patch.seriesRev, seriesDigest: opts.patch.seriesDigest,
+            patches: opts.patched?.patches ?? opts.patch.order.length, treeDigest: binding.digest,
+            buildInputs: { lockfileHash: prepared?.lockfileHash ?? null, builderImage: prepared?.builderImage ?? null },
+          } : undefined;
+          record = await installer.install(stagingDir, manifest, resolved, link, {
+            keepProvenance: opts.action === 'app.patch.activate', ...(patched ? { extra: { patched } } : {}),
+          });
+          // A patch activation keeps the release's provenance on the record: the
+          // installation's source is that record's, as every later sync reads it.
+          const landed: AppIdentityFacts = opts.action === 'app.patch.activate'
+            ? { ...hostFacts, source: { kind: record.source, ref: record.ref, ...(record.digest ? { digest: record.digest } : {}) } }
+            : hostFacts;
+          // Before the registry reload below, so its host guard accepts this manifest.
+          try {
+            await this.hostLifecycle?.completeInstall(landed, restore, manifest.hosts.map((h) => h.name));
+          } catch (err) {
+            console.warn(`[nexus] app host update for ${manifest.id} failed: ${(err as Error).message}`);
+          }
+          // The approved root request, on the installation, before the app can start (fail closed if it can't be).
+          if (executionApproved) {
+            try {
+              await this.hostLifecycle?.approveExecution(manifest.id, targetScope, {
+                runAs: 'root', digest: executionApproved.digest, approvedAt: Date.now(), via: binding.action,
+              });
+            } catch (err) {
+              console.warn(`[nexus] ${manifest.id}: its root approval could not be recorded (${(err as Error).message}); it does not start until you approve it again (aura admin apps run-as ${manifest.id} root)`);
+            }
+          }
+        } finally {
+          this.hostLifecycle?.endInstall(manifest.id, targetScope);
         }
       } finally {
-        this.hostLifecycle?.endInstall(manifest.id, targetScope);
+        lock.release();
       }
+      if (prepared?.provisioned) yield { type: 'install.provision', message: 'dependencies ready (installed in the builder before the switch)' };
+      if (prepared?.built) yield { type: 'install.provision', message: 'built before the switch' };
 
       // Register with the AppRegistry NOW — before provisioning, and well before
       // yielding install.done. Two reasons, and the order matters:

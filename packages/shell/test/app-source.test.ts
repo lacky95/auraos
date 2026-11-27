@@ -6,7 +6,8 @@
 //   node tools/run-tests.mjs --only=shell
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as core from '@aura/core';
@@ -16,6 +17,7 @@ import { mountedSourcePath } from '../src/lib/appSource.ts';
 import {
   activatePrepared, appSourceStatus, startPreview, stopPreviews, cleanWorkspaces, mountAppVolume, setSourceMode, type AppSourceDeps, type ScopedApp,
 } from '../src/lib/appSource.ts';
+import { exchangeHelper } from '../../core/test/rename-exchange-helper.mjs';
 
 class MemoryStore {
   records = new Map<string, ApprovalRecord>();
@@ -56,6 +58,8 @@ let scopes: core.ScopeDefinition[];
 let nexus: core.NexusManager;
 let kernel: AuraMount[];
 let audits: unknown[];
+/** Admin audit rows (patch lifecycle, Phase 7a). */
+let auditRows: Array<{ action: string; target?: string; outcome?: string; detail: Record<string, any> }>;
 /** Previews the fake AppManager started: instanceId → { appId, appDir, workspace, owner }. */
 let previews: Map<string, { appId: string; appDir: string; workspace: string; owner: string }>;
 
@@ -146,6 +150,7 @@ function deps(): AppSourceDeps {
     },
     installationId: async (appId, scope) => `inst-${scope}-${appId.replace(/\./g, '-')}`,
     nexus,
+    audit: { record: async (e: any) => { auditRows.push({ ...e, detail: e.detail ?? {} }); return e; } },
   };
 }
 
@@ -154,12 +159,13 @@ beforeEach(async () => {
   caller = TERMINAL;
   kernel = [];
   audits = [];
+  auditRows = [];
   previews = new Map();
   root = mkdtempSync(join(tmpdir(), 'aura-src-'));
   const scope = (id: core.ScopeId, priority: number, immutable: boolean) =>
     ({ id, appsDir: join(root, id, 'apps'), dataDir: join(root, id, 'data'), immutable, priority }) as core.ScopeDefinition;
   scopes = [scope('system', 0, true), scope('global', 1, false), scope('user', 2, false)];
-  nexus = new core.NexusManager({ scopes, rootDataDir: join(root, 'root') });
+  nexus = new core.NexusManager({ exchangeHelper: exchangeHelper(), scopes, rootDataDir: join(root, 'root') });
   writeApp(join(scopes[0]!.appsDir, 'com.aura.terminal'), { id: 'com.aura.terminal', originId: O2, name: 'Terminal', version: '1.0.0', tools: ['*'] });
   writeApp(join(scopes[0]!.appsDir, 'io.lakner.terminalx'), { id: 'io.lakner.terminalx', name: 'TerminalX', version: '1.0.0' });
   // An installed store app (closed by default), with instance data.
@@ -169,6 +175,35 @@ beforeEach(async () => {
   for (let c = await it.next(); !c.done; c = await it.next()) { /* to the end */ }
   put(join(scopes[1]!.appsDir, 'io.shop.app', 'io.shop.app', 'orders.json'), '[42]');
 });
+
+/**
+ * A real series (Phase 7a: R4 binds the revision and checks the tree): the
+ * shop release as an upstream git repo, `change` committed on it, saved as
+ * the installation's series, and built into `user`'s workspace `n` the way
+ * `aura dev patch activate` builds its scratch workspace. Returns the revision.
+ */
+function seriesWorkspace(user: string, n: number, change: (dir: string) => void, key = 'inst-global-io-shop-app'): { rev: string; ws: string } {
+  const upstream = join(root, 'upstream');
+  if (!existsSync(join(upstream, '.git'))) {
+    writeApp(upstream, { id: 'io.shop.app', originId: O1, name: 'Shop', version: '1.0.0' });
+    core.initRepo(upstream, 'release 1.0.0');
+  }
+  const base = execFileSync('git', ['-C', upstream, 'rev-parse', 'HEAD']).toString().trim();
+  const edit = mkdtempSync(join(root, 'edit-'));
+  execFileSync('git', ['clone', '-q', upstream, edit]);
+  change(edit);
+  execFileSync('git', ['-C', edit, 'add', '-A']);
+  execFileSync('git', ['-C', edit, '-c', 'user.name=T', '-c', 'user.email=t@t', 'commit', '-q', '-m', `change for ${user}`]);
+  const repo = join(root, 'root', core.patchRepoSubpath(key));
+  const saved = core.saveSeries(repo, {
+    target: { kind: 'app', appId: 'io.shop.app' }, base: { repository: upstream, commit: base }, patches: core.exportPatches(edit, base), message: 'save',
+  });
+  const ws = join(root, 'root', core.workspaceSubpath(user, key, n));
+  rmSync(ws, { recursive: true, force: true });
+  const built = core.buildTree(ws, saved.series.base, core.readPatches(repo, saved.series, saved.commit));
+  assert.equal(built.ok, true);
+  return { rev: saved.commit, ws };
+}
 
 const req = (method: string, body?: unknown, headers: Record<string, string> = {}, url = 'http://shell.test/api/x') =>
   new Request(url, { method, headers: { 'content-type': 'application/json', ...headers }, ...(body ? { body: JSON.stringify(body) } : {}) });
@@ -250,32 +285,83 @@ test('a workspace is created and bound writable at /mnt/aura/work/<app> in the c
 
 test('activate without approval answers 202; with it the tree is swapped, the rollback tree kept, the data survives', async () => {
   await mountAppVolume(req('POST'), 'com.aura.terminal', deps(), { app: 'io.shop.app', kind: 'work' });
-  const ws = join(root, 'root', 'aura', 'workspaces', 'default', 'inst-global-io-shop-app', '1');
-  writeApp(ws, { id: 'io.shop.app', originId: O1, name: 'Shop', version: '1.0.0' }, 'patched\n');
+  const { rev } = seriesWorkspace('default', 1, (d) => put(join(d, 'src', 'index.astro'), 'patched\n'));
   const appDir = join(scopes[1]!.appsDir, 'io.shop.app');
 
-  const first = await read(await activatePrepared(req('POST', { workspace: 1 }), 'io.shop.app', deps()));
-  assert.equal(first.status, 202);
+  const first = await read(await activatePrepared(req('POST', { workspace: 1, rev }), 'io.shop.app', deps()));
+  assert.equal(first.status, 202, JSON.stringify(first.body));
   assert.deepEqual([first.body.action, first.body.level], ['app.patch.activate', 'session']);
   assert.match(first.body.display.title, /^Activate patched Shop/);
+  // Q23: the dialog names the base, the revision, the ordered patches and the diffstat, and carries the exact diff.
+  const details = (first.body.display.details as string[]).join('\n');
+  assert.match(details, /Base: [0-9a-f]{12}/);
+  assert.match(details, new RegExp(`Series revision: ${rev.slice(0, 12)} \\(digest [0-9a-f]{12}\\)`));
+  assert.match(details, /1\. change for default \[[0-9a-f]{8}\] 1 file, \+1 −1/);
+  assert.match(details, /Diffstat: 1 file change, \+1 −1/);
+  assert.match(first.body.display.diff, /^\+patched$/m);
   assert.equal(readFileSync(join(appDir, 'src', 'index.astro'), 'utf-8'), 'v1\n', 'nothing swapped');
 
   const id = first.body.approvalId as string;
   await store.approve(id, DECIDER);
-  const done = await read(await activatePrepared(req('POST', { workspace: 1 }, { 'x-aura-approval': id }), 'io.shop.app', deps()));
+  const done = await read(await activatePrepared(req('POST', { workspace: 1, rev }, { 'x-aura-approval': id }), 'io.shop.app', deps()));
   assert.equal(done.status, 200, JSON.stringify(done.body));
   assert.deepEqual([done.body.scope, done.body.running], ['global', ['io.shop.app']]);
   assert.equal(readFileSync(join(appDir, 'src', 'index.astro'), 'utf-8'), 'patched\n');
   assert.equal(readFileSync(join(appDir, 'io.shop.app', 'orders.json'), 'utf-8'), '[42]');
   assert.ok(done.body.rollbackTree && existsSync(done.body.rollbackTree));
   assert.equal(readFileSync(join(done.body.rollbackTree, 'src', 'index.astro'), 'utf-8'), 'v1\n');
+  // Reproducibility: the record keeps what the tree was built from.
+  assert.equal(done.body.record.patched?.seriesRev, rev);
+  assert.equal(done.body.record.patched?.patches, 1);
+  // Audit: patch.activated with the revision, digest, base, approval and tree digest; no contents.
+  const row = auditRows.find((r) => r.action === 'patch.activated');
+  assert.ok(row, JSON.stringify(auditRows));
+  assert.deepEqual([row.target, row.outcome, row.detail.rev, row.detail.approval, row.detail.patches], ['app:io.shop.app', 'ok', rev, id, 1]);
+  assert.match(row.detail.seriesDigest, /^[0-9a-f]{64}$/);
+  assert.ok(row.detail.treeDigest);
+  assert.doesNotMatch(JSON.stringify(auditRows), /patched\\n|\+patched/, 'no patch contents in the audit');
 
   // A permission change makes it `fresh`.
-  writeApp(ws, { id: 'io.shop.app', originId: O1, name: 'Shop', version: '1.0.0', permissions: ['apps.mount'] }, 'patched 2\n');
-  const perm = await read(await activatePrepared(req('POST', { workspace: 1 }), 'io.shop.app', deps()));
+  const second = seriesWorkspace('default', 1, (d) => writeApp(d, { id: 'io.shop.app', originId: O1, name: 'Shop', version: '1.0.0', permissions: ['apps.mount'] }, 'patched 2\n'));
+  const perm = await read(await activatePrepared(req('POST', { workspace: 1, rev: second.rev }), 'io.shop.app', deps()));
   assert.deepEqual([perm.status, perm.body.level], [202, 'fresh']);
 
-  assert.equal((await read(await activatePrepared(req('POST', { workspace: 9 }), 'io.shop.app', deps()))).status, 404);
+  assert.equal((await read(await activatePrepared(req('POST', { workspace: 9, rev }), 'io.shop.app', deps()))).status, 404);
+});
+
+test('Q23 binding: the revision is read from the patch repo and the tree must be exactly base + the series', async () => {
+  const { rev, ws } = seriesWorkspace('default', 1, (d) => put(join(d, 'src', 'index.astro'), 'patched\n'));
+  // No revision, an unknown one: refused before anyone is asked.
+  assert.deepEqual((await read(await activatePrepared(req('POST', { workspace: 1 }), 'io.shop.app', deps()))).body.error, 'invalid-revision');
+  assert.equal((await read(await activatePrepared(req('POST', { workspace: 1, rev: 'deadbeefdeadbeef' }), 'io.shop.app', deps()))).status, 404);
+  // A tree that is not what the series builds: an extra file, or an extra commit.
+  put(join(ws, 'src', 'extra.astro'), 'sneaky\n');
+  const extra = await read(await activatePrepared(req('POST', { workspace: 1, rev }), 'io.shop.app', deps()));
+  assert.deepEqual([extra.status, extra.body.error], [422, 'tree-mismatch']);
+  execFileSync('git', ['-C', ws, 'add', '-A']);
+  execFileSync('git', ['-C', ws, '-c', 'user.name=T', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'not in the series']);
+  assert.equal((await read(await activatePrepared(req('POST', { workspace: 1, rev }), 'io.shop.app', deps()))).body.error, 'tree-mismatch');
+  assert.equal(store.records.size, 0, 'the owner was never asked');
+
+  // An approval of one revision never covers another: the binding differs (digest, order).
+  const a = seriesWorkspace('default', 1, (d) => put(join(d, 'src', 'index.astro'), 'A\n'));
+  const asked = await read(await activatePrepared(req('POST', { workspace: 1, rev: a.rev }), 'io.shop.app', deps()));
+  const id = asked.body.approvalId as string;
+  await store.approve(id, DECIDER);
+  const b = seriesWorkspace('default', 1, (d) => put(join(d, 'src', 'index.astro'), 'B\n'));
+  const swapped = await read(await activatePrepared(req('POST', { workspace: 1, rev: b.rev }, { 'x-aura-approval': id }), 'io.shop.app', deps()));
+  assert.equal(swapped.status, 202, 'a new approval is requested');
+  assert.notEqual(swapped.body.approvalId, id);
+  assert.equal(readFileSync(join(scopes[1]!.appsDir, 'io.shop.app', 'src', 'index.astro'), 'utf-8'), 'v1\n', 'nothing installed');
+});
+
+test('save is recorded by the system: R1 `saved` audits patch.saved from the patch repo', async () => {
+  const { rev } = seriesWorkspace('default', 1, (d) => put(join(d, 'src', 'index.astro'), 'patched\n'));
+  const r = await read(await appSourceStatus(req('POST', { app: 'io.shop.app', saved: rev }), 'com.aura.terminal', deps(), true));
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const row = auditRows.find((x) => x.action === 'patch.saved');
+  assert.deepEqual([row?.target, row?.detail.rev, row?.detail.patches, row?.detail.installationId], ['app:io.shop.app', rev, 1, 'inst-global-io-shop-app']);
+  assert.equal((await read(await appSourceStatus(req('POST', { app: 'io.shop.app', saved: 'f'.repeat(40) }), 'com.aura.terminal', deps(), true))).status, 422);
 });
 
 test('built-in: a built-in app is not patched — R4 answers 409 system-app-later; status says so; nothing is installed', async () => {
@@ -283,7 +369,7 @@ test('built-in: a built-in app is not patched — R4 answers 409 system-app-late
   writeApp(ws, { id: 'com.aura.terminal', originId: O2, name: 'Terminal', version: '1.0.0', tools: ['*'] }, 'status line\n');
   const r = await read(await activatePrepared(req('POST', { workspace: 1 }), 'com.aura.terminal', deps()));
   assert.deepEqual([r.status, r.body.error], [409, 'system-app-later']);
-  assert.equal(r.body.message, 'com.aura.terminal is a built-in app. Built-in apps are patched by system patches (Phase 7) or in Developer Mode.');
+  assert.equal(r.body.message, 'com.aura.terminal is a built-in app. Built-in apps are changed with system patches (`aura system patch start`, Normal mode) or in Developer Mode.');
   assert.equal([...store.records.values()].length, 0, 'the owner is never asked');
   assert.equal(existsSync(join(scopes[2]!.appsDir, 'com.aura.terminal')), false);
   assert.equal(readFileSync(join(scopes[0]!.appsDir, 'com.aura.terminal', 'src', 'index.astro'), 'utf-8'), 'v1\n');
@@ -293,7 +379,7 @@ test('built-in: a built-in app is not patched — R4 answers 409 system-app-late
   // Status: the read-only source, and the reason.
   const s = await read(await appSourceStatus(req('POST', { app: 'com.aura.terminal' }), 'com.aura.terminal', deps(), true));
   assert.deepEqual([s.body.scope, s.body.mode, s.body.source.writable, s.body.source.mounted], ['system', 'closed', false, true]);
-  assert.equal(s.body.next, 'Read the source at /mnt/aura/com.aura.terminal (read-only). Built-in apps are patched by system patches (Phase 7) or in Developer Mode.');
+  assert.equal(s.body.next, 'Read the source at /mnt/aura/com.aura.terminal (read-only). Built-in apps are changed with system patches (`aura system patch start`, Normal mode) or in Developer Mode.');
   // A normal app's status is unchanged.
   assert.match((await read(await appSourceStatus(req('GET', undefined, {}, 'http://shell.test/x?app=io.shop.app'), 'com.aura.terminal', deps(), false))).body.next, /aura dev patch start io\.shop\.app/);
 });
@@ -313,21 +399,20 @@ test('a same-id user copy is its own app: own patch key, and never the owner\'s 
 });
 
 test('activate installs the calling user\'s workspace; only the owner names another user\'s', async () => {
-  const ws = (user: string) => join(root, 'root', 'aura', 'workspaces', user, 'inst-global-io-shop-app', '1');
-  writeApp(ws('default'), { id: 'io.shop.app', originId: O1, name: 'Shop', version: '1.0.1' }, 'mine\n');
-  writeApp(ws('bob'), { id: 'io.shop.app', originId: O1, name: 'Shop', version: '1.0.2' }, 'bob\n');
+  seriesWorkspace('default', 1, (d) => put(join(d, 'src', 'index.astro'), 'mine\n'));
+  const { rev } = seriesWorkspace('bob', 1, (d) => put(join(d, 'src', 'index.astro'), 'bob\n'));
 
   // A Terminal of user `default` can't reach bob's workspace.
-  const denied = await read(await activatePrepared(req('POST', { workspace: 1, user: 'bob' }), 'io.shop.app', deps()));
+  const denied = await read(await activatePrepared(req('POST', { workspace: 1, user: 'bob', rev }), 'io.shop.app', deps()));
   assert.deepEqual([denied.status, denied.body.error], [403, 'forbidden']);
   // Bob's own Terminal activates his own workspace (the approval names that tree).
   caller = { ...TERMINAL, instanceId: 'com.aura.terminal-2', userId: 'bob' };
-  const bob = await read(await activatePrepared(req('POST', { workspace: 1 }), 'io.shop.app', deps()));
-  assert.equal(bob.status, 202);
+  const bob = await read(await activatePrepared(req('POST', { workspace: 1, rev }), 'io.shop.app', deps()));
+  assert.equal(bob.status, 202, JSON.stringify(bob.body));
   assert.match(JSON.stringify(bob.body.display), /workspaces\/bob\//);
   // The owner may name any user's workspace.
   caller = { kind: 'user', userId: 'default', role: 'owner', sessionId: 'sess-desk-0001', verification: 'verified' } as CallerPrincipal;
-  const owner = await read(await activatePrepared(req('POST', { workspace: 1, user: 'bob' }), 'io.shop.app', deps()));
+  const owner = await read(await activatePrepared(req('POST', { workspace: 1, user: 'bob', rev }), 'io.shop.app', deps()));
   assert.notEqual(owner.status, 403);
   assert.notEqual(owner.status, 404);
 });

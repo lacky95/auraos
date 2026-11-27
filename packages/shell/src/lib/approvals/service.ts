@@ -137,7 +137,7 @@ export async function requestApproval(
   if (result.ok) {
     approvalsChanged();
     await audit(deps, {
-      by: auditBy(requester), action: 'approval.requested', target: `approval:${result.record.id}`, outcome: 'ok',
+      by: auditBy(requester), action: 'approval.requested', target: core.approvalRef(result.record.id), outcome: 'ok',
       detail: { action: req.action, level: req.level, requestedBy: requesterSummary(requester), title: result.record.display.title },
     });
   }
@@ -155,7 +155,7 @@ export async function consumeApproval(
     approvalsChanged();
     const d = result.record.decidedBy;
     await audit(deps, {
-      by: auditBy(requester), action: 'approval.consumed', target: `approval:${id}`, outcome: 'ok',
+      by: auditBy(requester), action: 'approval.consumed', target: core.approvalRef(id), outcome: 'ok',
       detail: {
         action, requestedBy: requesterSummary(requester),
         approvedBy: d?.kind === 'operator' ? 'host operator' : d ? `owner ${d.userId}` : 'unknown',

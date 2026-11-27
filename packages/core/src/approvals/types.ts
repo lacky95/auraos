@@ -128,6 +128,12 @@ export interface ApprovalDisplay {
    * shown first and prominently. Never the requester's wording.
    */
   highRisk?: ApprovalRisk[];
+  /**
+   * The exact change being approved, as a unified diff (a patch activation,
+   * Q23: "exact diff review"). Server-built from the bound content; shown
+   * collapsed, in full up to its clip.
+   */
+  diff?: string;
 }
 
 /** One high-risk item of an approval: what, and why it is dangerous, in one line. */

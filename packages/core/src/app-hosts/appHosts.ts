@@ -12,9 +12,9 @@
  * definition. Docs: /docs/app-hosts.
  */
 
-import { isRawIpHost, isValidHostName, parseAppHost } from './hostRules.js';
+import { isRawIpHost, isValidHostName, parseAppHost } from '../types/hostRules.js';
 
-export * from './hostRules.js';
+export * from '../types/hostRules.js';
 
 /**
  * The URL of app host `name` for a desktop opened at `scheme://host`, or null

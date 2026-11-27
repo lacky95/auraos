@@ -26,6 +26,7 @@ import { NexusManager } from '../dist/nexus/NexusManager.js';
 import { installExposure } from '../dist/nexus/PermissionDiff.js';
 import { buildPrivilegeReview } from '../dist/identity/privilegeReview.js';
 import { securityOption, securityPolicyValue } from '../dist/security/options.js';
+import { exchangeHelper } from './rename-exchange-helper.mjs';
 
 const TMP = mkdtempSync(join(tmpdir(), 'aura-rootreq-'));
 const server = new KvServer();
@@ -151,7 +152,7 @@ function nexusFixture() {
   const scopes = [scope('system', 0, true), scope('global', 1, false), scope('user', 2, false)];
   const reg = createAppHostRegistry(r);
   const life = new AppHostLifecycle(reg);
-  const mgr = new NexusManager({ scopes, rootDataDir: join(root, 'root'), hostLifecycle: life });
+  const mgr = new NexusManager({ exchangeHelper: exchangeHelper(), scopes, rootDataDir: join(root, 'root'), hostLifecycle: life });
   const src = (version, execution, extra = {}) => {
     const dir = join(root, 'src', `${version}-${Math.random().toString(36).slice(2)}`, 'org.r.app');
     mkdirSync(dir, { recursive: true });

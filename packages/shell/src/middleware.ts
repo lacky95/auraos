@@ -120,6 +120,8 @@ async function ensureAppManager() {
       contractScan: core.scanContractSources,
       // 5b K: the identity, user, grant and audit services, handed in (D97: no app-manager -> auth/services import).
       auth: core.getAuthServices,
+      // Phase 7a: installs a crash interrupted are finished or undone before the registry scan.
+      installRecovery: () => core.getNexusManager().reconcileInstalls(),
     });
     // Hydrate per-app enable state BEFORE init() so its autoStart / warmPool
     // / service-spawn loops skip disabled apps from the very first tick.

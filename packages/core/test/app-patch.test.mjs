@@ -15,6 +15,7 @@ import { NexusManager } from '../dist/nexus/NexusManager.js';
 import { effectiveSourceMode, listWorkspaces, workspaceSubpath, withoutCredentials } from '../dist/nexus/AppSource.js';
 import { ContainerRunner, ownSourceReadOnly } from '../dist/app-manager/ContainerRunner.js';
 import { appFingerprint, writeBuildStamp } from '../dist/app-manager/appBuild.js';
+import { exchangeHelper } from './rename-exchange-helper.mjs';
 
 const O1 = '00000000-0000-4000-8000-000000000001';
 const put = (p, text) => { mkdirSync(join(p, '..'), { recursive: true }); writeFileSync(p, text); };
@@ -24,7 +25,7 @@ function world() {
   const root = mkdtempSync(join(tmpdir(), 'aura-patch-'));
   const scope = (id, priority, immutable) => ({ id, appsDir: join(root, id, 'apps'), dataDir: join(root, id, 'data'), immutable, priority });
   const scopes = [scope('system', 0, true), scope('global', 1, false), scope('user', 2, false)];
-  const mgr = new NexusManager({ scopes, rootDataDir: join(root, 'root') });
+  const mgr = new NexusManager({ exchangeHelper: exchangeHelper(), scopes, rootDataDir: join(root, 'root') });
   const tree = (dir, id, version, extra = {}) => {
     put(join(dir, 'app.manifest.json'), JSON.stringify({ id, originId: O1, name: 'Shop', version, ...extra.manifest }));
     put(join(dir, 'src', 'index.astro'), `v${version}\n`);
@@ -71,7 +72,7 @@ test('workspace paths: validated segments, numbered dirs', () => {
 
 test('source.mode survives an update', async () => {
   const root = mkdtempSync(join(tmpdir(), 'aura-mode-'));
-  const installer = new Installer({ appsDir: join(root, 'apps'), dataDir: join(root, 'data'), scope: 'global' });
+  const installer = new Installer({ exchangeHelper: exchangeHelper(), appsDir: join(root, 'apps'), dataDir: join(root, 'data'), scope: 'global' });
   const stage = (v) => { const d = join(root, `s-${v}`); put(join(d, 'app.manifest.json'), '{}'); return d; };
   const manifest = (version) => ({ id: 'io.shop.app', name: 'Shop', version });
   const resolved = { source: 'oci', rawRef: 'reg/io.shop.app:1', digest: 'sha256:1' };
@@ -132,7 +133,7 @@ test('built-in: a built-in app is not patched — its activation is refused, not
   let error = null;
   try { for (let c = await it.next(); !c.done; c = await it.next()) { /* to the end */ } }
   catch (err) { error = err.message; }
-  assert.equal(error, 'system-app-later: Built-in apps are patched by system patches (Phase 7) or in Developer Mode');
+  assert.equal(error, 'system-app-later: Built-in apps are changed with system patches (`aura system patch start`, Normal mode) or in Developer Mode');
   assert.deepEqual(bindings, [], 'the owner is never asked');
   assert.equal(existsSync(join(w.user.appsDir, 'com.aura.terminal')), false);
   assert.equal(readFileSync(join(sysDir, 'src', 'index.astro'), 'utf-8'), 'v1.0.0\n');

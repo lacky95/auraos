@@ -2,7 +2,7 @@
  * App Hosts contract for Phase 2: the records, registry interface, frame
  * result and signed claims the registry, router, gateway and desktop share.
  * Types only, so importing this file adds no runtime code. The rules
- * themselves are in hostRules.ts.
+ * themselves are in types/hostRules.ts.
  */
 import type { NexusSource } from '../nexus/types.js';
 import type { ExecutionApproval } from '../identity/execution.js';

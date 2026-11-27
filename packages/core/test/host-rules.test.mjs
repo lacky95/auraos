@@ -11,7 +11,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import * as rules from '../dist/app-hosts/hostRules.js';
+import * as rules from '../dist/types/hostRules.js';
 import * as coreHosts from '../dist/app-hosts/appHosts.js';
 
 const {
@@ -232,12 +232,12 @@ test('app cookie is __Host- on HTTPS', () => {
 test('the SDK copy of the rules is byte-identical', () => {
   assert.equal(
     readFileSync(join(ROOT, 'packages/app-sdk/src/hostRules.ts'), 'utf-8'),
-    readFileSync(join(ROOT, 'packages/core/src/app-hosts/hostRules.ts'), 'utf-8'),
+    readFileSync(join(ROOT, 'packages/core/src/types/hostRules.ts'), 'utf-8'),
   );
 });
 
 test('the rules module has no imports', () => {
-  const src = readFileSync(join(ROOT, 'packages/core/src/app-hosts/hostRules.ts'), 'utf-8');
+  const src = readFileSync(join(ROOT, 'packages/core/src/types/hostRules.ts'), 'utf-8');
   assert.doesNotMatch(src, /^\s*(import|export\s+\*|export\s+\{[^}]*\}\s+from)\b/m);
 });
 

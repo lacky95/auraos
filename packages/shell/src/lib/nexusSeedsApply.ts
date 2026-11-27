@@ -14,7 +14,7 @@ import { probeGitApp } from './nexusGitApp.js';
 import { credentialsLoaded } from './nexusSourceLogin.js';
 
 const DATA_DIR    = process.env['AURA_DATA_DIR'] ?? '/data';
-const STATE_KV    = 'nexus/source-seeds';  // os KV, in process (core osKv.ts)
+const STATE_KV    = core.NEXUS_SOURCE_SEEDS_KEY;  // os KV, in process (core osKv.ts)
 
 export const SEED_ENV_VAR = 'AURA_NEXUS_SOURCES';
 /** Lowest precedence first. */

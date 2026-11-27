@@ -69,6 +69,20 @@ export interface InstallRecord {
    *  Absent: the release's `source.defaultMode` (AppSource `effectiveSourceMode`).
    *  Kept across updates and patch activations. */
   sourceMode?: SourceMode;
+  /**
+   * A patched tree (Track P, D68 reproducibility): the upstream it is based
+   * on (`basedOn` is the rest of this record) and the exact series and build
+   * inputs it was built from. Absent: the artifact as its source shipped it.
+   */
+  patched?: {
+    baseCommit: string;
+    seriesRev: string;
+    seriesDigest: string;
+    patches: number;
+    /** The installed tree's digest (what the approval bound); the record's `digest` stays the upstream artifact's. */
+    treeDigest: string;
+    buildInputs: { lockfileHash: string | null; builderImage: string | null };
+  };
 }
 
 /** How the user resolved an identity conflict (re-sent with the install). */
@@ -191,6 +205,13 @@ export interface InstallBinding {
   execution: import('../identity/execution.js').ExecutionBinding | null;
   /** What the manifest asks of the host beyond tools and permissions, for the dialog's high-risk section. */
   exposure: InstallExposure;
+  /**
+   * `app.patch.activate` of a series (Q23 approval integrity): the base, the
+   * series revision, digest and order the tree was built from, recomputed by
+   * the route from the patch repository. Absent for store installs and for a
+   * rollback tree.
+   */
+  patch?: import('../patches/types.js').PatchBinding;
 }
 
 /**

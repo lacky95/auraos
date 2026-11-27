@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { Installer, runtimeDataEntries } from '../dist/nexus/Installer.js';
+import { exchangeHelper } from './rename-exchange-helper.mjs';
 
 const ID = 'io.test.app';
 const put = (p, text) => { mkdirSync(join(p, '..'), { recursive: true }); writeFileSync(p, text); };
@@ -23,7 +24,7 @@ function setup() {
   const root = mkdtempSync(join(tmpdir(), 'aura-inst-'));
   const appsDir = join(root, 'apps');
   const dataDir = join(root, 'data');
-  const installer = new Installer({ appsDir, dataDir, scope: 'user' });
+  const installer = new Installer({ exchangeHelper: exchangeHelper(), appsDir, dataDir, scope: 'user' });
   const stage = (version, extra = {}) => {
     const dir = mkdtempSync(join(root, 'stage-'));
     put(join(dir, 'app.manifest.json'), JSON.stringify(manifest(version)));

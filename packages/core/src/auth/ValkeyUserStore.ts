@@ -54,7 +54,8 @@ export const userTombstoneKey = (userId: string): string => `ident:user:tomb:${u
 /** The profile record (D46), versioned. Not sealed: it holds nothing that grants anything. */
 export const profileKey = (userId: string): string => `user:${userId}:profile`;
 /** The sealed password policy (passwordPolicy.ts). Missing means the defaults. */
-export const PASSWORD_POLICY_KEY = 'user:policy:password';
+export { PASSWORD_POLICY_KEY } from './keys.js';
+import { PASSWORD_POLICY_KEY } from './keys.js';
 export const USERNAME_PATTERN = /^[a-z0-9][a-z0-9._-]{0,31}$/;
 /**
  * Every local user id: the owner's `default` and the generated ones. It fits

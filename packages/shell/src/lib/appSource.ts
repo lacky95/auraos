@@ -32,6 +32,7 @@ import { patchLevel, sourceOpenDetails, sourceOpenLevel } from './approvals/disp
 import { installGate, runInstall } from './approvals/nexus.ts';
 import { json, type ApprovalServiceDeps } from './approvals/service.ts';
 import { parseIdentity } from './nexusIdentity.js';
+import { auditActor, auditPatch, isSeriesError, preparedSeries, type PreparedSeries } from './patchActivation.ts';
 import { TERMINAL_APP_ID } from '../../server/session-hosts.mjs';
 
 /** The app a registry knows, with where it lives. */
@@ -69,6 +70,8 @@ export interface AppSourceDeps {
   /** The App Host installation of an app in a scope (`apphost:install:*`), or null. */
   installationId(appId: string, scope: string): Promise<string | null>;
   nexus: Pick<NexusManager, 'install' | 'setSourceMode' | 'rollbackTrees' | 'records'>;
+  /** The admin audit (patch lifecycle rows, Phase 7a). */
+  audit: Pick<core.AuthServices['audit'], 'record'>;
 }
 
 export function liveAppSourceDeps(authenticate: AppSourceDeps['authenticate'], approvals: ApprovalServiceDeps, owner: OwnerActionDeps): AppSourceDeps {
@@ -91,6 +94,7 @@ export function liveAppSourceDeps(authenticate: AppSourceDeps['authenticate'], a
     mounts: mgr.mounts,
     installationId: async (appId, scope) => (await core.getAppHostServices().registry.findInstallation(appId, scope))?.installationId ?? null,
     nexus: core.getNexusManager(),
+    audit: { record: (input) => core.getAuthServices().audit.record(input) },
   };
 }
 
@@ -109,7 +113,7 @@ export function resolveApp(deps: AppSourceDeps, ref: unknown): ScopedApp | Respo
 }
 
 /**
- * A built-in app: read-only, patched by system patches (Phase 7) or in
+ * A built-in app: read-only, changed with system patches (Phase 7b) or in
  * Developer Mode (Q6, D68). A same-id copy from a store or `aura dev` is its
  * own app, with its own patches.
  */
@@ -207,10 +211,12 @@ export async function appSourceStatus(request: Request, instanceId: string | und
   const inst = consumer(deps, instanceId);
   if (inst instanceof Response) return inst;
   let ref: unknown;
+  let saved: unknown;
   if (bind) {
     const body = await readJson(request);
     if (body instanceof Response) return body;
     ref = body['app'];
+    saved = body['saved'];
   } else {
     ref = new URL(request.url).searchParams.get('app');
   }
@@ -220,6 +226,14 @@ export async function appSourceStatus(request: Request, instanceId: string | und
   const { key, active } = await patchInstallation(deps, app);
   const userId = actingUser(principal);
 
+  // `aura dev patch save` reports the revision it saved: the kernel side reads
+  // it from the patch repository and writes the audit row (Phase 7a), so the
+  // record is the system's, not the CLI's word.
+  if (saved !== undefined) {
+    const r = key ? savedSeries(deps.dataDir, key, saved, app.id) : { error: 'no-installation', message: `${app.id} has no installation record` };
+    if ('error' in r) return json({ error: r.error, message: r.message }, 422);
+    await auditPatch(deps.audit, auditActor(principal), core.PATCH_AUDIT_ACTIONS.saved, app.id, 'ok', { installationId: key, ...r });
+  }
   const writable = mode.mode === 'open' && mayWrite(principal, deps);
   let view = deps.mounts.list(inst).find((m) => m.id === app.id);
   if (bind) {
@@ -424,6 +438,21 @@ export async function setSourceMode(ctx: RouteCtx, appId: string | undefined, de
   return json({ ok: true, appId: app.id, mode, defaultMode: app.source?.defaultMode ?? 'closed' });
 }
 
+/** A saved revision's identity for the audit: revision, digest, patch count (validated, never contents). */
+function savedSeries(dataDir: string, installationId: string, rev: unknown, appId: string):
+  { rev: string; seriesDigest: string; base: string; patches: number } | { error: string; message: string } {
+  if (typeof rev !== 'string' || !/^[0-9a-f]{40,64}$/.test(rev)) return { error: 'invalid-revision', message: 'saved: a full revision hash' };
+  try {
+    const loaded = core.loadSeries(join(dataDir, core.patchRepoSubpath(installationId)), rev);
+    if (!loaded) return { error: 'invalid-revision', message: `no series at ${rev.slice(0, 12)}` };
+    if (core.seriesAppId(loaded.series) !== appId) return { error: 'invalid-series', message: `the series patches ${core.seriesAppId(loaded.series) ?? 'the system'}` };
+    core.assertPatchesValid({ kind: 'app', appId }, loaded.patches.filter((p) => p.enabled));
+    return { rev, seriesDigest: loaded.digest, base: loaded.series.base.commit, patches: loaded.patches.length };
+  } catch (err) {
+    return { error: 'invalid-series', message: (err as Error).message };
+  }
+}
+
 // ── R4: activate a prepared tree ────────────────────────────────────────────
 
 export async function activatePrepared(request: Request, appId: string | undefined, deps: AppSourceDeps): Promise<Response> {
@@ -441,7 +470,10 @@ export async function activatePrepared(request: Request, appId: string | undefin
   const scope: 'global' | 'user' = app.scopeId === 'global' ? 'global' : 'user';
 
   let tree: string;
-  if (body['rollback'] === true) {
+  let series: PreparedSeries | null = null;
+  const rollback = body['rollback'] === true;
+  const { key } = await patchInstallation(deps, app);
+  if (rollback) {
     const newest = deps.nexus.rollbackTrees(app.id, scope).newest;
     if (!newest) return json({ error: 'no-rollback-tree', message: `no earlier tree of ${app.id} is kept` }, 404);
     tree = newest;
@@ -450,11 +482,17 @@ export async function activatePrepared(request: Request, appId: string | undefin
     if (!Number.isInteger(n)) return json({ error: 'invalid-workspace', message: 'pass workspace: <n>, or rollback: true' }, 400);
     const user = workspaceOwner(principal, body['user']);
     if (user instanceof Response) return user;
-    const { key } = await patchInstallation(deps, app);
     if (!key) return json({ error: 'no-installation', message: `${app.id} has no installation record` }, 409);
     try { tree = join(deps.dataDir, core.workspaceSubpath(user, key, n as number)); }
     catch (err) { return json({ error: 'invalid-workspace', message: (err as Error).message }, 400); }
     if (!existsSync(tree)) return json({ error: 'no-workspace', message: `workspace ${String(n)} of ${app.id} does not exist` }, 404);
+    // Q23: what the tree was built from, read from the patch repository and checked against the tree.
+    const s = preparedSeries({
+      dataDir: deps.dataDir, installationId: key, rev: body['rev'], appId: app.id, scope, tree,
+      upstreamCommit: upstreamOf(deps, app)?.commit ?? null,
+    });
+    if (isSeriesError(s)) return json({ error: s.error, message: s.message }, s.status);
+    series = s;
   }
   let candidate: AppManifest;
   try { candidate = core.validateStagedDir(tree); }
@@ -465,13 +503,40 @@ export async function activatePrepared(request: Request, appId: string | undefin
   const diff = core.computePermissionDiff(app, candidate);
   const gate = installGate(deps.approvals, principal, request, body['operatorCode'], {
     level: (binding) => patchLevel(app.id, binding, diff), diff,
+    ...(series ? { details: series.lines, exactDiff: series.diff } : {}),
   });
   const answer = await runInstall(deps.nexus.install({
     ref: tree, scope, action: 'app.patch.activate', approval: gate.approval, ...(identity ? { identity } : {}),
+    ...(series ? { patch: series.binding, patched: { patches: series.patches } } : {}),
   }), gate, () => 422);
-  if (answer.status !== 200) return answer;
-  const result = await answer.json() as { ok?: boolean; record?: InstallRecord };
-  if (!result.ok || !result.record) return json(result);
+  const consumed = gate.consumed();
+  const by = consumed?.by ?? auditActor(principal);
+  const auditDetail = {
+    appScope: scope, ...(key ? { installationId: key } : {}),
+    ...(series ? { rev: series.binding.seriesRev, seriesDigest: series.binding.seriesDigest, base: series.binding.baseCommit, patches: series.patches } : {}),
+    ...(consumed?.id ? { approval: consumed.id } : {}),
+  };
+  if (answer.status !== 200) {
+    // A question (approval, identity) is no failure; anything else after the approval is.
+    if (consumed) {
+      const b = await answer.clone().json().catch(() => ({})) as { error?: string; message?: string; code?: string; step?: string };
+      await auditPatch(deps.audit, by, core.PATCH_AUDIT_ACTIONS.activationFailed, app.id, 'failed', {
+        ...auditDetail, step: b.step ?? (b.code === core.ACTIVATION_BUSY ? 'lock' : b.code === core.INSTALL_NOT_ATOMIC ? 'switch' : 'install'),
+        reason: String(b.message ?? b.error ?? '').slice(0, 300),
+      });
+    }
+    return answer;
+  }
+  const result = await answer.json() as { ok?: boolean; record?: InstallRecord; needsIdentityChoice?: boolean; error?: string };
+  if (!result.ok || !result.record) {
+    if (consumed && !result.needsIdentityChoice) {
+      await auditPatch(deps.audit, by, core.PATCH_AUDIT_ACTIONS.activationFailed, app.id, 'failed', { ...auditDetail, step: 'install', reason: String(result.error ?? '').slice(0, 300) });
+    }
+    return json(result);
+  }
+  await auditPatch(deps.audit, by, rollback ? core.PATCH_AUDIT_ACTIONS.rolledBack : core.PATCH_AUDIT_ACTIONS.activated, app.id, 'ok', {
+    ...auditDetail, treeDigest: result.record.patched?.treeDigest ?? result.record.digest, ...(rollback ? { to: 'previous tree', automatic: body['automatic'] === true } : {}),
+  });
   return json({
     ok: true, record: result.record, scope,
     rollbackTree: deps.nexus.rollbackTrees(app.id, scope, result.record).previous,

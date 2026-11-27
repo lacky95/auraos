@@ -16,7 +16,7 @@ import type { ScopeDefinition, ScopeId } from '../scopes/types.js';
 import type { AppHostRecord, AppInstallation, AppInstanceScope, AppSourceFingerprint } from './contracts.js';
 import { APP_HOST_DEFAULT_USER, sameAppSource, type AppHostStore } from './AppHostRegistry.js';
 import { manifestHostClaim, type ManifestHostGuard } from './manifestHostGuard.js';
-import { isProtectedHostName } from './hostRules.js';
+import { isProtectedHostName } from '../types/hostRules.js';
 import { newInstallationRunAs } from '../identity/types.js';
 import type { ExecutionApproval } from '../identity/execution.js';
 

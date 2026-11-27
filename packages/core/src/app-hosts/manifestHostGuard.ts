@@ -7,7 +7,7 @@
  * a system app and was not accepted before (`known`), or when it is an
  * allocated App Host label. System-scope manifests are trusted as shipped.
  */
-import { isProtectedHostName } from './hostRules.js';
+import { isProtectedHostName } from '../types/hostRules.js';
 
 interface HostHolder { id: string; hosts: ReadonlyArray<{ name: string }> }
 

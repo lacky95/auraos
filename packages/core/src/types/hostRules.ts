@@ -3,7 +3,7 @@
  * built and named. Pure, with no imports, so it runs in the shell server, the
  * browser and an installed app alike.
  *
- * The source is packages/core/src/app-hosts/hostRules.ts. The SDK carries a
+ * The source is packages/core/src/types/hostRules.ts. The SDK carries a
  * byte-identical copy at packages/app-sdk/src/hostRules.ts, because an app can
  * install @aura/app-sdk without @aura/core. core's host-rules test fails if
  * the two differ. Docs: /docs/app-hosts.

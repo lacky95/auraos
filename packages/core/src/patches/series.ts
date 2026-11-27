@@ -3,8 +3,15 @@
  * of a base commit, in a small git repository of its own (the patch repo).
  *
  *   <patch repo>/
- *     aura-patches.yaml        app, base { repository, commit, path? }, patches[]
+ *     aura-patches.yaml        v: 2, target, base { repository, commit, path?, release? },
+ *                              patches[{ file, subject, sha256, enabled }]
  *     patches/0001-<slug>.patch  `git format-patch` output, applied in order
+ *
+ * v2 (Phase 7): a target (an app or the system), each patch's sha256 and an
+ * enabled flag; the series digest (digest.ts) is what an approval binds. A
+ * file without `v` is v1 (`app: <id>`) and reads as v2 (target app, sha256
+ * computed, enabled); every save writes v2. Every patch is validated
+ * (validate.ts) on save and before it is applied.
  *
  * One library for both kinds of patch (D53): app patches (`aura dev patch …`,
  * repo: the app-data volume's aura/patches/<installationId>, bound at
@@ -28,7 +35,10 @@ import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { parse, stringify } from 'yaml';
 import { z } from 'zod';
-import { MOUNT_ROOT_PATH, PATCHES_DIR_NAME, WORK_DIR_NAME } from '../app-manager/MountManager.js';
+import { MOUNT_ROOT_PATH, PATCHES_DIR_NAME, WORK_DIR_NAME } from '../app-manager/contracts.js';
+import { seriesDigest, sha256Hex } from './digest.js';
+import type { PatchTarget } from './types.js';
+import { validatePatch, type PatchValidation } from './validate.js';
 
 export const SERIES_FILE = 'aura-patches.yaml';
 export const PATCHES_DIR = 'patches';
@@ -40,22 +50,46 @@ const BaseSchema = z.object({
   commit:     z.string().regex(/^[0-9a-f]{7,64}$/, 'a commit hash'),
   /** Subdirectory of the repo that is the app (monorepo apps). */
   path:       z.string().min(1).refine((p) => !p.startsWith('/') && !p.split('/').includes('..'), 'a relative path').optional(),
+  /** The release the base commit belongs to (system series, 7b). */
+  release:    z.string().min(1).optional(),
 });
 
 const PatchSchema = z.object({
   file:    z.string().regex(/^patches\/[^/]+\.patch$/, 'patches/<name>.patch'),
   subject: z.string(),
+  /** sha256 of the patch file's bytes; computed on read when absent (v1). */
+  sha256:  z.string().regex(/^[0-9a-f]{64}$/, 'a sha256').optional(),
+  /** false: kept in the series but not applied (its flag is part of the digest). */
+  enabled: z.boolean().default(true),
 });
 
-export const SeriesSchema = z.object({
-  app:     z.string().min(1),
+const TargetSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('app'), appId: z.string().min(1), scope: z.enum(['global', 'user']).optional() }),
+  z.object({ kind: z.literal('system') }),
+]);
+
+const SeriesV2Schema = z.object({
+  v:       z.literal(2),
+  target:  TargetSchema,
   base:    BaseSchema,
   patches: z.array(PatchSchema).default([]),
 });
 
+/** v1 (Track P, before Phase 7): `app: <id>`, patches without sha256 or flag. Read only. */
+const SeriesV1Schema = z.object({
+  app:     z.string().min(1),
+  base:    BaseSchema,
+  patches: z.array(PatchSchema.pick({ file: true, subject: true })).default([]),
+}).transform((s) => ({ v: 2 as const, target: { kind: 'app' as const, appId: s.app }, base: s.base, patches: s.patches.map((p) => ({ ...p, enabled: true })) }));
+
+export const SeriesSchema = z.union([SeriesV2Schema, SeriesV1Schema]);
+
 export type SeriesBase  = z.infer<typeof BaseSchema>;
 export type SeriesPatch = z.infer<typeof PatchSchema>;
-export type Series      = z.infer<typeof SeriesSchema>;
+export type Series      = z.infer<typeof SeriesV2Schema>;
+
+/** The app a series patches, or null for a system series. */
+export const seriesAppId = (s: Series): string | null => (s.target.kind === 'app' ? s.target.appId : null);
 
 export class SeriesError extends Error {}
 
@@ -77,8 +111,9 @@ export const patchesOverride = (): string | null => process.env['AURA_PATCHES_DI
  * path on the command line (`-c safe.directory=<top>`: protected config,
  * written nowhere): a workspace or patch repo bound into a Terminal
  * (`/mnt/aura/work/<app>`, `/mnt/aura/patches/<app>`), the same dirs in the
- * shell (`<dataDir>/aura/workspaces/...`, `<dataDir>/aura/patches/...`), and
- * the tests' override root. Any other repo keeps git's check.
+ * shell (`<dataDir>/aura/workspaces/...`, `<dataDir>/aura/patches/...`), the
+ * system patch store (`<dataDir>/patches/system`, 7b), and the tests'
+ * override root. Any other repo keeps git's check.
  */
 export function safeDirectoryArgs(dir: string): string[] {
   const top = resolve(dir);
@@ -86,7 +121,8 @@ export function safeDirectoryArgs(dir: string): string[] {
   const override = patchesOverride();
   const roots = [
     join(MOUNT_ROOT_PATH, WORK_DIR_NAME), join(MOUNT_ROOT_PATH, PATCHES_DIR_NAME),
-    join(data, 'aura', 'workspaces'), join(data, 'aura', 'patches'), ...(override ? [override] : []),
+    join(data, 'aura', 'workspaces'), join(data, 'aura', 'patches'), join(data, 'patches', 'system'),
+    ...(override ? [override] : []),
   ];
   return roots.some((r) => top.startsWith(`${resolve(r)}/`)) ? ['-c', `safe.directory=${top}`] : [];
 }
@@ -120,20 +156,29 @@ function identityArgs(cwd: string): string[] {
 export function parseSeries(text: string): Series {
   let doc: unknown;
   try { doc = parse(text); } catch (err) { throw new SeriesError(`${SERIES_FILE}: ${(err as Error).message}`); }
-  const r = SeriesSchema.safeParse(doc);
+  const versioned = !!doc && typeof doc === 'object' && 'v' in (doc as object);
+  const r = (versioned ? SeriesV2Schema : SeriesSchema).safeParse(doc);
   if (!r.success) {
     throw new SeriesError(`${SERIES_FILE}: ${r.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ')}`);
   }
   return r.data;
 }
 
+/** The series file text: always v2. */
 export function formatSeries(s: Series): string {
   const base: SeriesBase = {
     ...(s.base.repository ? { repository: s.base.repository } : {}),
     commit: s.base.commit,
     ...(s.base.path ? { path: s.base.path } : {}),
+    ...(s.base.release ? { release: s.base.release } : {}),
   };
-  return stringify({ app: s.app, base, patches: s.patches.map((p) => ({ file: p.file, subject: p.subject })) });
+  const target = s.target.kind === 'app'
+    ? { kind: 'app', appId: s.target.appId, ...(s.target.scope ? { scope: s.target.scope } : {}) }
+    : { kind: 'system' };
+  return stringify({
+    v: 2, target, base,
+    patches: s.patches.map((p) => ({ file: p.file, subject: p.subject, ...(p.sha256 ? { sha256: p.sha256 } : {}), enabled: p.enabled !== false })),
+  });
 }
 
 /** The series in a patch repo, at `rev` (a commit) or in the work tree. null: no series yet. */
@@ -150,13 +195,40 @@ function tryGitRaw(cwd: string, args: string[]): string | null {
   try { return git(cwd, args); } catch { return null; }
 }
 
-/** The patch files of a series, as text, from the repo at `rev` (or the work tree). */
-export function readPatches(repoDir: string, series: Series, rev?: string): Array<SeriesPatch & { content: string }> {
+export type LoadedPatch = SeriesPatch & { content: string; sha256: string; enabled: boolean };
+
+/**
+ * The patch files of a series, as text, from the repo at `rev` (or the work
+ * tree), each with its sha256. A recorded sha256 that does not match the file
+ * is refused: the series was changed outside `saveSeries`.
+ */
+export function readPatches(repoDir: string, series: Series, rev?: string): LoadedPatch[] {
   return series.patches.map((p) => {
     const content = rev ? tryGitRaw(repoDir, ['show', `${rev}:${p.file}`]) : readFileOr(join(repoDir, p.file));
     if (content === null) throw new SeriesError(`${p.file} is listed in ${SERIES_FILE} but missing${rev ? ` at ${rev.slice(0, 12)}` : ''}`);
-    return { ...p, content };
+    const sha256 = sha256Hex(content);
+    if (p.sha256 && p.sha256 !== sha256) throw new SeriesError(`${p.file} does not match its sha256 in ${SERIES_FILE}`);
+    return { ...p, content, sha256, enabled: p.enabled !== false };
   });
+}
+
+/** A series at `rev` with its patches and digest: what an activation of `rev` binds. */
+export function loadSeries(repoDir: string, rev: string): { series: Series; patches: LoadedPatch[]; digest: string } | null {
+  const series = readSeries(repoDir, rev);
+  if (!series) return null;
+  const patches = readPatches(repoDir, series, rev);
+  return { series, patches, digest: seriesDigest({ target: series.target, base: series.base, patches }) };
+}
+
+/**
+ * Validate each patch for `target` (validate.ts); throws a SeriesError naming
+ * every refused patch. Returns each patch's result (flags for the approval).
+ */
+export function assertPatchesValid(target: PatchTarget, patches: Array<Pick<SeriesPatch, 'file'> & { content: string }>): PatchValidation[] {
+  const results = patches.map((p) => validatePatch(p.content, { target }));
+  const bad = results.flatMap((r, i) => r.refused.map((f) => `${patches[i]!.file}: ${f.message}`));
+  if (bad.length) throw new SeriesError(`refused patch content: ${bad.join('; ')}`);
+  return results;
 }
 
 function readFileOr(p: string): string | null {
@@ -230,7 +302,7 @@ export function checkoutBase(dir: string, base: SeriesBase, opts: { timeout?: nu
 
 // ─── save and apply ─────────────────────────────────────────────────────────
 
-export interface ExportedPatch extends SeriesPatch { content: string }
+export interface ExportedPatch { file: string; subject: string; content: string; enabled?: boolean }
 
 /**
  * The commits `baseCommit..HEAD` of `workTree` as patch files, in order
@@ -272,8 +344,12 @@ export interface SaveResult {
  * the customization). Creates the repo on first use. Old patch files not in
  * the new series are removed.
  */
-export function saveSeries(repoDir: string, input: { app: string; base: SeriesBase; patches: ExportedPatch[]; message: string }): SaveResult {
-  const series: Series = { app: input.app, base: input.base, patches: input.patches.map(({ file, subject }) => ({ file, subject })) };
+export function saveSeries(repoDir: string, input: { target: PatchTarget; base: SeriesBase; patches: ExportedPatch[]; message: string }): SaveResult {
+  assertPatchesValid(input.target, input.patches);
+  const series: Series = {
+    v: 2, target: input.target, base: input.base,
+    patches: input.patches.map(({ file, subject, content, enabled }) => ({ file, subject, sha256: sha256Hex(content), enabled: enabled !== false })),
+  };
   mkdirSync(join(repoDir, PATCHES_DIR), { recursive: true });
   const fresh = !existsSync(join(repoDir, '.git'));
   if (fresh) git(repoDir, ['init', '-q', '-b', 'main']);
@@ -316,12 +392,18 @@ export type ApplyResult =
  * `keepConflict`: then the work tree stays in the `git am` session with the
  * conflict markers, for someone to fix and `git am --continue`.
  */
-export function applySeries(workTree: string, patches: Array<SeriesPatch & { content: string }>, opts: { keepConflict?: boolean } = {}): ApplyResult {
+export function applySeries(
+  workTree: string, patches: Array<SeriesPatch & { content: string }>,
+  opts: { keepConflict?: boolean; target?: PatchTarget } = {},
+): ApplyResult {
+  // Disabled patches stay in the series but are not applied; the rest are validated first.
+  const active = patches.map((p, index) => ({ p, index })).filter(({ p }) => p.enabled !== false);
+  assertPatchesValid(opts.target ?? { kind: 'app', appId: '' }, active.map(({ p }) => p));
   const dir = mkdtempSync(join(tmpdir(), 'aura-apply-'));
   const id = identityArgs(workTree);
   try {
-    for (let i = 0; i < patches.length; i++) {
-      const p = patches[i]!;
+    for (let n = 0; n < active.length; n++) {
+      const { p, index: i } = active[n]!;
       const file = join(dir, basename(p.file));
       writeFileSync(file, p.content);
       try {
@@ -330,10 +412,10 @@ export function applySeries(workTree: string, patches: Array<SeriesPatch & { con
         const conflicts = (tryGitRaw(workTree, ['diff', '--name-only', '--diff-filter=U']) ?? '').split('\n').filter(Boolean);
         const message = gitError(err);
         if (!opts.keepConflict) tryGit(workTree, [...id, 'am', '--abort']);
-        return { ok: false, applied: i, failed: { ...p, index: i }, conflicts, message, inProgress: !!opts.keepConflict };
+        return { ok: false, applied: n, failed: { ...p, index: i }, conflicts, message, inProgress: !!opts.keepConflict };
       }
     }
-    return { ok: true, applied: patches.length, head: git(workTree, ['rev-parse', 'HEAD']).trim() };
+    return { ok: true, applied: active.length, head: git(workTree, ['rev-parse', 'HEAD']).trim() };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -344,7 +426,9 @@ export function applySeries(workTree: string, patches: Array<SeriesPatch & { con
  * what activation installs and an update tries on a new base. On a patch
  * that does not apply, the result names it and the tree is unusable.
  */
-export function buildTree(dir: string, base: SeriesBase, patches: Array<SeriesPatch & { content: string }>): ApplyResult & { baseCommit: string } {
+export function buildTree(
+  dir: string, base: SeriesBase, patches: Array<SeriesPatch & { content: string }>, opts: { target?: PatchTarget } = {},
+): ApplyResult & { baseCommit: string } {
   const baseCommit = checkoutBase(dir, base);
-  return { ...applySeries(dir, patches), baseCommit };
+  return { ...applySeries(dir, patches, opts), baseCommit };
 }

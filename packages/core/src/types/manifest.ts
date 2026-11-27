@@ -1,4 +1,4 @@
-import { HOST_NAME_RE, RESERVED_HOST_NAMES, isValidHostName } from '../app-hosts/appHosts.js';
+import { HOST_NAME_RE, RESERVED_HOST_NAMES, isValidHostName } from './hostRules.js';
 import { z } from 'zod';
 
 /**
