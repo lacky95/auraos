@@ -11,6 +11,10 @@
 export * from './contracts.js';
 
 // ── P1 resolver ─────────────────────────────────────────────────────────────
+export { resolveEffective, autoSelectableProfile, profileOptions, type ProfileContext } from './resolve.js';
+export { effectiveManifestView, mergeFields, tightenField, type ViewConfig } from './merge.js';
+export { configDigestOf, grantDigestOf, grantBearingOf, type DigestableConfig } from './digest.js';
+export { FEATURE_OF_NEED } from './requirements.js';
 
 // ── P2 store and state ──────────────────────────────────────────────────────
 

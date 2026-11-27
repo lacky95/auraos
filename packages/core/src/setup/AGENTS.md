@@ -5,6 +5,10 @@ The sector rules are in `packages/core/AGENTS.md`. Design: D108 (`app-profiles-s
 ## Files
 
 - **`contracts.ts`** (contract leaf): operational states and transitions, the desired-configuration record, the resolution (desired / authorized / effective), digests, resolver ports, D105 codes (`needs-setup`), the `app.setup.apply` payload and class, API/SDK views, hook contracts, audit and the `app:setup-state` event.
+- **`resolve.ts`** (P1): `resolveEffective(input, ports)`, the one pure resolver (desired → requested → effective, D105 `blocking`, never a fallback; `instanceScope: shared` refused until BT-M2); `autoSelectableProfile` (decision 3: exactly one feasible input-free profile, only for a caller that asks) and `profileOptions` (available + reasons).
+- **`merge.ts`** (P1): the merge rules (overlay over base, desired overrides on the configurable keys, sorted request union, services by name with the overlay keys only, fields tightened never loosened) and `effectiveManifestView` (base order kept: an app without setup/profiles gets its base back).
+- **`requirements.ts`** (P1): requirement evaluation through the `ResolverPorts`: explicit (`setup`/profile, level, `when`), implied (Private Home: D64 `app-private-home`, `home.private[.sidecar:<n>]`, `storage.privateHome`; `instance` network: `network.isolation`; resources: `resources.limits`) and derived (`requirementsOf()` → `FEATURE_OF_NEED`). Only `supported` meets a requirement.
+- **`digest.ts`** (P1): `configDigestOf` (secrets by field name only) and `grantDigestOf` (`GrantBearing`), `sha256:<hex>` over canonical JSON.
 - **`index.ts`**: the module's public surface, re-exported by the core barrel. Named exports only; one region per work package.
 - Related leaves outside this directory: `config/schema.ts` (the one field model, also behind runtime settings) and `types/setupManifest.ts` (the manifest blocks `setup`, `profiles`, `homeEnvironments`, env references).
 
