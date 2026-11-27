@@ -71,6 +71,18 @@ test('initRepo makes a main branch with one commit of the files, honouring .giti
   assert.equal(initRepo(dir, 'again'), null, 'an existing repo is left alone');
 });
 
+test('initRepo with exclude lines never commits an existing app dir\'s runtime data', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'aura-init-'));
+  writeFileSync(join(dir, 'a.txt'), 'a\n');
+  for (const rel of ['io.x.app/secrets.json', '.sidecars/webui/data/webui.db']) {
+    execFileSync('mkdir', ['-p', join(dir, rel, '..')]);
+    writeFileSync(join(dir, rel), '{}');
+  }
+  initRepo(dir, 'Initial commit', ['/io.x.app/', '.sidecars/']);
+  assert.deepEqual(git(dir, 'ls-files').split('\n'), ['a.txt']);
+  assert.equal(git(dir, 'status', '--porcelain'), '', 'excluded, so not even untracked');
+});
+
 test('save: patches/NNNN-*.patch plus aura-patches.yaml in one patch-repo commit', () => {
   const u = upstream();
   const base = { repository: u.repo, commit: u.base };

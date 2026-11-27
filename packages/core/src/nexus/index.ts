@@ -65,8 +65,11 @@ export {
   DEFAULT_REGISTRY_CONFIG, LOCAL_REGISTRY_DEFAULT_URL, LOCAL_REGISTRY_HOST,
 } from './RegistryConfig.js';
 export type { RegistryConfig, RegistryEntry } from './RegistryConfig.js';
-export { publishFileList, withheldReason, DEFAULT_PUBLISH_IGNORE } from './PublishFiles.js';
-export type { PublishFileList, PublishFileOpts } from './PublishFiles.js';
+export {
+  publishFileList, withheldReason, DEFAULT_PUBLISH_IGNORE, isInstanceDataDir, isRuntimeDataEntry, runtimeDataIgnoreLines,
+  trackedRuntimeData, trackedRuntimeDataRefusal, refuseTrackedRuntimeData, RuntimeDataTrackedError,
+} from './PublishFiles.js';
+export type { PublishFileList, PublishFileOpts, TrackedRuntimeFile } from './PublishFiles.js';
 export {
   readOciCatalog, readOciCatalogAsync, upsertOciCatalog, parseCatalog, catalogRepo,
   CATALOG_REPO, CATALOG_TAG, CATALOG_ARTIFACT_TYPE,

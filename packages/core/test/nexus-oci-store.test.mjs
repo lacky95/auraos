@@ -12,11 +12,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, writeFileSync, symlinkSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-import { publishFileList, withheldReason } from '../dist/nexus/PublishFiles.js';
+import {
+  publishFileList, withheldReason, runtimeDataIgnoreLines, trackedRuntimeData, refuseTrackedRuntimeData, RuntimeDataTrackedError,
+} from '../dist/nexus/PublishFiles.js';
+import { publishGit } from '../dist/nexus/Publisher.js';
 import { parseCatalog, catalogRepo } from '../dist/nexus/OciCatalog.js';
 import { checkRegistryLogin, probeRegistryAddress, parseChallenge } from '../dist/nexus/RegistryProbe.js';
 import { splitOciUrl, orasHostFromUrl } from '../dist/nexus/RegistryConfig.js';
@@ -95,6 +99,100 @@ test('withheldReason: the app data dir only at the root', () => {
   assert.equal(withheldReason('io.x.y/state.json', 'io.x.y'), 'app data dir');
   assert.equal(withheldReason('src/io.x.y/ok.ts', 'io.x.y'), null);
   assert.equal(withheldReason('.env.sample', 'a'), null);
+});
+
+test('withheldReason: every instance data dir (<appId>-<n> too) and secrets.json', () => {
+  assert.equal(withheldReason('io.x.y-2/secrets.json', 'io.x.y'), 'app data dir');
+  assert.equal(withheldReason('io.x.y-docs/a.md', 'io.x.y'), null, 'only <appId>-<digits> is an instance dir');
+  assert.equal(withheldReason('secrets.json', 'a'), 'secret or runtime data');
+  assert.equal(withheldReason('.claude.json', 'a'), 'secret or runtime data');
+});
+
+// ─── tracked runtime data (security finding 0.0.52: instance data in the source repo) ───
+
+const gitIn = (dir, ...args) => execFileSync('git', ['-C', dir, '-c', 'user.name=t', '-c', 'user.email=t@t', ...args],
+  { stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim();
+
+/** An app repo whose instance data and sidecar volumes are tracked (what `git add -A` without the ignore lines does). */
+function leakyRepo() {
+  const dir = appDir({
+    'app.manifest.json': '{}', 'src/a.ts': '', '.npmrc': '@aura:registry=x\n', 'sub/.npmrc': '//r/:_authToken=npm_x\n',
+    'io.x.app/secrets.json': '{}', 'io.x.app-2/state.json': '{}', '.sidecars/webui/data/webui.db': 'x',
+    '.sidecars/claude/home/.claude/.credentials.json': '{}', 'auth.json': '{}',
+  });
+  gitIn(dir, 'init', '-q', '-b', 'main');
+  gitIn(dir, 'add', '-A');
+  gitIn(dir, 'commit', '-qm', 'all');
+  return dir;
+}
+
+test('trackedRuntimeData names tracked instance data, sidecar volumes and credentials, nothing else', () => {
+  const dir = leakyRepo();
+  writeFileSync(join(dir, 'io.x.app', 'untracked.db'), 'x');   // present but untracked: not this check's concern
+  const found = trackedRuntimeData(dir, 'io.x.app');
+  assert.deepEqual(found.map((f) => f.file), [
+    '.sidecars/claude/home/.claude/.credentials.json', '.sidecars/webui/data/webui.db', 'auth.json',
+    'io.x.app-2/state.json', 'io.x.app/secrets.json', 'sub/.npmrc',
+  ]);
+  assert.equal(found.find((f) => f.file === 'sub/.npmrc').reason, 'contains a registry login');
+  assert.deepEqual(trackedRuntimeData(appDir({ 'a.json': '{}' }), 'io.x.app'), [], 'not a git work tree: nothing');
+});
+
+test('trackedRuntimeData with pushing: commits a push would send, not those already on the remote', () => {
+  const dir = leakyRepo();
+  gitIn(dir, 'rm', '-rq', '--cached', 'io.x.app', 'io.x.app-2', '.sidecars', 'auth.json', 'sub/.npmrc');
+  gitIn(dir, 'commit', '-qm', 'untrack');
+  assert.deepEqual(trackedRuntimeData(dir, 'io.x.app'), [], 'the index is clean now');
+  const pushed = trackedRuntimeData(dir, 'io.x.app', { pushing: ['main'] });
+  assert.ok(pushed.some((f) => f.file === 'io.x.app/secrets.json'), 'the history still carries it');
+  const remote = mkdtempSync(join(tmpdir(), 'aura-remote-'));
+  execFileSync('git', ['init', '-q', '--bare', remote]);
+  gitIn(dir, 'remote', 'add', 'origin', remote);
+  gitIn(dir, 'push', '-q', 'origin', 'main');
+  writeFileSync(join(dir, 'src', 'b.ts'), '');
+  gitIn(dir, 'add', 'src/b.ts');
+  gitIn(dir, 'commit', '-qm', 'clean');
+  assert.deepEqual(trackedRuntimeData(dir, 'io.x.app', { pushing: ['main', '--not', '--remotes=origin'] }), [],
+    'only the unpushed commits count');
+});
+
+test('refuseTrackedRuntimeData: the D105 body names the files and the fix', () => {
+  const dir = leakyRepo();
+  assert.throws(() => refuseTrackedRuntimeData(dir, 'io.x.app'), (err) => {
+    assert.ok(err instanceof RuntimeDataTrackedError);
+    assert.equal(err.body.error, 'runtime-data-tracked');
+    assert.equal(err.body.category, 'invalid-request');
+    assert.match(err.body.message, /io\.x\.app\/secrets\.json/);
+    assert.match(err.body.hint, /git rm -r --cached/);
+    assert.equal(err.body.details.files.length, 6);
+    return true;
+  });
+  assert.doesNotThrow(() => refuseTrackedRuntimeData(appDir({ 'a.ts': '' }), 'io.x.app'));
+});
+
+test('publishGit refuses an app that tracks runtime data, before anything is staged or pushed', async () => {
+  const dir = leakyRepo();
+  writeFileSync(join(dir, 'app.manifest.json'), JSON.stringify({
+    id: 'io.x.app', name: 'X', version: '1.0.0', originId: '6f1c1d36-7c55-4bb4-9d0f-0d6c3c7c4a11',
+  }));
+  const dataDir = mkdtempSync(join(tmpdir(), 'aura-pubdata-'));
+  await assert.rejects(publishGit({ appPath: dir, repo: join(dataDir, 'nowhere.git'), dataDir }),
+    (err) => err instanceof RuntimeDataTrackedError);
+  assert.throws(() => readFileSync(join(dataDir, 'nexus', 'publish-staging')), /ENOENT/, 'nothing staged');
+});
+
+test('runtimeDataIgnoreLines keep runtime data untracked, and the scaffold .gitignore carries them', () => {
+  const dir = appDir({
+    'src/a.ts': '', 'io.x.app/secrets.json': '{}', 'io.x.app-3/x.json': '{}', '.sidecars/s/v/webui.db': 'x',
+    '.data/p.db': 'x', '.env': 'K=v', '.env.example': 'K=', 'auth.json': '{}',
+  });
+  writeFileSync(join(dir, '.gitignore'), runtimeDataIgnoreLines('io.x.app').join('\n') + '\n');
+  gitIn(dir, 'init', '-q');
+  const visible = gitIn(dir, 'ls-files', '--others', '--exclude-standard').split('\n').sort();
+  assert.deepEqual(visible, ['.env.example', '.gitignore', 'src/a.ts']);
+  const template = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../../aura-cli/src/templates/app/.gitignore'), 'utf-8')
+    .replaceAll('{{APP_ID}}', 'io.x.app').split('\n');
+  for (const line of runtimeDataIgnoreLines('io.x.app')) assert.ok(template.includes(line), `template .gitignore has ${line}`);
 });
 
 test('catalog documents stay inside their prefix', () => {
