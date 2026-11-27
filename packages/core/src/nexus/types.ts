@@ -201,3 +201,28 @@ export type NexusProgressEvent =
   | { type: 'publish.progress';   message: string }
   | { type: 'publish.done';       ref: string }
   | { type: 'error';              code: string; message: string };
+
+/**
+ * A registry credential for pulling one image on behalf of one installed app
+ * (RegistryAuth `resolvePullCredential`). An opaque, short-lived handle: the
+ * secret is not a field, it only goes into a throwaway auth file that the
+ * runtime that pulls (docker today, another ARI runtime later) asks for and
+ * disposes right after the pull. Never handed to the app or its sidecars.
+ */
+export interface PullCredential {
+  /** The Nexus source whose login this is (named in errors). */
+  readonly source:     string;
+  /** Registry host of the image (== the source's registry host). */
+  readonly host:       string;
+  /** Repository path of the image on that host (inside the app's own artifact repository). */
+  readonly repository: string;
+  /**
+   * Write the login as an OCI registry auth file (the `{"auths": …}` JSON that
+   * docker `--config`, podman/skopeo `--authfile` and oras `--registry-config`
+   * read), holding only this host, in a private temp dir. Call `dispose()` in
+   * a finally.
+   */
+  authFile(): { dir: string; file: string; dispose(): void };
+  /** `text` (registry output) with the secret masked. */
+  redact(text: string): string;
+}

@@ -34,17 +34,20 @@ app-managed path; the notes below say where the two differ.
 ### Private images
 
 An image in a private registry is pulled with the registry login of the
-Nexus source the app was **installed from**, and only when the image lives on
-that source's own registry host (`registry.example.com/team/my-app/runtime:1`
-for an app from the source at `https://registry.example.com`). Set the login
-once with `aura nexus registry login <source>`; a deploy token with read
-access to the image is enough. The OS writes it to a throwaway docker config
-for that one pull and deletes it again; the app never sees it.
+Nexus source the app was **installed from**, and only when the image lives
+inside the app's own repository on that source: the repository its release
+was installed from, or a path below it. For an app published to
+`registry.example.com/team/apps/my-app`, `registry.example.com/team/apps/my-app/runtime:1`
+qualifies (GitLab: the project's own container registry). Set the login once
+with `aura nexus registry login <source>`; its token needs read access to that
+repository (GitLab: a deploy token with `read_registry`). The OS writes it to a
+throwaway auth file for that one pull and deletes it again; the app and its
+sidecars never see it.
 
-An app never uses another source's login, and an app Nexus did not install
-(`aura dev new`, a clone) pulls anonymously. A refused pull fails the spawn
-with code `image_auth` (HTTP 502, `code` in the JSON answer) and a message
-that names the registry and the fix.
+An app never uses another source's login or another repository's, and an
+app Nexus did not install (`aura dev new`, a clone) pulls anonymously. A
+refused pull fails the spawn with code `image_auth` (HTTP 502, `code` in the
+JSON answer) and a message that names the source, the repository and the fix.
 
 ## Inheritance
 

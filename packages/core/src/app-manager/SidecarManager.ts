@@ -18,9 +18,8 @@ import {
 } from './tool-provision.js';
 import { SIDECAR_TOOL_RE, effectiveSidecarTools } from './sidecar-tools.js';
 import { userHomeSubpath } from '../scopes/home.js';
-import {
-  imageRegistryHost, isAuthFailure, redactLogin, writeAuthConfig, type RegistryLogin,
-} from '../nexus/RegistryAuth.js';
+import { authFailureReason, isAuthFailure, parseImageRef } from '../nexus/RegistryAuth.js';
+import type { PullCredential } from '../nexus/types.js';
 import {
   SpecError, resolveSidecarSpec, specHash,
   type ResolvedSidecarSpec, type SidecarSpawnRequest,
@@ -140,11 +139,12 @@ interface SidecarManagerOpts {
   /** Live instance → app + its shell-side data dir. */
   instance(instanceId: string): { appId: string; instanceDataDir: string; owner?: string } | null;
   /**
-   * The registry login an image of `appId` may be pulled with (nexus
-   * `appPullLogin`: only the login of the app's own install source, only for
-   * that source's registry host), or null for an anonymous pull.
+   * The registry credential `image` may be pulled with on behalf of `appId`
+   * (AppManager.pullCredentialFor → nexus resolvePullCredential: only its own
+   * install source's login, only inside its own artifact repository), or null
+   * for an anonymous pull.
    */
-  pullLogin?(appId: string, imageHost: string): Promise<RegistryLogin | null>;
+  pullCredential?(appId: string, image: string): Promise<PullCredential | null>;
   /**
    * A sidecar was created or removed — lets AppManager refresh its sidecar
    * cache now instead of at the next reconciler tick (else `GET sidecars`
@@ -222,10 +222,13 @@ async function dockerOk(args: string[], what: string, timeoutMs?: number): Promi
  */
 export class ImageAuthError extends SpecError {
   readonly code = 'image_auth';
-  constructor(readonly image: string, readonly host: string, detail: string, hadLogin: boolean) {
-    super(502, hadLogin
-      ? `image_auth: ${host} refused the pull of ${image} with the login of the source this app was installed from — check that login (aura nexus registry login <source>) and its read access (${detail})`
-      : `image_auth: ${host} refused the pull of ${image} (${detail}) — a private image needs a login on the Nexus source this app was installed from, for that same registry host (aura nexus registry login <source>); other sources' logins are never used`);
+  constructor(readonly image: string, detail: string, cred: PullCredential | null, reason: 'rejected' | 'missing' | 'forbidden') {
+    const { host } = parseImageRef(image);
+    super(502, !cred
+      ? `image_auth: ${host} refused the pull of ${image} without a login (${detail}). A private image is pulled with the registry login of the Nexus source the app was installed from, and only when it lives inside the app's own repository there (e.g. <app repository>/runtime); other sources' logins and other repositories are never used. Set that source's login: aura nexus registry login <source>`
+      : reason === 'forbidden'
+        ? `image_auth: the login of Nexus source '${cred.source}' may not read ${host}/${cred.repository} (${detail}). Give its token read access to that repository (GitLab: a deploy token with the read_registry scope on the project or group), then set it: aura nexus registry login ${cred.source}`
+        : `image_auth: ${host} rejected the login of Nexus source '${cred.source}' for ${cred.repository} (${detail}). Check or renew it (GitLab: a deploy token with read_registry): aura nexus registry login ${cred.source}`);
     this.name = 'ImageAuthError';
   }
 }
@@ -502,23 +505,22 @@ export class SidecarManager {
   }
 
   /**
-   * Pull `image` unless docker has it. When the app's install source has a
-   * login for the image's registry host (opts.pullLogin), the pull runs with
-   * a throwaway docker config holding only that login (`docker --config`,
-   * removed in every case); the login is never in argv, the env or a log.
-   * A refused pull is an ImageAuthError (`image_auth`).
+   * Pull `image` unless docker has it. With a credential for it
+   * (opts.pullCredential) the pull runs with a throwaway auth file holding only
+   * that login (`docker --config <dir>`, removed in every case); the secret is
+   * never in argv, the env, a log or an error, and never reaches the app or
+   * the sidecar. A refused pull is an ImageAuthError (`image_auth`).
    */
   private async ensureImage(image: string, appId: string): Promise<void> {
     if ((await docker(['image', 'inspect', '--format', '{{.Id}}', image])).code === 0) return;
-    const host = imageRegistryHost(image);
-    let login: RegistryLogin | null = null;
-    try { login = (await this.opts.pullLogin?.(appId, host)) ?? null; }
-    catch (err) { console.warn(`[SidecarManager] registry login for ${image} (${appId}) unavailable, pulling anonymously: ${(err as Error).message}`); }
-    // A pull with a login is never shared with an anonymous one (or another login's).
-    const key = login ? `${image}\0${login.username}` : image;
+    let cred: PullCredential | null = null;
+    try { cred = (await this.opts.pullCredential?.(appId, image)) ?? null; }
+    catch (err) { console.warn(`[SidecarManager] no registry credential for ${image} (${appId}), pulling anonymously: ${(err as Error).message}`); }
+    // A credentialed pull is never shared with an anonymous one (or another source's).
+    const key = cred ? `${image}\0${cred.source}` : image;
     let pull = this.pulls.get(key);
     if (!pull) {
-      pull = pullImage(image, host, login);
+      pull = pullImage(image, cred);
       this.pulls.set(key, pull);
       void pull.finally(() => this.pulls.delete(key)).catch(() => undefined);
     }
@@ -1002,17 +1004,18 @@ export class SidecarManager {
   }
 }
 
-/** `docker pull`, with `login` (if any) in a temporary docker config dir that is always removed. */
-async function pullImage(image: string, host: string, login: RegistryLogin | null): Promise<void> {
-  const auth = login ? writeAuthConfig(host, login) : null;
+/** `docker pull`, with the credential (if any) in a throwaway auth file that is always removed. */
+async function pullImage(image: string, cred: PullCredential | null): Promise<void> {
+  const auth = cred ? cred.authFile() : null;
   try {
     const r = await docker([...(auth ? ['--config', auth.dir] : []), 'pull', image], { timeoutMs: PULL_TIMEOUT_MS });
     if (r.code === 0) return;
-    const out = redactLogin(r.stderr.trim() || (r.timedOut ? 'timed out' : `docker exited ${r.code}`), login);
-    if (isAuthFailure(out)) throw new ImageAuthError(image, host, out.split('\n').pop()!.slice(-300), !!login);
+    const raw = r.stderr.trim() || (r.timedOut ? 'timed out' : `docker exited ${r.code}`);
+    const out = cred ? cred.redact(raw) : raw;
+    if (isAuthFailure(out)) throw new ImageAuthError(image, out.split('\n').pop()!.slice(-300), cred, authFailureReason(out, !!cred));
     throw new Error(`docker pull ${image}: ${out}`);
   } finally {
-    auth?.cleanup();
+    auth?.dispose();
   }
 }
 

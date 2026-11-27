@@ -1,5 +1,6 @@
 import { effectiveSourceMode, installRecordPath, type SourceModeInfo } from '../nexus/AppSource.js';
-import { appPullLogin } from '../nexus/RegistryAuth.js';
+import { resolvePullCredential, type InstallOrigin } from '../nexus/RegistryAuth.js';
+import type { PullCredential } from '../nexus/types.js';
 import { loadSourcesConfig } from '../nexus/SourcesConfig.js';
 import { ContextStore } from '../context/ContextStore.js';
 import { DEFAULT_OWNER_ID } from '../auth/identityContracts.js';
@@ -230,11 +231,8 @@ export class AppManager {
         };
       },
       changed: () => { void this.syncSidecars(2).catch(() => undefined); },
-      // Private sidecar images: only the login of the app's own install source.
-      pullLogin: (appId, imageHost) => appPullLogin(this.installSourceOf(appId), imageHost, {
-        sources: loadSourcesConfig,
-        secret:  (key) => new ContextStore(this.dataDir).get(key),
-      }),
+      // Private images: only the login of the app's own install source (pullCredentialFor).
+      pullCredential: (appId, image) => this.pullCredentialFor(appId, image),
     });
     // services[].prePull: fetch template images as soon as an app is
     // installed (init() covers the apps already loaded at boot).
@@ -1927,15 +1925,27 @@ export class AppManager {
     return effectiveSourceMode(this.scopeRegistry.getById(manifest.scopeId), manifest);
   }
 
-  /** The Nexus source the active copy of an app was installed from (its
-   *  install record's `sourceName`); undefined for a copy Nexus did not install. */
-  installSourceOf(appId: string): string | undefined {
+  /** Where the active copy of an app came from (its scope's install record); null for a copy Nexus did not install. */
+  installOriginOf(appId: string): InstallOrigin | null {
     const manifest = this.registry.getById(appId);
-    if (!manifest) return undefined;
+    if (!manifest) return null;
     try {
-      const r = JSON.parse(readFileSync(installRecordPath(this.scopeRegistry.getById(manifest.scopeId).dataDir, appId), 'utf-8')) as { sourceName?: unknown };
-      return typeof r.sourceName === 'string' && r.sourceName ? r.sourceName : undefined;
-    } catch { return undefined; }
+      const r = JSON.parse(readFileSync(installRecordPath(this.scopeRegistry.getById(manifest.scopeId).dataDir, appId), 'utf-8')) as Record<string, unknown>;
+      const str = (k: string) => (typeof r[k] === 'string' && r[k] ? { [k]: r[k] as string } : {});
+      return { id: appId, ...str('source'), ...str('ref'), ...str('sourceName'), ...str('remoteId') };
+    } catch { return null; }
+  }
+
+  /**
+   * The registry credential to pull `image` with on behalf of an installed
+   * app, as an opaque short-lived handle (nexus resolvePullCredential), for
+   * whichever runtime pulls it (SidecarManager today). Null: pull anonymously.
+   */
+  pullCredentialFor(appId: string, image: string): Promise<PullCredential | null> {
+    return resolvePullCredential(this.installOriginOf(appId), image, {
+      sources: loadSourcesConfig,
+      secret:  (key) => new ContextStore(this.dataDir).get(key),
+    });
   }
 
   getScopeDefinitions(): ScopeDefinition[] {

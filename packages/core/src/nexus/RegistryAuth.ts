@@ -31,6 +31,8 @@ import { join } from 'node:path';
 import { ContextStore } from '../context/ContextStore.js';
 import { orasHostFromUrl } from './RegistryConfig.js';
 import type { OciSource, SourcesConfig } from './SourcesConfig.js';
+import { DEFAULT_APP_REPO_PREFIX } from './SourcesConfig.js';
+import type { PullCredential } from './types.js';
 
 export interface RegistryLogin {
   username: string;
@@ -180,43 +182,86 @@ export function authFileContent(host: string, login: RegistryLogin): string {
   return JSON.stringify({ auths: { [host]: { auth } } });
 }
 
-// ─── Sidecar image pulls ────────────────────────────────────────────────
+// ─── Image pulls on behalf of an installed app ──────────────────────────
 
 /**
- * The registry host of a docker image reference: the first path component
- * when it looks like a host (has a `.` or `:`, or is `localhost`), else
- * Docker Hub (`docker.io`), as the docker CLI reads it.
+ * Registry host and repository path of an image reference, as the docker CLI
+ * reads it: the first component is a host when it has a `.` or `:` or is
+ * `localhost`, else the image is on Docker Hub. The tag / digest is dropped.
  */
-export function imageRegistryHost(image: string): string {
-  const slash = image.indexOf('/');
-  if (slash < 0) return 'docker.io';
-  const first = image.slice(0, slash);
-  return first.includes('.') || first.includes(':') || first === 'localhost' ? first : 'docker.io';
+export function parseImageRef(image: string): { host: string; repository: string } {
+  const ref = image.replace(/^oci:\/\//, '').replace(/@.*$/, '');
+  const slash = ref.indexOf('/');
+  const first = slash < 0 ? '' : ref.slice(0, slash);
+  const isHost = !!first && (first.includes('.') || first.includes(':') || first === 'localhost');
+  const host = isHost ? first : 'docker.io';
+  let repository = isHost ? ref.slice(slash + 1) : ref;
+  const colon = repository.lastIndexOf(':');
+  if (colon > repository.lastIndexOf('/')) repository = repository.slice(0, colon);
+  if (!isHost && !repository.includes('/')) repository = `library/${repository}`;
+  return { host, repository };
+}
+
+/** What an install record says about where an app came from (InstallRecord fields). */
+export interface InstallOrigin {
+  id:          string;
+  source?:     string;
+  ref?:        string;
+  sourceName?: string;
+  remoteId?:   string;
 }
 
 /**
- * The login an app's sidecar image may be pulled with (SidecarManager): the
- * one of the OCI source the app was installed from (its install record's
- * `sourceName`), and only when the image lives on that source's own registry
- * host. An app never borrows another source's login; no source, a non-OCI
- * source or another host → null (the pull goes out anonymously). Read fresh
- * from the sources config and the sealed secret on every call, so a login
- * added or removed with `aura nexus registry login|logout` counts at once.
+ * The repository the app's own OCI artifact lives in on its source: the ref it
+ * was installed from (a direct OCI install), else the source's store layout
+ * `<appRepoPrefix>/<id in that source>` (CatalogAggregator lists apps there).
  */
-export async function appPullLogin(
-  installSource: string | undefined, imageHost: string,
+function artifactRepository(origin: InstallOrigin, s: OciSource): string | null {
+  const host = orasHostFromUrl(s.url);
+  if (origin.source === 'oci' && origin.ref) {
+    const r = parseImageRef(origin.ref);
+    return r.host === host ? r.repository : null;
+  }
+  const prefix = (s.appRepoPrefix ?? DEFAULT_APP_REPO_PREFIX).replace(/^\/+|\/+$/g, '');
+  return `${prefix ? `${prefix}/` : ''}${origin.remoteId ?? origin.id}`;
+}
+
+/**
+ * The credential an installed app's image may be pulled with — the one
+ * registry-login mechanism Nexus already has, no second store:
+ *   • only the login of the OCI source the app was installed from (its install
+ *     record), through the same host binding as `loadRegistryCredentials`;
+ *   • only for an image on that source's registry host AND inside the app's
+ *     own artifact repository (`<repo>` itself or `<repo>/…`, e.g. GitLab's
+ *     `<project>/runtime`), never another app's or an unrelated repository.
+ * Anything else → null (an anonymous pull). Read fresh on every call, so
+ * `aura nexus registry login|logout` counts at once. Whether the login may
+ * read that repository is shown by the pull itself (read-only, token-scoped):
+ * a refusal is reported with the source's name (ImageAuthError).
+ */
+export async function resolvePullCredential(
+  origin: InstallOrigin | null, image: string,
   read: { sources(): Promise<SourcesConfig>; secret(key: string): Promise<string | null> },
-): Promise<RegistryLogin | null> {
-  if (!installSource) return null;
-  const s = (await read.sources()).sources.find((x): x is OciSource => x.kind === 'oci' && x.name === installSource);
-  if (!s || orasHostFromUrl(s.url) !== imageHost) return null;
-  return sealedSourceLogin(s, read.secret);
+): Promise<PullCredential | null> {
+  if (!origin?.sourceName) return null;
+  const s = (await read.sources()).sources.find((x): x is OciSource => x.kind === 'oci' && x.name === origin.sourceName);
+  if (!s) return null;
+  const host = orasHostFromUrl(s.url);
+  const img = parseImageRef(image);
+  const repo = artifactRepository(origin, s);
+  if (img.host !== host || !repo || (img.repository !== repo && !img.repository.startsWith(`${repo}/`))) return null;
+  const login = await sealedSourceLogin(s, read.secret);
+  if (!login) return null;
+  return {
+    source: s.name, host, repository: img.repository,
+    authFile: () => { const a = writeAuthConfig(host, login); return { dir: a.dir, file: a.file, dispose: a.cleanup }; },
+    redact: (text) => redactLogin(text, login),
+  };
 }
 
 /**
  * A docker-style config dir holding only `host`'s login (dir 0700 from
- * mkdtemp, `config.json` 0600), for `docker --config <dir>` or oras'
- * `--registry-config <file>`. The caller calls `cleanup()` in a finally.
+ * mkdtemp, `config.json` 0600). The caller calls `cleanup()` in a finally.
  */
 export function writeAuthConfig(host: string, login: RegistryLogin): { dir: string; file: string; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), 'aura-regauth-'));
@@ -227,8 +272,7 @@ export function writeAuthConfig(host: string, login: RegistryLogin): { dir: stri
   return { dir, file, cleanup };
 }
 
-/** `text` with the login's password (plain and inside the base64 auth) masked —
- *  for registry output that ends up in an error or a log. */
+/** `text` with the login's password (plain and inside the base64 auth) masked. */
 export function redactLogin(text: string, login: RegistryLogin | null): string {
   if (!login) return text;
   let out = text;

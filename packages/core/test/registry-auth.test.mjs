@@ -16,7 +16,7 @@ import { join } from 'node:path';
 import {
   secretKeyFor, sealedLoginValue, passwordForHost, authFileContent, orasTargetHost,
   isAuthFailure, authFailureReason, orasSync, orasAsync, OrasAuthError, SOURCE_SECRET_PATTERN,
-  imageRegistryHost, appPullLogin, writeAuthConfig, redactLogin,
+  parseImageRef, resolvePullCredential, writeAuthConfig, redactLogin,
 } from '../dist/nexus/RegistryAuth.js';
 import { parseStoreDescriptor, wellKnownUrl, discoverStore, StoreDiscoveryError } from '../dist/nexus/StoreDiscovery.js';
 import { isSourceEntry, isSourceAuth } from '../dist/nexus/SourcesConfig.js';
@@ -169,18 +169,18 @@ test('orasAsync: same login handling, and the event loop keeps running meanwhile
   } finally { process.env.PATH = old; }
 });
 
-test('the registry host of a docker image reference', () => {
-  assert.equal(imageRegistryHost('registry.lakner.io/lakner-io/auraos/apps/x/runtime:1'), 'registry.lakner.io');
-  assert.equal(imageRegistryHost('reg.io:5000/a/b@sha256:abc'), 'reg.io:5000');
-  assert.equal(imageRegistryHost('localhost/x:1'), 'localhost');
-  assert.equal(imageRegistryHost('alpine:3'), 'docker.io');
-  assert.equal(imageRegistryHost('library/alpine:3'), 'docker.io');
-  assert.equal(imageRegistryHost('ghcr.io/o/r:1'), 'ghcr.io');
+test('registry host and repository of an image reference', () => {
+  assert.deepEqual(parseImageRef('registry.lakner.io/lakner-io/auraos/apps/x/runtime:1'), { host: 'registry.lakner.io', repository: 'lakner-io/auraos/apps/x/runtime' });
+  assert.deepEqual(parseImageRef('reg.io:5000/a/b@sha256:abc'), { host: 'reg.io:5000', repository: 'a/b' });
+  assert.deepEqual(parseImageRef('oci://reg.io/a/b:1.0'), { host: 'reg.io', repository: 'a/b' });
+  assert.deepEqual(parseImageRef('localhost/x:1'), { host: 'localhost', repository: 'x' });
+  assert.deepEqual(parseImageRef('alpine:3'), { host: 'docker.io', repository: 'library/alpine' });
+  assert.deepEqual(parseImageRef('vendor/agent:latest'), { host: 'docker.io', repository: 'vendor/agent' });
 });
 
-test('appPullLogin: only the install source login, only for that source host', async () => {
+test('resolvePullCredential: only the install source login, only inside the app artifact repository', async () => {
   const cfg = { sources: [
-    { kind: 'oci', name: 'acme', url: 'https://registry.acme.com', priority: 1, auth: { type: 'basic', username: 'cust', secret: 'NEXUS_SRC_ACME_PASSWORD' } },
+    { kind: 'oci', name: 'acme', url: 'https://registry.acme.com', appRepoPrefix: 'grp/apps/', priority: 1, auth: { type: 'basic', username: 'cust', secret: 'NEXUS_SRC_ACME_PASSWORD' } },
     { kind: 'oci', name: 'other', url: 'https://registry.other.io/', priority: 2, auth: { type: 'basic', username: 'o', secret: 'NEXUS_SRC_OTHER_PASSWORD' } },
     { kind: 'oci', name: 'forged', url: 'https://registry.acme.com', priority: 3, auth: { type: 'basic', username: 'x', secret: 'NEXUS_SRC_FORGED_PASSWORD' } },
     { kind: 'oci', name: 'open', url: 'https://registry.open.io', priority: 4 },
@@ -193,14 +193,37 @@ test('appPullLogin: only the install source login, only for that source host', a
     NEXUS_SRC_FORGED_PASSWORD: sealedLoginValue('registry.other.io', 'pw-other'),
   };
   const read = { sources: async () => cfg, secret: async (k) => sealed[k] ?? null };
-  assert.deepEqual(await appPullLogin('acme', 'registry.acme.com', read), { username: 'cust', password: 'pw-acme' });
-  assert.equal(await appPullLogin('acme', 'registry.other.io', read), null, 'never another source login');
-  assert.equal(await appPullLogin('other', 'registry.acme.com', read), null);
-  assert.equal(await appPullLogin('forged', 'registry.acme.com', read), null, 'a login sealed for another host');
-  assert.equal(await appPullLogin('open', 'registry.open.io', read), null, 'a source without a login');
-  assert.equal(await appPullLogin('idx', 'idx.example.com', read), null, 'not an oci source');
-  assert.equal(await appPullLogin('gone', 'registry.acme.com', read), null, 'a source that no longer exists');
-  assert.equal(await appPullLogin(undefined, 'registry.acme.com', read), null, 'no install source');
+  const fromStore = { id: 'io.x.app', source: 'index', ref: 'io.x.app', sourceName: 'acme' };
+  const loginIn = async (origin, image) => {
+    const c = await resolvePullCredential(origin, image, read);
+    if (!c) return null;
+    const f = c.authFile();
+    try { return { source: c.source, repository: c.repository, cfg: JSON.parse(readFileSync(f.file, 'utf-8')) }; } finally { f.dispose(); }
+  };
+  const ok = await loginIn(fromStore, 'registry.acme.com/grp/apps/io.x.app/runtime:1');
+  assert.equal(ok.source, 'acme');
+  assert.equal(ok.repository, 'grp/apps/io.x.app/runtime');
+  assert.equal(Buffer.from(ok.cfg.auths['registry.acme.com'].auth, 'base64').toString(), 'cust:pw-acme');
+  assert.ok(await loginIn(fromStore, 'registry.acme.com/grp/apps/io.x.app:2'), 'the artifact repository itself');
+  assert.equal(await loginIn(fromStore, 'registry.acme.com/grp/apps/io.y.app/runtime:1'), null, 'another app repository');
+  assert.equal(await loginIn(fromStore, 'registry.acme.com/grp/apps/io.x.app-evil/runtime:1'), null, 'a sibling with the same prefix');
+  assert.equal(await loginIn(fromStore, 'registry.acme.com/grp/other:1'), null, 'outside the store prefix');
+  assert.equal(await loginIn(fromStore, 'registry.other.io/grp/apps/io.x.app/runtime:1'), null, 'never another source login');
+  assert.equal(await loginIn({ ...fromStore, remoteId: 'io.remote.app' }, 'registry.acme.com/grp/apps/io.remote.app/r:1') !== null, true, 'installed under another local id: the source id counts');
+  // A direct OCI install: its own ref is the artifact repository.
+  const direct = { id: 'io.x.app', source: 'oci', ref: 'registry.acme.com/team/x:1.0', sourceName: 'acme' };
+  assert.ok(await loginIn(direct, 'registry.acme.com/team/x/runtime:1'));
+  assert.equal(await loginIn(direct, 'registry.acme.com/team/y:1'), null);
+  assert.equal(await loginIn({ ...fromStore, sourceName: 'other' }, 'registry.acme.com/grp/apps/io.x.app/r:1'), null);
+  assert.equal(await loginIn({ ...fromStore, sourceName: 'forged' }, 'registry.acme.com/aura-apps/io.x.app/r:1'), null, 'a login sealed for another host');
+  assert.equal(await loginIn({ ...fromStore, sourceName: 'open' }, 'registry.open.io/aura-apps/io.x.app/r:1'), null, 'a source without a login');
+  assert.equal(await loginIn({ ...fromStore, sourceName: 'idx' }, 'idx.example.com/aura-apps/io.x.app/r:1'), null, 'not an oci source');
+  assert.equal(await loginIn({ ...fromStore, sourceName: 'gone' }, 'registry.acme.com/grp/apps/io.x.app/r:1'), null, 'a source that no longer exists');
+  assert.equal(await loginIn(null, 'registry.acme.com/grp/apps/io.x.app/r:1'), null, 'not installed by Nexus');
+  // The handle carries no secret as a field.
+  const c = await resolvePullCredential(fromStore, 'registry.acme.com/grp/apps/io.x.app/r:1', read);
+  assert.ok(!JSON.stringify(c).includes('pw-acme'));
+  assert.equal(c.redact('x pw-acme y'), 'x *** y');
 });
 
 test('writeAuthConfig: a private dir with one host, removed by cleanup; redactLogin masks the secret', () => {
