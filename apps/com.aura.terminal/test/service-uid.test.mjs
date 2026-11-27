@@ -13,6 +13,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const tc = await import('../src/tmux-control.ts');
+// A launcher socket of this test process's own (suites run side by side in one network namespace).
+process.env.AURA_TERM_LAUNCH_NAME = `test-${process.pid}`;
 const LAUNCH_ENV = { AURA_TERM_LAUNCH: '/usr/local/libexec/aura-term-launch', AURA_SESSION_UID: '1000' };
 
 test('T2: the launcher is used only when this server is not the session user', () => {
@@ -73,7 +75,7 @@ for (const [who, uid] of [['owner', 1000], ['member', 100000]]) {
     // As the container starts it: root with only SETUID/SETGID, no-new-privileges.
     const r = spawnSync('setpriv', ['--bounding-set=-all,+setuid,+setgid', '--inh-caps=-all', '--no-new-privs', '--',
       join(dir, 'aura-term-launch'), 'serve', '--service', '990:990', '--user', `${uid}:${uid}`, '--', join(dir, 'probe.sh'), join(dir, 'aura-term-launch')],
-      { encoding: 'utf-8', cwd: '/', env: { PATH: '/usr/local/bin:/usr/bin:/bin', AURA_LIFECYCLE_TOKEN: 'lt-secret' }, timeout: 30_000 });
+      { encoding: 'utf-8', cwd: '/', env: { PATH: '/usr/local/bin:/usr/bin:/bin', AURA_LIFECYCLE_TOKEN: 'lt-secret', AURA_TERM_LAUNCH_NAME: process.env.AURA_TERM_LAUNCH_NAME }, timeout: 30_000 });
     assert.equal(r.status, 0, r.stderr);
     const kv = Object.fromEntries(r.stdout.split('\n').filter((l) => l.includes('=')).map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]));
     assert.equal(kv.server_uid, '990');

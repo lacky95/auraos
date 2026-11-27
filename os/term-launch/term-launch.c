@@ -97,11 +97,21 @@ static int parse_ids(const char *s, uid_t *uid, gid_t *gid) {
   return 0;
 }
 
+/*
+ * The abstract socket's name: @aura-term-launch, or @aura-term-launch-<suffix> with AURA_TERM_LAUNCH_NAME
+ * (tests running side by side in one network namespace). Only a naming choice: whoever connects is still
+ * checked by SO_PEERCRED.
+ */
 static socklen_t sock_addr(struct sockaddr_un *a) {
+  char name[96];
+  const char *suffix = getenv("AURA_TERM_LAUNCH_NAME");
+  int ok = suffix && *suffix && strlen(suffix) <= 48;
+  for (const char *p = suffix; ok && *p; p++) ok = (*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') || *p == '-';
+  int n = ok ? snprintf(name, sizeof name, "%s-%s", SOCK_NAME, suffix) : snprintf(name, sizeof name, "%s", SOCK_NAME);
   memset(a, 0, sizeof *a);
   a->sun_family = AF_UNIX;
-  memcpy(a->sun_path + 1, SOCK_NAME, sizeof SOCK_NAME - 1);   /* abstract: leading NUL */
-  return (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + sizeof SOCK_NAME - 1);
+  memcpy(a->sun_path + 1, name, (size_t)n);   /* abstract: leading NUL */
+  return (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + (size_t)n);
 }
 
 /* Drops to uid/gid for good: no supplementary group, real = effective = saved. */
@@ -354,6 +364,8 @@ static int add(char **buf, size_t *len, size_t *cap, const char *s) {
 
 static int run(int argc, char **argv) {
   if (argc < 1 || !argv[0][0]) die(125, "%srun: no command", NULL);
+  /* A refused request closes the connection under our write: an error (125), never death by SIGPIPE. */
+  signal(SIGPIPE, SIG_IGN);
   int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
   struct sockaddr_un a; socklen_t al = sock_addr(&a);
   if (s < 0 || connect(s, (struct sockaddr *)&a, al) != 0) die(125, "the session launcher is not reachable: %s", strerror(errno));
@@ -400,7 +412,6 @@ static int run(int argc, char **argv) {
   sigemptyset(&sa.sa_mask);
   int fw[] = { SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGUSR1, SIGUSR2 };
   for (size_t i = 0; i < sizeof fw / sizeof fw[0]; i++) sigaction(fw[i], &sa, NULL);
-  signal(SIGPIPE, SIG_IGN);
 
   int32_t st;
   if (read_full(s, &st, sizeof st) != (ssize_t)sizeof st) _exit(125);
