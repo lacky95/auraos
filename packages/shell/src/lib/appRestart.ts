@@ -39,6 +39,10 @@ interface RestoredActivity {
 
 export interface RestartResult {
   appId: string;
+  /** The user whose instances this result restarted (their own fresh instance). */
+  userId?: string;
+  /** Other users' instances of the same app, each restarted into that user's own fresh instance. */
+  others?: RestartResult[];
   oldInstanceIds: string[];
   instanceId: string;
   restored: RestoredActivity[];
@@ -67,9 +71,33 @@ const inFlight = new Map<string, Promise<RestartResult>>();
 export function restartWithActivities(appId: string, instanceIds?: string[]): Promise<RestartResult> {
   const running = inFlight.get(appId);
   if (running) return running;
-  const p = doRestart(appId, instanceIds).finally(() => inFlight.delete(appId));
+  const p = restartPerOwner(appId, instanceIds).finally(() => inFlight.delete(appId));
   inFlight.set(appId, p);
   return p;
+}
+
+const ownerOf = (i: unknown): string | undefined => (i as { owner?: string } | undefined)?.owner;
+
+/**
+ * Instances of several users (a session host such as the System Terminal, or a member's own instances, I.2) are
+ * never merged: each user's instances restart into that user's own fresh instance, with that user's activities and
+ * workspaces. Merging them handed every window to the first instance's owner (the owner's Terminal came back as a
+ * member's, the owner had none). Pool members (no user yet) are stopped and refill. One user: unchanged.
+ */
+async function restartPerOwner(appId: string, only?: string[]): Promise<RestartResult> {
+  const mgr = getAppManager();
+  const all = mgr.getInstancesByApp(appId);
+  const chosen = all.filter((i) => only ? only.includes(i.instanceId) : !i.inPool);
+  const owners = [...new Set(chosen.map((i) => ownerOf(i) ?? localOwnerId()))];
+  if (owners.length <= 1) return doRestart(appId, only);
+  if (!only) await Promise.all(all.filter((i) => i.inPool).map((i) => mgr.stop(i.instanceId, { reason: 'restart' })));
+  const local = localOwnerId();
+  owners.sort((a, b) => Number(b === local) - Number(a === local));
+  const results: RestartResult[] = [];
+  for (const user of owners) {
+    results.push(await doRestart(appId, chosen.filter((i) => (ownerOf(i) ?? local) === user).map((i) => i.instanceId)));
+  }
+  return { ...results[0]!, others: results.slice(1) };
 }
 
 async function doRestart(appId: string, only?: string[]): Promise<RestartResult> {
@@ -92,7 +120,7 @@ async function doRestart(appId: string, only?: string[]): Promise<RestartResult>
 
   const viewIds = withActivities ? snapshot.map((a) => a.activityId) : oldInstanceIds;
   // C8: the restarted windows are their owner's, on that user's workspaces (the first instance's owner).
-  const userId = (instances[0] as { owner?: string } | undefined)?.owner ?? localOwnerId();
+  const userId = ownerOf(instances[0]) ?? localOwnerId();
   const before = placementsOf(await readWorkspaces(userId).catch(() => null), viewIds);
 
   OsEventBus.emit('app:restarting', {
@@ -154,7 +182,7 @@ async function doRestart(appId: string, only?: string[]): Promise<RestartResult>
     // after they have landed. Later moves are the user's and stay.
     setTimeout(() => { placeWindows(userId, restored, dropped, before).catch(() => undefined); }, 3_000);
 
-    const result: RestartResult = { appId, oldInstanceIds, instanceId, restored, failed, workspacesUpdated };
+    const result: RestartResult = { appId, userId, oldInstanceIds, instanceId, restored, failed, workspacesUpdated };
     OsEventBus.emit('app:restarted', result);
     return result;
   } catch (err) {
@@ -206,6 +234,7 @@ async function placeWindows(
   dropped: string[],
   before: Map<string, Placement>,
 ): Promise<boolean> {
+  if (!restored.length && !dropped.length) return false; // no window of this restart (a windowless app)
   const state = await readWorkspaces(userId);
   if (!state) return false;
   const ours = new Set([...dropped, ...restored.flatMap((r) => [r.from, r.to])]);
