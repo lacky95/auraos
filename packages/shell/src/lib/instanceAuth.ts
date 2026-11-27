@@ -2,6 +2,7 @@ import { getAppManager, type AccessPrincipal, type ExecBridgeError } from '@aura
 import * as core from '@aura/core';
 import { capabilityRefusal, refusalResponse } from './runtimeCaps.ts';
 import { errorResponse, jsonResponse } from './appResponse.js';
+import type { AuraErrorBody } from '@aura/core';
 import { isOwnerPrincipal, isTrustedOwnerAgent } from './access/identify.ts';
 
 /**
@@ -63,8 +64,10 @@ export function sidecarTarget(
 export function sidecarError(err: unknown): Response {
   const refused = refusalResponse(err);
   if (refused) return refused;
-  const { status, code } = (err ?? {}) as { status?: unknown; code?: unknown };
+  const { status, code, body } = (err ?? {}) as { status?: unknown; code?: unknown; body?: AuraErrorBody };
   const message = err instanceof Error ? err.message : String(err);
+  // A refusal that carries its D105 body (e.g. B12 sidecar-identity-conflict) answers it as is.
+  if (typeof status === 'number' && body && typeof body.error === 'string' && typeof body.message === 'string') return errorResponse(status, body);
   if (typeof status === 'number') {
     return typeof code === 'string' && /^[a-z_]{1,32}$/.test(code)
       ? errorResponse(status, { error: code, message }) : errorResponse(message, status);

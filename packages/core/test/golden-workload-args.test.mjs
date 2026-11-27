@@ -122,6 +122,9 @@ const SERVICES = [
   // D107: explicitly isolated, and an inheritHome sidecar kept on the shared network by choice.
   { name: 'iso', image: 'redis:7', command: ['redis-server'], volumes: [], network: 'instance', seed: { command: ['true'] } },
   { name: 'homeshared', image: 'alpine:3', command: [], volumes: [], inheritHome: true, network: 'shared' },
+  // B12: a foreign image with the app's home runs as the app; a conflicting template user is refused.
+  { name: 'homeforeign', image: 'ghcr.io/example/webui:1', command: [], volumes: [], inheritHome: true },
+  { name: 'homeuser', image: 'ghcr.io/example/webui:1', command: [], volumes: [], inheritHome: true, user: '1000:1000' },
 ];
 
 /** A Nexus source's login for one image (nexus PullCredential), with a fixed throwaway auth dir. */
@@ -131,7 +134,7 @@ const CRED = {
   redact: (text) => text,
 };
 
-function sidecars(t, { toolsMode = 'hardlink', pullCredential } = {}) {
+function sidecars(t, { toolsMode = 'hardlink', pullCredential, identity = { uid: 200001, gid: 200001, range: 'app' } } = {}) {
   const dataDir = fs.mkdtempSync(join(tmpdir(), 'aura-gw-'));
   fs.mkdirSync(join(dataDir, 'aura', 'toolchain', 'bin'), { recursive: true });
   for (const b of ['jq', 'rg']) fs.writeFileSync(join(dataDir, 'aura', 'toolchain', 'bin', b), `#!/bin/sh\necho ${b}\n`);
@@ -155,7 +158,7 @@ function sidecars(t, { toolsMode = 'hardlink', pullCredential } = {}) {
     mounts: { reapplyConsumer: async () => ({ restored: 0, inherited: 0, failed: 0 }), removeAll: () => {}, forgetConsumer: () => {} },
     context: async () => ({ env: { CTX_KEY: 'ctx-value' }, known: new Set(['CTX_KEY']) }),
     ...(pullCredential ? { pullCredential } : {}),
-    instance: (id) => (id === INST ? { appId: APP, instanceDataDir: join(dataDir, 'scopes/users/default/apps', APP, INST), identity: { uid: 200001, gid: 200001, range: 'app' } } : null),
+    instance: (id) => (id === INST ? { appId: APP, instanceDataDir: join(dataDir, 'scopes/users/default/apps', APP, INST), ...(identity ? { identity } : {}) } : null),
     appHome: async () => ({ kind: 'app-global', hostPath: join(dataDir, 'aura/apphomes/i/global'), volumeSubpath: 'aura/apphomes/i/global',
       logicalPath: '/home/aura', uid: 200001, gid: 200001, mode: 0o700 }),
   });
@@ -214,6 +217,18 @@ test('golden sidecar argv: prepull-credential and image-auth refusal', async (t)
   await mgr.prePull({ id: APP, services: [{ name: 'p', image: 'private.example/team/app/runtime:1', prePull: true }] });
   const err = await mgr.spawn(INST, { template: 'priv' }, app).then(() => null, (e) => e);
   recorded['sidecar:prepull-credential'] = normalise({ calls: d.calls, err: err && { name: err.name, code: err.code, status: err.status, message: err.message } }, dataDir);
+});
+
+// B12: the identity of a foreign-image home sidecar, under an app identity and under a root installation,
+// and the refusal of a conflicting template user (nothing is created).
+test('golden sidecar argv: B12 home sidecar identity (foreign image, app and root parent; conflicting user refused)', async (t) => {
+  const d = fakeDocker(t);
+  const app1 = sidecars(t);
+  await app1.mgr.spawn(INST, { template: 'homeforeign' }, app);
+  const err = await app1.mgr.spawn(INST, { template: 'homeuser' }, app).then(() => null, (e) => e);
+  const root = sidecars(t, { identity: null });
+  await root.mgr.spawn(INST, { template: 'homeforeign', name: 'homeforeign-root' }, app);
+  recorded['sidecar:b12-home-identity'] = normalise({ calls: d.calls, refusal: err && { status: err.status, body: err.body } }, app1.dataDir);
 });
 
 for (const [name, opt] of Object.entries({ 'fail-start': { failStart: true }, 'die-on-boot': { dieOnBoot: true } })) {

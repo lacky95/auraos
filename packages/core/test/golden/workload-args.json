@@ -627,6 +627,201 @@
       }
     ]
   ],
+  "sidecar:b12-home-identity": {
+    "calls": [
+      [
+        "volume",
+        "inspect",
+        "aura-io.test.app-data"
+      ],
+      [
+        "volume",
+        "inspect",
+        "aura-io.test.app-pg"
+      ],
+      [
+        "volume",
+        "inspect",
+        "aura-io.test.app-legacy"
+      ],
+      [
+        "inspect",
+        "--format",
+        "{{.Name}}\t{{.State.Status}}\t{{json .Config.Labels}}\t{{.RestartCount}}",
+        "aura-io.test.app-2--homeforeign"
+      ],
+      [
+        "ps",
+        "-a",
+        "--filter",
+        "label=aura.managed=os",
+        "--filter",
+        "label=aura.parent=io.test.app-2",
+        "--format",
+        "{{.Names}}\t{{.State}}\t{{.Label \"aura.sidecar.spec\"}}"
+      ],
+      [
+        "image",
+        "inspect",
+        "--format",
+        "{{.Id}}",
+        "ghcr.io/example/webui:1"
+      ],
+      [
+        "create",
+        "--name",
+        "aura-io.test.app-2--homeforeign",
+        "--network",
+        "aura-inst-io.test.app-2",
+        "--restart",
+        "unless-stopped",
+        "--cap-drop",
+        "NET_RAW",
+        "--label",
+        "aura.parent=io.test.app-2",
+        "--label",
+        "aura.app=io.test.app",
+        "--label",
+        "aura.service=homeforeign",
+        "--label",
+        "aura.managed=os",
+        "--label",
+        "aura.sidecar.template=homeforeign",
+        "--label",
+        "aura.sidecar.owner=-",
+        "--label",
+        "aura.sidecar.spec={\"name\":\"homeforeign\",\"template\":\"homeforeign\",\"image\":\"ghcr.io/example/webui:1\",\"specHash\":\"59cd5e51734f7c3a\",\"mounts\":{\"own\":false,\"inherit\":false,\"exclude\":[],\"forceRo\":false},\"network\":\"instance\",\"createdAt\":\"<TS>\"}",
+        "--mount",
+        "type=volume,source=appvol,target=/home/aura,volume-subpath=aura/apphomes/i/global",
+        "-e",
+        "HOME=/home/aura",
+        "--user",
+        "200001:200001",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "ghcr.io/example/webui:1"
+      ],
+      [
+        "start",
+        "id1"
+      ],
+      [
+        "inspect",
+        "--format",
+        "{{.Name}}\t{{.State.Status}}\t{{json .Config.Labels}}\t{{.RestartCount}}",
+        "aura-io.test.app-2--homeforeign"
+      ],
+      [
+        "volume",
+        "inspect",
+        "aura-io.test.app-data"
+      ],
+      [
+        "volume",
+        "inspect",
+        "aura-io.test.app-pg"
+      ],
+      [
+        "volume",
+        "inspect",
+        "aura-io.test.app-legacy"
+      ],
+      [
+        "volume",
+        "inspect",
+        "aura-io.test.app-data"
+      ],
+      [
+        "volume",
+        "inspect",
+        "aura-io.test.app-pg"
+      ],
+      [
+        "volume",
+        "inspect",
+        "aura-io.test.app-legacy"
+      ],
+      [
+        "inspect",
+        "--format",
+        "{{.Name}}\t{{.State.Status}}\t{{json .Config.Labels}}\t{{.RestartCount}}",
+        "aura-io.test.app-2--homeforeign-root"
+      ],
+      [
+        "ps",
+        "-a",
+        "--filter",
+        "label=aura.managed=os",
+        "--filter",
+        "label=aura.parent=io.test.app-2",
+        "--format",
+        "{{.Names}}\t{{.State}}\t{{.Label \"aura.sidecar.spec\"}}"
+      ],
+      [
+        "image",
+        "inspect",
+        "--format",
+        "{{.Id}}",
+        "ghcr.io/example/webui:1"
+      ],
+      [
+        "create",
+        "--name",
+        "aura-io.test.app-2--homeforeign-root",
+        "--network",
+        "aura-inst-io.test.app-2",
+        "--restart",
+        "unless-stopped",
+        "--cap-drop",
+        "NET_RAW",
+        "--label",
+        "aura.parent=io.test.app-2",
+        "--label",
+        "aura.app=io.test.app",
+        "--label",
+        "aura.service=homeforeign-root",
+        "--label",
+        "aura.managed=os",
+        "--label",
+        "aura.sidecar.template=homeforeign",
+        "--label",
+        "aura.sidecar.owner=-",
+        "--label",
+        "aura.sidecar.spec={\"name\":\"homeforeign-root\",\"template\":\"homeforeign\",\"image\":\"ghcr.io/example/webui:1\",\"specHash\":\"c5e4dcd7fa75e60a\",\"mounts\":{\"own\":false,\"inherit\":false,\"exclude\":[],\"forceRo\":false},\"network\":\"instance\",\"createdAt\":\"<TS>\"}",
+        "--mount",
+        "type=volume,source=appvol,target=/home/aura,volume-subpath=aura/apphomes/i/global",
+        "-e",
+        "HOME=/home/aura",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "ghcr.io/example/webui:1"
+      ],
+      [
+        "start",
+        "id2"
+      ],
+      [
+        "inspect",
+        "--format",
+        "{{.Name}}\t{{.State.Status}}\t{{json .Config.Labels}}\t{{.RestartCount}}",
+        "aura-io.test.app-2--homeforeign-root"
+      ]
+    ],
+    "refusal": {
+      "status": 409,
+      "body": {
+        "error": "sidecar-identity-conflict",
+        "message": "template 'homeuser' sets user '1000:1000' and inheritHome: a sidecar with io.test.app's home runs as the app's identity (200001:200001), so it is not created",
+        "category": "invalid-request",
+        "manifestField": "services[homeuser].user",
+        "hint": "drop \"user\" from services[homeuser] in app.manifest.json (an inheritHome sidecar always runs as its app's identity)"
+      }
+    }
+  },
   "sidecar:die-on-boot": [
     [
       "volume",
@@ -2105,6 +2300,12 @@
       "type=volume,source=appvol,target=/home/aura,volume-subpath=aura/apphomes/i/global",
       "-e",
       "HOME=/home/aura",
+      "--user",
+      "200001:200001",
+      "--cap-drop",
+      "ALL",
+      "--security-opt",
+      "no-new-privileges",
       "alpine:3"
     ],
     [
