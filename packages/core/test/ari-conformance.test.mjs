@@ -73,7 +73,7 @@ describeRuntime('proot', () => prootRuntime(stub((s) => ProotRunner.prototype.ca
 const FAKE_CAPS = Object.freeze({
   isolation: 'vm', network: 'remote', appHome: true, privateHomeSession: false, sessionExec: false, identity: 'emulated',
   readOnlyBinds: true, hostFilesystem: false, mounts: false, idmappedMounts: false, portExpose: false, sidecars: false,
-  warmPool: false, survivesShellRestart: false, usage: false, gpu: false,
+  warmPool: false, survivesShellRestart: false, usage: false, gpu: false, userNamespaces: false,
 });
 describeRuntime('fake', () => {
   const runner = stub(() => FAKE_CAPS, 'fake.example');
@@ -100,6 +100,8 @@ describeRuntime('mock', mockProvider, {
 // D106: the reference mock with some limits it can't enforce (partial) and with none: the mandatory-limits contract.
 describeRuntime('mock (partial limits: no pids)', () => mockProvider({ limits: { cpus: 'supported', memoryBytes: 'supported', pids: 'unsupported' } }), { instance: 'known-1' });
 describeRuntime('mock (no limits)', () => mockProvider({ limits: { cpus: 'unsupported', memoryBytes: 'unsupported', pids: 'unsupported' } }), { instance: 'known-1' });
+// D107: a reference provider that can't isolate workloads, and one without nested sandboxes.
+describeRuntime('mock (no workload isolation, no userns)', () => mockProvider({ workloadIsolation: 'none', userNamespaces: false }), { instance: 'known-1' });
 
 // ── Rows over the built-ins' sources and golden argv (5b E) ─────────────────
 

@@ -182,6 +182,7 @@ const FEATURE_ORDER = {
   'resources.limits': 21, 'resources.hardware': 22,
   'build.execute': 23, 'build.sourceSync': 24,
   'observability.logs': 25, 'observability.metrics': 26, 'observability.events': 27,
+  'execution.userNamespaces': 28,
 } as const;
 export type RuntimeFeatureId = keyof typeof FEATURE_ORDER;
 export const RUNTIME_FEATURE_IDS: readonly RuntimeFeatureId[] = Object.freeze(
@@ -234,7 +235,9 @@ const FEATURE_OF_CAPS: Record<RuntimeFeatureId, (c: RuntimeCapabilities) => Omit
   'mount.inheritance': (c) => ({ support: yes(c.mounts && c.sidecars), applyMode: 'live' }),
   'workload.dynamic': (c) => ({ support: yes(c.sidecars) }),
   'workload.identityInheritance': (c) => ({ support: yes(c.sidecars) }),
-  'network.isolation': (c) => ({ support: yes(c.network !== 'shell-netns' && c.isolation !== 'none') }),
+  // `workloadIsolation` (D107): the strongest network isolation the runtime enforces for associated
+  // workloads; `instance` = on their instance's own network only. A module that has it says so.
+  'network.isolation': (c) => ({ support: yes(c.network !== 'shell-netns' && c.isolation !== 'none'), constraints: { workloadIsolation: 'none' } }),
   'network.endpointExposure': (c) => ({ support: yes(c.portExpose), applyMode: 'live' }),
   // Per limit as constraints (D106): a module that enforces limits overrides the whole entry.
   'resources.limits': () => ({ support: 'unsupported', constraints: { cpus: 'unsupported', memoryBytes: 'unsupported', pids: 'unsupported' } }),
@@ -244,6 +247,8 @@ const FEATURE_OF_CAPS: Record<RuntimeFeatureId, (c: RuntimeCapabilities) => Omit
   'observability.logs': () => ({ support: 'supported' }),
   'observability.metrics': (c) => ({ support: yes(c.usage) }),
   'observability.events': () => ({ support: 'supported' }),
+  // D107: a nested sandbox inside a workload, only under the runtime's own confinement.
+  'execution.userNamespaces': (c) => ({ support: yes(c.userNamespaces) }),
 };
 
 /** The features of a runtime under its capabilities: the derived view plus the module's overrides. Plain data. */
@@ -508,6 +513,12 @@ export interface RuntimeWorkloads {
   create(req: RuntimeWorkloadCreate): Promise<string>;
   /** Starts a created workload and checks it stays up; on failure it is removed and the call throws with its last words. */
   start(id: string, ref: string): Promise<void>;
+  /**
+   * D107: the instance's own container (re)joins its workload network, so it
+   * reaches its isolated workloads again after it restarted (adopt,
+   * reconcile). Throws when it can't.
+   */
+  attachInstance(instanceId: string): Promise<void>;
   /** Removes a workload; throws when the runtime could not (`quiet`: never throws). */
   destroy(ref: string, opts?: { quiet?: boolean }): Promise<void>;
   /** A one-shot command in a running workload, output captured. */
@@ -692,6 +703,38 @@ export function unenforcedLimits(features: readonly RuntimeFeature[], limits: Re
   const f = features.find((x) => x.id === 'resources.limits');
   return RESOURCE_LIMIT_KEYS.filter((k) => limits[k] !== undefined
     && (f?.support !== 'supported' || (f.constraints?.[k] ?? 'supported') !== 'supported')).map((k) => `resources.limits.${k}`);
+}
+
+/** The network isolation a workload may require (D107): its instance's own network only. */
+export type WorkloadNetworkIsolation = 'instance';
+
+/** `network.isolation.<level>` when the runtime does not enforce `level` for associated workloads, else []. */
+export function unenforcedNetworkIsolation(features: readonly RuntimeFeature[], level: WorkloadNetworkIsolation): string[] {
+  const f = features.find((x) => x.id === 'network.isolation');
+  return f?.support === 'supported' && f.constraints?.['workloadIsolation'] === level ? [] : [`network.isolation.${level}`];
+}
+
+/**
+ * Refuses (throws `RuntimeFeatureError`, D105 shape) unless `module` isolates
+ * associated workloads at `level` (D107: mandatory, never silently put on a
+ * shared network). The kernel checks before it asks for such a workload; a
+ * provider checks again before it creates one.
+ */
+export function requireNetworkIsolation(
+  module: Pick<RuntimeModule, 'descriptor' | 'capabilities' | 'featureOverrides'>, settings: RuntimeSettings, level: WorkloadNetworkIsolation,
+  others: ReadonlyArray<Pick<RuntimeModule, 'descriptor' | 'capabilities' | 'featureOverrides' | 'workloads'>> = [],
+): void {
+  const missing = unenforcedNetworkIsolation(moduleFeatures(module, settings), level);
+  if (!missing.length) return;
+  const id = module.descriptor.id;
+  const suggest = others.filter((m) => m.descriptor.id !== id && m.workloads && !unenforcedNetworkIsolation(moduleFeatures(m, settings), level).length)
+    .map((m) => m.descriptor.id);
+  throw new RuntimeFeatureError(id, missing,
+    `runtime ${id} can't put a workload on its instance's own network: the isolation is mandatory, so it is not created (never on a shared network)`,
+    suggest,
+    suggest.length
+      ? `run the app on a runtime that isolates its workloads (${suggest.join(', ')}): the owner moves it with aura runtime set <app> <runtime>`
+      : 'no installed runtime isolates workloads per instance; aura runtime show <id> lists each runtime\'s network.isolation');
 }
 
 /**

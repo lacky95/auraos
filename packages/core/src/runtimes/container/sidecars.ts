@@ -39,6 +39,8 @@ import { MOUNT_ROOT_PATH, MY_TOOLS_PATH } from '../spawn/paths.js';
 export interface ContainerSidecarFacts {
   sidecarRuntime(): SidecarRuntimeFacts;
   mountRootSubpath(consumer: string): string;
+  /** D107: the instance's own workload network, ensured with the instance's container and the shell on it. */
+  isolatedNetwork(instanceId: string): string;
 }
 
 /** The OS-sidecar members of the container module's `workloads` group. */
@@ -135,7 +137,7 @@ async function toolArgs(rt: SidecarRuntimeFacts, dirKey: string, image: string):
 
 /** The `docker create` argv of one OS sidecar (golden: test/golden-workload-args.test.mjs). */
 export async function sidecarCreateArgs(
-  req: RuntimeWorkloadCreate, rt: SidecarRuntimeFacts, facts: { mountRootSubpath(consumer: string): string; baseImage: string },
+  req: RuntimeWorkloadCreate, rt: SidecarRuntimeFacts, facts: { mountRootSubpath(consumer: string): string; baseImage: string; network?: string },
 ): Promise<string[]> {
   const { instanceId, appId, spec } = req;
   const container = sidecarContainerName(instanceId, spec.name);
@@ -152,7 +154,8 @@ export async function sidecarCreateArgs(
   // inheritHome: the parent's App Home (D65) the kernel resolved; never a Private Home.
   const homeMount = spec.inheritHome && req.home ? containerHomeMount({ appDataVolume: rt.appDataVolume, home: req.home }) : [];
   const a: string[] = [
-    'create', '--name', container, '--network', rt.network, '--restart', spec.restart,
+    // D107: an isolated sidecar is on its instance's own network only (`facts.network`), else the shared one.
+    'create', '--name', container, '--network', facts.network ?? rt.network, '--restart', spec.restart,
     // No raw sockets unless the template's reviewed privileged/NET_RAW asks (spawn/networkArgs.ts, D88 S1).
     ...rawSocketArgs(spec),
     '--label', `aura.parent=${instanceId}`,
@@ -261,7 +264,7 @@ export function containerSidecars(runner: ContainerSidecarFacts, opts: { baseIma
       return env;
     },
     async seed({ instanceId, spec, env }) {
-      const rt = runner.sidecarRuntime();
+      const rt = { ...runner.sidecarRuntime(), ...(spec.network === 'instance' ? { network: runner.isolatedNetwork(instanceId) } : {}) };
       // aura.mount=1 keeps the throwaway out of sidecar listings; aura.parent
       // lets the reaper remove it if the instance dies mid-seed.
       const args = ['run', '--rm', '--network', rt.network, ...rawSocketArgs(spec), '--label', 'aura.mount=1', '--label', `aura.parent=${instanceId}`,
@@ -274,7 +277,11 @@ export function containerSidecars(runner: ContainerSidecarFacts, opts: { baseIma
       if (r.code !== 0) throw new Error(`seed for ${spec.name} failed: ${(r.stderr || r.stdout).trim().slice(-2000)}`);
     },
     async create(req) {
-      const args = await sidecarCreateArgs(req, runner.sidecarRuntime(), { mountRootSubpath: (c) => runner.mountRootSubpath(c), baseImage: opts.baseImage });
+      // D107: mandatory isolation is this runtime's to enforce (its feature says so), or the create is refused.
+      const network = req.spec.network === 'instance' ? runner.isolatedNetwork(req.instanceId) : undefined;
+      const args = await sidecarCreateArgs(req, runner.sidecarRuntime(), {
+        mountRootSubpath: (c) => runner.mountRootSubpath(c), baseImage: opts.baseImage, ...(network ? { network } : {}),
+      });
       return (await dockerOk(args, `docker create ${sidecarContainerName(req.instanceId, req.spec.name)}`)).trim();
     },
     async start(id, ref) {
@@ -292,6 +299,9 @@ export function containerSidecars(runner: ContainerSidecarFacts, opts: { baseIma
         await docker(['rm', '-f', ref]);
         throw new Error(`${ref} exited right after start:\n${words || '(no output)'}`);
       }
+    },
+    async attachInstance(instanceId) {
+      runner.isolatedNetwork(instanceId);
     },
     async destroy(ref, o = {}) {
       if (o.quiet) { await docker(['rm', '-f', ref]); return; }

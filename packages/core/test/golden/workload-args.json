@@ -1769,7 +1769,7 @@
       "--name",
       "aura-io.test.app-2--home",
       "--network",
-      "aura-net",
+      "aura-inst-io.test.app-2",
       "--restart",
       "unless-stopped",
       "--cap-drop",
@@ -1787,7 +1787,7 @@
       "--label",
       "aura.sidecar.owner=-",
       "--label",
-      "aura.sidecar.spec={\"name\":\"home\",\"template\":\"home\",\"image\":\"aura-base\",\"specHash\":\"c11274f2a98b7579\",\"nonce\":\"<NONCE>\",\"mounts\":{\"own\":false,\"inherit\":false,\"exclude\":[],\"forceRo\":false},\"createdAt\":\"<TS>\"}",
+      "aura.sidecar.spec={\"name\":\"home\",\"template\":\"home\",\"image\":\"aura-base\",\"specHash\":\"391b0dcb91e6fab6\",\"nonce\":\"<NONCE>\",\"mounts\":{\"own\":false,\"inherit\":false,\"exclude\":[],\"forceRo\":false},\"network\":\"instance\",\"createdAt\":\"<TS>\"}",
       "--mount",
       "type=volume,source=appvol,target=/home/aura,volume-subpath=aura/apphomes/i/global",
       "-e",
@@ -1926,6 +1926,196 @@
       "--format",
       "{{.Name}}\t{{.State.Status}}\t{{json .Config.Labels}}\t{{.RestartCount}}",
       "aura-io.test.app-2--inh"
+    ]
+  ],
+  "sidecar:spawn-isolated-adopt": [
+    [
+      "volume",
+      "inspect",
+      "aura-io.test.app-data"
+    ],
+    [
+      "volume",
+      "inspect",
+      "aura-io.test.app-pg"
+    ],
+    [
+      "volume",
+      "inspect",
+      "aura-io.test.app-legacy"
+    ],
+    [
+      "inspect",
+      "--format",
+      "{{.Name}}\t{{.State.Status}}\t{{json .Config.Labels}}\t{{.RestartCount}}",
+      "aura-io.test.app-2--iso"
+    ],
+    [
+      "ps",
+      "-a",
+      "--filter",
+      "label=aura.managed=os",
+      "--filter",
+      "label=aura.parent=io.test.app-2",
+      "--format",
+      "{{.Names}}\t{{.State}}\t{{.Label \"aura.sidecar.spec\"}}"
+    ],
+    [
+      "image",
+      "inspect",
+      "--format",
+      "{{.Id}}",
+      "redis:7"
+    ],
+    [
+      "run",
+      "--rm",
+      "--network",
+      "aura-inst-io.test.app-2",
+      "--cap-drop",
+      "NET_RAW",
+      "--label",
+      "aura.mount=1",
+      "--label",
+      "aura.parent=io.test.app-2",
+      "redis:7",
+      "true"
+    ],
+    [
+      "create",
+      "--name",
+      "aura-io.test.app-2--iso",
+      "--network",
+      "aura-inst-io.test.app-2",
+      "--restart",
+      "unless-stopped",
+      "--cap-drop",
+      "NET_RAW",
+      "--label",
+      "aura.parent=io.test.app-2",
+      "--label",
+      "aura.app=io.test.app",
+      "--label",
+      "aura.service=iso",
+      "--label",
+      "aura.managed=os",
+      "--label",
+      "aura.sidecar.template=iso",
+      "--label",
+      "aura.sidecar.owner=-",
+      "--label",
+      "aura.sidecar.spec={\"name\":\"iso\",\"template\":\"iso\",\"image\":\"redis:7\",\"specHash\":\"1ca217cbe8d9b458\",\"mounts\":{\"own\":false,\"inherit\":false,\"exclude\":[],\"forceRo\":false},\"network\":\"instance\",\"createdAt\":\"<TS>\"}",
+      "redis:7",
+      "redis-server"
+    ],
+    [
+      "start",
+      "id1"
+    ],
+    [
+      "inspect",
+      "--format",
+      "{{.Name}}\t{{.State.Status}}\t{{json .Config.Labels}}\t{{.RestartCount}}",
+      "aura-io.test.app-2--iso"
+    ],
+    [
+      "volume",
+      "inspect",
+      "aura-io.test.app-data"
+    ],
+    [
+      "volume",
+      "inspect",
+      "aura-io.test.app-pg"
+    ],
+    [
+      "volume",
+      "inspect",
+      "aura-io.test.app-legacy"
+    ],
+    [
+      "inspect",
+      "--format",
+      "{{.Name}}\t{{.State.Status}}\t{{json .Config.Labels}}\t{{.RestartCount}}",
+      "aura-io.test.app-2--iso"
+    ],
+    [
+      "volume",
+      "inspect",
+      "aura-io.test.app-data"
+    ],
+    [
+      "volume",
+      "inspect",
+      "aura-io.test.app-pg"
+    ],
+    [
+      "volume",
+      "inspect",
+      "aura-io.test.app-legacy"
+    ],
+    [
+      "inspect",
+      "--format",
+      "{{.Name}}\t{{.State.Status}}\t{{json .Config.Labels}}\t{{.RestartCount}}",
+      "aura-io.test.app-2--homeshared"
+    ],
+    [
+      "ps",
+      "-a",
+      "--filter",
+      "label=aura.managed=os",
+      "--filter",
+      "label=aura.parent=io.test.app-2",
+      "--format",
+      "{{.Names}}\t{{.State}}\t{{.Label \"aura.sidecar.spec\"}}"
+    ],
+    [
+      "image",
+      "inspect",
+      "--format",
+      "{{.Id}}",
+      "alpine:3"
+    ],
+    [
+      "create",
+      "--name",
+      "aura-io.test.app-2--homeshared",
+      "--network",
+      "aura-net",
+      "--restart",
+      "unless-stopped",
+      "--cap-drop",
+      "NET_RAW",
+      "--label",
+      "aura.parent=io.test.app-2",
+      "--label",
+      "aura.app=io.test.app",
+      "--label",
+      "aura.service=homeshared",
+      "--label",
+      "aura.managed=os",
+      "--label",
+      "aura.sidecar.template=homeshared",
+      "--label",
+      "aura.sidecar.owner=-",
+      "--label",
+      "aura.sidecar.spec={\"name\":\"homeshared\",\"template\":\"homeshared\",\"image\":\"alpine:3\",\"specHash\":\"0935584fa4e29328\",\"mounts\":{\"own\":false,\"inherit\":false,\"exclude\":[],\"forceRo\":false},\"createdAt\":\"<TS>\"}",
+      "--mount",
+      "type=volume,source=appvol,target=/home/aura,volume-subpath=aura/apphomes/i/global",
+      "-e",
+      "HOME=/home/aura",
+      "alpine:3"
+    ],
+    [
+      "start",
+      "id2"
+    ],
+    [
+      "inspect",
+      "--format",
+      "{{.Name}}\t{{.State.Status}}\t{{json .Config.Labels}}\t{{.RestartCount}}",
+      "aura-io.test.app-2--homeshared"
     ]
   ],
   "sidecar:spawn-legacy-volume": [

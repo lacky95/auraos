@@ -58,6 +58,7 @@ const sortedKeys = (needs: Partial<RuntimeCapabilities>): RuntimeCapability[] =>
 /**
  * The derivation table (one row per rule):
  *   services[]                       sidecars
+ *   services[].userNamespaces        userNamespaces (a nested sandbox, D107)
  *   ports.exposes                    portExpose
  *   warmPool > 0                     warmPool
  *   permission apps.mount            mounts (cross-app mounts)
@@ -74,6 +75,8 @@ export function requirementsOf(m: RequirementsManifest, installation?: Requireme
   const mounts = (m.permissions ?? []).includes('apps.mount');
   const needs: Partial<RuntimeCapabilities> = {};
   if (services.length) needs.sidecars = true;
+  // D107: a sidecar that runs a nested sandbox needs the runtime's userNamespaces (never by weakening it).
+  if (services.some((s) => s.userNamespaces)) needs.userNamespaces = true;
   if (exposes.length) needs.portExpose = true;
   if ((m.warmPool ?? 0) > 0) needs.warmPool = true;
   if (mounts) needs.mounts = true;
@@ -127,11 +130,11 @@ export function requirementsOf(m: RequirementsManifest, installation?: Requireme
  *   mount, idmap-mount                     a cross-app mount; a writable one
  *                                          between different app uids (D80)
  *   closed, sidecars, port-expose,         the manifest rows by name
- *   host-filesystem
+ *   host-filesystem, user-namespaces
  */
 export const REQUEST_KINDS = [
   'jump', 'home-private', 'home-ephemeral', 'home-app', 'terminal-session', 'application', 'sidecar',
-  'mount', 'idmap-mount', 'closed', 'sidecars', 'port-expose', 'host-filesystem',
+  'mount', 'idmap-mount', 'closed', 'sidecars', 'port-expose', 'host-filesystem', 'user-namespaces',
 ] as const;
 export type RequestKind = (typeof REQUEST_KINDS)[number];
 
@@ -153,6 +156,7 @@ export function requestNeeds(kind: RequestKind | ExecutionContext, opts: { jumpH
     case 'sidecars': return { sidecars: true };
     case 'port-expose': return { portExpose: true };
     case 'host-filesystem': return { hostFilesystem: true };
+    case 'user-namespaces': return { userNamespaces: true };
   }
 }
 

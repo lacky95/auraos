@@ -119,6 +119,9 @@ const SERVICES = [
     seed: { command: ['init-db'] }, env: { POSTGRES_PASSWORD: 'x' } },
   { name: 'legacy', image: 'alpine:3', command: [], volumes: [{ name: 'legacy', target: '/old' }] },
   { name: 'priv', image: 'private.example/other/x:1', command: [], volumes: [] },
+  // D107: explicitly isolated, and an inheritHome sidecar kept on the shared network by choice.
+  { name: 'iso', image: 'redis:7', command: ['redis-server'], volumes: [], network: 'instance', seed: { command: ['true'] } },
+  { name: 'homeshared', image: 'alpine:3', command: [], volumes: [], inheritHome: true, network: 'shared' },
 ];
 
 /** A Nexus source's login for one image (nexus PullCredential), with a fixed throwaway auth dir. */
@@ -132,11 +135,14 @@ function sidecars(t, { toolsMode = 'hardlink', pullCredential } = {}) {
   const dataDir = fs.mkdtempSync(join(tmpdir(), 'aura-gw-'));
   fs.mkdirSync(join(dataDir, 'aura', 'toolchain', 'bin'), { recursive: true });
   for (const b of ['jq', 'rg']) fs.writeFileSync(join(dataDir, 'aura', 'toolchain', 'bin', b), `#!/bin/sh\necho ${b}\n`);
+  const isolated = [];
   const runner = {
     sidecarRuntime: () => ({ dataDir, appDataVolume: 'appvol', nodeModulesVolume: 'nm', network: 'aura-net',
       osApiBase: 'http://aura-shell:3000', shellHostname: 'aura-shell', workspaceRoot: '/ws', toolsMode }),
     mountRootDir: (k) => join(dataDir, 'aura', 'mounts', k),
     mountRootSubpath: (k) => `aura/mounts/${k}`,
+    // D107: the instance network the runner would ensure (InstanceNetworks), recorded instead.
+    isolatedNetwork: (id) => { isolated.push(id); return `aura-inst-${id}`; },
     toolsDir: (k) => join(dataDir, 'aura', 'runtime', k, 'tools'),
     clearToolsDir: (k) => fs.rmSync(join(dataDir, 'aura', 'runtime', k, 'tools'), { recursive: true, force: true }),
   };
@@ -171,6 +177,12 @@ const SIDECAR_SCENARIOS = {
   'spawn-privileged-net': async (m) => { await m.spawn(INST, { template: 'net' }, app); },
   'spawn-seed': async (m) => { await m.spawn(INST, { template: 'db' }, app); },
   'spawn-legacy-volume': async (m) => { await m.spawn(INST, { template: 'legacy' }, app); },
+  // D107: on the instance network only (seed too); adopt rejoins; inheritHome shared by choice.
+  'spawn-isolated-adopt': async (m) => {
+    await m.spawn(INST, { template: 'iso' }, app);
+    await m.spawn(INST, { template: 'iso' }, app);
+    await m.spawn(INST, { template: 'homeshared' }, app);
+  },
   'remove-exec-logs-reconcile': async (m, d) => {
     await m.spawn(INST, { template: 'box', name: 'kid' }, app);
     await m.spawn(INST, { template: 'box', name: 'grandkid' }, { instanceId: INST, sidecar: 'kid' });

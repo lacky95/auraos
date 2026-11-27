@@ -190,6 +190,38 @@ export function describeRuntime(name, makeModule, harness = {}) {
     }
   });
 
+  // D107: workload network isolation and nested sandboxes are declared honestly and enforced or refused.
+  test(`[ARI ${name}] network.isolation and userNamespaces (D107): declared; a mandatory isolation it lacks is refused (D105 shape), nothing created; never downgraded`, async () => {
+    const m = makeModule();
+    const settings = settingsList()[0];
+    const features = moduleFeatures(m, settings);
+    const net = features.find((x) => x.id === 'network.isolation');
+    const level = net.constraints?.workloadIsolation;
+    assert.ok(['instance', 'none'].includes(level), `workloadIsolation reported: ${level}`);
+    const userns = features.find((x) => x.id === 'execution.userNamespaces');
+    assert.equal(userns.support, m.capabilities(settings).userNamespaces ? 'supported' : 'unsupported', 'execution.userNamespaces follows the capability');
+    if (!m.workloads?.create || !m._workloads) return;   // only an in-memory provider is driven here; the container's argv is golden
+    const req = (name) => ({ instanceId: 'org.k.app-1', appId: 'org.k.app', record: '{}', env: {}, token: null, home: null,
+      spec: { name, template: name, image: 'x:1', command: [], env: {}, envInherit: [], restart: 'no', dns: [], capabilities: [], devices: [],
+        privileged: false, publish: [], volumes: [], inheritIdentity: false, inheritPermissions: false, inheritTools: false,
+        network: 'instance', mounts: { own: false, inherit: false, exclude: [], forceRo: false } } });
+    const before = m._workloads.size;
+    if (level !== 'instance' || net.support !== 'supported') {
+      await assert.rejects(m.workloads.create(req('db')), (e) => {
+        const r = runtimeRefusal(e);
+        assert.equal(e.code, 'feature-unsupported');
+        assert.equal(r?.category, 'unsupported-feature');
+        assert.deepEqual(r.missing, ['network.isolation.instance']);
+        assert.ok(Array.isArray(r.suggest) && typeof r.hint === 'string');
+        return true;
+      });
+      assert.equal(m._workloads.size, before, 'nothing created (never on a shared network instead)');
+    } else {
+      const ref = await m.workloads.create(req('db'));
+      assert.equal(m._workloads.get(ref).network, 'instance', 'created isolated, as asked');
+    }
+  });
+
   // Phase 6 D-M: the mounts group is the mechanism only; its shape is the contract.
   test(`[ARI ${name}] mounts (D-M): present exactly with mount.attach; attach/detach/table/verify/rootOf are functions`, () => {
     const m = makeModule();
@@ -329,6 +361,8 @@ export function describeRuntime(name, makeModule, harness = {}) {
       ['mounts', { permissions: ['apps.mount'] }, 'open'],
       ['hostFilesystem', { tools: ['docker'] }, 'open'],
       ['warmPool', { warmPool: 1 }, 'open'],
+      // D107: a sidecar with a nested sandbox needs user namespaces; never granted by weakening the runtime.
+      ['userNamespaces', { services: [{ name: 'codex', image: 'x:1', userNamespaces: true }] }, 'open'],
     ];
     for (const [cap, extra, sourceMode] of rows) {
       if (caps[cap]) continue;

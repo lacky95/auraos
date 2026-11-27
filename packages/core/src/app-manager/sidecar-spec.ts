@@ -118,6 +118,12 @@ export interface ResolvedSidecarSpec {
    * container. Present only when set, like `inheritHome`.
    */
   ownTools?: true;
+  /**
+   * D107: on its instance's own network only (`services[].network`, default
+   * `instance` for an inheritHome sidecar). Present only when set, like
+   * `inheritHome`: a `shared` sidecar's spec hash is unchanged.
+   */
+  network?: 'instance';
   mounts: { own: boolean; inherit: boolean; exclude: string[]; forceRo: boolean };
 }
 
@@ -277,6 +283,7 @@ export function resolveSidecarSpec(req: SidecarSpawnRequest, ctx: ResolveContext
     inheritTools: tpl.inheritTools === true,
     ...(tpl.inheritHome ? { inheritHome: true as const } : {}),
     ...(tpl.tools ? { ownTools: true as const } : {}),
+    ...((tpl.network ?? (tpl.inheritHome ? 'instance' : 'shared')) === 'instance' ? { network: 'instance' as const } : {}),
     mounts,
   };
 }

@@ -138,7 +138,7 @@ const grown = (): RuntimesState => {
   const proot = s.runtimes[1]!;
   Object.assign(proot, {
     version: '1.0.0', ari: 1, settingsVersion: 1,
-    capabilities: { ...CAPS, network: 'shell-netns', appHome: true, hostFilesystem: true, idmappedMounts: false, usage: false, gpu: false },
+    capabilities: { ...CAPS, network: 'shell-netns', appHome: true, hostFilesystem: true, idmappedMounts: false, usage: false, gpu: false, userNamespaces: false },
     health: { status: 'ok', checks: [{ id: 'rootfs', ok: true }, { id: 'use-proot', ok: true, detail: 'AURA_USE_PROOT=true' }] },
     features: [
       { id: 'mount.attach', support: 'unsupported' },

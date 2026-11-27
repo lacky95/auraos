@@ -36,7 +36,7 @@ import { hostToolsGroup, toolsEnforcement, toolsFeatureOverrides, type HostToolS
 /** The runner surface the module adapts: the SandboxRunner contract plus the container's own groups. */
 export type ContainerRunnerSurface = SandboxRunner & Partial<Pick<ContainerRunner,
   'openSessions' | 'endSession' | 'canPropagateMounts' | 'instanceLogs' | 'execWorkload' | 'workloadLogs' | 'forwarderFacts' | 'buildApp' | 'provisionApp'
-  | 'sidecarRuntime' | 'mountRootSubpath' | 'mountRootDir' | 'toDaemonHostPath' | 'canIdmapMounts' | 'idmapHelperHostPath'>>;
+  | 'sidecarRuntime' | 'mountRootSubpath' | 'isolatedNetwork' | 'mountRootDir' | 'toDaemonHostPath' | 'canIdmapMounts' | 'idmapHelperHostPath'>>;
 
 type OrphanRecord = NonNullable<Awaited<ReturnType<NonNullable<SandboxRunner['listOrphanRecords']>>>>[number] & { user?: string };
 
@@ -60,6 +60,8 @@ export function containerRuntime(runner: ContainerRunnerSurface, deps: Container
   // Build/check workloads take enforced resource limits, each of them (D106, `limits.ts`); app instances don't (BT-M2).
   const featureOverrides = (): RuntimeFeatureOverrides => ({
     'build.execute': { support: 'supported' },
+    // D107: associated workloads can be put on their instance's own network (InstanceNetworks).
+    'network.isolation': { support: 'supported', constraints: { workloadIsolation: 'instance' } },
     'resources.limits': { support: 'supported', applyMode: 'recreate-required',
       constraints: { workloads: 'build', instances: 'unsupported', cpus: 'supported', memoryBytes: 'supported', pids: 'supported' } },
     ...toolsFeatureOverrides(runner.capabilities({}), toolsMode()),
@@ -153,6 +155,10 @@ export function containerRuntime(runner: ContainerRunnerSurface, deps: Container
         mountRootSubpath: (consumer) => {
           if (!runner.mountRootSubpath) throw new Error('the container runner has no mount root');
           return runner.mountRootSubpath(consumer);
+        },
+        isolatedNetwork: (instanceId) => {
+          if (!runner.isolatedNetwork) throw new Error('the container runner has no instance networks');
+          return runner.isolatedNetwork(instanceId);
         },
       }, { baseImage: deps.baseImage ?? 'aura-base' }),
     } satisfies RuntimeWorkloads } : {}),

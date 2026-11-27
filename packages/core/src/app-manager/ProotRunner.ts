@@ -219,6 +219,7 @@ const PTRACE_CAPABILITIES: Omit<RuntimeCapabilities, 'network'> = Object.freeze(
   survivesShellRestart: false,
   usage: false,
   gpu: false,
+  userNamespaces: false,
 });
 export const PROOT_CAPABILITIES: Readonly<Record<ProotPlacement, RuntimeCapabilities>> = Object.freeze({
   master: Object.freeze({ ...PTRACE_CAPABILITIES, network: 'shell-netns' as const }),

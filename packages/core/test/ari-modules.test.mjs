@@ -260,3 +260,47 @@ test('D-S: SidecarManager spawns, lists, adopts, removes and reconciles OS sidec
   const none = new SidecarManager({ ...mgr.opts, workloads: undefined });
   await assert.rejects(none.list(INST), /capability-missing: sidecars/);
 });
+
+// ── D107: per-instance workload networks through the workloads group ─────────
+
+test('D107: an isolated sidecar is created on its instance network and rejoined on adopt; a runtime that can\'t isolate refuses it before anything is made (mock, no Docker)', async () => {
+  const { SidecarManager } = await import('../dist/app-manager/SidecarManager.js');
+  const { InstanceTokens } = await import('../dist/app-manager/InstanceTokens.js');
+  const { requireNetworkIsolation } = await import('../dist/index.js');
+  const make = (mock) => {
+    const dataDir = mkdtempSync(join(TMP, 'iso-'));
+    const INST = 'org.mock.app-1';
+    const services = [{ name: 'db', image: 'redis:7', command: [], volumes: [], network: 'instance' }, { name: 'web', image: 'nginx:1', command: [], volumes: [] }];
+    return new SidecarManager({
+      runner: {
+        sidecarRuntime: () => ({ dataDir, appDataVolume: 'v', nodeModulesVolume: 'nm', network: 'n', osApiBase: 'x', shellHostname: 'h', workspaceRoot: '/w', toolsMode: 'hardlink' }),
+        mountRootDir: (k) => join(dataDir, 'm', k), mountRootSubpath: (k) => `m/${k}`, toolsDir: (k) => join(dataDir, 't', k), clearToolsDir: () => {},
+      },
+      workloads: mock.workloads,
+      registry: { getById: (id) => (id === 'org.mock.app' ? { id, services, tools: [], permissions: [] } : undefined) },
+      permissions: { hasPermission: () => false },
+      tokens: new InstanceTokens(join(dataDir, 'k')),
+      mounts: { reapplyConsumer: async () => ({}), removeAll: () => {}, forgetConsumer: () => {} },
+      context: async () => ({ env: {}, known: new Set() }),
+      instance: (id) => (id === INST ? { appId: 'org.mock.app', instanceDataDir: join(dataDir, 'apps', 'org.mock.app', INST) } : null),
+      appHome: async () => null,
+      // AppManager's check over the registry: the runtime that runs the workloads, and the others for `suggest`.
+      requireNetwork: (level) => requireNetworkIsolation(mock, {}, level, [mock]),
+    });
+  };
+  const INST = 'org.mock.app-1';
+  const ok = mockProvider();
+  const mgr = make(ok);
+  const res = await mgr.spawn(INST, { template: 'db' }, { instanceId: INST });
+  assert.equal(res.sidecar.network, 'instance');
+  assert.equal(ok._workloads.get(res.sidecar.containerName).network, 'instance', 'the runtime was asked for, and made, an isolated workload');
+  assert.equal((await mgr.spawn(INST, { template: 'web' }, { instanceId: INST })).sidecar.network, 'shared', 'shared stays the default without a home');
+  assert.equal((await mgr.spawn(INST, { template: 'db' }, { instanceId: INST })).created, false);
+  assert.deepEqual(ok._attached, [INST], 'adopting the isolated sidecar rejoins its instance to the network');
+
+  const none = mockProvider({ workloadIsolation: 'none' });
+  const refused = make(none);
+  await assert.rejects(refused.spawn(INST, { template: 'db' }, { instanceId: INST }),
+    (e) => e.code === 'feature-unsupported' && JSON.stringify(e.missing) === '["network.isolation.instance"]' && typeof e.hint === 'string');
+  assert.equal(none._workloads.size, 0, 'nothing created, and never on the shared network instead');
+});

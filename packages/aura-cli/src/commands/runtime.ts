@@ -92,6 +92,7 @@ export const CAPABILITY_LABELS: Record<string, string> = {
   survivesShellRestart: 'Survives a shell restart',
   usage: 'Usage metering',
   gpu: 'GPU',
+  userNamespaces: 'Nested sandboxes (user namespaces)',
 };
 
 /**

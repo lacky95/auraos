@@ -59,6 +59,8 @@ interface SpecRecord {
   owner?: string;
   /** Has its own tools dir (template `tools`); absent otherwise. */
   ownTools?: true;
+  /** D107: on its instance's own network only; absent: the shared network. */
+  network?: 'instance';
   createdAt: string;
 }
 
@@ -96,6 +98,8 @@ export interface OsSidecar {
   owner?: string;
   managedBy: 'os';
   mounts: SidecarMountsView;
+  /** D107: `instance` (its instance's own network only) or `shared`. */
+  network: 'instance' | 'shared';
   specHash: string;
 }
 
@@ -158,6 +162,12 @@ interface SidecarManagerOpts {
    * and `aura get sc` show the old state for up to a tick).
    */
   changed?(): void;
+  /**
+   * D107: refuses (RuntimeFeatureError, D105 shape) unless the runtime
+   * isolates workloads at `level` (`requireNetworkIsolation` over the
+   * registry). Asked before anything is created for an isolated sidecar.
+   */
+  requireNetwork?(level: 'instance'): void;
 }
 
 /**
@@ -314,6 +324,8 @@ export class SidecarManager {
       appDataVolume: rt.appDataVolume,
       legacyVolumeExists: (n) => legacy.has(n),
     });
+    // D107: mandatory isolation, refused before anything is made when the runtime can't enforce it.
+    if (spec.network === 'instance') this.opts.requireNetwork?.('instance');
     const hash = specHash(spec);
     const container = this.wl().ref(instanceId, spec.name);
     // Spawn-time tools = initial runtime grants (resolveSidecarSpec already
@@ -354,6 +366,8 @@ export class SidecarManager {
             // Same spec, already up: adopt. Re-learn its nonce and make sure its
             // mounts are there (idempotent — present ones are skipped).
             if (rec.nonce) this.opts.tokens.register(instanceId, rec.nonce, spec.name);
+            // D107: a restarted instance's container rejoins its workload network before it calls the sidecar.
+            if (rec.network === 'instance') await this.wl().attachInstance(instanceId);
             this.track(instanceId, spec.name, rec.mounts, rec);
             let tools: SidecarToolsView | null = null;
             if (rec.ownTools) {
@@ -404,6 +418,7 @@ export class SidecarManager {
         mounts: spec.mounts,
         ...(caller.sidecar ? { owner: caller.sidecar } : {}),
         ...(spec.ownTools ? { ownTools: true as const } : {}),
+        ...(spec.network ? { network: spec.network } : {}),
         createdAt: new Date().toISOString(),
       };
       // inheritHome: the parent's App Home (D65), the one its app process has; never a Private Home.
@@ -825,6 +840,10 @@ export class SidecarManager {
       }
       if (rec.nonce) this.opts.tokens.register(parent, rec.nonce, rec.name);
       this.track(parent, rec.name, rec.mounts, rec);
+      if (rec.network === 'instance') {
+        try { await this.wl().attachInstance(parent); }
+        catch (err) { console.warn(`[SidecarManager] ${container}: its instance can't rejoin the instance network: ${(err as Error).message}`); }
+      }
       if (rec.ownTools) {
         // Re-provision: the app's tools[] or the template may have changed
         // while the shell was down.
@@ -877,6 +896,7 @@ function toView(containerName: string, state: string, rec: SpecRecord): OsSideca
     ...(rec.owner ? { owner: rec.owner } : {}),
     managedBy: 'os',
     mounts: rec.mounts,
+    network: rec.network ?? 'shared',
     specHash: rec.specHash,
   };
 }

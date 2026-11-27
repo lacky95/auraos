@@ -18,7 +18,7 @@ import { publicInstance } from '../src/lib/appResponse.ts';
 const CONTAINER: RuntimeCapabilities = {
   isolation: 'namespace', network: 'bridge', appHome: true, privateHomeSession: true, sessionExec: true, identity: 'enforced',
   readOnlyBinds: true, hostFilesystem: true, mounts: true, idmappedMounts: false, portExpose: true, sidecars: true,
-  warmPool: true, survivesShellRestart: true, usage: true, gpu: false,
+  warmPool: true, survivesShellRestart: true, usage: true, gpu: false, userNamespaces: false,
 };
 const PTRACE: RuntimeCapabilities = { ...CONTAINER, isolation: 'ptrace', network: 'shell-netns', mounts: false, portExpose: false, sidecars: false, sessionExec: false, privateHomeSession: false };
 

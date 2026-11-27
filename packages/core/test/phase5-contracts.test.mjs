@@ -73,7 +73,7 @@ test('runner capabilities declare today honestly', () => {
   assert.deepEqual(proot, {
     isolation: 'ptrace', network: 'shell-netns', appHome: true, privateHomeSession: false, sessionExec: false, identity: 'enforced',
     readOnlyBinds: false, hostFilesystem: true, mounts: false, idmappedMounts: false, portExpose: false, sidecars: false,
-    warmPool: true, survivesShellRestart: false, usage: false, gpu: false,
+    warmPool: true, survivesShellRestart: false, usage: false, gpu: false, userNamespaces: false,
   });
   // Placement-aware (ARI-1, 5b P-3): master is the default; the pool differs only in its network (5b K).
   assert.deepEqual(runner.capabilities({ placement: 'master' }), proot);
@@ -86,7 +86,7 @@ test('runner capabilities declare today honestly', () => {
     // 5b K: A4 hostFilesystem; D80 idmappedMounts false until 5b G's probe.
     isolation: 'namespace', network: 'bridge', appHome: true, privateHomeSession: true, sessionExec: true, identity: 'enforced',
     readOnlyBinds: true, hostFilesystem: true, mounts: true, idmappedMounts: false, portExpose: true, sidecars: true,
-    warmPool: true, survivesShellRestart: true, usage: true, gpu: false,
+    warmPool: true, survivesShellRestart: true, usage: true, gpu: false, userNamespaces: false,
   });
 });
 

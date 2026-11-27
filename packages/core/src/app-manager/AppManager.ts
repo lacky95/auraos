@@ -48,7 +48,7 @@ import {
   RESPAWN_FREEZE_MS, readRespawnRecord, respawnEntries, writeRespawnRecord, type RespawnEntry,
 } from '../runtimes/respawn.js';
 import { DEFAULT_BUILD_LIMITS } from '../runtimes/container/limits.js';
-import { moduleFeatures, operationResult, requireLimits, type ResourceLimits, type RuntimeFeature, type RuntimeOperationResult, type RuntimeBuild, type RuntimeDiagnostics, type RuntimeEndpoints, type RuntimeOrphanProcess, type RuntimeSessionInfo, type RuntimeToolsStatus } from '../runtimes/ari.js';
+import { moduleFeatures, operationResult, requireLimits, requireNetworkIsolation, type ResourceLimits, type RuntimeFeature, type RuntimeOperationResult, type RuntimeBuild, type RuntimeDiagnostics, type RuntimeEndpoints, type RuntimeOrphanProcess, type RuntimeSessionInfo, type RuntimeToolsStatus } from '../runtimes/ari.js';
 import { BUILTIN_RUNTIMES } from '../runtimes/builtins/index.js';
 import { RUNTIME_AUDIT_ACTIONS, RuntimeSettingsStore, runtimeSettingsRevision } from '../runtimes/settingsStore.js';
 import { migrateLegacyRuntimes, migrationReport, processLegacyEnv, type MigrationApp, type MigrationReport } from '../runtimes/migrateLegacy.js';
@@ -517,6 +517,11 @@ export class AppManager {
     this.osSidecars  = new SidecarManager({
       runner:      this.container,
       ...(sidecarWorkloads ? { workloads: sidecarWorkloads } : {}),
+      // D107: isolated sidecars only on a runtime that enforces it (the one that runs them), else refused.
+      requireNetwork: (level) => {
+        const m = this.runtimes.list().find((x) => x.workloads);
+        if (m) requireNetworkIsolation(m, {}, level, this.runtimes.list());
+      },
       registry:    this.registry,
       permissions: this.permissions,
       tokens:      this.tokens,

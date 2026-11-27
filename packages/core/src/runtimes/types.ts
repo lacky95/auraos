@@ -57,6 +57,14 @@ export interface RuntimeCapabilities {
   usage: boolean;
   /** Reserved: `false` everywhere until a runtime offers it. */
   gpu: boolean;
+  /**
+   * Workloads may create user namespaces (a nested sandbox: bwrap, the
+   * Codex Linux sandbox) under the runtime's own confinement. D107: never
+   * by weakening it (no automatic --privileged, seccomp=unconfined or a
+   * disabled AppArmor profile); a runtime that can't offer it that way
+   * declares `false`, and a workload that needs it is refused.
+   */
+  userNamespaces: boolean;
 }
 
 export type RuntimeNetwork = 'shell-netns' | 'bridge' | 'remote';
@@ -70,7 +78,7 @@ export type RuntimeCapability = keyof RuntimeCapabilities;
 const CAPABILITY_ORDER: Record<RuntimeCapability, number> = {
   isolation: 0, network: 1, appHome: 2, privateHomeSession: 3, sessionExec: 4, identity: 5, readOnlyBinds: 6,
   hostFilesystem: 7, mounts: 8, idmappedMounts: 9, portExpose: 10, sidecars: 11, warmPool: 12,
-  survivesShellRestart: 13, usage: 14, gpu: 15,
+  survivesShellRestart: 13, usage: 14, gpu: 15, userNamespaces: 16,
 };
 export const RUNTIME_CAPABILITY_KEYS: readonly RuntimeCapability[] = Object.freeze(
   (Object.keys(CAPABILITY_ORDER) as RuntimeCapability[]).sort((a, b) => CAPABILITY_ORDER[a] - CAPABILITY_ORDER[b]),

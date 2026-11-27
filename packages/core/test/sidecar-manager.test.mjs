@@ -103,11 +103,14 @@ function fixture(t, opts = {}) {
     mkdirSync(join(dataDir, 'aura', 'toolchain', 'bin'), { recursive: true });
     for (const b of opts.mirror) writeFileSync(join(dataDir, 'aura', 'toolchain', 'bin', b), `#!/bin/sh\necho ${b}\n`);
   }
+  const isolated = [];
   const runner = {
     sidecarRuntime: () => ({ dataDir, appDataVolume: 'appvol', nodeModulesVolume: 'nm', network: 'aura-net',
       osApiBase: 'http://aura-shell:3000', shellHostname: 'aura-shell', workspaceRoot: '/ws', toolsMode: 'hardlink' }),
     mountRootDir: (k) => join(dataDir, 'aura', 'mounts', k),
     mountRootSubpath: (k) => `aura/mounts/${k}`,
+    // D107: the instance network the runner would ensure (InstanceNetworks), recorded instead.
+    isolatedNetwork: (id) => { isolated.push(id); return `aura-inst-${id}`; },
     toolsDir: (k) => join(dataDir, 'aura', 'runtime', k, 'tools'),
     clearToolsDir: (k) => rmSync(join(dataDir, 'aura', 'runtime', k, 'tools'), { recursive: true, force: true }),
   };

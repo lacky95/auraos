@@ -5,25 +5,33 @@
 // from it (ari-modules.test.mjs): the kernel depends on the contract only.
 // Its instance operations (spawn, kill, forceKill, onExit) are in memory too,
 // so the kit's instance-ops, workload-token and G1 rows run against it (5b E).
-import { HEALTHY, RuntimeExecError, requireLimits, runnerEndpoint } from '../../dist/index.js';
+import { HEALTHY, RuntimeExecError, requireLimits, requireNetworkIsolation, runnerEndpoint } from '../../dist/index.js';
 
 /**
  * `limits`: which resource limits it enforces (D106), each `supported` by default; a variant with some or all
  * `unsupported` is the conformance kit's partial and no-limits provider.
  */
-export function mockProvider({ limits = { cpus: 'supported', memoryBytes: 'supported', pids: 'supported' } } = {}) {
+export function mockProvider({
+  limits = { cpus: 'supported', memoryBytes: 'supported', pids: 'supported' },
+  /** D107: the network isolation it enforces for workloads (`none`: a variant that can't). */
+  workloadIsolation = 'instance',
+  /** D107: nested sandboxes in its workloads. */
+  userNamespaces = true,
+} = {}) {
   const MOCK_CAPS = {
     isolation: 'remote', network: 'remote', appHome: true, privateHomeSession: true, sessionExec: true, identity: 'enforced',
     readOnlyBinds: true, hostFilesystem: false, mounts: false, idmappedMounts: false, portExpose: false, sidecars: true,
-    warmPool: false, survivesShellRestart: true, usage: true, gpu: false,
+    warmPool: false, survivesShellRestart: true, usage: true, gpu: false, userNamespaces,
   };
   const running = new Map();   // instanceId → { port, env, ref, nonce }
   const exits = new Map();     // instanceId → [cb]
   const workloads = new Map(); // OS sidecar ref → { ref, state, env, tags }
   const builds = [];           // { op, appId, limits }
+  const attached = [];         // instances that (re)joined their workload network
   const anyLimit = Object.values(limits).some((v) => v !== 'unsupported');
   const featureOverrides = () => ({
     'build.execute': { support: 'supported' },
+    'network.isolation': { support: 'supported', constraints: { workloadIsolation } },
     'resources.limits': { support: anyLimit ? 'supported' : 'unsupported', constraints: { workloads: 'build', ...limits } },
   });
   /** D106 `resources.limits`: positive finite; integer bytes and pids; nothing else. */
@@ -60,6 +68,7 @@ export function mockProvider({ limits = { cpus: 'supported', memoryBytes: 'suppo
     kill: async (id) => { exit(id, 0); },
     forceKill: (id) => exit(id, 137),
   };
+  const self = { descriptor: { id: 'mock' }, capabilities: () => ({ ...MOCK_CAPS }), featureOverrides };
   return {
     descriptor: { id: 'mock', version: '0.1.0', ari: 1, title: 'Mock', description: 'reference mock provider (tests only)', builtIn: false,
       settingsVersion: 1, settingsSchema: { type: 'object', properties: {} } },
@@ -100,19 +109,24 @@ export function mockProvider({ limits = { cpus: 'supported', memoryBytes: 'suppo
       instanceEnv: async (id) => ({ ...(running.get(id)?.env ?? {}) }),
       seed: async () => {},
       create: async (req) => {
+        // D107: mandatory isolation, the same contract check the kernel makes; never created on a shared network.
+        if (req.spec.network === 'instance') requireNetworkIsolation(self, {}, 'instance');
         const ref = `urn:mock:wl/${req.instanceId}/${req.spec.name}`;
-        workloads.set(ref, { ref, state: 'created', env: { ...req.env, ...(req.token ? { AURA_INSTANCE_TOKEN: req.token } : {}) }, tags: {
+        workloads.set(ref, { ref, state: 'created', network: req.spec.network ?? 'shared', env: { ...req.env, ...(req.token ? { AURA_INSTANCE_TOKEN: req.token } : {}) }, tags: {
           'aura.parent': req.instanceId, 'aura.app': req.appId, 'aura.service': req.spec.name, 'aura.managed': 'os',
           'aura.sidecar.template': req.spec.template, 'aura.sidecar.owner': req.owner ?? '-', 'aura.sidecar.spec': req.record,
         } });
         return ref;
       },
+      attachInstance: async (instanceId) => { attached.push(instanceId); },
       start: async (id) => { const w = workloads.get(id); if (!w) throw new Error(`no workload ${id}`); w.state = 'running'; },
       destroy: async (ref, o = {}) => { if (!workloads.delete(ref) && !o.quiet) throw new Error(`no workload ${ref}`); },
       run: async (ref) => { if (!workloads.has(ref)) throw new Error(`no workload ${ref}`); return { exitCode: 0, stdout: '', stderr: '', truncated: false, timedOut: false }; },
       output: async (ref) => { if (!workloads.has(ref)) throw new Error(`no workload ${ref}`); return { stdout: '', stderr: '' }; },
       lastWords: async () => '',
     },
+    /** Instances that rejoined their workload network (D107). */
+    _attached: attached,
     /** The OS sidecars it runs (the D-S row of ari-modules.test.mjs). */
     _workloads: workloads,
     // The instance's own output, kept by the provider (no runner output ring, no engine).

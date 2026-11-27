@@ -34,7 +34,7 @@ import { ProotRunner } from '../dist/app-manager/ProotRunner.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 
-// ─── The inventory (§2): 49 runtime-related rows ────────────────────────────
+// ─── The inventory (§2): 49 runtime-related rows, + 2 from D107 ────────────────────────────
 //
 // status  ari     served through ARI or the runner, no runtime bypass
 //         fixed   a §2 bypass closed in 5b-1 (or 5-main), by `by`
@@ -98,6 +98,9 @@ export const INVENTORY = [
   { id: 'feat.datadir-report', surface: 'data-dir and contract report (diagnostics.inspectWrites)', status: 'fixed', by: '5b-2 D-R', feature: 'observability.logs' },
   { id: 'feat.base-install', surface: 'PRoot base-install', status: 'fixed', by: '5b PR (module action)', feature: 'instance.lifecycle' },
   { id: 'feat.container-health', surface: 'container health (was a constant)', status: 'fixed', by: '5b CR', feature: 'instance.lifecycle' },
+  // D107 (Phase 6 net-iso): new runtime-dependent features, through ARI from the start
+  { id: 'feat.workload-network-isolation', surface: 'per-instance sidecar networks (services[].network; workloads.create on the instance network, attachInstance; mandatory, fail closed)', status: 'ari', feature: 'network.isolation', group: 'workloads' },
+  { id: 'feat.user-namespaces', surface: 'nested sandboxes in workloads (services[].userNamespaces → capability userNamespaces; fail closed, never by weakening the runtime)', status: 'ari', feature: 'execution.userNamespaces' },
 ];
 
 /** Outside the 49 (the SDK, not a command or a kernel feature): owner answer 3, removed in 5b. */
@@ -207,8 +210,8 @@ const byId = new Map(ALL.map((r) => [r.id, r]));
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
-test('ARI coverage: the §2 inventory has its 49 rows, each well-formed (status, feature, row → group)', () => {
-  assert.equal(INVENTORY.length, 49);
+test('ARI coverage: the §2 inventory has its 49 rows (+2 D107), each well-formed (status, feature, row → group)', () => {
+  assert.equal(INVENTORY.length, 51);
   assert.equal(new Set(ALL.map((r) => r.id)).size, ALL.length, 'unique ids');
   const counts = { ari: 0, fixed: 0, bypass: 0 };
   for (const r of ALL) {
@@ -225,7 +228,7 @@ test('ARI coverage: the §2 inventory has its 49 rows, each well-formed (status,
   for (const r of INVENTORY) counts[r.status]++;
   // §2.3: 18 through ARI and 31 bypasses at 283378f; 5b-1 (K..G) and 5-main B6 closed 13 of the 31,
   // 5b-2 stream D the rest row by row (D-T, D-R, D-C, D-#11, D-X, D-P, D-B), Phase 6 ari-rest D-S and D-M.
-  assert.deepEqual(counts, { ari: 18, fixed: 31, bypass: 0 });
+  assert.deepEqual(counts, { ari: 20, fixed: 31, bypass: 0 });
 });
 
 test('ARI coverage: every group an ari/fixed row is served by is declared by the reference provider (container)', () => {

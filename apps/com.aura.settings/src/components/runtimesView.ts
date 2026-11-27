@@ -88,6 +88,7 @@ export const CAPABILITY_ROWS: Array<{ key: string; label: string; failsClosed?: 
   { key: 'survivesShellRestart', label: 'Survives a shell restart' },
   { key: 'usage', label: 'Usage metering' },
   { key: 'gpu', label: 'GPU', failsClosed: true },
+  { key: 'userNamespaces', label: 'Nested sandboxes (user namespaces)', failsClosed: true },
 ];
 
 /** A feature for people: support, how a change applies, its constraints (advisory stays advisory). */

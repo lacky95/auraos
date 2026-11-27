@@ -877,6 +877,21 @@ export const AppManifestSchema = z.object({
     inheritHome: z.boolean().optional(),
     /** The app's cross-app mounts at /mnt/aura (live). */
     inheritMounts: z.boolean().optional(),
+    /**
+     * OS sidecars (D107, ARI `network.isolation`): `instance` puts the
+     * sidecar on its instance's own network only (the app's container, its
+     * isolated siblings and the shell reach it; no other app does), `shared`
+     * on the shared app network. Default: `instance` for a sidecar that
+     * inherits the app's home (it holds the app's credentials), else
+     * `shared`. Mandatory: a runtime that can't isolate refuses the sidecar.
+     */
+    network: z.enum(['instance', 'shared']).optional(),
+    /**
+     * The sidecar runs a nested sandbox (user namespaces, e.g. bwrap):
+     * the runtime must declare `userNamespaces`, else the app is refused
+     * (capability-missing). Never granted by weakening the container.
+     */
+    userNamespaces: z.boolean().optional(),
     /** The host docker socket — host root. Only if the app itself holds the docker tool. */
     inheritDockerSocket: z.boolean().optional(),
     /** `--cap-add` (OS sidecars: needs `sidecars.privileged`). */

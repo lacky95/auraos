@@ -9,7 +9,7 @@ import { MY_TOOLS_PATH, currentToolsMode, provisionAllowlist, toolchainMirrorBin
 import { containerHomeEnv, containerHomeMount } from '../runtimes/spawn/homeArgs.js';
 import { containerContextEnv, containerContextMounts } from '../runtimes/spawn/contextArgs.js';
 import { containerNetworkArgs, containerNetworkEnv, containerShellBase, rawSocketArgs, terminalNetworkUser } from '../runtimes/spawn/networkArgs.js';
-import { TERM_NETWORK_CONTAINER_LABEL, TermNetworks, type TermNetwork } from '../runtimes/container/networks.js';
+import { InstanceNetworks, TERM_NETWORK_CONTAINER_LABEL, TermNetworks, type TermNetwork } from '../runtimes/container/networks.js';
 import { containerIdentityArgs, isNonRootIdentity, writeIdentityFiles } from '../runtimes/spawn/identityArgs.js';
 import {
   SESSION_IDENTITY_LABEL, readKernelSessionSecret, sessionHostUser, sessionServerOwner, terminalSessionArgs, terminalSessionCommand, writeSessionSecret,
@@ -333,6 +333,8 @@ export class ContainerRunner implements SandboxRunner, ContainerMountBackend, Co
   private volumeStore: VolumeStore;
   /** The per-user private Terminal networks (D58). */
   private termNetworks: TermNetworks;
+  /** D107: the per-instance workload networks (isolated sidecars). */
+  private instanceNetworks: InstanceNetworks;
 
   /**
    * Whether the survivors of the last shell lifetime are still unknown: the
@@ -368,6 +370,8 @@ export class ContainerRunner implements SandboxRunner, ContainerMountBackend, Co
     this.termNetworks = new TermNetworks(() => this.getOwnContainerId());
     // Before adoption: a surviving Terminal is reachable only there.
     this.termNetworks.joinExisting();
+    this.instanceNetworks = new InstanceNetworks(() => this.getOwnContainerId());
+    this.instanceNetworks.joinExisting();
   }
 
   /**
@@ -400,6 +404,10 @@ export class ContainerRunner implements SandboxRunner, ContainerMountBackend, Co
       survivesShellRestart: true,
       usage: true,
       gpu: false,
+      // D107: Docker's default seccomp profile (and AppArmor where it restricts unprivileged user
+      // namespaces) refuses a workload's own user namespace; granting it would mean weakening the
+      // container (privileged, seccomp=unconfined), which this runtime never does. Declared honestly.
+      userNamespaces: false,
     };
   }
 
@@ -461,6 +469,15 @@ export class ContainerRunner implements SandboxRunner, ContainerMountBackend, Co
       workspaceRoot: this.workspaceRoot,
       toolsMode: currentToolsMode(this.dataDir),
     };
+  }
+
+  /**
+   * D107: the instance's own workload network (`aura-inst-<id>`), created
+   * when missing, with the shell and the instance's container on it. Throws
+   * when it can't be (the isolated workload is then not created).
+   */
+  public isolatedNetwork(instanceId: string): string {
+    return this.instanceNetworks.ensure(instanceId, this.containerName(instanceId));
   }
 
   // ─── Spawn ────────────────────────────────────────────────────────────

@@ -68,7 +68,7 @@ mkdirSync(ROOTFS);
 const CONTAINER_CAPS: core.RuntimeCapabilities = {
   isolation: 'namespace', network: 'bridge', appHome: true, privateHomeSession: false, sessionExec: false, identity: 'none',
   readOnlyBinds: true, hostFilesystem: true, mounts: true, idmappedMounts: false, portExpose: true, sidecars: true,
-  warmPool: true, survivesShellRestart: true, usage: true, gpu: false,
+  warmPool: true, survivesShellRestart: true, usage: true, gpu: false, userNamespaces: false,
 };
 const PROOT_CAPS: core.RuntimeCapabilities = {
   ...CONTAINER_CAPS, isolation: 'ptrace', readOnlyBinds: false, mounts: false, portExpose: false, sidecars: false, survivesShellRestart: false, usage: false,
