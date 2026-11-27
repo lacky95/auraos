@@ -242,3 +242,15 @@ test('5-main integration (I.2 + D69): a member\'s app.use reaches its own Termin
   // Another app's instance token with an app-permission grant still never reaches a Terminal upstream (D89 B6).
   assert.equal((await d(input(inst('io.ex.app', { userId: MEMBER }), proxy, { appId: 'com.aura.terminal', instanceId: 'com.aura.terminal-2' }, 'instance-token'))).outcome, 'deny');
 });
+
+test("5-main (VM finding): a member may be granted its own Terminal; the owner UIs stay the owner's", async () => {
+  const { ownerUiApp } = await import("../server/gateway-identity.mjs");
+  const { SESSION_HOST_APPS } = await import("../server/session-hosts.mjs");
+  // The grant route refuses an owner UI unless it is the session host (lib/usersAdmin.ts changeUserGrant).
+  const refused = (appId: string) => !!ownerUiApp(appId) && !SESSION_HOST_APPS.has(appId);
+  assert.equal(refused("com.aura.terminal"), false, "a member's own Terminal (D82)");
+  assert.equal(refused("com.aura.settings"), true);
+  assert.equal(refused("com.aura.nexus"), true);
+  const src = readFileSync(new URL("../src/lib/usersAdmin.ts", import.meta.url), "utf8");
+  assert.match(src, /ownerUiApp\(appId\) && !SESSION_HOST_APPS\.has\(appId\)/);
+});

@@ -25,6 +25,7 @@ import * as core from '@aura/core';
 import type { APIContext } from 'astro';
 import { membersAllowed } from '../../server/access-mode.mjs';
 import { ownerUiApp } from '../../server/gateway-identity.mjs';
+import { SESSION_HOST_APPS } from '../../server/session-hosts.mjs';
 import { authenticate } from './auth.ts';
 import { json } from './approvals/service.ts';
 
@@ -157,8 +158,10 @@ export async function changeUserGrant(ctx: Ctx): Promise<Response> {
   const account = await accountOf(ctx.params['id']);
   if (!account) return json({ error: 'no-user' }, 404);
   if (account.role === 'owner') return json({ error: 'owner', message: 'The owner holds every app already; grants are for members.' }, 409);
-  // The owner's management UIs act as the owner (D45); they are not a member's app.
-  if (change === 'grant' && ownerUiApp(appId)) {
+  // The owner's management UIs act as the owner (D45); they are not a member's app. The System Terminal is
+  // the exception: it is in that list for the owner's instance picker only, and each user's own session host
+  // (D69); a member's use grant is its own Terminal (D82).
+  if (change === 'grant' && ownerUiApp(appId) && !SESSION_HOST_APPS.has(appId)) {
     return json({ error: 'owner-ui-app', message: `${appId} is the owner's management UI (D45); it is not granted to members in Phase 5.` }, 409);
   }
   const mgr = core.getAppManager();
