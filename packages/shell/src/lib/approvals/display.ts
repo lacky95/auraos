@@ -9,7 +9,8 @@
  * for the same request.
  */
 import { isCredentialName, normaliseInject, SENSITIVE_APPS } from '@aura/core';
-import type { ApprovalDisplay, ApprovalLevel, ApprovalRequester, ApprovalRisk, InstallBinding, PermissionDiff } from '@aura/core';
+import { visibleText } from './visibleText.ts';
+import type { ApprovalDisplay, ApprovalExplanation, ApprovalLevel, ApprovalRequester, ApprovalRisk, InstallBinding, PermissionDiff } from '@aura/core';
 
 /** Tools and permissions that hand over the host or its container runtime: `fresh` (5.10). */
 const RISKY_TOOLS: ReadonlySet<string> = new Set(['docker', '*']);
@@ -45,6 +46,22 @@ export function requesterReason(raw: unknown): string | undefined {
   return s ? clip(s, MAX_REASON) : undefined;
 }
 
+/** Longest requester summary a route accepts, in UTF-8 bytes (D109 AF2: 8 KiB). */
+export const EXPLANATION_MAX_BYTES = 8 * 1024;
+
+/**
+ * D109 AF2: the requester's summary (Markdown) for the dialog, or undefined
+ * when there is none. Call after the route refused one over
+ * EXPLANATION_MAX_BYTES. The dialog renders it as safe Markdown with the
+ * notifications' parser (lib/notifications/markdown.ts: no HTML node) and
+ * links as text; the CLI prints it as text.
+ */
+export function requesterExplanation(raw: unknown): ApprovalExplanation | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const text = visibleText(raw).trim();
+  return text ? { format: 'markdown', text } : undefined;
+}
+
 // ── nexus.install / nexus.update ────────────────────────────────────────────
 
 /**
@@ -55,7 +72,9 @@ export function requesterReason(raw: unknown): string | undefined {
  * makes the approval `fresh`. The table is in phase5-rootreq-progress.md and
  * docs/approvals: keep the three in step.
  */
-export function installRisks(binding: InstallBinding, diff: PermissionDiff): ApprovalRisk[] {
+export function installRisks(
+  binding: Pick<InstallBinding, 'appId' | 'tools' | 'permissions' | 'context' | 'execution' | 'exposure'>, diff: PermissionDiff,
+): ApprovalRisk[] {
   const out: ApprovalRisk[] = [];
   const newInstall = diff.versionFrom === null;
   const toolAdded = (t: string) => newInstall || diff.toolsAdded.includes(t);

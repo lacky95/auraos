@@ -24,6 +24,23 @@ Every request first opens the **full blocking dialog**:
 - **Deny and block this app** stops an app from asking again until you lift the block.
 - A request that needs a fresh confirmation asks for your password, in this dialog only.
 - A secret request (`credential.store`) asks for the secret, in this dialog only.
+- A requester's **summary** (for example an agent's description of the app it creates) is
+  shown below AuraOS's own facts, in its own box labelled "not checked by AuraOS". It is
+  rendered as safe Markdown: no HTML, no scripts, links and images only as text with their
+  address, nothing is loaded.
+
+## Creating an app
+
+Every new app made from a sandbox (`aura dev new`, `aura dev clone`, from the System
+Terminal by you or an agent, with or without `--agent`) and from Settings asks you first
+(`app.create`, forced). In the desktop and on the host (`aura` with the operator's ticket)
+you create apps directly. The dialog shows what AuraOS read from the manifest that will be
+written: the id, name, scope and directory, its shape and runtime, the tools, permissions,
+sidecars and Context keys it declares, and the files. Declaring `docker`, every tool (`*`),
+privileged sidecars or other high-risk items needs your password. The approval is bound to
+exactly those files (and the requester's summary): any change needs a new one. It grants
+nothing beyond what the manifest declares: no separately granted permission, no Context
+secret, no root execution.
 
 ## Forced and deferrable requests
 
@@ -32,7 +49,7 @@ change it.
 
 | Class | Dialog | Examples |
 |---|---|---|
-| **Forced** | Approve or Deny now. Never becomes a notification. | Installing and updating apps, activating an app patch, an app running as root, cap and PRoot package installs, Developer Mode, security options, restarts and self-update, overwriting an app's code, an app's own `user.confirm` |
+| **Forced** | Approve or Deny now. Never becomes a notification. | Installing and updating apps, activating an app patch, an app running as root, cap and PRoot package installs, Developer Mode, security options, restarts and self-update, creating an app and overwriting an app's code, an app's own `user.confirm` |
 | **Deferrable** | Approve, Deny, or **Later**. | Opening an app's source (`aura dev open`), grants and revokes, API keys, manifest edits, admin reads, Aura Context writes, Terminal agent hooks, storing or reading a secret |
 
 ### Later and Review

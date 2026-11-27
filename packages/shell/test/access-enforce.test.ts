@@ -359,6 +359,20 @@ test('guard ownerManages (conditional) → only the body variant that needed it'
   }
 });
 
+test('D109 AF2: creating an app (scaffold, clone, with or without force) is the owner\'s or the System Terminal\'s, in every mode', async () => {
+  const scaffold = (force: boolean) => ({ method: 'POST', path: '/api/admin/scaffold', route: '/api/admin/scaffold', body: { appId: 'com.acme.notes', force } });
+  const clone = (force: boolean) => ({ method: 'POST', path: '/api/admin/clone-app', route: '/api/admin/clone-app', body: { sourceAppId: 'a', force } });
+  const term = inst('com.aura.terminal', 'com.aura.terminal-1', { userId: 'default' });
+  for (const mode of MODES) {
+    for (const call of [scaffold(false), scaffold(true), clone(false), clone(true)]) {
+      assert.equal(await gate(mode, term, call), 'pass', `${mode} ${call.path} ${call.body.force}: the route then asks the owner`);
+      assert.equal(await gate(mode, owner, call), 'pass');
+      assert.equal(await gate(mode, inst('com.acme.notes'), call), '403 access-denied', `${mode} ${call.path}: another app`);
+      assert.equal(await gate(mode, anon, call), '401 unauthenticated');
+    }
+  }
+});
+
 test('guard sidecarGate → the instance\'s own token and its app\'s permission, in every mode', async () => {
   const spawn = (id: string) => ({ method: 'POST', path: `/api/instances/${id}/sidecars`, route: '/api/instances/[instanceId]/sidecars', params: { instanceId: id }, body: { template: 't' } });
   for (const mode of MODES) {

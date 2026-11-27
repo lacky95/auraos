@@ -343,3 +343,11 @@ test('D102 deny feedback: plain text, capped, optional; notice is not a state ch
   assert.equal(n.record.notice, 'ntf_abc123456');
   assert.equal(transitionApproval(n.record, { type: 'notice', notice: null }, T0 + 2).record.notice, undefined);
 });
+
+// ── D109 AF2: app.create ─────────────────────────────────────────────────────
+
+test('D109 AF2: app.create is in the closed catalog and forced, whatever the payload says', () => {
+  assert.ok(APPROVAL_ACTIONS.includes('app.create'));
+  assert.equal(APPROVAL_CLASS['app.create'], 'forced');
+  for (const p of [{}, { op: 'mount.workspace' }, { class: 'deferrable' }, null]) assert.equal(approvalClassOf('app.create', p), 'forced');
+});

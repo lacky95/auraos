@@ -184,3 +184,19 @@ test('an install the shell refuses (not the owner, D31) says how to install', as
   assert.match(lines.join('\n'), /System Terminal/);
   assert.match(lines.join('\n'), /docker exec -it aura-shell aura/);
 });
+
+test('D109 AF2: the requester\'s summary prints under its label as plain text; escape sequences and bidi controls go', async () => {
+  const { approvalLines, explanationLines } = await import('../src/lib/approval.js');
+  assert.deepEqual(explanationLines(undefined), []);
+  assert.deepEqual(explanationLines({ text: '  ' }), []);
+  const lines = approvalLines({
+    level: 'session',
+    display: { title: 'Create the app Notes (com.example.notes)', details: ['App: com.example.notes'], requestedBy: 'Terminal',
+      explanation: { format: 'markdown', text: '# Plan\r\n\u001b[2J\u001b]0;pwn\u0007red\u202etxt' } },
+  });
+  assert.deepEqual(lines.slice(-3), ['  The requester\'s summary (not checked by AuraOS):', '  | # Plan', '  | [2J]0;pwnredtxt']);
+  assert.ok(lines.every((l) => !/[\u0000-\u001f\u202e]/.test(l)));
+  const long = explanationLines({ text: Array.from({ length: 50 }, (_, i) => `l${i}`).join('\n') });
+  assert.equal(long.length, 1 + 40 + 1);
+  assert.match(long.at(-1)!, /10 more lines/);
+});
