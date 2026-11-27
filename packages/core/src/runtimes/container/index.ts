@@ -12,8 +12,9 @@
  * here: a survivor's `ref` is opaque to the kernel. 5b-2 D moved behind its
  * groups: port expose (`endpoints`), builds (`build`), sidecar exec/logs
  * (`workloads`), instance logs (`logs`), the dataDir and cap-doctor
- * inspections (`diagnostics`). Mounts and sidecar create stay in the
- * managers until Phase 6 (D-M, D-S).
+ * inspections (`diagnostics`). Phase 6 moved OS sidecars (`workloads`
+ * create, start, list, remove: `sidecars.ts`, D-S) and cross-app mounts
+ * (`mounts`, D-M) behind their groups.
  *
  * The runner is handed in by the composition point (AppManager today,
  * `bootSystem()` in Phase 6): this module imports no app-manager code at
@@ -26,12 +27,14 @@ import {
 } from '../ari.js';
 import { containerDiagnostics } from './diagnostics.js';
 import { containerEndpoints } from './endpoints.js';
+import { containerSidecars } from './sidecars.js';
 import { RuntimeExecError } from '../types.js';
 import { hostToolsGroup, toolsEnforcement, toolsFeatureOverrides, type HostToolStore, type ToolsMode } from '../hostTools.js';
 
 /** The runner surface the module adapts: the SandboxRunner contract plus the container's own groups. */
 export type ContainerRunnerSurface = SandboxRunner & Partial<Pick<ContainerRunner,
-  'openSessions' | 'endSession' | 'canPropagateMounts' | 'instanceLogs' | 'execWorkload' | 'workloadLogs' | 'forwarderFacts' | 'buildApp' | 'provisionApp'>>;
+  'openSessions' | 'endSession' | 'canPropagateMounts' | 'instanceLogs' | 'execWorkload' | 'workloadLogs' | 'forwarderFacts' | 'buildApp' | 'provisionApp'
+  | 'sidecarRuntime' | 'mountRootSubpath'>>;
 
 type OrphanRecord = NonNullable<Awaited<ReturnType<NonNullable<SandboxRunner['listOrphanRecords']>>>>[number] & { user?: string };
 
@@ -126,6 +129,17 @@ export function containerRuntime(runner: ContainerRunnerSurface, deps: Container
         if (!runner.workloadLogs) throw new RuntimeExecError('engine', `no log of ${workloadId}: the runner has no engine`);
         return runner.workloadLogs(workloadId, req, onChunk);
       },
+      // OS sidecars (Phase 6 D-S): create, start, list, inspect, remove, seed, run, output.
+      ...containerSidecars({
+        sidecarRuntime: () => {
+          if (!runner.sidecarRuntime) throw new Error('the container runner has no sidecar facts');
+          return runner.sidecarRuntime();
+        },
+        mountRootSubpath: (consumer) => {
+          if (!runner.mountRootSubpath) throw new Error('the container runner has no mount root');
+          return runner.mountRootSubpath(consumer);
+        },
+      }, { baseImage: deps.baseImage ?? 'aura-base' }),
     } satisfies RuntimeWorkloads } : {}),
     // The instance's own output: the engine's log (5b-2 D-X).
     ...(runner.instanceLogs ? { logs: (instanceId: string, req: RuntimeLogsRequest, onChunk: (stream: RuntimeOutputStream, data: Buffer) => void) => runner.instanceLogs!(instanceId, req, onChunk) } : {}),

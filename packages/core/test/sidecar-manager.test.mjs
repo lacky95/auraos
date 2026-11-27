@@ -13,6 +13,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SidecarManager } from '../dist/app-manager/SidecarManager.js';
+import { containerSidecars } from '../dist/runtimes/container/sidecars.js';
 import { InstanceTokens } from '../dist/app-manager/InstanceTokens.js';
 
 const APP = 'io.test.app';
@@ -95,15 +96,17 @@ function fixture(t, opts = {}) {
     mkdirSync(join(dataDir, 'aura', 'toolchain', 'bin'), { recursive: true });
     for (const b of opts.mirror) writeFileSync(join(dataDir, 'aura', 'toolchain', 'bin', b), `#!/bin/sh\necho ${b}\n`);
   }
+  const runner = {
+    sidecarRuntime: () => ({ dataDir, appDataVolume: 'appvol', nodeModulesVolume: 'nm', network: 'aura-net',
+      osApiBase: 'http://aura-shell:3000', shellHostname: 'aura-shell', workspaceRoot: '/ws', toolsMode: 'hardlink' }),
+    mountRootDir: (k) => join(dataDir, 'aura', 'mounts', k),
+    mountRootSubpath: (k) => `aura/mounts/${k}`,
+    toolsDir: (k) => join(dataDir, 'aura', 'runtime', k, 'tools'),
+    clearToolsDir: (k) => rmSync(join(dataDir, 'aura', 'runtime', k, 'tools'), { recursive: true, force: true }),
+  };
   const mgr = new SidecarManager({
-    runner: {
-      sidecarRuntime: () => ({ dataDir, appDataVolume: 'appvol', nodeModulesVolume: 'nm', network: 'aura-net',
-        osApiBase: 'http://aura-shell:3000', shellHostname: 'aura-shell', workspaceRoot: '/ws', toolsMode: 'hardlink' }),
-      mountRootDir: (k) => join(dataDir, 'aura', 'mounts', k),
-      mountRootSubpath: (k) => `aura/mounts/${k}`,
-      toolsDir: (k) => join(dataDir, 'aura', 'runtime', k, 'tools'),
-      clearToolsDir: (k) => rmSync(join(dataDir, 'aura', 'runtime', k, 'tools'), { recursive: true, force: true }),
-    },
+    runner,
+    workloads: containerSidecars(runner, { baseImage: 'aura-base' }),
     registry: { getById: (id) => (id === APP ? { id: APP, services, tools: opts.appTools?.() ?? opts.tools ?? [], permissions: ['sidecars.spawn'] } : undefined) },
     permissions: { hasPermission: (_app, p) => perms.includes(p) },
     tokens,

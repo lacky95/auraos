@@ -29,6 +29,7 @@ import type { SandboxRunner } from '../app-manager/SandboxRunner.js';
 import type { SettingsSchema } from './settingsSchema.js';
 import type { SidecarInfo } from '../types/instance.js';
 import type { LifecycleStatus } from '../app-manager/lifecycleGate.js';
+import type { ResolvedSidecarSpec } from '../app-manager/sidecar-spec.js';
 import {
   CATEGORY_OF_CODE, RUNTIME_ID_PATTERN, RuntimeModuleError,
   type RuntimeCapabilities, type RuntimeRefusal, type RuntimeRefusalCode, type RuntimeSettings,
@@ -398,7 +399,68 @@ export interface RuntimeLogsStream { done: Promise<void>; close(): void }
 /** Reads a workload's log (`observability.logs`, 5b-2 D-X); `onChunk` gets each piece as it comes. */
 export type RuntimeLogs = (id: string, req: RuntimeLogsRequest, onChunk: (stream: RuntimeOutputStream, data: Buffer) => void) => Promise<RuntimeLogsStream>;
 
-/** `workload.dynamic`: associated workloads (sidecars; present ⇔ `sidecars`). Create moves here in 5b-2 (D-S). */
+/**
+ * An associated workload as its runtime keeps it (Phase 6 D-S): its state and
+ * the tags it was created with. The kernel's record of an OS sidecar travels
+ * as one tag until Phase 8 moves that desired state into the kernel; the
+ * tags are actual state, reported only.
+ */
+export interface RuntimeWorkloadState {
+  /** The runtime's handle of it, also where it is reached on the runtime's network (opaque to the kernel). */
+  ref: string;
+  /** The runtime's word for its state (`running`, `exited`, `created`, ...). */
+  state: string;
+  tags: Record<string, string>;
+  /** Restarts by the runtime's restart policy since it was created. */
+  restarts: number;
+}
+/** One OS-managed workload of a listing: its ref, its instance, its state (per-instance listings) and the kernel's record. */
+export interface RuntimeManagedWorkload { ref: string; instanceId: string; state?: string; record?: string }
+
+/**
+ * One OS sidecar as the kernel decided it (Phase 6 D-S): the resolved spec
+ * (sidecar-spec.ts: what the app may run, checked against its templates and
+ * permissions), the record the runtime keeps with it, the env and the
+ * identity pieces. The runtime only realises it (its own argv, network,
+ * tools and mount-root wiring). Plain data; `home` carries host fields only
+ * for a runtime with `hostFilesystem` (A4).
+ */
+export interface RuntimeWorkloadCreate {
+  instanceId: string;
+  appId: string;
+  spec: ResolvedSidecarSpec;
+  /** The kernel's record (JSON), kept with the workload; `owner`: the sidecar that spawned it. */
+  record: string;
+  owner?: string;
+  /** Inherited, then the spec's own (the runtime adds HOME and the identity after it). */
+  env: Record<string, string>;
+  /** D89: its own workload token when the spec inherits the identity. */
+  token: string | null;
+  /** D65: the parent's App Home when the spec inherits it. */
+  home: ResolvedHome | null;
+  /** The parent's process identity (P5-3: an inheritHome base-image sidecar is the app's own code). */
+  parentIdentity?: SpawnIdentity;
+  /** The app's permissions when the spec inherits them. */
+  permissions?: string[];
+}
+/** A one-shot command in a running workload, its output captured (`POST …/sidecars/:name/exec`). */
+export interface RuntimeWorkloadRun {
+  argv: string[];
+  user?: string;
+  workdir?: string;
+  env?: Record<string, string>;
+  /** Small stdin payload. */
+  stdin?: string;
+  timeoutMs: number;
+}
+export interface RuntimeWorkloadRunResult { exitCode: number | null; stdout: string; stderr: string; truncated: boolean; timedOut: boolean }
+
+/**
+ * `workload.dynamic`: associated workloads (sidecars; present ⇔ `sidecars`).
+ * The kernel (SidecarManager) decides what runs, for whom, with which
+ * tokens, tools and mounts; the runtime creates, starts, lists, inspects and
+ * removes (Phase 6 D-S). Refusals throw with the runtime's own words.
+ */
 export interface RuntimeWorkloads {
   /** Every associated workload; null when the runtime could not be read (never reap on that). */
   list(): Promise<SidecarInfo[] | null>;
@@ -409,6 +471,37 @@ export interface RuntimeWorkloads {
   exec(workloadId: string, spec: RuntimeWorkloadExec, onOutput: (channel: 1 | 2, data: Buffer) => void): Promise<RuntimeExecSession>;
   /** A workload's own output. */
   logs: RuntimeLogs;
+
+  // OS sidecars (Phase 6 D-S).
+  /** The ref of an instance's sidecar `name` (also its address). */
+  ref(instanceId: string, name: string): string;
+  /** The OS-managed workloads of an instance, with state and record; throws when they can't be read. */
+  listOf(instanceId: string): Promise<RuntimeManagedWorkload[]>;
+  /** Every OS-managed workload (reconcile after a kernel restart); null when they can't be read. */
+  listManaged(): Promise<RuntimeManagedWorkload[] | null>;
+  /** Refs of the OS-managed workloads of an instance that sidecar `owner` spawned. */
+  spawnedBy(instanceId: string, owner: string): Promise<string[]>;
+  inspect(ref: string): Promise<RuntimeWorkloadState | null>;
+  /** A runtime storage volume of that name exists (a pre-OS-sidecar per-app volume). */
+  storageExists(name: string): Promise<boolean>;
+  /** The image is present (fetched once, concurrent callers share the fetch); throws when it can't be. */
+  prepareImage(image: string): Promise<void>;
+  /** The env an instance's own workload runs with. */
+  instanceEnv(instanceId: string): Promise<Record<string, string>>;
+  /** Runs the spec's one-shot seed in a throwaway workload on its storage; throws with its output. */
+  seed(req: { instanceId: string; spec: ResolvedSidecarSpec; env: Record<string, string> }): Promise<void>;
+  /** Creates the workload (not started); its id. Throws, leaving nothing behind. */
+  create(req: RuntimeWorkloadCreate): Promise<string>;
+  /** Starts a created workload and checks it stays up; on failure it is removed and the call throws with its last words. */
+  start(id: string, ref: string): Promise<void>;
+  /** Removes a workload; throws when the runtime could not (`quiet`: never throws). */
+  destroy(ref: string, opts?: { quiet?: boolean }): Promise<void>;
+  /** A one-shot command in a running workload, output captured. */
+  run(ref: string, req: RuntimeWorkloadRun): Promise<RuntimeWorkloadRunResult>;
+  /** The tail of a workload's output; throws when it can't be read. */
+  output(ref: string, opts: { tail: number; since?: string; timestamps?: boolean }): Promise<{ stdout: string; stderr: string }>;
+  /** Its last 20 lines of output, trimmed (a failure report). */
+  lastWords(ref: string): Promise<string>;
 }
 
 /** The logical tool grant (D100 §5): tool ids, never a host directory. */

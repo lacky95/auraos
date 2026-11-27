@@ -84,15 +84,15 @@ export const INVENTORY = [
   { id: 'cli.mount-workspace', surface: 'mount workspace', status: 'bypass', row: 'D-M', feature: 'mount.attach' },
   { id: 'cli.patch-mounts', surface: 'dev patch start/save/activate (work, patches mounts)', status: 'bypass', row: 'D-M', feature: 'mount.attach' },
   { id: 'cli.port', surface: 'port ls/expose/rm (endpoints)', status: 'fixed', by: '5b-2 D-P', feature: 'network.endpointExposure', group: 'endpoints' },
-  { id: 'cli.sidecars', surface: 'get/describe/start/stop/restart/delete sc|svc', status: 'bypass', row: 'D-S', feature: 'workload.dynamic' },
-  { id: 'cli.sidecar-create', surface: 'sidecar create, sidecar tools', status: 'bypass', row: 'D-S', feature: 'workload.dynamic' },
+  { id: 'cli.sidecars', surface: 'get/describe/start/stop/restart/delete sc|svc (workloads.listOf/inspect/destroy)', status: 'fixed', by: 'Phase 6 ari-rest (D-S)', feature: 'workload.dynamic', group: 'workloads' },
+  { id: 'cli.sidecar-create', surface: 'sidecar create, sidecar tools (workloads.create/start/seed; tools stay kernel storage, A4)', status: 'fixed', by: 'Phase 6 ari-rest (D-S)', feature: 'workload.dynamic', group: 'workloads' },
   { id: 'cli.build', surface: 'build app, nexus install/update (build)', status: 'fixed', by: '5b-2 D-B', feature: 'build.execute', group: 'build' },
   { id: 'cli.sdk', surface: 'sdk install, refreshSdk (provisioning through build; the @aura/* copy is kernel storage, A4, like homes)', status: 'fixed', by: '5b-2 D-B', feature: 'build.execute', group: 'build' },
   { id: 'feat.tools-host-dir', surface: 'tool refresh as a host dir', status: 'fixed', by: '5b K/CR (tools group)', feature: 'tools.liveGrant', group: 'tools' },
   { id: 'cli.whereami', surface: 'whereami (the kernel answers)', status: 'fixed', by: '5b CR', feature: 'instance.lifecycle' },
   { id: 'feat.reaper', surface: 'orphan reaper, reap-orphans (the runtimes\' orphans.scan; liveness by isRunning)', status: 'fixed', by: '5b-2 D-#11', feature: 'instance.adoption' },
   { id: 'feat.mount-reapply', surface: 'mount reapply, fan-out to sidecars', status: 'bypass', row: 'D-M', feature: 'mount.inheritance' },
-  { id: 'feat.sidecar-reconcile', surface: 'OS sidecar reconcile, orphan sidecars', status: 'bypass', row: 'D-S', feature: 'workload.dynamic' },
+  { id: 'feat.sidecar-reconcile', surface: 'OS sidecar reconcile, orphan sidecars (workloads.listManaged/destroy)', status: 'fixed', by: 'Phase 6 ari-rest (D-S)', feature: 'workload.dynamic', group: 'workloads' },
   { id: 'feat.term-networks', surface: 'Terminal private networks (container module internals)', status: 'fixed', by: '5b-2 D-T', feature: 'network.isolation' },
   { id: 'feat.datadir-report', surface: 'data-dir and contract report (diagnostics.inspectWrites)', status: 'fixed', by: '5b-2 D-R', feature: 'observability.logs' },
   { id: 'feat.base-install', surface: 'PRoot base-install', status: 'fixed', by: '5b PR (module action)', feature: 'instance.lifecycle' },
@@ -108,7 +108,6 @@ const EXTRA_LEDGER = [{ id: 'sdk.docker-mode', surface: 'app-sdk direct-Docker s
 const BOUNDARY = [
   /^packages\/core\/src\/runtimes\//,
   /^packages\/core\/src\/app-manager\/(ContainerRunner|ProotRunner|DockerApi|SessionBroker)\.ts$/,
-  /^packages\/core\/src\/app-manager\/spawn\//,
 ];
 
 /** Owner-approved, not app-runtime functionality (§2.3 "exempt"); never propagates. */
@@ -123,10 +122,9 @@ const EXEMPT = {
 /** Direct or indirect runtime-specific use outside the boundary, each with its inventory rows. */
 const BASELINE = {
   // AppManager: the composition point (constructs the providers and managers until Phase 6 K bootSystem());
-  // it still constructs MountManager and SidecarManager, which hold Docker mechanism (D-M, D-S).
-  'packages/core/src/app-manager/AppManager.ts': ['cli.mount', 'cli.sidecars'],
+  // it still constructs MountManager, which holds Docker mechanism (D-M).
+  'packages/core/src/app-manager/AppManager.ts': ['cli.mount'],
   'packages/core/src/app-manager/MountManager.ts': ['cli.mount', 'cli.mount-workspace', 'cli.patch-mounts', 'feat.mount-reapply'],
-  'packages/core/src/app-manager/SidecarManager.ts': ['cli.sidecars', 'cli.sidecar-create', 'feat.sidecar-reconcile'],
   'packages/core/src/patches/series.ts': ['cli.patch-mounts'],
   'packages/shell/src/lib/appSource.ts': ['cli.patch-mounts'],
   'packages/shell/src/pages/api/admin/manifest-edit.ts': ['cli.mount'],
@@ -134,13 +132,8 @@ const BASELINE = {
   'packages/shell/src/pages/api/nexus/publish.ts': ['cli.patch-mounts'],
   'packages/shell/src/pages/api/instances/[instanceId]/mounts.ts': ['cli.mount', 'cli.mount-workspace'],
   'packages/shell/src/pages/api/instances/[instanceId]/mounts/[mountId].ts': ['cli.mount'],
-  'packages/shell/src/pages/api/instances/[instanceId]/sidecars.ts': ['cli.sidecars', 'cli.sidecar-create'],
-  'packages/shell/src/pages/api/instances/[instanceId]/sidecars/[name].ts': ['cli.sidecars'],
-  'packages/shell/src/pages/api/instances/[instanceId]/sidecars/[name]/exec.ts': ['cli.sidecars'],
-  'packages/shell/src/pages/api/instances/[instanceId]/sidecars/[name]/logs.ts': ['cli.sidecars'],
-  'packages/shell/src/pages/api/instances/[instanceId]/sidecars/[name]/mounts.ts': ['cli.sidecars', 'feat.mount-reapply'],
-  'packages/shell/src/pages/api/instances/[instanceId]/sidecars/[name]/mounts/[mountId].ts': ['cli.sidecars', 'feat.mount-reapply'],
-  'packages/shell/src/pages/api/instances/[instanceId]/sidecars/[name]/tools.ts': ['cli.sidecar-create'],
+  'packages/shell/src/pages/api/instances/[instanceId]/sidecars/[name]/mounts.ts': ['feat.mount-reapply'],
+  'packages/shell/src/pages/api/instances/[instanceId]/sidecars/[name]/mounts/[mountId].ts': ['feat.mount-reapply'],
   'packages/app-sdk/src/sidecars.ts': ['sdk.docker-mode'],
 };
 
@@ -164,8 +157,8 @@ const DETAIL = [
   ['kind check', /\bsandbox\s*(===|!==)\s*['"](container|proot)['"]|['"](container|proot)['"]\s*(===|!==)\s*[\w.?]*sandbox\b/],
   ['container name', /`aura-\$\{[^}]*[iI]nstance[^}]*\}/],
 ];
-/** Shell code reaching a kernel manager that holds the Docker mechanism (until 5b-2 D). */
-const MANAGER = /\b(?:mgr|getAppManager\(\)|this\.mgr|deps\.mgr|core\.getAppManager\(\))\.(mounts|osSidecars|container)\b/;
+/** Shell code reaching a kernel manager that holds the Docker mechanism (MountManager until Phase 6 D-M). */
+const MANAGER = /\b(?:mgr|getAppManager\(\)|this\.mgr|deps\.mgr|core\.getAppManager\(\))\.(mounts|container)\b/;
 
 function sourceFiles() {
   const out = [];
@@ -239,8 +232,8 @@ test('ARI coverage: the §2 inventory has its 49 rows, each well-formed (status,
   }
   for (const r of INVENTORY) counts[r.status]++;
   // §2.3: 18 through ARI and 31 bypasses at 283378f; 5b-1 (K..G) and 5-main B6 closed 13 of the 31,
-  // 5b-2 stream D the rest row by row (D-T, D-R, D-C, D-#11, D-X, D-P, D-B so far).
-  assert.deepEqual(counts, { ari: 18, fixed: 24, bypass: 7 });
+  // 5b-2 stream D the rest row by row (D-T, D-R, D-C, D-#11, D-X, D-P, D-B), Phase 6 ari-rest D-S and D-M.
+  assert.deepEqual(counts, { ari: 18, fixed: 27, bypass: 4 });
 });
 
 test('ARI coverage: every group an ari/fixed row is served by is declared by the reference provider (container)', () => {
@@ -297,11 +290,6 @@ const PHASE6 = {
     + 'interleaves policy (kinds, nesting, D80 cross-uid plan, persistence, fan-out) with the helper-container bind, the '
     + 'consumer mount-table verify and the legacy-root inspect; the split needs the VM mount matrix (idmap-mount, '
     + 'mount reapply after restart), not an L1/L2 refactor.',
-  'D-S': 'Phase 6 K: workloads.create/start/stop/reconcile. SidecarManager builds the sidecar argv from the spawn '
-    + 'helpers (identity, home, tools, mounts, raw sockets) and keeps Docker labels as its desired state; the argv '
-    + 'builder moves into the container module with the spawn arg helpers it uses (which runtimes/ may not import '
-    + 'from app-manager without a module cycle), golden-tested on the sidecar argv, together with D-M (sidecar '
-    + 'mounts fan out through MountManager).',
   'D-SDK': 'Phase 6, after the apps move: the owner precondition ("every existing app is on OS-managed sidecars") '
     + 'does not hold. Two installed apps (io.lakner.trilium, io.lakner.steelaibrowser) call createSidecars() '
     + 'without a mode, i.e. the SDK docker mode; they move to mode \'os\' (app patches) first, then the mode, its '

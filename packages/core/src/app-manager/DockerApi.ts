@@ -10,7 +10,7 @@
  */
 import http from 'node:http';
 import type { Duplex, Readable } from 'node:stream';
-import { DOCKER_SOCKET_PATH } from './spawn/socketArgs.js';
+import { DOCKER_SOCKET_PATH } from '../runtimes/spawn/socketArgs.js';
 import { RuntimeExecError } from '../runtimes/types.js';
 import type { RuntimeExecSession, RuntimeLogsRequest, RuntimeLogsStream, RuntimeOutputStream, RuntimeWorkloadExec } from '../runtimes/ari.js';
 

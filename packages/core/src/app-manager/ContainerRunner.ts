@@ -6,12 +6,12 @@ import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import { lifecyclePath } from '../types/manifest.js';
 import { MY_TOOLS_PATH, currentToolsMode, provisionAllowlist, toolchainMirrorBin } from './tool-provision.js';
-import { containerHomeEnv, containerHomeMount } from './spawn/homeArgs.js';
-import { containerContextEnv, containerContextMounts } from './spawn/contextArgs.js';
-import { containerNetworkArgs, containerNetworkEnv, containerShellBase, rawSocketArgs, terminalNetworkUser } from './spawn/networkArgs.js';
+import { containerHomeEnv, containerHomeMount } from '../runtimes/spawn/homeArgs.js';
+import { containerContextEnv, containerContextMounts } from '../runtimes/spawn/contextArgs.js';
+import { containerNetworkArgs, containerNetworkEnv, containerShellBase, rawSocketArgs, terminalNetworkUser } from '../runtimes/spawn/networkArgs.js';
 import { TERM_NETWORK_CONTAINER_LABEL, TermNetworks, type TermNetwork } from '../runtimes/container/networks.js';
-import { containerIdentityArgs, isNonRootIdentity, writeIdentityFiles } from './spawn/identityArgs.js';
-import { readKernelSessionSecret, sessionHostUser, terminalSessionArgs, writeSessionSecret } from './spawn/sessionArgs.js';
+import { containerIdentityArgs, isNonRootIdentity, writeIdentityFiles } from '../runtimes/spawn/identityArgs.js';
+import { readKernelSessionSecret, sessionHostUser, terminalSessionArgs, writeSessionSecret } from '../runtimes/spawn/sessionArgs.js';
 import { containerName } from '../runtimes/container/names.js';
 import type { RuntimeCapabilities } from '../runtimes/types.js';
 import type { ForwarderFacts } from '../runtimes/container/endpoints.js';
@@ -19,7 +19,7 @@ import type { RuntimeLogsRequest, RuntimeLogsStream, RuntimeOutputStream, Runtim
 import { IDMAP_HELPER_PATH, type ContainerMountBackend, type ContainerPortBackend, type ContainerSidecarBackend, type FacilityProbe, type SidecarRuntimeFacts } from '../runtimes/container/backends.js';
 // Value import, but MountManager imports ContainerRunner type-only, so there
 // is no runtime cycle.
-import { MOUNT_ROOT_PATH } from './MountManager.js';
+import { MOUNT_ROOT_PATH } from '../runtimes/spawn/paths.js';
 import { KEEP_RESTART_LABEL, keptAcrossRestart, type KeepSiblings } from './sidecarParking.js';
 import type { SandboxExecOpts, SandboxRunner, SandboxRunnerOpts } from './SandboxRunner.js';
 import type { ExecSession, SessionSpec } from './ExecBridge.js';

@@ -14,8 +14,8 @@ import { join } from 'node:path';
 
 import { appIdentityProvider, sessionHostIdentityProvider } from '../dist/identity/appIdentityProvider.js';
 import { APP_MIGRATION, buildPrivilegeReview } from '../dist/identity/privilegeReview.js';
-import { containerIdentityArgs, identityAccountName, isSessionIdentity, renderIdentityFiles } from '../dist/app-manager/spawn/identityArgs.js';
-import { readKernelSessionSecret, sessionSecretSubpath, terminalSessionArgs, writeSessionSecret, SESSION_SECRET_FILE, TERMINAL_RUN_DIR } from '../dist/app-manager/spawn/sessionArgs.js';
+import { containerIdentityArgs, identityAccountName, isSessionIdentity, renderIdentityFiles } from '../dist/runtimes/spawn/identityArgs.js';
+import { readKernelSessionSecret, sessionSecretSubpath, terminalSessionArgs, writeSessionSecret, SESSION_SECRET_FILE, TERMINAL_RUN_DIR } from '../dist/runtimes/spawn/sessionArgs.js';
 import { ASTRO_START_SHELL } from '../dist/app-manager/provisioning.js';
 import { ContainerRunner } from '../dist/app-manager/ContainerRunner.js';
 import { SECURITY_OPTIONS } from '../dist/security/options.js';

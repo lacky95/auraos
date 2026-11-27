@@ -25,6 +25,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SidecarManager } from '../dist/app-manager/SidecarManager.js';
+import { containerSidecars } from '../dist/runtimes/container/sidecars.js';
 import { MountManager } from '../dist/app-manager/MountManager.js';
 import { InstanceTokens } from '../dist/app-manager/InstanceTokens.js';
 
@@ -127,6 +128,7 @@ function sidecars(t, { toolsMode = 'hardlink' } = {}) {
   };
   const mgr = new SidecarManager({
     runner,
+    workloads: containerSidecars(runner, { baseImage: 'aura-base' }),
     registry: { getById: (id) => (id === APP ? { id: APP, services: SERVICES, tools: ['jq', 'rg'], permissions: ['sidecars.spawn', 'net.raw'] } : undefined) },
     permissions: { hasPermission: (_app, p) => ['sidecars.tools', 'sidecars.privileged'].includes(p) },
     tokens: new InstanceTokens(join(dataDir, 'aura', 'secrets', 'k')),

@@ -26,7 +26,7 @@ import { APP_MIGRATION, buildPrivilegeReview, manifestPrivilegeNeeds } from '../
 import { newInstallationRunAs } from '../dist/identity/types.js';
 import {
   containerIdentityArgs, identityFilesSubpath, renderIdentityFiles, sidecarIdentityArgs, writeIdentityFiles,
-} from '../dist/app-manager/spawn/identityArgs.js';
+} from '../dist/runtimes/spawn/identityArgs.js';
 import {
   ASTRO_START_SHELL, BUILDER_CACHE_PATH, RAW_START_SHELL, builderProvisionEnv, builderProvisionShell, PROVISION_BEGIN,
 } from '../dist/app-manager/provisioning.js';

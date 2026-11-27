@@ -35,7 +35,7 @@ import { BASE_IMAGE } from './BaseImage.js';
 import type { EngineClient } from './DockerApi.js';
 import { ExecBridgeError, type ExecSession, type SessionSpec } from './ExecBridge.js';
 import { engineSession } from './DockerApi.js';
-import { DOCKER_SOCKET_PATH } from './spawn/socketArgs.js';
+import { DOCKER_SOCKET_PATH } from '../runtimes/spawn/socketArgs.js';
 
 const execFileAsync = promisify(execFile);
 

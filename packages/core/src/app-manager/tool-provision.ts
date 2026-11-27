@@ -30,6 +30,7 @@ import {
   unlinkSync, writeFileSync,
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join } from 'node:path';
+import { MY_TOOLS_PATH } from '../runtimes/spawn/paths.js';
 import { resolveToolBinaries, type SidecarMap } from '../capabilities/tool-allowlist.js';
 import {
   INSTANCE_LIB_DIR, libsForBinaries, materialiseLibs, readLibMap, toolchainLibFor,
@@ -38,8 +39,8 @@ import {
 
 /** Path the legacy ('symlink') mode binds the whole toolchain store at. */
 export const ALL_TOOLS_PATH = '/aura/all-tools';
-/** Path every sandbox gets its own allowlist dir at; prepended to PATH. */
-export const MY_TOOLS_PATH = '/aura/my-tools';
+/** Path every sandbox gets its own allowlist dir at; prepended to PATH (one definition: runtimes/spawn/paths.ts). */
+export { MY_TOOLS_PATH };
 
 /**
  * Where a sandbox finds the shared libraries of the tools it was granted.

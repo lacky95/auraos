@@ -96,14 +96,12 @@ import { IDMAP_HELPER_PATH, type ContainerMountBackend } from '../runtimes/conta
 import { containerName } from '../runtimes/container/names.js';
 import { RuntimeCapabilityError } from '../runtimes/types.js';
 import { BASE_IMAGE } from './BaseImage.js';
+import { MOUNT_ROOT_PATH } from '../runtimes/spawn/paths.js';
 import { SYSTEM_APP_LATER, SYSTEM_APP_LATER_MESSAGE } from '../nexus/AppSource.js';
 
 const HELPER_IMAGE = BASE_IMAGE;
-/**
- * Canonical mount root inside a consumer container. Provisioned at spawn by
- * `ContainerRunner`, so only containers started since that change have it.
- */
-export const MOUNT_ROOT_PATH = '/mnt/aura';
+/** Canonical mount root inside a consumer container (one definition: runtimes/spawn/paths.ts). */
+export { MOUNT_ROOT_PATH };
 /**
  * Legacy root, relative to the consumer's own `/data`. Every container has a
  * `/data` volume mount regardless of age, and docker leaves it a slave of the

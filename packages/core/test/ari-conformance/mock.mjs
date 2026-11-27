@@ -15,6 +15,7 @@ export function mockProvider() {
   };
   const running = new Map();   // instanceId → { port, env, ref, nonce }
   const exits = new Map();     // instanceId → [cb]
+  const workloads = new Map(); // OS sidecar ref → { ref, state, env, tags }
   const survivors = [{ instanceId: 'org.mock.app-1', appId: 'org.mock.app', port: 4700, ref: 'urn:mock:ws/7f3a', tokenNonce: 'n-1', owner: 'default' }];
   const sessions = [{ sessionId: 's-1', instanceId: 'org.mock.app-1', kind: 'user', userId: 'default', home: 'private', uid: 100000, startedAt: '2026-11-27T00:00:00.000Z' }];
   let seq = 0;
@@ -58,7 +59,35 @@ export function mockProvider() {
       list: async () => [], remove: () => {}, removeOf: () => 0,
       exec: async (id) => { throw new RuntimeExecError('not-found', `no workload ${id}`); },
       logs: async (id) => { throw new RuntimeExecError('not-found', `no workload ${id}`); },
+      // OS sidecars (Phase 6 D-S): opaque refs, tags kept as given, nothing of Docker.
+      ref: (instanceId, name) => `urn:mock:wl/${instanceId}/${name}`,
+      listOf: async (instanceId) => [...workloads.values()].filter((w) => w.tags['aura.parent'] === instanceId && w.tags['aura.managed'] === 'os')
+        .map((w) => ({ ref: w.ref, instanceId, state: w.state, record: w.tags['aura.sidecar.spec'] })),
+      listManaged: async () => [...workloads.values()].filter((w) => w.tags['aura.managed'] === 'os')
+        .map((w) => ({ ref: w.ref, instanceId: w.tags['aura.parent'], record: w.tags['aura.sidecar.spec'] })),
+      spawnedBy: async (instanceId, owner) => [...workloads.values()]
+        .filter((w) => w.tags['aura.parent'] === instanceId && w.tags['aura.sidecar.owner'] === owner).map((w) => w.ref),
+      inspect: async (ref) => { const w = workloads.get(ref); return w ? { ref, state: w.state, tags: { ...w.tags }, restarts: 0 } : null; },
+      storageExists: async () => false,
+      prepareImage: async () => {},
+      instanceEnv: async (id) => ({ ...(running.get(id)?.env ?? {}) }),
+      seed: async () => {},
+      create: async (req) => {
+        const ref = `urn:mock:wl/${req.instanceId}/${req.spec.name}`;
+        workloads.set(ref, { ref, state: 'created', env: { ...req.env, ...(req.token ? { AURA_INSTANCE_TOKEN: req.token } : {}) }, tags: {
+          'aura.parent': req.instanceId, 'aura.app': req.appId, 'aura.service': req.spec.name, 'aura.managed': 'os',
+          'aura.sidecar.template': req.spec.template, 'aura.sidecar.owner': req.owner ?? '-', 'aura.sidecar.spec': req.record,
+        } });
+        return ref;
+      },
+      start: async (id) => { const w = workloads.get(id); if (!w) throw new Error(`no workload ${id}`); w.state = 'running'; },
+      destroy: async (ref, o = {}) => { if (!workloads.delete(ref) && !o.quiet) throw new Error(`no workload ${ref}`); },
+      run: async (ref) => { if (!workloads.has(ref)) throw new Error(`no workload ${ref}`); return { exitCode: 0, stdout: '', stderr: '', truncated: false, timedOut: false }; },
+      output: async (ref) => { if (!workloads.has(ref)) throw new Error(`no workload ${ref}`); return { stdout: '', stderr: '' }; },
+      lastWords: async () => '',
     },
+    /** The OS sidecars it runs (the D-S row of ari-modules.test.mjs). */
+    _workloads: workloads,
     // The instance's own output, kept by the provider (no runner output ring, no engine).
     logs: async (id, _req, onChunk) => {
       if (!running.has(id)) throw new RuntimeExecError('not-running', `${id} is not running`);

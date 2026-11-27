@@ -8,7 +8,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { rawSocketArgs, rawSocketsRequested } from '../dist/app-manager/spawn/networkArgs.js';
+import { rawSocketArgs, rawSocketsRequested } from '../dist/runtimes/spawn/networkArgs.js';
 import { ContainerRunner } from '../dist/app-manager/ContainerRunner.js';
 
 test('D88 S1: every OS container drops NET_RAW; only a privileged or NET_RAW template keeps it', () => {

@@ -70,7 +70,7 @@ import type { ContextMigrationDeps } from '../context/migratePhase5.js';
 import { defaultKv } from '@aura/kv-store';
 import { appOwnershipSpecs, applyAppOwnership } from '../identity/appOwnership.js';
 import { RuntimeCapabilityError, RuntimeModuleError } from '../runtimes/types.js';
-import { BASE_GROUP, BASE_PASSWD, identityAccountName, isNonRootIdentity, isSessionIdentity } from './spawn/identityArgs.js';
+import { BASE_GROUP, BASE_PASSWD, identityAccountName, isNonRootIdentity, isSessionIdentity } from '../runtimes/spawn/identityArgs.js';
 import { renderGroup, renderPasswd, type PasswdEntry } from '../identity/passwd.js';
 import type { SessionCaller, SessionContext } from './ExecBridge.js';
 import type { JumpHomeMode } from '../homes/types.js';
@@ -478,8 +478,11 @@ export class AppManager {
       sidecars: (id) => this.getSidecars(id),
       sessionContext: (id, req) => this.sessionContext(id, req),
     });
+    // The runtime that realises OS sidecars (D-S): the one with the `workloads` group (the container module).
+    const sidecarWorkloads = this.runtimes.list().find((m) => m.workloads)?.workloads;
     this.osSidecars  = new SidecarManager({
       runner:      this.container,
+      ...(sidecarWorkloads ? { workloads: sidecarWorkloads } : {}),
       registry:    this.registry,
       permissions: this.permissions,
       tokens:      this.tokens,
