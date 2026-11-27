@@ -45,7 +45,8 @@ RUN ARCH=$(dpkg --print-architecture) \
 # non-login service uid and every session command (tmux, the shells) as the session user, for the server only.
 # `aura-term-tmux` (a link) is the server's tmux. See os/term-launch/term-launch.c.
 COPY os/term-launch/term-launch.c /tmp/term-launch.c
-RUN cc -std=gnu11 -O2 -Wall -Wextra -Werror -static -o /usr/local/libexec/aura-term-launch /tmp/term-launch.c \
+RUN mkdir -p /usr/local/libexec \
+ && cc -std=gnu11 -O2 -Wall -Wextra -Werror -static -o /usr/local/libexec/aura-term-launch /tmp/term-launch.c \
  && ln -s aura-term-launch /usr/local/libexec/aura-term-tmux \
  && rm /tmp/term-launch.c
 

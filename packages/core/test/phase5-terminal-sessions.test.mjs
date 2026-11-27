@@ -204,7 +204,7 @@ test('T2: a session host serves its production build only; else exit 78. No exec
   assert.doesNotMatch(ASTRO_START_SHELL, /node-sealed|AURA_SERVER_SEALED/);
   const dockerfile = readFileSync(new URL('../../../Dockerfile', import.meta.url), 'utf-8');
   assert.doesNotMatch(dockerfile, /node-sealed/, 'no execute-only node');
-  assert.match(dockerfile, /-o \/usr\/local\/libexec\/aura-term-launch \/tmp\/term-launch\.c/, 'aura-base builds the session launcher');
+  assert.match(dockerfile, /mkdir -p \/usr\/local\/libexec\s*\\\s*&& cc [^\n]*-o \/usr\/local\/libexec\/aura-term-launch \/tmp\/term-launch\.c/, 'aura-base builds the session launcher');
   assert.match(dockerfile, /ln -s aura-term-launch \/usr\/local\/libexec\/aura-term-tmux/);
 });
 
