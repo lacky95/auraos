@@ -194,7 +194,7 @@ test('registry: a file option reads its switch file; the host variable wins; gar
   const env = core.resolveSecurityOptions({}, { AURA_SYSTEM_MODE: 'developer', AURA_SHELL_MODE: 'prod' }, read);
   assert.deepEqual([option(env, 'system-mode').value, option(env, 'system-mode').effectiveSource], ['developer', 'env AURA_SYSTEM_MODE']);
   assert.deepEqual([option(env, 'shell-mode').value, option(env, 'shell-mode').effectiveSource], ['prod', 'env AURA_SHELL_MODE']);
-  assert.deepEqual([option(core.resolveSecurityOptions({}, {}, () => null), 'system-mode').value], ['developer']);
+  assert.deepEqual([option(core.resolveSecurityOptions({}, {}, () => null), 'system-mode').value], ['normal']);
   assert.equal(option(list, 'system-mode').writable, false);
 });
 

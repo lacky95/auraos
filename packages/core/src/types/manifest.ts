@@ -459,7 +459,7 @@ export const AppManifestSchema = z.object({
    * The app contract this app was built for (D48, `AURA_CONTRACT` in the SDK
    * and in core's contract/appContract.ts). Absent: built before the contract.
    * AuraOS reports it per app (`aura get apps -o wide`, the contract report);
-   * from Phase 6 it refuses an unknown major version with a clear message.
+   * AuraOS refuses a newer major with a clear message (contract/types.ts).
    */
   auraContract: z.number().int().min(1).optional(),
   /**

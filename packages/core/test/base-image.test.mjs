@@ -85,3 +85,64 @@ test('failed build: spawns are refused until a retry succeeds', async () => {
   await base.whenReady();
   assert.equal(base.current.phase, 'ready');
 });
+
+// ── Phase 6 G: the image's Node against engines.node (the Astro 7 lesson) ────
+
+function nodeSetup({ versions, engines = '>=22.23.4' }) {
+  const dataDir = mkdtempSync(join(tmpdir(), 'base-image-node-'));
+  const dockerfile = join(dataDir, 'Dockerfile');
+  writeFileSync(dockerfile, 'FROM node:22 AS aura-base\n');
+  writeFileSync(join(dataDir, 'package.json'), JSON.stringify({ engines: { node: engines } }));
+  const calls = { builds: 0, inspected: 0 };
+  const deps = {
+    exists: () => true,
+    nodeVersion: () => versions[Math.min(calls.inspected++, versions.length - 1)],
+    build: async () => { calls.builds++; return 0; },
+  };
+  return { base: new BaseImage({ dataDir, dockerfile, image: 'aura-base-test', deps }), calls };
+}
+
+test('node requirement: an image that satisfies engines.node is ready, with both versions recorded', async () => {
+  const { base, calls } = nodeSetup({ versions: ['22.23.5'] });
+  await base.whenReady();
+  assert.equal(calls.builds, 0);
+  assert.equal(base.current.phase, 'ready');
+  assert.deepEqual(base.current.node, { version: '22.23.5', required: '>=22.23.4' });
+});
+
+test('node requirement: a stale image is rebuilt; ready once the rebuilt one satisfies it', async () => {
+  const { base, calls } = nodeSetup({ versions: ['22.12.0', '22.23.5'] });
+  await base.whenReady();
+  assert.equal(calls.builds, 1);
+  assert.equal(base.current.phase, 'ready');
+});
+
+test('node requirement: still stale after the build fails, naming the image and both versions', async () => {
+  const { base, calls } = nodeSetup({ versions: ['22.12.0'] });
+  await assert.rejects(base.whenReady(), /aura-base-test has Node 22\.12\.0, but this AuraOS requires >=22\.23\.4 \(engines\.node\)/);
+  assert.equal(calls.builds, 1);
+  assert.equal(base.current.phase, 'failed');
+  await assert.rejects(base.whenReady(), /missing and building it failed/, 'not ready by the exists shortcut either');
+});
+
+test('node requirement: an unknown version or no engines.node is not checked', async () => {
+  for (const s of [nodeSetup({ versions: [null] }), nodeSetup({ versions: ['18.0.0'], engines: '' })]) {
+    await s.base.whenReady();
+    assert.equal(s.calls.builds, 0);
+  }
+});
+
+test('satisfiesNode: npm-style ranges; one table with the release builder\'s copy when it exists (phase 6 B)', async () => {
+  const { satisfiesNode } = await import('../dist/app-manager/nodeRequirement.js');
+  const table = [
+    ['v22.23.5', '>=22.23.4', true], ['22.23.3', '>=22.23.4', false], ['22.23.4', '>=22.23.4', true],
+    ['24.1.0', '^22', false], ['22.0.0', '^22', true], ['23.1.0', '>=20 <23 || 24.x', false], ['24.3.1', '>=20 <23 || 24.x', true],
+    ['22.5.0', '~22.5', true], ['22.6.0', '~22.5', false], ['22.23.5', '', true], ['22.23.5', '22.x', true], ['bogus', '>=1', false],
+  ];
+  for (const [v, r, want] of table) assert.equal(satisfiesNode(v, r), want, `${v} ${r}`);
+  const builder = new URL('../../../os/release/images.mjs', import.meta.url);
+  const { existsSync } = await import('node:fs');
+  if (!existsSync(builder)) return;
+  const other = await import(builder.href);
+  for (const [v, r] of table) assert.equal(other.satisfiesNode(v, r), satisfiesNode(v, r), `builder copy differs: ${v} ${r}`);
+});

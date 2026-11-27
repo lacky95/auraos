@@ -15,7 +15,7 @@
 import * as core from '@aura/core';
 import type { BootEntry, BootHook, SystemHandle } from '@aura/core';
 import { accessMode } from '../../server/access-mode.mjs';
-import { isDeveloperMode, systemMode } from './systemMode.ts';
+import { isDeveloperMode, migrateSystemModeFile, systemMode, type SystemModeMigration } from './systemMode.ts';
 import { startOnboarding, type OnboardingHandle } from './onboarding/index.js';
 import { ensureSdkPublished } from './sdkBootstrap.js';
 import { installRelaySigner, type RelaySigner } from './access/relay.ts';
@@ -25,8 +25,19 @@ import { installRelaySigner, type RelaySigner } from './access/relay.ts';
 installRelaySigner(() => { try { return core.getAppManager() as unknown as RelaySigner; } catch { return null; } });
 
 let onboarding: OnboardingHandle | null = null;
+/** Phase 6 G (D60): written before anything reads the mode (bootSystem `early`); audited once the KV is up. */
+let modeMigration: SystemModeMigration | null = null;
 
 export const SHELL_BOOT_HOOKS: readonly BootHook[] = [
+  {
+    name: 'system-mode-migration-audit', layer: 'server', phase: 'beforeApps',
+    run: async () => {
+      if (!modeMigration) return;
+      await core.getAuthServices().audit.record({
+        by: { kind: 'system' }, action: 'system-mode.migrated', target: 'system:mode', outcome: 'ok', detail: { ...modeMigration },
+      });
+    },
+  },
   // Before the apps: the `aura-base` image every container app runs from (built in the
   // background when missing; container spawns wait for it) and the onboarding card.
   {
@@ -79,6 +90,8 @@ export function bootShell(entry: BootEntry): SystemHandle {
   return core.bootSystem({
     entry,
     hooks: [...SHELL_BOOT_HOOKS],
+    // A checkout install with no mode file keeps developer (D60), before anything reads the mode.
+    early: () => { modeMigration = migrateSystemModeFile(); },
     developerMode: isDeveloperMode,
     systemMode: () => systemMode(),
     accessMode: () => accessMode(),

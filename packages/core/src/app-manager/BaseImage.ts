@@ -25,7 +25,12 @@ import { dirname, join } from 'node:path';
  * State lives in `<dataDir>/aura/first-boot/base-image.{json,log}` (same shape
  * as the self-updater's job files); `onChange()` listeners get every state
  * change — the shell turns them into a notification.
+ *
+ * Present means usable: the image's Node must satisfy the root `engines.node`
+ * (Phase 6 G, nodeRequirement.ts). A stale image is rebuilt like a missing
+ * one; still stale after the build, it fails with both versions named.
  */
+import { nodeMismatch, requiredNodeNextTo } from './nodeRequirement.js';
 
 export const BASE_IMAGE = process.env['AURA_BASE_IMAGE'] ?? 'aura-base';
 export const BASE_IMAGE_TARGET = 'aura-base';
@@ -44,6 +49,8 @@ export interface BaseImageState {
   error?: string;
   /** True when this process built the image (vs. found it present). */
   built?: boolean;
+  /** The image's Node and the required range (`engines.node`); null when unknown. */
+  node?: { version: string | null; required: string | null };
 }
 
 /**
@@ -68,6 +75,8 @@ const BUILD_TIMEOUT_MS = 30 * 60_000;
 export interface BaseImageDeps {
   /** True when the image exists locally. */
   exists(image: string): boolean;
+  /** The image's Node version (read, never run); null or absent: unknown, not checked. */
+  nodeVersion?(image: string): string | null;
   /** Run the build; call `onLine` per output line; resolve with the exit code. */
   build(image: string, dockerfile: string, onLine: (line: string) => void): Promise<number>;
 }
@@ -77,6 +86,14 @@ const defaultDeps: BaseImageDeps = {
     const r = spawnSync('docker', ['image', 'inspect', '--format', '{{.Id}}', image], { stdio: 'ignore', timeout: 15_000 });
     return r.status === 0;
   },
+  // The official node images set NODE_VERSION: read it, never run the image.
+  nodeVersion(image) {
+    const r = spawnSync('docker', ['image', 'inspect', '--format', '{{range .Config.Env}}{{println .}}{{end}}', image], { encoding: 'utf-8', timeout: 15_000 });
+    if (r.status !== 0) return null;
+    const line = r.stdout.split('\n').find((l) => l.startsWith('NODE_VERSION='));
+    return line ? line.slice('NODE_VERSION='.length).trim() || null : null;
+  },
+
   build(image, dockerfile, onLine) {
     return new Promise((resolve) => {
       if (spawnSync('docker', ['buildx', 'version'], { stdio: 'ignore', timeout: 15_000 }).status !== 0) {
@@ -176,7 +193,7 @@ export class BaseImage {
     if (this.inflight) return this.inflight;
     if (this.state.phase === 'failed') {
       // The image may have been built by hand since (`docker compose build aura-base`).
-      if (this.deps.exists(this.image)) { this.set({ phase: 'ready', progress: null }); return Promise.resolve(); }
+      if (this.deps.exists(this.image) && !this.staleNode()) { this.set({ phase: 'ready', progress: null }); return Promise.resolve(); }
       return Promise.reject(new Error(`the ${this.image} image is missing and building it failed: ${this.state.error ?? 'unknown error'} — retry from the "Setting up AuraOS" notification or run \`docker compose build aura-base\` on the host`));
     }
     return this.ensure();
@@ -193,10 +210,21 @@ export class BaseImage {
     }
   }
 
+  /** Why the present image's Node does not meet `engines.node` (records both on the state), or null. */
+  private staleNode(): string | null {
+    const node = { version: this.deps.nodeVersion?.(this.image) ?? null, required: requiredNodeNextTo(this.dockerfile) };
+    this.state = { ...this.state, node };
+    return nodeMismatch(this.image, node.version, node.required);
+  }
+
   private async run(): Promise<void> {
     if (this.deps.exists(this.image)) {
-      this.set({ phase: 'ready', progress: null, error: undefined });
-      return;
+      const stale = this.staleNode();
+      if (!stale) {
+        this.set({ phase: 'ready', progress: null, error: undefined });
+        return;
+      }
+      console.warn(`[BaseImage] ${stale} — rebuilding it`);
     }
     if (!existsSync(this.dockerfile)) {
       const error = `${this.dockerfile} not found — cannot build ${this.image}`;
@@ -223,6 +251,14 @@ export class BaseImage {
     });
     await new Promise<void>((res) => log.end(res));
     const finishedAt = new Date().toISOString();
+    const stillStale = code === 0 && this.deps.exists(this.image) ? this.staleNode() : null;
+    if (stillStale) {
+      // The Dockerfile's own Node is below the floor: no rebuild fixes that, the checkout does.
+      const error = `${stillStale}: update the aura-base Node in the Dockerfile`;
+      console.error(`[BaseImage] ${error}`);
+      this.set({ phase: 'failed', error, finishedAt });
+      throw new Error(error);
+    }
     if (code === 0 && this.deps.exists(this.image)) {
       console.log(`[BaseImage] ${this.image} built`);
       this.set({ phase: 'ready', progress: 1, step: undefined, finishedAt });

@@ -424,6 +424,17 @@ test('install without an approval answers needs-approval with the exact diff; wi
   assert.equal((await install(TERMINAL, { 'x-aura-approval': id })).status, 202, 'single use');
 });
 
+test('D48: core refusing an app built for a newer contract is 422 contract-unsupported with its message', async () => {
+  const message = 'com.example.notes is built for Aura contract 2; this AuraOS implements 1. Update AuraOS or install a version built for contract 1.';
+  async function* refused(): AsyncGenerator<NexusProgressEvent, null, unknown> {
+    yield { type: 'error', code: 'contract-unsupported', message };
+    throw new Error(message);
+  }
+  const gate = installGate(deps(), TERMINAL, new Request('http://shell.test/api/nexus/install', { method: 'POST' }), undefined);
+  const r = await read(await runInstall(refused(), gate));
+  assert.deepEqual([r.status, r.body.error, r.body.message], [422, 'contract-unsupported', message]);
+});
+
 test('stream C: an approved install grants the Context keys it names, attributed to the approver', async () => {
   const granted: Array<{ id: string; permission: string; appScope?: string; installationId?: string; by: unknown }> = [];
   const fakeGrants = () => ({

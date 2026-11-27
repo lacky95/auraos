@@ -18,7 +18,7 @@ ARG DOCKER_IO_REGISTRY=docker.io
 FROM scratch AS aura-infra-public
 
 # Valkey binaries come from the official image (see the base stage).
-FROM ${DOCKER_IO_REGISTRY}/valkey/valkey:8-bookworm AS valkey
+FROM ${DOCKER_IO_REGISTRY}/valkey/valkey:8.1.3-bookworm@sha256:fea8b3e67b15729d4bb70589eb03367bab9ad1ee89c876f54327fc7c6e618571 AS valkey
 
 # ─── Stage: aura-base ─────────────────────────────────────────────────────────
 # Sibling-container image used by ContainerRunner. Rooted at the FULL Debian
@@ -155,7 +155,8 @@ RUN --mount=type=bind,source=os/infra/build-env.sh,target=/run/aura-infra/build-
 # Copied from the official image rather than apt-installed: bookworm has no
 # valkey package, and this pins the exact version. All of its shared-library
 # deps (libssl3, libsystemd0, libgcrypt20, liblzma5, libzstd1, liblz4-1,
-# libcap2) are already in node:22-slim's bookworm base.
+# libcap2) are already in node:22-slim's bookworm base. The valkey stage is pinned by
+# tag and digest (Phase 6 G); auraos-e2e diagnose/valkey-version checks what runs.
 COPY --from=valkey /usr/local/bin/valkey-server /usr/local/bin/valkey-server
 COPY --from=valkey /usr/local/bin/valkey-cli    /usr/local/bin/valkey-cli
 

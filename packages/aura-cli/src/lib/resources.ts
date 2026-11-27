@@ -70,6 +70,8 @@ export interface AppDto {
     auraContract?: number;
   };
   enabled?: boolean;
+  /** D48: the refusal message of an app built for a newer Aura contract (never started); null otherwise. */
+  incompatible?: string | null;
   instances: InstanceDto[];
   activities: ActivityDto[];
   /** How the app starts next time (`prod` / `dev: changed` …) — `GET /api/apps/serve`; only on `get apps`. */
@@ -212,7 +214,8 @@ const apps: ResourceDef<AppDto> = {
     { header: 'BG', value: (a) => (a.manifest.backgroundService ? 'yes' : '-'), wide: true },
     // The app contract the app was built for (D48): `-` before the contract.
     { header: 'CONTRACT', value: (a) => (a.manifest.auraContract ? String(a.manifest.auraContract) : '-'), wide: true },
-    { header: 'EN', value: (a) => (a.enabled === false ? color.red('off') : color.green('on')) },
+    // D48: an app built for a newer Aura contract is never started, whatever its enable flag.
+    { header: 'EN', value: (a) => (a.incompatible ? color.red('incompatible') : a.enabled === false ? color.red('off') : color.green('on')) },
   ],
 };
 

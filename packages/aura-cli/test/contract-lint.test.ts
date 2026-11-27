@@ -31,6 +31,15 @@ test('a manifest on the contract with matching source is quiet', () => {
   assert.deepEqual(lintContract(a.file, a.text, a.parsed), []);
 });
 
+test('an auraContract newer than this AuraOS is an error (D48: refused), at its line', () => {
+  const a = app('future', { auraContract: AURA_CONTRACT + 1 });
+  const f = lintContract(a.file, a.text, a.parsed, { source: false });
+  assert.equal(f.length, 1);
+  assert.equal(f[0]!.severity, 'error', 'aura dev validate exits 1');
+  assert.equal(f[0]!.line, 5);
+  assert.equal(f[0]!.message, `com.example.future is built for Aura contract ${AURA_CONTRACT + 1}; this AuraOS implements ${AURA_CONTRACT}. Update AuraOS or install a version built for contract ${AURA_CONTRACT}.`);
+});
+
 test('missing contract version, undeclared Context key and permission, raw Context: file:line warnings', () => {
   const a = app('dirty', { services: [{ name: 'db', image: 'postgres:16', privileged: true }] }, {
     'src/server.ts': "const k = await osClient.context.get('API_KEY');\nconst raw = readFileSync('/run/context/API_KEY');\n",

@@ -498,6 +498,12 @@ test('preview: the caller\'s own workspace runs as a separate instance, no appro
   writeApp(join(root, 'root', 'aura', 'workspaces', 'default', 'inst-global-io-shop-app', '2'), { id: 'io.other.app', name: 'Other', version: '1.0.0' });
   assert.equal((await read(await startPreview(req('POST', { workspace: 2 }), 'io.shop.app', deps()))).status, 422);
   assert.equal((await read(await startPreview(req('POST', {}), 'io.shop.app', deps()))).status, 400);
+  // D48: a workspace built for a newer Aura contract never runs.
+  writeApp(join(root, 'root', 'aura', 'workspaces', 'default', 'inst-global-io-shop-app', '3'), { id: 'io.shop.app', originId: O1, name: 'Shop', version: '2.0.0', auraContract: 2 });
+  const future = await read(await startPreview(req('POST', { workspace: 3 }), 'io.shop.app', deps()));
+  assert.deepEqual([future.status, future.body.error], [422, 'contract-unsupported']);
+  assert.match(future.body.message, /^io\.shop\.app is built for Aura contract 2; this AuraOS implements 1\./);
+  assert.equal(previews.size, 0);
   assert.equal((await read(await startPreview(req('POST', { workspace: 1 }), 'com.aura.terminal', deps()))).body.error, 'system-app-later');
 });
 

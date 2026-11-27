@@ -859,8 +859,9 @@ Besides the schema, the App Host checks (warnings unless noted) report with file
   - notes: on('upgrade') handlers with no path check, hmr: false
 Release builds (Phase 6): build.release cwd and command exist (errors), a command without outputs (warning),
   apps the release builder would not build without build.release (note).
-The app contract checks (D48, warnings: report only):
-  - auraContract missing, or newer than this AuraOS (${AURA_CONTRACT})
+The app contract checks (D48, warnings: report only, except the first error):
+  - auraContract newer than this AuraOS (${AURA_CONTRACT}): an error, AuraOS refuses to install or start it
+  - auraContract missing
   - context.get('KEY') of a key not in context[]; reads of the raw Context (/run/context)
   - SDK calls whose permission is missing (user.confirm, storage, osSidecars, notifications)
   - services[] without sidecars.spawn or docker; privileged sidecars without sidecars.privileged

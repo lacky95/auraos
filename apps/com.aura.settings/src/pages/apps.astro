@@ -23,6 +23,8 @@ interface AppDto {
     autoStart?: boolean;
   };
   enabled: boolean;
+  /** D48: built for a newer Aura contract (never started): the refusal message. */
+  incompatible?: string | null;
   instances: Array<{ instanceId: string; state: string }>;
 }
 
@@ -143,6 +145,7 @@ apps.sort((a, b) => {
     .app-tag[data-kind="running"]  { color: var(--aura-color-primary); border-color: var(--aura-color-primary); }
     .app-tag[data-kind="bg"]       { color: var(--aura-color-secondary); border-color: var(--aura-color-secondary); }
     .app-tag[data-kind="service"]  { color: var(--aura-color-secondary); border-color: var(--aura-color-secondary); }
+    .app-tag[data-kind="incompatible"] { color: var(--aura-color-danger); border-color: var(--aura-color-danger); }
     .toggle {
       position: relative;
       display: inline-flex;
@@ -380,6 +383,7 @@ apps.sort((a, b) => {
               <div class="app-name">{m.name}</div>
               <div class="app-id">{m.id} · v{m.version}{serve.get(m.id) && serve.get(m.id)!.label !== '-' && <span title={serve.get(m.id)!.detail ?? (serve.get(m.id)!.mode === 'prod' ? 'Runs from its production build' : 'Runs with astro dev — `aura build app` builds it')}> · {serve.get(m.id)!.label}</span>}</div>
               <div class="app-tags">
+                {app.incompatible && <span class="app-tag" data-kind="incompatible" title={app.incompatible}>incompatible</span>}
                 {running > 0 && <span class="app-tag" data-kind="running">{running} running</span>}
                 {isService && <span class="app-tag" data-kind="service">service</span>}
                 {m.backgroundService && <span class="app-tag" data-kind="bg">background</span>}

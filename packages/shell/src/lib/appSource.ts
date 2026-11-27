@@ -538,6 +538,9 @@ export async function startPreview(request: Request, appId: string | undefined, 
   try { candidate = core.validateStagedDir(tree); }
   catch (err) { return json({ error: 'invalid-tree', message: (err as Error).message }, 422); }
   if (candidate.id !== app.id) return json({ error: 'invalid-tree', message: `the workspace is ${candidate.id}, not ${app.id}` }, 422);
+  // D48: a workspace built for a newer Aura contract never runs (activation refuses it in core's install).
+  const refused = core.contractRefusal(candidate);
+  if (refused) return json({ error: refused.code, message: refused.message }, 422);
   try {
     const instanceId = await deps.apps.startPreview(app.id, { appDir: tree, workspace: subpath, owner: user });
     return json({ ok: true, appId: app.id, instanceId, workspace: n });
