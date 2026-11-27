@@ -13,11 +13,12 @@
  *   - 503 D105 `unavailable` while this build has no setup engine (P3 wires
  *     it), never a made-up or empty configuration.
  *
- * D108 P4: `liveSetupSelfDeps().service` is null until INT points it at the
- * shared accessor (P5 `lib/setup/service.ts` `liveSetupService()`).
+ * The engine comes from the one shared accessor (`lib/setup/service.ts`
+ * `liveSetupService()`), null until the engine is wired (P3).
  */
 import type { SetupConfigView, SetupErrorBody, SetupServiceContract } from '@aura/core';
 import type { ResolvedPrincipal } from './access/identify.ts';
+import { liveSetupService } from './setup/service.ts';
 
 export interface SetupSelfDeps {
   resolve(request: Request): Promise<ResolvedPrincipal>;
@@ -28,7 +29,7 @@ export interface SetupSelfDeps {
 export function liveSetupSelfDeps(): SetupSelfDeps {
   return {
     resolve: async (request) => (await import('./auth.ts')).resolveCaller(request),
-    service: () => null,
+    service: () => liveSetupService(),
   };
 }
 
