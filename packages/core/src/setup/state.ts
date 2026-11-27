@@ -132,7 +132,7 @@ export class SetupStateMachine {
   /**
    * One legal transition, compare-and-set on `expect`. Never into `ready`
    * (`markReady`). The digests stay those of the last `ready`; `approvalId`
-   * survives only in `awaiting-approval`; `error` only when given.
+   * survives only in `awaiting-approval` and `initializing`; `error` only when given.
    */
   async transition(installationId: string, expect: InstallationSetupSummary, to: OperationalState, patch: SetupTransitionPatch = {}): Promise<InstallationSetupSummary> {
     if (to === 'ready') throw new SetupStateError('digest-required', '`ready` is entered only with the validated digest (markReady)');
@@ -144,7 +144,9 @@ export class SetupStateMachine {
       configDigest: expect.configDigest, grantDigest: expect.grantDigest,
       step: patch.step !== undefined ? patch.step : expect.step,
       attempt: patch.attempt ?? expect.attempt,
-      ...(to === 'awaiting-approval' && approvalId ? { approvalId } : {}),
+      // The approval of the run: while it is asked, and (P3) while the approved run initializes, so a
+      // kernel restart there still knows what it covers.
+      ...((to === 'awaiting-approval' || to === 'initializing') && approvalId ? { approvalId } : {}),
       updatedAt: this.now().toISOString(),
       ...(patch.error ? { error: patch.error } : {}),
     };

@@ -54,7 +54,11 @@ import { RUNTIME_AUDIT_ACTIONS, RuntimeSettingsStore, runtimeSettingsRevision } 
 import { migrateLegacyRuntimes, migrationReport, processLegacyEnv, type MigrationApp, type MigrationReport } from '../runtimes/migrateLegacy.js';
 import { defaultRedis } from '@aura/kv-store';
 import { AdminAudit } from '../auth/AdminAudit.js';
-import { CONTRACT_AUDIT_ACTIONS, operationalBlock, OperationalBlockError, type OperationalBlock } from '../contract/types.js';
+import {
+  CONTRACT_AUDIT_ACTIONS, declaredSetupKeys, operationalBlock, OperationalBlockError, setupEngineMissing, setupGateBlock, type OperationalBlock,
+} from '../contract/types.js';
+import type { MaintenanceReason } from './maintenance.js';
+import type { SetupEngine, SetupGateDecision } from '../setup/ports.js';
 import type { AuthServices } from '../auth/services.js';
 import { defaultIdentityKeyFile } from '../auth/identityKey.js';
 import { HomeDeniedError, type HomeResolver, type ResolvedHome } from '../homes/types.js';
@@ -250,6 +254,8 @@ export class AppManager {
   readonly tokens:      InstanceTokens;
   /** Sidecars the OS starts on an app's request (the official sidecar path). */
   readonly osSidecars:  SidecarManager;
+  /** D108: the setup engine (its start gate and `SetupServiceContract`), handed in by the composition root; null without one. */
+  readonly setup: SetupEngine | null;
   /** Phase 5 stream X: jump, exec and logs through the shell (ExecBridge.ts). */
   readonly execBridge: ExecBridge;
   /** Stream J.6: the single-use grants behind `aura root` tabs (rootTabs.ts). */
@@ -342,6 +348,11 @@ export class AppManager {
     runtimes?: RuntimeModule[];
     /** The Runtime Settings store; default: the sealed record in Valkey. */
     runtimeSettings?: RuntimeSettingsStore;
+    /**
+     * D108: builds the setup engine over this manager (`system/compose.ts` `createSetupEngine`).
+     * Absent: an app that declares setup or profiles never starts (`setupEngineMissing`).
+     */
+    setup?: (mgr: AppManager) => SetupEngine;
   }) {
     this.dataDir = opts.dataDir;
     this.auth = opts.auth ?? (() => { throw new Error('AppManager: no auth services were handed in (initAppManager opts.auth)'); });
@@ -548,7 +559,14 @@ export class AppManager {
       changed: () => { void this.syncSidecars(2).catch(() => undefined); },
       // Private images: only the login of the app's own install source (pullCredentialFor).
       pullCredential: (appId, image) => this.pullCredentialFor(appId, image),
+      // D108 (P4): setup values of the gate-validated effective configuration; the templates as its profile shapes them.
+      setupValues: async (instanceId) => {
+        const appId = this.instances.get(instanceId)?.appId;
+        return appId && this.setup ? this.setup.sidecarValues(appId) : null;
+      },
+      effectiveManifest: (appId, base) => (this.setup ? this.setup.manifestView(appId, base) : base),
     });
+    this.setup = opts.setup ? opts.setup(this) : null;
     // services[].prePull: fetch template images as soon as an app is
     // installed (init() covers the apps already loaded at boot).
     OsEventBus.on('app:installed', ({ appId }) => {
@@ -1834,6 +1852,8 @@ export class AppManager {
         for (let i = 0; i < m.warmPool; i++) this.scheduleRefill(m.id);
       }
     }
+    // D108: the setup engine resumes runs a restart interrupted and watches for revoked authorizations.
+    this.setup?.start();
     // Auto-start every Service component. Independent of the warm-pool path —
     // services aren't pre-staged copies of a user-facing app, they ARE the
     // running backend. The reconciler crash-recovers them on the same loop it
@@ -2256,7 +2276,8 @@ export class AppManager {
     const manifest = this.registry.getById(chosen.appId);
     if (!manifest) return { kind: 'noHandler' };
     // D108 A2: an app that may not start is an answer (show its setup or why), not a failed spawn.
-    const blocked = operationalBlock(manifest);
+    // Only an app that declares setup/profiles reads anything more (the engine's gate).
+    const blocked = operationalBlock(manifest) ?? (declaredSetupKeys(manifest).length ? await this.setupRefusal(chosen.appId, manifest) : null);
     if (blocked) return { kind: 'setup-required', appId: chosen.appId, state: blocked.details.state, error: blocked };
 
     // Snapshot the app's instances first so the handler can tell a cold
@@ -2437,6 +2458,10 @@ export class AppManager {
     opts: {
       manifest: AppManifest; runtime: ResolvedRuntime; owner?: string; inPool?: boolean; preview?: boolean;
       installation: { installationId: string; runAs?: AppRunAs; execution?: ExecutionApproval; runAsMigration?: AppRunAsMigration } | null;
+      /** D108: the configDigest the spawn's manifest view was built from (null: the base); the gate must validate the same. */
+      setupDigest?: string | null;
+      /** D108 A3: a maintenance start (the setup engine's own, reason `setup`, passes its gate while initializing). */
+      maintenance?: MaintenanceReason;
     },
   ): Promise<Pick<InstanceSpawnContext, 'home' | 'identity' | 'contextEnv'>> {
     // instanceId: a runtime handle only, for the log line below and the vault audit row; never a durable reference (D85 A7).
@@ -2448,8 +2473,17 @@ export class AppManager {
     if (migrating) throw new HomeDeniedError('ownership-pending', migrating);
     // The start gate (D108 A2, D48): every spawn passes here (start, intents, services, autostart, the pool,
     // respawn, previews). A blocked app never starts; its D105 body travels with the error.
+    // Only an app that declares setup/profiles reaches the setup engine; every other app: the static predicate, as before.
     const blocked = operationalBlock(opts.manifest);
     if (blocked) throw new OperationalBlockError(blocked);
+    const gate: SetupGateDecision = declaredSetupKeys(opts.manifest).length
+      ? await this.startGate(appId, opts.manifest, { installationId: opts.installation.installationId, ...(opts.maintenance ? { maintenance: opts.maintenance } : {}) })
+      : { ok: true, effective: null };
+    if (!gate.ok) throw new OperationalBlockError(gate.block);
+    // D108: the configuration this spawn was built with is the one the gate validates now (never a stale or base view).
+    if (opts.setupDigest !== undefined && (gate.effective?.configDigest ?? null) !== opts.setupDigest) {
+      throw new OperationalBlockError(setupGateBlock(appId, 'setup-required', 'ready', `${appId}'s configuration changed while it started; start it again`, `start ${appId} again`));
+    }
     // The user it is for: its owner, or the user a pool member is warmed for (D78; stream T keys the pool per user).
     const user = opts.owner ?? (opts.inPool ? this.poolHomeUser(appId, opts.manifest) : undefined);
     // Owner decision 5-main item 3 (identity/execution.ts): a root request runs only with the owner's
@@ -2846,10 +2880,15 @@ export class AppManager {
   }
 
   private async spawnInstance(
-    appId: string, opts: { inPool: boolean; userId?: string; preview?: { appDir: string; workspace: string; owner: string; dataFrom: string | null } },
+    appId: string, opts: { inPool: boolean; userId?: string; preview?: { appDir: string; workspace: string; owner: string; dataFrom: string | null }; maintenance?: MaintenanceReason },
   ): Promise<string> {
-    const manifest = this.registry.getById(appId);
-    if (!manifest) throw new Error(`App not found: ${appId}`);
+    const base = this.registry.getById(appId);
+    if (!base) throw new Error(`App not found: ${appId}`);
+    // D108: an app with setup/profiles starts with the configuration its gate validated (the effective
+    // manifest view); spawnContext re-checks gate and digest. Every other app: its manifest, unchanged.
+    const setupView = this.setup && declaredSetupKeys(base).length
+      ? await this.setupView(appId, base, opts.maintenance) : { manifest: base, digest: null, declares: false };
+    const manifest = setupView.manifest;
     // Survivors unknown (the boot scan failed): adopt them first, so this
     // spawn's port and instance name are not a survivor's.
     if (this.adoptionPending) {
@@ -2889,7 +2928,10 @@ export class AppManager {
     try {
       const runner = runtime.module.runner;
       const installation = await this.installationRunAs(appId);
-      const spawnCtx = await this.spawnContext(appId, instanceId, { manifest, runtime, owner, inPool: opts.inPool, preview: !!opts.preview, installation });
+      const spawnCtx = await this.spawnContext(appId, instanceId, {
+        manifest, runtime, owner, inPool: opts.inPool, preview: !!opts.preview, installation,
+        ...(setupView.declares ? { setupDigest: setupView.digest } : {}), ...(opts.maintenance ? { maintenance: opts.maintenance } : {}),
+      });
       if (spawnCtx.home) this.instanceHomes.set(instanceId, spawnCtx.home);
       if (spawnCtx.home?.kind === 'private' && spawnCtx.home.hostPath) this.seedPrivateHome(spawnCtx.home.hostPath);
       if (opts.inPool) this.poolHomes.set(instanceId, this.poolHomeUser(appId, manifest) ?? '');
@@ -3071,11 +3113,42 @@ export class AppManager {
    * Fire-and-forget — never blocks the caller.
    */
   /**
+   * D108: the start gate of one app: a newer contract major, then (only for an app that declares
+   * setup or profiles) the setup engine's gate, or `setupEngineMissing` without an engine.
+   */
+  private async startGate(appId: string, manifest: AppManifest, opts: { installationId: string | null; maintenance?: MaintenanceReason }): Promise<SetupGateDecision> {
+    const blocked = operationalBlock(manifest);
+    if (blocked) return { ok: false, block: blocked };
+    if (declaredSetupKeys(manifest).length === 0) return { ok: true, effective: null };
+    if (!this.setup) return { ok: false, block: setupEngineMissing(manifest)! };
+    if (!opts.installationId) {
+      return { ok: false, block: setupGateBlock(appId, 'setup-required', 'setup-required', `${appId}: its installation record is unavailable, so its setup can't be checked; not started`, `try again in a moment`) };
+    }
+    return this.setup.check(appId, manifest, { installationId: opts.installationId, ...(opts.maintenance ? { maintenance: opts.maintenance } : {}) });
+  }
+
+  /** The setup gate's refusal of a declaring app (startIntent), or null. */
+  private async setupRefusal(appId: string, manifest: AppManifest): Promise<OperationalBlock | null> {
+    const d = await this.startGate(appId, manifest, { installationId: await this.installationIdOf(appId) });
+    return d.ok ? null : d.block;
+  }
+
+  /** The manifest a spawn uses (D108): the gate-validated effective view of a declaring app, else the base. */
+  private async setupView<M extends AppManifest>(appId: string, base: M, maintenance?: MaintenanceReason): Promise<{ manifest: M; digest: string | null; declares: boolean }> {
+    if (!this.setup || declaredSetupKeys(base).length === 0) return { manifest: base, digest: null, declares: false };
+    const installationId = await this.installationIdOf(appId);
+    const d = installationId ? await this.setup.check(appId, base, { installationId, ...(maintenance ? { maintenance } : {}) }).catch(() => null) : null;
+    return d?.ok && d.effective
+      ? { manifest: this.setup.manifestView(appId, base, d.effective), digest: d.effective.configDigest, declares: true }
+      : { manifest: base, digest: null, declares: true };
+  }
+
+  /**
    * The supervisor loops (boot services, autoStart, warm pools, enable, respawn) skip an app the
    * start gate refuses, instead of spawning it to fail (D108 A2). The gate itself is in `spawnContext`.
    */
   private skipBlocked(manifest: AppManifest, loop: string): boolean {
-    const blocked = operationalBlock(manifest);
+    const blocked = operationalBlock(manifest) ?? (this.setup ? this.setup.knownBlock(manifest.id) : setupEngineMissing(manifest));
     if (blocked) console.log(`[AppManager] ${loop}: skipping ${manifest.id} (${blocked.error}): ${blocked.message}`);
     return blocked !== null;
   }

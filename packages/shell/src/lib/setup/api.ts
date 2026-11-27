@@ -32,7 +32,7 @@ import type {
 import { resolveCaller } from '../auth.ts';
 import { bearerToken, isTrustedOwnerAgent, type ResolvedPrincipal } from '../access/identify.ts';
 import { shellOwner } from '../appHostHandoff.ts';
-import { json } from '../approvals/service.ts';
+import { approvalsChanged, json } from '../approvals/service.ts';
 import { liveSetupService, SETUP_UNAVAILABLE } from './service.ts';
 
 /** The engine call a route makes. */
@@ -269,10 +269,14 @@ export async function handleSetup(ctx: RouteCtx, op: SetupOp, deps: SetupRouteDe
           const e = invalid(`${field || '(none)'} is not a secret field of ${appId}`, { manifestField: 'setup.fields' });
           return json(e, errorStatus(e));
         }
-        return json(await svc.askSecret(appId, field, actor), 202);
+        const asked = await svc.askSecret(appId, field, actor);
+        // The engine created the request in the kernel: wake the desktop's approval dialog.
+        approvalsChanged();
+        return json(asked, 202);
       }
       default: {
         const o = await (op === 'resume' ? svc.resume(appId, actor) : svc[op](appId, proposal, actor));
+        if (o.status === 'on-hold') approvalsChanged();
         return json(o, outcomeStatus(o));
       }
     }

@@ -427,7 +427,7 @@ test('install without an approval answers needs-approval with the exact diff; wi
 test('the start gate (D48, D108): core refusing an app is 422 with its D105 body, as given', async () => {
   for (const body of [
     core.operationalBlock({ id: 'com.example.notes', auraContract: 2 })!,
-    core.operationalBlock({ id: 'com.example.notes', setup: { fields: [] } })!,
+    core.setupEngineMissing({ id: 'com.example.notes', setup: { fields: [] } })!,
   ]) {
     async function* refused(): AsyncGenerator<NexusProgressEvent, null, unknown> {
       yield { type: 'error', code: body.error, message: body.message, body };

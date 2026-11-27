@@ -26,11 +26,32 @@ import { LinuxIdentityStore, defaultHighWaterMarkFile } from '../identity/LinuxI
 import { SECURITY_AUDIT_ACTIONS, SecurityPolicyStore } from '../security/SecurityPolicyStore.js';
 import { CapabilityRegistryStore } from '../capabilities/CapabilityRegistryStore.js';
 import { OsEventBus } from '../ipc/OsEventBus.js';
-import { installAppHostServicesFactory, type AppHostServices } from '../app-hosts/services.js';
+import { getAppHostServices, installAppHostServicesFactory, type AppHostServices } from '../app-hosts/services.js';
 import { createAppHostRegistry } from '../app-hosts/AppHostRegistry.js';
 import { AppHostLifecycle } from '../app-hosts/lifecycle.js';
 import { ManifestHostGuard } from '../app-hosts/manifestHostGuard.js';
 import { installNotificationDeps, type NotificationAuthorizer } from '../notifications/NotificationService.js';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import type { AppManager } from '../app-manager/AppManager.js';
+import type { MaintenanceStarter } from '../app-manager/maintenance.js';
+import { toolchainMirrorBin } from '../app-manager/tool-provision.js';
+import { payloadHash } from '../approvals/state.js';
+import {
+  appGrantCounts, canonicalPermission, contextReadPermission, credentialReadPermission, isPrivilegedPermission, userScope,
+} from '../auth/GrantStore.js';
+import { DEFAULT_OWNER_ID } from '../auth/identityContracts.js';
+import { OS_SCOPE } from '../auth/types.js';
+import { toolBinaryName, toolsGrant } from '../capabilities/tool-allowlist.js';
+import { CredentialVault } from '../context/CredentialVault.js';
+import { securityPolicyValue } from '../security/options.js';
+import type { ApprovalRequester } from '../approvals/types.js';
+import type { ResolverPorts, SetupActor } from '../setup/contracts.js';
+import type { HomeEnvironmentPort, ResolverPortsQuery, SetupEngine } from '../setup/ports.js';
+import { SetupService } from '../setup/service.js';
+import { SetupStateMachine } from '../setup/state.js';
+import { SetupConfigStore, tamperAuditInput, vaultHandleRevoker } from '../setup/store.js';
+import { localSystemId } from './systemIdentity.js';
 
 function registry() {
   try { return getAppManager().registry; } catch { return null; }
@@ -155,8 +176,153 @@ export function createAppHostServices(): AppHostServices {
       const dropped = await grants.revokeAppScope(appId, scope);
       if (dropped.length) console.log(`[app-hosts] revoked ${dropped.length} grant(s) of ${appId} (${scope}): ${dropped.map((g) => g.permission).join(', ')}`);
     },
+    // D108: delete-app-data drops the installation's setup records and revokes their vault handles.
+    forgetSetup: (installationId, userId) => setupStore().forgetInstallation(installationId, userId),
   });
   return svc;
+}
+
+// ── the setup engine (D108 P3) ─────────────────────────────────────────────
+
+let sharedSetupStore: SetupConfigStore | null = null;
+/** The desired-configuration store (P2): sealed `app:config:*`, tamper audited, handles revoked through the vault. */
+function setupStore(): SetupConfigStore {
+  if (sharedSetupStore) return sharedSetupStore;
+  const redis = () => defaultRedis();
+  sharedSetupStore = new SetupConfigStore({
+    identityKeyFile: defaultIdentityKeyFile(),
+    redis,
+    onTampered: (ref) => {
+      console.warn(`[setup] a desired-configuration record of installation ${ref.installationId} failed its integrity check; the app needs setup again`);
+      void new AdminAudit(redis).record(tamperAuditInput(ref)).catch(() => undefined);
+    },
+    revokeHandle: vaultHandleRevoker(new CredentialVault()),
+  });
+  return sharedSetupStore;
+}
+
+/** The approval requester of a setup actor: exactly what `approvalRequester()` records for that principal, so it can poll its request. */
+function setupRequester(mgr: AppManager, actor: SetupActor): ApprovalRequester {
+  let system: { systemId?: string } = {};
+  try { system = { systemId: localSystemId() }; } catch { /* no system identity: none on the principal either */ }
+  if (actor.kind === 'terminal') {
+    const inst = mgr.getInstance(actor.instanceId);
+    let lifetime: string | null = null;
+    try { lifetime = mgr.tokens.lifetimeId(actor.instanceId); } catch { lifetime = null; }
+    return {
+      kind: 'instance', appId: inst?.appId ?? 'com.aura.terminal', instanceId: actor.instanceId, userId: actor.userId,
+      ...(lifetime ? { lifetime } : {}), ...system,
+    };
+  }
+  // The owner (desktop) asks as themselves; the host operator's request is the owner's to decide.
+  return { kind: 'user', userId: actor.kind === 'user' ? actor.userId : DEFAULT_OWNER_ID, ...system };
+}
+
+/** The resolver ports of one resolution: every read done up front (ResolverPorts are synchronous). */
+async function setupResolverPorts(mgr: AppManager, home: HomeEnvironmentPort | null, q: ResolverPortsQuery): Promise<ResolverPorts> {
+  const auth = getAuthServices();
+  const binding = await mgr.appGrantBinding(q.appId);
+  const held = new Set((await auth.grants.listFor({ kind: 'app', id: q.appId }))
+    .filter((g) => g.scope.kind === OS_SCOPE.kind && appGrantCounts(g, binding)).map((g) => g.permission));
+  let record = null;
+  try { record = await mgr.runtimeSettings.get(); } catch { record = null; }
+  let policy: Awaited<ReturnType<typeof auth.securityPolicy.get>> | null = null;
+  try { policy = await auth.securityPolicy.get(); } catch { policy = null; }
+  // The Private Home (P9): the app's and each sidecar's grant, for this installation and user.
+  const homeAuth = new Map<string, boolean>();
+  if (home) {
+    const q0 = { appId: q.appId, installationId: q.installationId, userId: q.userId };
+    homeAuth.set('', await home.homePrivateAuthorized(q0).catch(() => false));
+    for (const s of q.manifest.services) homeAuth.set(s.name, await home.homePrivateAuthorized({ ...q0, sidecar: s.name }).catch(() => false));
+  }
+  const mirror = toolchainMirrorBin(process.env['AURA_DATA_DIR'] ?? '/data');
+  return {
+    runtimeFeatures(id) {
+      try {
+        if (!mgr.runtimes.get(id) || (record && !mgr.runtimes.isEnabled(id, record))) return null;
+        return Object.fromEntries(mgr.runtimes.featuresOf(id, record).map((f) => [f.id, f.support]));
+      } catch { return null; }
+    },
+    defaultRuntime: () => record?.default ?? 'container',
+    isAuthorized(req) {
+      switch (req.kind) {
+        case 'permission': return q.approved.permissions.includes(req.permission) || (isPrivilegedPermission(req.permission) && held.has(canonicalPermission(req.permission)));
+        case 'tool': return q.approved.tools.includes(req.tool) || toolsGrant(q.manifest.tools, req.tool);
+        case 'context': return held.has(contextReadPermission(req.key));
+        case 'grant': return held.has(canonicalPermission(req.grant)) || q.approved.permissions.includes(req.grant);
+        case 'home-private': return homeAuth.get('') === true;
+        case 'home-private-sidecar': return homeAuth.get(req.sidecar) === true;
+        default: return false;
+      }
+    },
+    capability(name) {
+      let installed = false;
+      try { installed = existsSync(join(mirror, toolBinaryName(name))); } catch { installed = false; }
+      return { installed, granted: toolsGrant(q.manifest.tools, name) || q.approved.tools.includes(name) };
+    },
+    policy(id) {
+      if (!policy) return null;
+      try { const v = securityPolicyValue(policy, id); return typeof v === 'string' || typeof v === 'boolean' ? v : null; } catch { return null; }
+    },
+  };
+}
+
+/**
+ * The setup engine over an AppManager (AppManager `opts.setup`, from `bootSystem()`): P2's store and
+ * state machine, the resolver ports, D102 approvals, the vault, the existing grant paths, the
+ * maintenance start (6B.M: used as soon as AppManager implements `startMaintenance`; until then hooks
+ * fail closed) and P9's home environment (`home`, connected at INT; null: never a Private Home).
+ */
+export function createSetupEngine(mgr: AppManager, opts: { home?: HomeEnvironmentPort | null } = {}): SetupEngine {
+  const home = opts.home ?? null;
+  const auth = () => getAuthServices();
+  const vault = new CredentialVault();
+  const store = setupStore();
+  const appHosts = () => getAppHostServices().registry;
+  const states = new SetupStateMachine({
+    registry: { getInstallation: (id) => appHosts().getInstallation(id), setSetup: (id, e, n) => appHosts().setSetup(id, e, n) },
+    store,
+  });
+  return new SetupService({
+    ownerId: DEFAULT_OWNER_ID,
+    manifest: (appId) => mgr.registry.getById(appId) ?? null,
+    installation: async (appId) => mgr.installationRunAs(appId),
+    store,
+    states,
+    resolverPorts: (q) => setupResolverPorts(mgr, home, q),
+    approvals: {
+      create: (r) => auth().approvals.create(r),
+      get: (id) => auth().approvals.get(id),
+      consume: (id, c) => auth().approvals.consume(id, c),
+      cancel: (id, by) => auth().approvals.cancel(id, by),
+      hash: payloadHash,
+    },
+    requester: (actor) => setupRequester(mgr, actor),
+    appName: (appId) => mgr.registry.getById(appId)?.name ?? null,
+    vault,
+    grants: {
+      grantPermission: async ({ appId, installationId, permission, by }) => {
+        const appScope = mgr.registry.getScopeId(appId);
+        await auth().grants.grant({ kind: 'app', id: appId }, permission, { by, installationId, ...(appScope ? { appScope } : {}) });
+      },
+      grantContext: async ({ appId, installationId, key, by }) => {
+        const appScope = mgr.registry.getScopeId(appId);
+        await auth().grants.grant({ kind: 'app', id: appId }, contextReadPermission(key), { by, installationId, ...(appScope ? { appScope } : {}) });
+      },
+      grantable: (p) => isPrivilegedPermission(p),
+    },
+    readGranted: async (appId, userId, name) =>
+      appGrantCounts(await auth().grants.get({ kind: 'app', id: appId }, credentialReadPermission(name), userScope(userId)), await mgr.appGrantBinding(appId)),
+    home,
+    maintenance: () => {
+      const m = mgr as unknown as Partial<MaintenanceStarter>;
+      return typeof m.startMaintenance === 'function' ? (mgr as unknown as MaintenanceStarter) : null;
+    },
+    stopWorkloads: (appId) => mgr.stopAll(appId, { reason: 'user' }),
+    audit: async (e) => { await auth().audit.record(e); },
+    emit: (e) => { OsEventBus.emit('app:setup-state', e); },
+    appIds: () => mgr.registry.getAll().map((m) => m.id),
+  });
 }
 
 /** Window ownership for the notification pop-up limit, from the kernel's activity model. */

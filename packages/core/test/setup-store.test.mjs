@@ -229,7 +229,7 @@ test('a configured app: setup-required until begun; illegal transitions refused 
   await assert.rejects(machine.markReady(id, s1, { configDigest: D1, grantDigest: G1, profile: null }), (e) => e.code === 'illegal-transition');
 });
 
-test('resumption: step, attempt and approvalId persist; approvalId only while awaiting approval', async () => {
+test('resumption: step, attempt and approvalId persist; approvalId only while awaiting approval and the approved run initializing (P3)', async () => {
   const id = (await newInstall()).installationId;
   let s = await machine.begin(id, SETUP_MANIFEST);
   s = await machine.transition(id, s, 'configuring', { step: 'profile', profile: 'personal' });
@@ -239,9 +239,11 @@ test('resumption: step, attempt and approvalId persist; approvalId only while aw
   assert.deepEqual(reread, s, 'what a resume reads after a restart');
   assert.deepEqual([reread.state, reread.step, reread.approvalId, reread.profile], ['awaiting-approval', 'approval', 'appr-123', 'personal']);
   s = await machine.transition(id, s, 'initializing', { step: 'init', attempt: 1 });
-  assert.equal(s.approvalId, undefined);
+  assert.equal(s.approvalId, 'appr-123', 'P3: the approved run keeps what it was approved with');
   s = await machine.progress(id, s, { attempt: 2 });
   assert.equal(s.attempt, 2);
+  s = await machine.transition(id, s, 'setup-failed');
+  assert.equal(s.approvalId, undefined, 'gone outside awaiting-approval / initializing');
 });
 
 test('ready only via markReady with the validated digests (CAS); a failed reconfiguration keeps the old ready digest', async () => {

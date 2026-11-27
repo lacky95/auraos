@@ -1,6 +1,7 @@
 import EventEmitter from 'eventemitter3';
 import type { AppLifecycleState } from '../types/lifecycle.js';
 import type { FlightState } from '../types/activity.js';
+import type { SetupStateEvent } from '../setup/contracts.js';
 
 /**
  * Compact framework fingerprint carried on theme/mode change events. Apps that
@@ -69,6 +70,8 @@ export interface OsEvents {
   'app:removed': { appId: string };
   /** A user toggled an app's enable state (Settings → Apps or `aura enable/disable app`). */
   'app:enabledChanged': { appId: string; enabled: boolean };
+  /** D108: an app's operational (setup) state changed (setup/contracts.ts `SetupStateEvent`). Emitted only by the setup engine. */
+  'app:setup-state': SetupStateEvent;
   /** A user launched an app — dock uses this to re-order its MRU tiles live. */
   'app:mruChanged': { appId: string; at: number };
   /** restored: reopened by the desktop-session restore after an OS restart, not by a user or an app. */

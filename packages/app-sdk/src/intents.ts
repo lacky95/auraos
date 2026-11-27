@@ -36,7 +36,7 @@ export type StartIntentResult =
   | { kind: 'disambiguation'; candidates: Array<{ appId: string; score: number }> }
   | { kind: 'noHandler' }
   /** D108 A2: the app may not start yet (setup needed, or blocked); `error` is the D105 body to show. */
-  | { kind: 'setup-required'; appId: string; state: 'blocked' | 'setup-required'; error: { error: string; message: string; details?: { state?: string } } & OsErrorFacts };
+  | { kind: 'setup-required'; appId: string; state: 'setup-required' | 'configuring' | 'awaiting-approval' | 'initializing' | 'ready' | 'setup-failed' | 'blocked' | 'repair-required'; error: { error: string; message: string; details?: { state?: string } } & OsErrorFacts };
 
 export class IntentsApi {
   constructor(private readonly base: () => string) {}

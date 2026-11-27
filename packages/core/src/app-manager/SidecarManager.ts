@@ -178,6 +178,12 @@ interface SidecarManagerOpts {
    * template is refused (fail closed).
    */
   setupValues?(instanceId: string): Promise<SidecarSetupValues | null>;
+  /**
+   * D108: the app's manifest as its gate-validated setup configuration shapes
+   * it (the profile's service env, home, network, limits, readiness), for the
+   * template a spawn resolves. Absent: the registry's manifest.
+   */
+  effectiveManifest?(appId: string, base: AppManifest): AppManifest;
 }
 
 /**
@@ -314,8 +320,9 @@ export class SidecarManager {
   async spawn(instanceId: string, req: SidecarSpawnRequest, caller: Caller): Promise<{ created: boolean; sidecar: OsSidecar; tools?: { effective: string[]; ignored: string[] } }> {
     const inst = this.opts.instance(instanceId);
     if (!inst) throw new SpecError(404, `Instance not found: ${instanceId}`);
-    const manifest = this.opts.registry.getById(inst.appId);
-    if (!manifest) throw new SpecError(404, `App not found: ${inst.appId}`);
+    const registered = this.opts.registry.getById(inst.appId);
+    if (!registered) throw new SpecError(404, `App not found: ${inst.appId}`);
+    const manifest = this.opts.effectiveManifest?.(inst.appId, registered) ?? registered;
     const rt = this.opts.runner.sidecarRuntime();
     const appDataSubpath = dirname(inst.instanceDataDir).slice(rt.dataDir.length).replace(/^\/+/, '');
 
