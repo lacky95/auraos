@@ -35,7 +35,8 @@ before(() => {
 D="${dir}"
 case "$1" in
   ps) echo "$*" >> "$D/ps.log"; [ -f "$D/ps.fail" ] && exit 1; cat "$D/ps.out" ;;
-  inspect) cat "$D/$2.json" 2>/dev/null || exit 1 ;;
+  inspect) [ -f "$D/$2.slow" ] && { echo "error during connect: context deadline exceeded" >&2; exit 1; }
+           cat "$D/$2.json" 2>/dev/null || { echo "Error: No such object: $2" >&2; exit 1; } ;;
   *) exit 1 ;;
 esac
 `);
@@ -83,6 +84,14 @@ test('a failed scan is null ("unknown"), never an empty list ("no survivors")', 
   writeFileSync(join(dir, 'ps.fail'), '');
   try { assert.equal(await runner().listOrphanRecords(), null); }
   finally { rmSync(join(dir, 'ps.fail')); }
+});
+
+test('a survivor whose inspect fails (not gone) makes the scan incomplete: null, never skipped (live 0.0.51: two instances on port 4002)', async () => {
+  writeFileSync(join(dir, 'aura-io.ex.board.slow'), '');
+  try { assert.equal(await runner().listOrphanRecords(), null); }
+  finally { rmSync(join(dir, 'aura-io.ex.board.slow')); }
+  // A container gone between `ps` and `inspect` (aura-gone) is no survivor: skipped, the scan still answers.
+  assert.equal((await runner().listOrphanRecords()).length, 3);
 });
 
 // ── AppManager.adoptOrphans ────────────────────────────────────────────────
@@ -236,4 +245,40 @@ test('a port two survivors share is given back only when the last of them goes',
   fake.instances.delete('com.aura.console');
   release('com.aura.counter-4');
   assert.deepEqual(released, [4004]);
+});
+
+test('a pending adoption is retried once for concurrent callers, then survivors are reconciled', async () => {
+  let scans = 0; let survivors = 0;
+  let answer = false;
+  const fake = {
+    adoptionPending: true, adoptionRetry: null, appHostsReady: false,
+    adoptOrphans: async () => { scans++; await new Promise((r) => setTimeout(r, 10)); return answer; },
+    reconcileSurvivors: async () => { survivors++; },
+  };
+  const retry = () => AppManager.prototype.retryAdoption.call(fake);
+  await Promise.all([retry(), retry(), retry()]);
+  assert.deepEqual([scans, survivors, fake.adoptionPending], [1, 0, true], 'one scan for all; still unknown');
+  answer = true;
+  await retry();
+  assert.deepEqual([scans, survivors, fake.adoptionPending, fake.adoptionRetry], [2, 1, false, null]);
+  await retry();
+  assert.equal(scans, 2, 'nothing pending: no scan');
+});
+
+test('a spawn while the survivors are unknown retries the adoption before it takes an instance name or a port', () => {
+  const src = readFileSync(new URL('../src/app-manager/AppManager.ts', import.meta.url), 'utf-8');
+  const spawn = src.slice(src.indexOf('private async spawnInstance('));
+  const retry = spawn.indexOf('await this.retryAdoption()');
+  assert.ok(retry > 0, 'spawnInstance retries the adoption');
+  assert.ok(retry < spawn.indexOf('this.allocateInstanceId(') && retry < spawn.indexOf('this.ports.allocate('));
+});
+
+test('adopting a survivor on a port another instance holds says so (and keeps both)', async () => {
+  const { fake, adopt } = fakeManager([rec('io.ex.board', 'io.ex.board', { port: 4002 })]);
+  fake.instances.set('com.aura.browser', { instanceId: 'com.aura.browser', appId: 'com.aura.browser', state: 'resumed', port: 4002 });
+  const warned = [];
+  const warn = console.warn; console.warn = (m) => warned.push(String(m));
+  try { assert.equal(await adopt(), true); } finally { console.warn = warn; }
+  assert.ok(fake.instances.has('io.ex.board') && fake.ports.isInUse(4002));
+  assert.ok(warned.some((m) => /io\.ex\.board on port 4002, which com\.aura\.browser holds too/.test(m)), warned.join('\n'));
 });
