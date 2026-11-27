@@ -12,3 +12,9 @@ The CLI is a **client**: the host operator's and the user's way into AuraOS when
 ## Tests
 
 `node tools/run-tests.mjs --only=aura-cli` (`test/run.mjs`).
+
+## The human CLI is a compatibility contract (D109 Addendum)
+
+- **`--agent` is reserved** for the agent interface (D109). No command defines an option of that name; `src/lib/invocation.ts` takes it before commander (never after a bare `--`, never as an option's value) and, until the agent interface exists, answers it with a usage error (exit 2) without running anything.
+- **`--help` never runs an action.** `test/invocation.test.ts` checks every command.
+- **The human help and the TUI frames are golden** (`test/golden/`): the baseline of the Addendum's byte-identity rule. A change to them is a change of the human CLI, which needs the owner's approval; regenerate with `AURA_UPDATE_GOLDEN=1` only then.
