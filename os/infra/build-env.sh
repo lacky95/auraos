@@ -9,7 +9,7 @@
 #                     Dockerfile's empty `scratch` stage, and this file changes
 #                     nothing: the build is exactly today's.
 #   /run/secrets/*    BuildKit secrets (infra_proxy[_http], infra_npmrc,
-#                     infra_npm_basic, infra_apt_auth, infra_git); absent unless
+#                     infra_npm_basic, infra_apt_auth, infra_git, infra_mtls); absent unless
 #                     install.sh / the release builder passed them
 #   /run/aura-build   a tmpfs for this step's scratch files
 # Exports only into this RUN's process env and writes only into the tmpfs:
@@ -42,11 +42,43 @@ if [ -s "$_as/infra_proxy" ]; then
   fi
   unset _p
 fi
+# mTLS (D94 IC-8, O8): the client keys arrive as one secret (infra_mtls, a
+# "# aura-mtls <name>" line before each PEM key) and are split into this
+# step's tmpfs (0600); with the public certificates (mtls/<name>.crt) each
+# host in mtls/clients gets git, npm, apt and pip settings. Same rule as
+# os/infra/adapters/mtls.mjs toolConfig().
+if [ -s "$_as/infra_mtls" ] && [ -f "$_ai/mtls/clients" ]; then
+  mkdir -p "$_aw/mtls"
+  chmod 700 "$_aw/mtls"
+  ( umask 077; awk -v d="$_aw/mtls" '/^# aura-mtls /{f=d "/" $3 ".key"; next} f!=""{print > f}' "$_as/infra_mtls" )
+  : > "$_aw/mtls/npmrc"
+  : > "$_aw/mtls/apt.conf"
+  _gi=${GIT_CONFIG_COUNT:-0}
+  _py=$(sed -n 's|^index-url = [a-z]*://\([^/:]*\).*|\1|p' "$_ai/xdg/pip/pip.conf" 2>/dev/null)
+  while IFS="$_tab" read -r _c _h; do
+    [ -n "$_h" ] && [ -s "$_aw/mtls/$_c.key" ] || continue
+    _crt="$_ai/mtls/$_c.crt"
+    _key="$_aw/mtls/$_c.key"
+    eval "export GIT_CONFIG_KEY_$_gi=http.https://$_h/.sslCert GIT_CONFIG_VALUE_$_gi=$_crt"
+    _gi=$((_gi + 1))
+    eval "export GIT_CONFIG_KEY_$_gi=http.https://$_h/.sslKey GIT_CONFIG_VALUE_$_gi=$_key"
+    _gi=$((_gi + 1))
+    printf '//%s/:certfile=%s\n//%s/:keyfile=%s\n' "$_h" "$_crt" "$_h" "$_key" >> "$_aw/mtls/npmrc"
+    printf 'Acquire::https::%s::SslCert "%s";\nAcquire::https::%s::SslKey "%s";\n' "$_h" "$_crt" "$_h" "$_key" >> "$_aw/mtls/apt.conf"
+    if [ "$_h" = "$_py" ] && [ -z "${PIP_CLIENT_CERT:-}" ]; then
+      ( umask 077; cat "$_crt" "$_key" > "$_aw/mtls/$_c.pip.pem" )
+      export PIP_CLIENT_CERT="$_aw/mtls/$_c.pip.pem"
+    fi
+  done < "$_ai/mtls/clients"
+  export GIT_CONFIG_COUNT=$_gi
+  unset _gi _py _c _h _crt _key
+fi
+
 # npm/pnpm: the build has no user of its own, so the public npmrc plus the
 # registry auth is its user config (pnpm 11+ reads no global npmrc).
-if [ -f "$_ai/npmrc" ] || [ -s "$_as/infra_npmrc" ]; then
+if [ -f "$_ai/npmrc" ] || [ -s "$_as/infra_npmrc" ] || [ -s "$_aw/mtls/npmrc" ]; then
   mkdir -p "$_aw"
-  cat "$_ai/npmrc" "$_as/infra_npmrc" > "$_aw/npmrc" 2>/dev/null
+  cat "$_ai/npmrc" "$_as/infra_npmrc" "$_aw/mtls/npmrc" > "$_aw/npmrc" 2>/dev/null
   export NPM_CONFIG_USERCONFIG="$_aw/npmrc"
 fi
 if [ -s "$_as/infra_npm_basic" ]; then
@@ -54,15 +86,20 @@ if [ -s "$_as/infra_npm_basic" ]; then
   export COREPACK_NPM_USERNAME COREPACK_NPM_PASSWORD
 fi
 if [ -s "$_as/infra_git" ]; then
-  export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0="store --file=$_as/infra_git"
+  _gi=${GIT_CONFIG_COUNT:-0}
+  eval "export GIT_CONFIG_KEY_$_gi=credential.helper"
+  eval "export GIT_CONFIG_VALUE_$_gi='store --file=$_as/infra_git'"
+  export GIT_CONFIG_COUNT=$((_gi + 1))
+  unset _gi
 fi
 
 # APT: a temporary APT_CONFIG (the public drop-in, mirrored copies of the
 # sources, the auth file); the image's own /etc/apt is never changed.
-if [ -d "$_ai/apt" ] || [ -s "$_as/infra_apt_auth" ]; then
+if [ -d "$_ai/apt" ] || [ -s "$_as/infra_apt_auth" ] || [ -s "$_aw/mtls/apt.conf" ]; then
   mkdir -p "$_aw/apt/sources.list.d"
   : > "$_aw/apt/apt.conf"
   [ -f "$_ai/apt/apt.conf.d/90aura-infra" ] && cat "$_ai/apt/apt.conf.d/90aura-infra" >> "$_aw/apt/apt.conf"
+  [ -s "$_aw/mtls/apt.conf" ] && cat "$_aw/mtls/apt.conf" >> "$_aw/apt/apt.conf"
   [ -s "$_as/infra_apt_auth" ] && printf 'Dir::Etc::netrc "%s";\n' "$_as/infra_apt_auth" >> "$_aw/apt/apt.conf"
   if [ -f "$_ai/apt/mirrors" ]; then
     # A mirror replaces scheme://host and keeps the path (adapters/apt.mjs rewriteAptSources).

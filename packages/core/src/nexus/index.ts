@@ -52,7 +52,7 @@ export {
   loadSourcesConfig, saveSourcesConfig, seedSourcesConfigIfMissing,
   sortedSources, ociSources, findSource, ociRegistryView, isSourceEntry, isSourceAuth,
   DEFAULT_SOURCES_CONFIG, DEFAULT_APP_REPO_PREFIX, OFFICIAL_INDEX_URL,
-  OFFICIAL_STORE_REPO,
+  OFFICIAL_STORE_REPO, officialStore,
 } from './SourcesConfig.js';
 export { readOsKey, writeOsKey } from './osKv.js';
 export type {

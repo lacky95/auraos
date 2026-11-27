@@ -102,11 +102,11 @@ test('build secrets: per-ecosystem files from the credentials; never in public o
   const f = exampleFixture();
   const cfg = C.parseInfraConfig(EXAMPLE).config;
   const s = SEC.renderBuildSecrets(cfg, f.creds);
-  assert.deepEqual(Object.keys(s).sort(), ['infra_apt_auth', 'infra_git', 'infra_mtls_artifactory_mtls_key', 'infra_npm_basic', 'infra_npmrc', 'infra_proxy']);
+  assert.deepEqual(Object.keys(s).sort(), ['infra_apt_auth', 'infra_git', 'infra_mtls', 'infra_npm_basic', 'infra_npmrc', 'infra_proxy']);
   assert.equal(s.infra_proxy, `http://${CANARY.proxy}@proxy.corp.example:3128/\n`);
   assert.match(s.infra_npmrc, /^\/\/artifactory\.corp\.example\/api\/npm\/npm-remote\/:_auth=/);
   assert.match(s.infra_apt_auth, /^machine artifactory\.corp\.example\/debian-remote login art password ART-CANARY-tok3n$/m);
-  assert.match(s.infra_mtls_artifactory_mtls_key, /PRIVATE KEY/);
+  assert.match(s.infra_mtls, /^# aura-mtls artifactory-mtls\n-----BEGIN PRIVATE KEY-----/);
   // The non-secret override and env carry none of it.
   const override = INST.renderInfraOverride(cfg, { publicDir: '/x', hasCorporateCa: true });
   assert.doesNotMatch(override + JSON.stringify(INST.proxyEnv(cfg)), /CANARY|PRIVATE KEY/);

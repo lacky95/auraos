@@ -35,6 +35,8 @@
  *   • Never lie about what happened. Every step appends to the job log,
  *     including the failure paths.
  */
+import { artifactUrl } from '../infra/policy.js';
+import { renderDigest } from '../infra/propagate.js';
 import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
@@ -46,6 +48,8 @@ import { join } from 'node:path';
  * bump both together.
  */
 const COMPOSE_PLUGIN_VERSION = '2.40.3';
+/** The compose plugin's public download, without the architecture suffix the script appends. */
+const COMPOSE_PLUGIN_URL = `https://github.com/docker/compose/releases/download/v${COMPOSE_PLUGIN_VERSION}/docker-compose-linux-`;
 
 export type UpdatePhase =
   | 'queued' | 'checking' | 'pulling' | 'building' | 'verifying'
@@ -417,7 +421,11 @@ export class SelfUpdater {
    * Launch the updater. Returns the job id immediately — the work outlives
    * this process, so there is nothing to await.
    */
-  start(opts: { mode?: UpdateMode; branch?: string; dryRun?: boolean } = {}):
+  start(opts: {
+    mode?: UpdateMode; branch?: string; dryRun?: boolean;
+    /** D64 `infra-public-fallback` (the async caller reads it); omitted with a config = deny (fail closed). */
+    publicFallback?: 'allow' | 'deny';
+  } = {}):
       { ok: true; job: UpdateJob } | { ok: false; reason: string } {
     const mode: UpdateMode = opts.mode ?? 'update';
     const branch = (opts.branch ?? 'main').trim();
@@ -462,7 +470,13 @@ export class SelfUpdater {
     const remote = mode === 'update' ? this.remoteInfo(branch) : { remote: '', fetchUrl: '' };
     if (!remote) return { ok: false, reason: 'No git remote configured to update from.' };
 
+    // D94 IC-6: the compose plugin download through the artifact mirrors; under
+    // infra-public-fallback=deny with no mirror for it, the script refuses instead of going public.
+    const compose = artifactUrl(COMPOSE_PLUGIN_URL);
+    const deny = (opts.publicFallback ?? (renderDigest() ? 'deny' : 'allow')) === 'deny';
+    const composeUrl = compose.rewritten || !deny ? compose.url : null;
     const script = updaterScript({
+      composeUrl,
       jobFile: `/data/aura/update/${id}.json`,
       logFile: `/data/aura/update/${id}.log`,
       fetchUrl: remote.fetchUrl,
@@ -560,9 +574,10 @@ function describeMode(mode: UpdateMode, branch: string, dryRun: boolean): string
  */
 export function renderUpdaterScript(o: {
   jobFile: string; logFile: string; fetchUrl: string; mode: UpdateMode; branch: string; dryRun: boolean;
-  project?: string; composeFile?: string; workDir?: string;
+  project?: string; composeFile?: string; workDir?: string; composeUrl?: string | null;
 }): string {
   return updaterScript({
+    composeUrl: COMPOSE_PLUGIN_URL,
     project: 'aura',
     composeFile: '/workspace/docker-compose.yml',
     workDir: '/workspace',
@@ -578,6 +593,8 @@ export function renderUpdaterScript(o: {
 function updaterScript(o: {
   jobFile: string; logFile: string; fetchUrl: string; mode: UpdateMode; branch: string; dryRun: boolean;
   project: string; composeFile: string; workDir: string;
+  /** The compose plugin URL without its architecture suffix; null = refused (infra-public-fallback=deny). */
+  composeUrl: string | null;
 }): string {
   const dry = o.dryRun ? '1' : '0';
   return `
@@ -601,6 +618,7 @@ COMPOSE_FILE=${JSON.stringify(o.composeFile)}
 # without a credential; /api/os/about is the owner's).
 HEALTH=http://aura-shell:3000/api/auth/status
 COMPOSE_VERSION=${COMPOSE_PLUGIN_VERSION}   # keep in step with the Dockerfile ARG
+COMPOSE_URL=${JSON.stringify(o.composeUrl ?? '')}   # D94: through the artifact mirrors; empty = refused
 # A first boot after a rebuild runs pnpm install and builds every package —
 # minutes, sometimes many. So the health wait is NOT a plain timeout: it gives
 # up only when the new shell stops making progress, and otherwise keeps
@@ -762,9 +780,13 @@ fi
 # next build bakes it in for good.
 ensure_compose() {
   if docker compose version >/dev/null 2>&1; then return 0; fi
+  if [ -z "$COMPOSE_URL" ]; then
+    say building "docker compose plugin missing, and its public download is refused (infra-public-fallback is deny): add a registries.artifacts.rewrites prefix for github.com"
+    return 1
+  fi
   say building "docker compose plugin missing from this image — fetching v$COMPOSE_VERSION"
   mkdir -p /usr/local/lib/docker/cli-plugins
-  curl -fsSL "https://github.com/docker/compose/releases/download/v$COMPOSE_VERSION/docker-compose-linux-$(uname -m)" \
+  curl -fsSL "$COMPOSE_URL$(uname -m)" \
     -o /usr/local/lib/docker/cli-plugins/docker-compose || return 1
   chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
   docker compose version >/dev/null 2>&1

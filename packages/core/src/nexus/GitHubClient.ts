@@ -21,8 +21,10 @@
  */
 
 import { execFileSync } from 'node:child_process';
+import { infraEndpoints } from '../infra/endpoints.js';
 
-const API = 'https://api.github.com';
+/** GitHub's REST API base: the infrastructure config's `endpoints.githubApi` (GitHub Enterprise), else api.github.com. */
+const api = (): string => infraEndpoints().githubApi.replace(/\/+$/, '');
 
 export interface GitHubRepoInfo {
   owner:          string;
@@ -99,7 +101,7 @@ export class GitHubClient {
     path: string,
     body?: unknown,
   ): Promise<{ status: number; data: T }> {
-    const res = await fetch(`${API}${path}`, {
+    const res = await fetch(`${api()}${path}`, {
       method,
       headers: {
         Authorization:          `Bearer ${this.token}`,

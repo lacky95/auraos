@@ -8,13 +8,14 @@ import { lifecyclePath } from '../types/manifest.js';
 import { MY_TOOLS_PATH, currentToolsMode, provisionAllowlist, toolchainMirrorBin } from './tool-provision.js';
 import { containerHomeEnv, containerHomeMount } from '../runtimes/spawn/homeArgs.js';
 import { containerContextEnv, containerContextMounts } from '../runtimes/spawn/contextArgs.js';
+import { containerInfraArgs } from '../runtimes/spawn/infraArgs.js';
 import { containerNetworkArgs, containerNetworkEnv, containerShellBase, rawSocketArgs, terminalNetworkUser } from '../runtimes/spawn/networkArgs.js';
 import { InstanceNetworks, TERM_NETWORK_CONTAINER_LABEL, TermNetworks, type TermNetwork } from '../runtimes/container/networks.js';
 import { containerIdentityArgs, isNonRootIdentity, writeIdentityFiles } from '../runtimes/spawn/identityArgs.js';
 import {
   SESSION_IDENTITY_LABEL, readKernelSessionSecret, sessionHostUser, sessionServerOwner, terminalSessionArgs, terminalSessionCommand, writeSessionSecret,
 } from '../runtimes/spawn/sessionArgs.js';
-import { containerName } from '../runtimes/container/names.js';
+import { containerName, sidecarContainerName } from '../runtimes/container/names.js';
 import type { RuntimeCapabilities } from '../runtimes/types.js';
 import type { ForwarderFacts } from '../runtimes/container/endpoints.js';
 import type { RuntimeLogsRequest, RuntimeLogsStream, RuntimeOutputStream, RuntimeWorkloadExec } from '../runtimes/ari.js';
@@ -887,6 +888,12 @@ export class ContainerRunner implements SandboxRunner, ContainerMountBackend, Co
       ...containerHomeMount({ appDataVolume, home: ctx.home }),
       // The shared Context Volumes (spawn/contextArgs.ts). No /run/context (stream C).
       ...containerContextMounts({ appDataVolume, volumes: contextVolumes }),
+      // D94 IC-5 (spawn/infraArgs.ts): the infrastructure defaults the kernel resolved (none without
+      // a config). Before the Context keys, so an app's own granted key (e.g. its proxy) wins.
+      ...containerInfraArgs({
+        infra: ctx.infra, appDataVolume,
+        noProxyExtra: [hostname, ...(manifest.services ?? []).map((svc) => sidecarContainerName(instanceId, svc.name))],
+      }),
       // No Docker socket, ever (stream J.7, spawn/socketArgs.ts): only a root tab's session has it.
       // The Context keys the kernel granted this start (declared AND granted,
       // stream C) FIRST — the fixed OS vars below are pushed after, so a

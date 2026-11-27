@@ -1,7 +1,7 @@
 import type { APIRoute } from 'astro';
 import {
   getAppManager, getNexusManager, submitToStore, resolveGitHubToken,
-  loadSourcesConfig, OFFICIAL_INDEX_URL, OFFICIAL_STORE_REPO,
+  loadSourcesConfig, officialStore,
   ContextStore, GitHubError, SubmitError, GitHubClient, parseRepoSlug,
   type StoreEntryCtx,
 } from '@aura/core';
@@ -150,16 +150,18 @@ async function readContextToken(): Promise<string | null> {
  * have been running longest.
  */
 async function resolveStoreRepo(): Promise<string> {
+  // The official store as configured (D94 endpoints, philosophy audit #7).
+  const off = officialStore();
   try {
     const cfg = await loadSourcesConfig();
     for (const s of cfg.sources) {
       if (s.kind !== 'git-index') continue;
       const withRepo = s as { repo?: string; url?: string };
       if (withRepo.repo) return withRepo.repo;
-      if (withRepo.url === OFFICIAL_INDEX_URL) return OFFICIAL_STORE_REPO;
+      if (withRepo.url === off.indexUrl) return off.repo;
     }
-  } catch { /* fall through to the constant */ }
-  return OFFICIAL_STORE_REPO;
+  } catch { /* fall through to the configured store */ }
+  return off.repo;
 }
 
 /** Referenced so the import is not dropped; the manager is what owns dataDir. */

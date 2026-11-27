@@ -11,6 +11,9 @@ import type { FanoutTarget, MountManager } from './MountManager.js';
 import type { PermissionManager } from '../permissions/PermissionManager.js';
 import type { AppManifest } from '../types/manifest.js';
 import type { SpawnIdentity } from '../identity/types.js';
+import type { InfraSpawnView } from '../infra/types.js';
+import { infraImageRef } from '../infra/images.js';
+import { sidecarInfraEnv } from '../runtimes/spawn/infraArgs.js';
 import { listToolchainBinaries, provisionAllowlist, readAliasMap, readSidecarMap, toolchainMirrorBin } from './tool-provision.js';
 import { SIDECAR_TOOL_RE, effectiveSidecarTools } from './sidecar-tools.js';
 import { privateHomeSidecarRefusal } from './privateHomeNetwork.js';
@@ -176,6 +179,8 @@ interface SidecarManagerOpts {
    * not granted, so a root installation's home sidecar is refused.
    */
   homeInheritGranted?(appId: string, template: string): Promise<boolean>;
+  /** D94 IC-5: the infrastructure defaults of a start (AppManager's `infraView`). Absent: none. */
+  infraView?(): Promise<InfraSpawnView | null>;
 }
 
 /**
@@ -351,6 +356,14 @@ export class SidecarManager {
     if (inst.privateHome) {
       const refusal = privateHomeSidecarRefusal(inst.runtime ?? 'unknown', inst.appId, spec.name, spec.network ?? 'shared');
       if (refusal) throw refusal;
+    }
+    // D94 IC-5: the parent's infrastructure defaults (a foreign image gets the proxy env only, and
+    // its image through the configured OCI mirror); none without a config. Part of the spec hash,
+    // so a config change recreates the sidecar at its next spawn.
+    const infra = await this.opts.infraView?.().catch(() => null) ?? null;
+    if (infra) {
+      spec.env = { ...sidecarInfraEnv(infra, (manifest.services ?? []).map((s) => this.wl().ref(instanceId, s.name))), ...spec.env };
+      spec.image = infraImageRef(spec.image);
     }
     const hash = specHash(spec);
     const container = this.wl().ref(instanceId, spec.name);

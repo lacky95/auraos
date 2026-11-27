@@ -21,7 +21,7 @@ import { delimiter, dirname, join } from 'node:path';
 import {
   detectSidecars, findBinaryPath, readAliasMap, readSidecarMap, setAliases, setSidecars,
   readLinkage, stageLibs, stageIntoRootfs, setLibs, readLibMap, orphanedLibs, conflictingLibs,
-  toolchainLibFor, toolchainMirrorLib, type CapabilityDefinition, type CapabilityStep, type LibDep,
+  toolchainLibFor, toolchainMirrorLib, infraDownloadUrl, type CapabilityDefinition, type CapabilityStep, type LibDep,
 } from '@aura/core';
 import { aptInstallArgv, aptUpdateArgv, type RunCommand } from './privilegedExec.ts';
 
@@ -258,6 +258,9 @@ async function sha256File(path: string): Promise<string> {
 
 /** Download an https URL into `dir` and check it against its sha256 before anyone uses it. */
 async function fetchChecked(run: RunCommand, url: string, sha256: string, dir: string): Promise<string> {
+  // D94 IC-6: through the config's artifact mirrors; a public URL no mirror covers is refused under
+  // infra-public-fallback=deny (the sha256 below is checked either way).
+  url = await infraDownloadUrl(url, 'capability download');
   const file = join(dir, 'download');
   run('curl', ['-fsSL', '--proto', '=https', '--proto-redir', '=https', '--retry', '2', '--max-time', '900', '-o', file, '--', url], { timeoutMs: 960_000 });
   const got = await sha256File(file);

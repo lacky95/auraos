@@ -16,7 +16,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import { auditOwner, ownerAction, type OwnerActor } from './approvals/admin.ts';
-import type { ApprovalLevel } from '@aura/core';
+import { infraExecEnv, type ApprovalLevel } from '@aura/core';
 
 export { DEBIAN_PACKAGE_RE, isDebianPackageName } from '@aura/core';
 
@@ -34,7 +34,8 @@ export interface PrivilegedDeps {
 export const runArgv: RunCommand = (file, args, { timeoutMs, cwd }) => {
   const r = spawnSync(file, [...args], {
     encoding: 'utf8', timeout: timeoutMs, stdio: ['ignore', 'pipe', 'pipe'], ...(cwd ? { cwd } : {}),
-    env: { ...process.env, DEBIAN_FRONTEND: 'noninteractive' },
+    // D94 IC-5: the infrastructure config's non-secret env (one infraExecEnv for every install; none without a config).
+    env: { ...process.env, ...infraExecEnv('cap-installer'), DEBIAN_FRONTEND: 'noninteractive' },
   });
   const out = `${r.stdout ?? ''}${r.stderr ?? ''}`.trim();
   if (r.error) throw new Error(`${file} ${args.join(' ')}: ${r.error.message}${out ? `\n${out}` : ''}`);

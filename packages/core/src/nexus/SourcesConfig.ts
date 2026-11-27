@@ -27,6 +27,7 @@ import {
 } from './RegistryConfig.js';
 import type { SourceAuth } from './RegistryAuth.js';
 import { readOsKey, writeOsKey } from './osKv.js';
+import { DEFAULT_ENDPOINTS, infraEndpoints } from '../infra/endpoints.js';
 
 // ─── Shape ──────────────────────────────────────────────────────────────
 export type SourceKind = 'oci' | 'git-index' | 'git-app';
@@ -100,13 +101,34 @@ export interface SourcesConfig {
 // ─── Defaults ───────────────────────────────────────────────────────────
 
 /** The official AuraOS store — a curated index, published from
- *  github.com/lacky95/auraos-store and served as static files. */
-export const OFFICIAL_INDEX_URL = 'https://nexus.aura.lakner.io/index.yaml';
+ *  github.com/lacky95/auraos-store and served as static files. The built-in
+ *  default (infra/endpoints.ts, the one place); the effective one is
+ *  `officialStore()`: an infrastructure config's `endpoints.nexusIndex` replaces
+ *  it (philosophy audit #7, D94). */
+export const OFFICIAL_INDEX_URL = DEFAULT_ENDPOINTS.nexusIndex;
 
 /** The repository behind that index — where `aura nexus app submit` opens its
  *  pull request. Separate constant because the index URL is a static host and
- *  says nothing about where submissions go. */
-export const OFFICIAL_STORE_REPO = 'lacky95/auraos-store';
+ *  says nothing about where submissions go (`endpoints.nexusStoreRepo`). */
+export const OFFICIAL_STORE_REPO = DEFAULT_ENDPOINTS.nexusStoreRepo;
+
+/** The official store as this system is configured: the infrastructure config's endpoints, else the built-in ones. */
+export function officialStore(dataDir?: string): { indexUrl: string; repo: string; isPublicDefault: boolean } {
+  const e = infraEndpoints(dataDir);
+  return { indexUrl: e.nexusIndex, repo: e.nexusStoreRepo, isPublicDefault: !e.configured.includes('nexusIndex') };
+}
+
+/** The `official` source of a config through `officialStore()` (a stored entry keeps the built-in URL). */
+function withOfficialStore(cfg: SourcesConfig): SourcesConfig {
+  const off = officialStore();
+  if (off.isPublicDefault && off.repo === OFFICIAL_STORE_REPO) return cfg;
+  return {
+    ...cfg,
+    sources: cfg.sources.map((s) => (s.kind === 'git-index' && s.name === 'official' && s.url === OFFICIAL_INDEX_URL
+      ? { ...s, url: off.indexUrl, ...(s.repo === OFFICIAL_STORE_REPO || s.repo === undefined ? { repo: off.repo } : {}) }
+      : s)),
+  };
+}
 export const DEFAULT_SOURCES_CONFIG: SourcesConfig = {
   schema: 1,
   sources: [
@@ -138,7 +160,7 @@ export async function loadSourcesConfig(): Promise<SourcesConfig> {
   // 1. New key wins.
   try {
     const v = normaliseConfig(await readOsKey(KV_KEY));
-    if (v) return v;
+    if (v) return withOfficialStore(v);
   } catch { /* fall through to migration */ }
 
   // 2. Migrate the legacy registries key, if present.
@@ -149,11 +171,17 @@ export async function loadSourcesConfig(): Promise<SourcesConfig> {
   }
 
   // 3. Nothing stored → default.
-  return cloneDefault();
+  return withOfficialStore(cloneDefault());
 }
 
 /** Write the whole config. Replaces any existing value. */
 export async function saveSourcesConfig(cfg: SourcesConfig): Promise<void> {
+  // The stored entry keeps the built-in URL: the infrastructure config maps it on every read.
+  const off = officialStore();
+  if (!off.isPublicDefault) {
+    cfg = { ...cfg, sources: cfg.sources.map((s) => (s.kind === 'git-index' && s.name === 'official' && s.url === off.indexUrl
+      ? { ...s, url: OFFICIAL_INDEX_URL, ...(s.repo === off.repo ? { repo: OFFICIAL_STORE_REPO } : {}) } : s)) };
+  }
   try {
     await writeOsKey(KV_KEY, cfg);
   } catch (err) {

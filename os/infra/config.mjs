@@ -326,7 +326,7 @@ export function validateInfraConfig(input) {
     v.forEach((x, i) => check(x, `${path}[${i}]`));
   };
 
-  only(input, '', ['version', 'network', 'trust', 'clientCertificates', 'registries', 'policy']);
+  only(input, '', ['version', 'network', 'trust', 'clientCertificates', 'registries', 'endpoints', 'policy']);
   if (input.version !== INFRA_CONFIG_VERSION) err('version', `must be ${INFRA_CONFIG_VERSION}`);
 
   const cfg = structuredClone(input);
@@ -428,6 +428,18 @@ export function validateInfraConfig(input) {
       });
     }
   }
+  if (cfg.endpoints !== undefined) {
+    // AuraOS's own default endpoints (philosophy audit #7): the official store
+    // and the GitHub it is published on, replaced by an internal mirror or GHE.
+    const e = cfg.endpoints;
+    if (!isObj(e)) err('endpoints', 'expected a mapping');
+    else {
+      only(e, 'endpoints', ['nexusIndex', 'nexusStoreRepo', 'github', 'githubApi']);
+      for (const k of ['nexusIndex', 'github', 'githubApi']) if (e[k] !== undefined) url(e[k], `endpoints.${k}`);
+      if (e.nexusIndex !== undefined && typeof e.nexusIndex === 'string' && !/\.ya?ml$/i.test(e.nexusIndex.split('?')[0])) err('endpoints.nexusIndex', 'expected the URL of the store\'s index.yaml');
+      if (e.nexusStoreRepo !== undefined && (typeof e.nexusStoreRepo !== 'string' || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(e.nexusStoreRepo))) err('endpoints.nexusStoreRepo', 'expected owner/repo');
+    }
+  }
   if (cfg.policy !== undefined) {
     const p = cfg.policy;
     if (!isObj(p)) err('policy', 'expected a mapping');
@@ -484,6 +496,9 @@ export function endpointsOf(cfg) {
   for (const m of Object.values(r.oci?.mirrors ?? {})) out.push({ kind: 'oci', url: `https://${m.split('/')[0]}/v2/` });
   for (const u of Object.values(r.git?.rewrites ?? {})) out.push({ kind: 'git', url: u });
   for (const u of Object.values(r.artifacts?.rewrites ?? {})) out.push({ kind: 'artifacts', url: u });
+  const e = cfg.endpoints ?? {};
+  if (e.nexusIndex) out.push({ kind: 'nexus', url: e.nexusIndex });
+  if (e.githubApi) out.push({ kind: 'github', url: e.githubApi });
   const seen = new Set();
   return out.filter((e) => !seen.has(`${e.kind} ${e.url}`) && seen.add(`${e.kind} ${e.url}`));
 }

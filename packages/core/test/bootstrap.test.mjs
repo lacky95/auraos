@@ -27,6 +27,8 @@ test('golden boot order: identity first (A2), then KV, seeds, before-apps hooks,
     'state.opts.early?.(dataDir)',
     'kvServer.start(',
     'bootstrapKv(',
+    'seedInfraPolicy(dataDir',
+    'importBootstrapCredentials(',
     'retireSharedAdminCredential(',
     'getNotificationService().start()',
     "hook.phase === 'beforeApps'",
@@ -38,6 +40,11 @@ test('golden boot order: identity first (A2), then KV, seeds, before-apps hooks,
     'st.kernelReadyAt = now()',
   ];
   assert.deepEqual(order(SRC, 'async function bootKernel(', golden), golden);
+});
+
+test('golden boot order, step 0 (D94 IC-5, acceptance 4): infrastructure is loaded before the kernel boot can reach the network', () => {
+  const golden = ['g[SYSTEM_KEY] = state;', 'loadInfrastructure({', 'installSignalHandlers()', 'await opts.kernel(', 'await bootKernel(state'];
+  assert.deepEqual(order(SRC, 'export function bootSystem(', golden), golden);
 });
 
 test('golden: AppManager.init, the boot reconciliation order (enable state, adoption, reconcile, sidecars, migrations, respawn, reconciler, starts)', () => {

@@ -66,6 +66,8 @@ import {
   APP_ROOT_EXECUTION_OPTION, RootExecutionError, executionConfigOf, executionDecision, type AppRootExecutionPolicy, type ExecutionApproval,
 } from '../identity/execution.js';
 import { securityPolicyValue } from '../security/options.js';
+import { infraSpawnView } from '../infra/policy.js';
+import type { InfraSpawnView } from '../infra/types.js';
 import { LINUX_ID_RANGES, ROOT_SPAWN_IDENTITY, TERMINAL_SERVICE_UID, linuxIdRangeOf, type AppRunAs, type SpawnIdentity, type SpawnIdentityProvider } from '../identity/types.js';
 import { appIdentityProvider, sessionHostIdentityProvider } from '../identity/appIdentityProvider.js';
 import { grantedContextEnv, liveGrantedContextDeps, type GrantedContextDeps } from '../context/grantedContext.js';
@@ -238,6 +240,7 @@ export class AppManager {
   private readonly probeIdmap: boolean;
   /** The D64 switch `app-root-execution` (identity/execution.ts); a read failure throws (the start fails closed). */
   private readonly rootExecutionPolicy: () => Promise<AppRootExecutionPolicy>;
+  private readonly infraView: () => Promise<InfraSpawnView | null>;
   private instances = new Map<string, AppInstance>();
   private nextInstanceNum = new Map<string, number>();
   private activities = new Map<string, AppActivity>();
@@ -321,6 +324,8 @@ export class AppManager {
     contractScan?: (appDir: string, manifest: AppManifest, keys: readonly string[]) => ReturnType<ContextMigrationDeps['scan']>;
     /** The D64 switch `app-root-execution`; default: the owner's security policy record. */
     rootExecutionPolicy?: () => Promise<AppRootExecutionPolicy>;
+    /** D94 IC-5: the infrastructure defaults a start gets; default: the rendered config and D64 `infra-inherit`. */
+    infraView?: () => Promise<InfraSpawnView | null>;
     /**
      * 5b G (D80): Developer Mode is on (the shell owns the system mode). A
      * writable cross-app source mount into another uid needs it. Absent: off.
@@ -444,6 +449,7 @@ export class AppManager {
         identity: async (userId) => this.auth().identity.ensureUser(userId),
       },
     );
+    this.infraView = opts.infraView ?? (() => infraSpawnView(this.dataDir));
     this.rootExecutionPolicy = opts.rootExecutionPolicy ?? (async () => {
       const store = this.auth().securityPolicy;
       return securityPolicyValue(await store.get(), APP_ROOT_EXECUTION_OPTION) === 'refuse' ? 'refuse' : 'approve';
@@ -523,6 +529,7 @@ export class AppManager {
     const sidecarWorkloads = this.runtimes.list().find((m) => m.workloads)?.workloads;
     this.osSidecars  = new SidecarManager({
       runner:      this.container,
+      infraView:   () => this.infraView(),
       ...(sidecarWorkloads ? { workloads: sidecarWorkloads } : {}),
       // D107: isolated sidecars only on a runtime that enforces it (the one that runs them), else refused.
       requireNetwork: (level) => {
@@ -2568,7 +2575,7 @@ export class AppManager {
       manifest: AppManifest; runtime: ResolvedRuntime; owner?: string; inPool?: boolean; preview?: boolean;
       installation: { installationId: string; runAs?: AppRunAs; execution?: ExecutionApproval; runAsMigration?: AppRunAsMigration } | null;
     },
-  ): Promise<Pick<InstanceSpawnContext, 'home' | 'identity' | 'contextEnv'>> {
+  ): Promise<Pick<InstanceSpawnContext, 'home' | 'identity' | 'contextEnv' | 'infra'>> {
     // instanceId: a runtime handle only, for the log line below and the vault audit row; never a durable reference (D85 A7).
     if (!opts.installation) {
       throw new HomeDeniedError('installation-unresolved', `${appId}: its installation identity is unavailable, so it has no App Home; not started`);
@@ -2633,7 +2640,9 @@ export class AppManager {
     const { env: contextEnv } = await grantedContextEnv({
       appId, declared: opts.manifest.context, ...(user ? { userId: user } : {}), instanceId,
     }, this.context);
-    return { home, identity, contextEnv };
+    // D94 IC-5: the non-secret infrastructure defaults (none without a config or with infra-inherit=none).
+    const infra = (await this.infraView?.()) ?? null;
+    return { home, identity, contextEnv, ...(infra ? { infra } : {}) };
   }
 
   /**

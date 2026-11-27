@@ -20,9 +20,12 @@ export const INFRA_GENERATED_DIR = `${INFRA_DIR}/generated`;
 export const INFRA_CURRENT_LINK = `${INFRA_GENERATED_DIR}/current`;
 /** Where consumers see the rendered dir (read-only mount; os/infra/adapters `INFRA_ROOT`). */
 export const INFRA_ROOT = '/etc/aura/infra';
-/** BuildKit secret ids the Dockerfile consumes (os/infra/adapters `BUILD_SECRET_IDS`), plus `infra_mtls_<name>_key` (IC-8). */
-export const BUILD_SECRET_IDS = ['infra_apt_auth', 'infra_git', 'infra_npm_basic', 'infra_npmrc', 'infra_proxy', 'infra_proxy_http'] as const;
-export type BuildSecretId = (typeof BUILD_SECRET_IDS)[number] | `infra_mtls_${string}_key`;
+/**
+ * BuildKit secret ids the Dockerfile consumes (os/infra/adapters `BUILD_SECRET_IDS`). `infra_mtls`
+ * (IC-8) holds every install-time client key in one secret: a Dockerfile can mount fixed ids only.
+ */
+export const BUILD_SECRET_IDS = ['infra_apt_auth', 'infra_git', 'infra_mtls', 'infra_npm_basic', 'infra_npmrc', 'infra_proxy', 'infra_proxy_http'] as const;
+export type BuildSecretId = (typeof BUILD_SECRET_IDS)[number];
 
 // ── the config (version 1, D94 §4.2) ────────────────────────────────────────
 
@@ -49,8 +52,22 @@ export interface InfraConfig {
     git?: { rewrites?: Record<string, string>; credential?: InfraRef };
     artifacts?: { rewrites?: Record<string, string> };
   };
+  /** AuraOS's own default endpoints (philosophy audit #7); a missing key keeps the built-in public default. */
+  endpoints?: Partial<InfraEndpoints>;
   /** A seed for the D64 `infra-*` options only (O2); not kept after the first-boot import. */
   policy?: { publicFallback?: 'allow' | 'deny'; proxy?: 'off' | 'configured' };
+}
+
+/** The official store and the GitHub it lives on (`generated/current/endpoints.json` over the built-in defaults). */
+export interface InfraEndpoints {
+  /** The official Nexus store's `index.yaml`. */
+  nexusIndex: string;
+  /** `owner/repo` behind it (where `aura nexus app submit` opens its pull request). */
+  nexusStoreRepo: string;
+  /** GitHub's web base (fork and pull-request URLs). */
+  github: string;
+  /** GitHub's REST API base (GitHub Enterprise: `https://<host>/api/v3`). */
+  githubApi: string;
 }
 
 /** A validator finding: a field path and plain words, never a value. */
@@ -70,7 +87,43 @@ export interface InfraRenderManifest {
   files: string[];
 }
 
+/**
+ * `status.json.infra` (IC-5, IC-7): what the kernel applied at boot step 0, in categories, never a
+ * value. `none` = no configuration (today's behaviour); `degraded` names what is not applied.
+ */
+export interface InfraBootStatus {
+  configured: boolean;
+  /** `sha256:<hex>` of the rendered dir, or null. */
+  digest: string | null;
+  state: 'none' | 'ok' | 'degraded' | 'failed';
+  /** Corporate CAs in the shell's trust (0 without). */
+  corporateCas: number;
+  proxy: 'off' | 'configured';
+  /** The kernel's own outbound requests (fetch) go through the configured proxy. */
+  kernelProxy: boolean;
+  /** A change the running shell cannot take without `aura restart os`. */
+  restartRequired: boolean;
+  /** Plain words, no values. */
+  issues: string[];
+  appliedAt: string | null;
+  /** No `bootstrap:` ref is left in the config (install.sh deletes its copies then, O3). Absent before the seed step. */
+  credentialsImported?: boolean;
+}
+
 // ── propagation (IC-5, ./propagate.ts) ──────────────────────────────────────
+
+/**
+ * What one workload start gets of the infrastructure config (`SpawnContext.infra`): plain data the
+ * kernel resolved (the rendered dir and D64 `infra-inherit`), turned into argv by the runtimes
+ * (runtimes/spawn/infraArgs.ts). Absent = nothing (no config, or `infra-inherit=none`).
+ */
+export interface InfraSpawnView {
+  digest: string;
+  /** The rendered dir under the data root (`aura/infra/generated/<hex>`): a volume subpath for containers. */
+  subpath: string;
+  /** The non-secret env (proxy without credentials, NO_PROXY, CA and config pointers). */
+  env: Record<string, string>;
+}
 
 /** Who an environment is for: each consumer gets the non-secret layer; secrets only per operation. */
 export type InfraConsumer =

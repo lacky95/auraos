@@ -1,6 +1,7 @@
 import type { AppManifest } from '../types/manifest.js';
 import type { ResolvedHome } from '../homes/types.js';
 import type { SpawnIdentity } from '../identity/types.js';
+import type { InfraSpawnView } from '../infra/types.js';
 
 export type ScopeId = 'system' | 'global' | 'user';
 
@@ -58,4 +59,9 @@ export interface SpawnContext {
    * Runners put exactly these into the env; absent means none.
    */
   contextEnv?: Record<string, string>;
+  /**
+   * D94 IC-5: the non-secret infrastructure defaults for this start (the rendered config, when
+   * D64 `infra-inherit` is `defaults`); runtimes/spawn/infraArgs.ts turns it into argv. Absent = none.
+   */
+  infra?: InfraSpawnView;
 }

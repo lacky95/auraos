@@ -16,15 +16,15 @@ import { dirname, join } from 'node:path';
 import * as YAML from 'yaml';
 import type { IndexDocument, IndexEntry } from './types.js';
 import { seedIndex } from './defaultIndex.js';
+import { officialStore } from './SourcesConfig.js';
 
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000;   // 6h
 const FETCH_TIMEOUT_MS = 10_000;
 
 // NOTE: this class is exported but never constructed — bare-id resolution goes
-// through CatalogAggregator.lookup(), not here. The URL used to point at
-// aura-os/nexus-index, a repository that never existed; it now names the real
-// store so reviving this does not send anyone to a dead host.
-const DEFAULT_INDEX_URL = 'https://nexus.aura.lakner.io/index.yaml';
+// through CatalogAggregator.lookup(), not here. Its default is the official
+// store as configured (SourcesConfig officialStore(), philosophy audit #7): no
+// copy of the URL of its own.
 
 export interface IndexClientOpts {
   /** Override the upstream URL (env: `AURA_NEXUS_INDEX_URL`). */
@@ -42,7 +42,7 @@ export class IndexClient {
   constructor(opts: IndexClientOpts) {
     this.url = opts.url
       ?? process.env['AURA_NEXUS_INDEX_URL']
-      ?? DEFAULT_INDEX_URL;
+      ?? officialStore().indexUrl;
     this.cachePath = opts.cachePath;
   }
 

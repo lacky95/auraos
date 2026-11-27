@@ -185,6 +185,9 @@ const routes: RouteAccessManifest['routes'] = {
     methods: on(['GET', 'POST', 'DELETE'], ownerManages('API keys: the owner decides; creating one needs the password.')),
   },
   '/api/admin/audit': { methods: { GET: ownerManages('The audit trail: an owner view.') } },
+  '/api/admin/infra/doctor': {
+    methods: { POST: ownerManages('The infrastructure doctor (D94 IC-7): checks the config, its render, the certificates and the configured endpoints; categories only, never a value. An owner view.') },
+  },
   '/api/admin/security-options': {
     methods: {
       GET: ownerManages('The security options registry (D64): every switch, its value and source. An owner view.'),

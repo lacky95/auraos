@@ -201,6 +201,7 @@ export function registerAdmin(program: Command): void {
     });
 
   registerAdminSecurity(admin);
+  registerAdminInfra(admin);
   registerAdminHomes(admin);
   registerAdminUsers(admin);
   registerAdminApps(admin);
@@ -251,6 +252,37 @@ function registerAdminSecurity(admin: Command): void {
       const r = await api.put<{ changed: boolean; option: SecurityOptionDto }>('/api/admin/security-options', { id, value: v });
       if (r.changed) ok(`${color.bold(r.option.id)} = ${showValue(r.option.value)}`);
       else info(`${r.option.id} is already ${showValue(r.option.value)}`);
+    });
+}
+
+interface InfraDoctorDto {
+  configured: boolean; ok: boolean; digest: string | null;
+  checks: Array<{ id: string; status: 'ok' | 'warn' | 'fail' | 'skip'; message: string }>;
+}
+
+/**
+ * `aura admin infra doctor` (D94 IC-7, O9): the infrastructure configuration
+ * checked against the running system. Categories and plain words only, never
+ * a value; exits 1 when a check fails. On the host:
+ * `docker exec aura-shell aura admin infra doctor`.
+ */
+function registerAdminInfra(admin: Command): void {
+  const infra = admin
+    .command('infra')
+    .description('Infrastructure configuration (D94): proxy, CAs, mirrors and registries for corporate networks.');
+  infra
+    .command('doctor')
+    .description('Check the infrastructure config, its render, certificates, the infra-* security options and the configured endpoints.')
+    .option('--offline', 'skip the network probes (proxy, registries)')
+    .option('-o, --output <fmt>', 'json for the full report')
+    .action(async (opts: { offline?: boolean; output?: string }) => {
+      const r = await api.post<InfraDoctorDto>(`/api/admin/infra/doctor${opts.offline ? '?offline=1' : ''}`, {});
+      if (opts.output === 'json') { console.log(JSON.stringify(r, null, 2)); if (!r.ok) process.exitCode = 1; return; }
+      const mark = { ok: color.green('ok'), warn: color.yellow('warn'), fail: color.red('FAIL'), skip: color.dim('skip') } as const;
+      console.log(table(r.checks.map((c) => ({ CHECK: c.id, STATUS: mark[c.status], DETAIL: c.message }))));
+      if (!r.configured) info('no infrastructure configuration: AuraOS uses the public defaults');
+      else if (r.ok) ok(`infrastructure ${r.digest ? r.digest.slice(0, 19) : ''} ok`);
+      else { warn('infrastructure: some checks failed (see above)'); process.exitCode = 1; }
     });
 }
 

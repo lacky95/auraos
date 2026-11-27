@@ -146,8 +146,9 @@ test('registry: every option has a title, a description, a source and the fresh 
   }
   assert.equal(core.securityOption(core.FRESH_AUTH_REQUIRE_HTTPS)?.default, false, 'D63: off by default');
   assert.deepEqual([...core.POLICY_OPTION_IDS],
-    [core.FRESH_AUTH_REQUIRE_HTTPS, core.APP_ROOT_EXECUTION_OPTION, core.AURA_ROOT_OPTION, core.UPDATE_CHANNEL, core.SECURITY_UPDATE_POLICY],
-    'J.6: aura-root became a policy option; 5-main item 3: app-root-execution; Phase 6 Stage 1b: the release update options');
+    [core.FRESH_AUTH_REQUIRE_HTTPS, core.APP_ROOT_EXECUTION_OPTION, core.AURA_ROOT_OPTION, core.UPDATE_CHANNEL, core.SECURITY_UPDATE_POLICY,
+      core.INFRA_PUBLIC_FALLBACK, core.INFRA_PROXY, core.INFRA_INHERIT, core.INFRA_PUBLIC_ROOTS],
+    'J.6: aura-root became a policy option; 5-main item 3: app-root-execution; Phase 6 Stage 1b: the release update options; D94 IC-6: the infra-* switches');
   // Stage 1b (D71, owner answer c): signed by default; main only by the owner's own fresh decision.
   assert.equal(core.securityOption(core.UPDATE_CHANNEL)?.default, 'signed');
   assert.deepEqual(core.securityOption(core.UPDATE_CHANNEL)?.values, ['signed', 'main']);
@@ -186,7 +187,8 @@ test('registry: env wins, then the policy record, then the default; sources say 
   assert.equal(option(list, 'lifecycle-strict').effectiveSource, 'default');
   assert.equal(option(list, 'password-policy').effectiveSource, 'record user:policy:password');
   assert.equal(option(list, 'access-profile').effectiveSource, 'reserved');
-  assert.deepEqual(list.filter((o) => o.writable).map((o) => o.id), ['fresh-auth-require-https', 'app-root-execution', 'aura-root', 'update-channel', 'security-update-policy']);
+  assert.deepEqual(list.filter((o) => o.writable).map((o) => o.id), ['fresh-auth-require-https', 'app-root-execution', 'aura-root', 'update-channel', 'security-update-policy',
+    'infra-public-fallback', 'infra-proxy', 'infra-inherit', 'infra-public-roots']);
   assert.deepEqual([option(list, 'aura-root').value, option(list, 'aura-root').effectiveSource], ['enabled', 'default']);
   assert.equal(option(core.resolveSecurityOptions({}, {}), 'fresh-auth-require-https').value, false);
 });

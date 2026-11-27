@@ -91,25 +91,42 @@ if [ "${AURA_BOOT_SPLASH:-1}" != "0" ] && [ -f /workspace/os/boot-splash.mjs ]; 
 fi
 
 phase installing
-# D94: `pnpm install` goes through the infrastructure config (registry, proxy
-# without credentials, CA). os/infra/render.mjs renders the stored config into
+# D94 (IC-5): the infrastructure config, before anything here or in the shell
+# reaches the network. os/infra/render.mjs renders the stored config into
 # /data/aura/infra/generated/current (a no-op when unchanged; nothing without a
-# config), linked at /etc/aura/infra, where every rendered path points. The env
-# is applied to this step only here; the kernel's own propagation is IC-5.
-INFRA_ENV= INFRA_NPMRC=
+# config), linked at /etc/aura/infra, where every rendered path points. Its
+# non-secret env (proxy without credentials, NO_PROXY, CA and config pointers)
+# is exported for the rest of the boot and the shell itself, so Node reads
+# NODE_EXTRA_CA_CERTS / NODE_USE_ENV_PROXY at startup and every child process
+# inherits it; the kernel's boot step 0 keeps its internal traffic direct and
+# reloads a changed config live (core infra/kernel.ts). The tools' system files
+# (apt drop-in, the global npmrc) are linked into place. No config: nothing of
+# this happens (today's behaviour), and a link left from an earlier config goes.
+INFRA_NPMRC=
+infra_links() {   # $1 = on|off
+  for _p in /etc/apt/apt.conf.d/90aura-infra:apt/apt.conf.d/90aura-infra /usr/local/etc/npmrc:npmrc; do
+    _dst=${_p%%:*} _src=/etc/aura/infra/${_p#*:}
+    if [ "$1" = on ] && [ -f "$_src" ]; then mkdir -p "${_dst%/*}" && ln -sfn "$_src" "$_dst"
+    elif [ -L "$_dst" ] && case $(readlink "$_dst") in /etc/aura/infra/*) true ;; *) false ;; esac; then rm -f "$_dst"; fi
+  done
+}
 if [ -f /data/aura/infra/config.yaml ]; then
   if run node /workspace/os/infra/render.mjs apply --data /data && [ -f /data/aura/infra/generated/current/env.sh ]; then
     mkdir -p /etc/aura && ln -sfn /data/aura/infra/generated/current /etc/aura/infra
-    INFRA_ENV=/etc/aura/infra/env.sh
+    # shellcheck disable=SC1091
+    . /etc/aura/infra/env.sh
+    infra_links on
     # pnpm reads no global npmrc: the boot's install uses the rendered one as
     # its user config, unless the master has its own ~/.npmrc (that wins).
     if [ -f /etc/aura/infra/npmrc ] && [ ! -f "$HOME/.npmrc" ]; then INFRA_NPMRC=/etc/aura/infra/npmrc; fi
   else
-    echo '[aura] boot: the infrastructure config was not applied (see above): pnpm install runs without it — aura admin infra doctor' | tee -a "$LOG"
+    echo '[aura] boot: the infrastructure config was not applied (see above): the shell starts without it — aura admin infra doctor' | tee -a "$LOG"
   fi
+else
+  infra_links off
+  rm -f /etc/aura/infra
 fi
-# shellcheck disable=SC1090
-run sh -c '[ -z "$1" ] || . "$1"; [ -z "$2" ] || export NPM_CONFIG_USERCONFIG="$2"; exec pnpm install' boot-install "$INFRA_ENV" "$INFRA_NPMRC" \
+run sh -c '[ -z "$1" ] || export NPM_CONFIG_USERCONFIG="$1"; exec pnpm install' boot-install "$INFRA_NPMRC" \
   || echo '[aura] pnpm install exited non-zero (likely ERR_PNPM_IGNORED_BUILDS) — continuing' | tee -a "$LOG"
 
 phase building

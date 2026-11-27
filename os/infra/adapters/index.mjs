@@ -16,7 +16,9 @@
 // exactly today's behaviour (D94 acceptance 6).
 import * as apt from './apt.mjs';
 import * as artifacts from './artifacts.mjs';
+import * as endpoints from './endpoints.mjs';
 import * as git from './git.mjs';
+import * as mtls from './mtls.mjs';
 import * as node from './node.mjs';
 import * as npm from './npm.mjs';
 import * as oci from './oci.mjs';
@@ -24,11 +26,11 @@ import * as proxy from './proxy.mjs';
 import * as python from './python.mjs';
 import * as trust from './trust.mjs';
 
-export const ADAPTERS = Object.freeze([proxy, trust, node, npm, python, git, apt, oci, artifacts]);
+export const ADAPTERS = Object.freeze([proxy, trust, node, npm, python, git, apt, oci, artifacts, mtls, endpoints]);
 export const INFRA_ROOT = '/etc/aura/infra';
 
 /** The secret ids the image build consumes (Dockerfile `--mount=type=secret,id=…`). */
-export const BUILD_SECRET_IDS = Object.freeze(['infra_apt_auth', 'infra_git', 'infra_npm_basic', 'infra_npmrc', 'infra_proxy', 'infra_proxy_http']);
+export const BUILD_SECRET_IDS = Object.freeze(['infra_apt_auth', 'infra_git', 'infra_mtls', 'infra_npm_basic', 'infra_npmrc', 'infra_proxy', 'infra_proxy_http']);
 
 /** Values the adapters must never emit (D94 §7.5): a test greps every output for them. */
 export const TLS_BYPASS = Object.freeze([
@@ -82,4 +84,4 @@ export const envFile = (env) => Object.entries(env).map(([k, v]) => `${k}=${v}\n
 /** `export KEY='value'` lines for `.` in a POSIX shell. */
 export const envSh = (env) => Object.entries(env).map(([k, v]) => `export ${k}='${v.replace(/'/g, `'\\''`)}'\n`).join('');
 
-export { apt, artifacts, git, node, npm, oci, proxy, python, trust };
+export { apt, artifacts, endpoints, git, mtls, node, npm, oci, proxy, python, trust };

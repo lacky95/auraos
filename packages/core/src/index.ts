@@ -117,4 +117,9 @@ export type * from './app-manager/maintenance.js';
 export * from './release/types.js';
 export * as releasePaths from './release/paths.js';
 export * from './infra/types.js';
-export { InfraPropagationError, buildSecrets, infraExecEnv, renderDigest } from './infra/propagate.js';
+export { InfraCredentialError, InfraPropagationError, buildSecrets, infraExecEnv, renderDigest } from './infra/propagate.js';
+// D94 IC-5..IC-7: step 0 status, the doctor, the D64 view and refusals, AuraOS's own endpoints (audit #7).
+export { infraBootStatus, reloadInfrastructure } from './infra/kernel.js';
+export { runInfraDoctor, type InfraCheck, type InfraDoctorReport } from './infra/doctor.js';
+export { InfraPublicFallbackError, infraDownloadUrl, readInfraPolicy, refusePublic, type InfraPolicy } from './infra/policy.js';
+export { DEFAULT_ENDPOINTS, infraEndpoints } from './infra/endpoints.js';

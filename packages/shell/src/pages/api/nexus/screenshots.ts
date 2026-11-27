@@ -1,7 +1,7 @@
 import type { APIRoute } from 'astro';
 import {
   getAppManager, manageScreenshots, resolveGitHubToken,
-  loadSourcesConfig, OFFICIAL_INDEX_URL, OFFICIAL_STORE_REPO,
+  loadSourcesConfig, officialStore,
   ContextStore, GitHubError, SubmitError,
 } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../lib/appResponse.js';
@@ -121,16 +121,18 @@ async function readContextToken(): Promise<string | null> {
 /** The store repo AND its index URL — assets are served from the index origin,
  *  so both come from the same source entry. */
 async function resolveStore(override?: string): Promise<{ repo: string; indexUrl: string }> {
+  // The official store as configured (D94 endpoints, philosophy audit #7).
+  const off = officialStore();
   try {
     const cfg = await loadSourcesConfig();
     for (const s of cfg.sources) {
       if (s.kind !== 'git-index') continue;
       const g = s as { repo?: string; url?: string };
       if (override && g.repo !== override) continue;
-      if (g.repo || g.url === OFFICIAL_INDEX_URL) {
-        return { repo: override ?? g.repo ?? OFFICIAL_STORE_REPO, indexUrl: g.url ?? OFFICIAL_INDEX_URL };
+      if (g.repo || g.url === off.indexUrl) {
+        return { repo: override ?? g.repo ?? off.repo, indexUrl: g.url ?? off.indexUrl };
       }
     }
   } catch { /* fall through */ }
-  return { repo: override ?? OFFICIAL_STORE_REPO, indexUrl: OFFICIAL_INDEX_URL };
+  return { repo: override ?? off.repo, indexUrl: off.indexUrl };
 }
