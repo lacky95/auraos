@@ -1,0 +1,84 @@
+# The Normal layout (Phase 6 L; D1–D4, D34, D80; owner question f). Every
+# release carries this file (it is part of the release tree,
+# /data/releases/<id>/docker-compose.release.yml); the updater, install.sh and
+# os/release-ctl.sh start the shell from the CURRENT release's copy:
+#
+#   docker compose -p <project> --env-file /data/aura/release/compose.env \
+#     -f /data/releases/<id>/docker-compose.release.yml up -d aura-os
+#
+# Today's docker-compose.yml stays the Developer layout, unchanged.
+#
+# The differences from the Developer layout:
+#   - no checkout bind and no host path at all except the Docker socket, so
+#     the updater can run it from /data alone (no host checkout needed);
+#   - the data volume at /data (read-write) and its `releases/` again at
+#     /releases, READ-ONLY: os/release-entry.sh links /workspace to
+#     /releases/<id>, so any write into the release fails with EROFS, root
+#     included (D34), and sibling containers mount it read-only too (D80,
+#     runtimes/spawn/systemTreeArgs.ts);
+#   - the image is the release's own (`release` target of its Dockerfile),
+#     named in compose.env (written at the switch: release-ctl.sh `env`).
+#     No build, no pnpm install at boot.
+#
+# compose.env (aura/release/compose.env): COMPOSE_PROJECT_NAME,
+# AURA_APP_DATA_VOLUME (`<project>_aura-app-data`, created by install.sh),
+# AURA_SHELL_IMAGE, AURA_BASE_IMAGE, AURA_RELEASE; optional AURA_PORT.
+services:
+  aura-os:
+    image: ${AURA_SHELL_IMAGE:?compose.env names the release's shell image}
+    pull_policy: never
+    container_name: aura-shell
+    hostname: aura-shell
+    # Like the Developer layout: back after a host reboot or daemon restart.
+    restart: unless-stopped
+    command: ["/os/release-entry.sh"]
+    ports:
+      - "${AURA_PORT:-3000}:3000"
+    volumes:
+      - aura-app-data:/data
+      - type: volume
+        source: aura-app-data
+        target: /releases
+        read_only: true
+        volume:
+          subpath: releases
+      # Sibling-container model (see docker-compose.yml): effectively root on the host.
+      - /var/run/docker.sock:/var/run/docker.sock
+    working_dir: /data
+    environment:
+      NODE_ENV: production
+      AURA_SHELL_MODE: prod
+      AURA_APPS_DIR: /workspace/apps
+      AURA_DATA_DIR: /data
+      AURA_BASE_ROOTFS: /os/base-rootfs
+      AURA_TOOLCHAIN_DIR: /os/toolchain
+      AURA_APP_PORT_START: "4001"
+      AURA_APP_PORT_END: "4999"
+      AURA_USE_PROOT: "true"
+      AURA_DOCKER_NETWORK: aura-net
+      AURA_BASE_IMAGE: ${AURA_BASE_IMAGE:?compose.env names the release's base image}
+      AURA_SHELL_IMAGE: ${AURA_SHELL_IMAGE}
+      AURA_SHELL_HOSTNAME: aura-shell
+      # The data volume by name: sibling containers mount the release from it
+      # (volume-subpath releases/<id>/…). No host workspace path: there is no checkout.
+      AURA_APP_DATA_VOLUME: ${AURA_APP_DATA_VOLUME:?compose.env names the data volume}
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp:unconfined
+    stdin_open: true
+    tty: true
+    networks:
+      - aura-net
+
+networks:
+  # Shared with the Developer layout and every sibling container; created
+  # before `up` (release-ctl.sh, install.sh) and by the shell itself.
+  aura-net:
+    name: aura-net
+    external: true
+
+volumes:
+  aura-app-data:
+    name: ${AURA_APP_DATA_VOLUME}
+    external: true

@@ -101,6 +101,8 @@ export type {
   AppRootExecutionPolicy, ExecutionApproval, ExecutionApprovedVia, ExecutionBinding, ExecutionConfig, ExecutionDecision, ExecutionRequest,
 } from './identity/execution.js';
 export { renderIdentityFiles, identityFilesSubpath, isNonRootIdentity } from './runtimes/spawn/identityArgs.js';
+// Phase 6 L: the release this process serves (Normal layout), and whether a path lies in a release tree (D80).
+export { runningRelease, inReleaseTree } from './runtimes/spawn/systemTreeArgs.js';
 export * from './homes/importReport.js';
 export * from './homes/importMarkers.js';
 export * from './homes/plan.js';

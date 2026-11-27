@@ -24,6 +24,9 @@ import { IDMAP_HELPER_PATH, type ContainerMountBackend, type ContainerPortBacken
 import { DEFAULT_BUILD_LIMITS, limitArgs } from '../runtimes/container/limits.js';
 import type { ResourceLimits } from '../runtimes/ari.js';
 import { MOUNT_ROOT_PATH } from '../runtimes/spawn/paths.js';
+import {
+  resolveSystemTree, systemTreeHostPath, systemTreeMount, systemTreeNodeModules, systemTreeRel, systemTreeSlice, type SystemTree,
+} from '../runtimes/spawn/systemTreeArgs.js';
 import { KEEP_RESTART_LABEL, keptAcrossRestart, type KeepSiblings } from './sidecarParking.js';
 import type { SandboxExecOpts, SandboxRunner, SandboxRunnerOpts } from './SandboxRunner.js';
 import type { ExecSession, SessionSpec } from './ExecBridge.js';
@@ -133,9 +136,6 @@ export function pickVolumeByDestination(mounts: DockerMount[], destination: stri
 // matches the sources) is shared with ProotRunner: provisioning.ts
 // ASTRO_START_SHELL, chosen per start via AURA_SERVE (appBuild.ts serveState).
 const SYNTHESISED_ENTRYPOINT = ASTRO_START_SHELL;
-
-/** Workspace root files an app container and an app build mount read-only (workspaceMounts). */
-export const WORKSPACE_ROOT_FILES = ['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'tsconfig.base.json'] as const;
 
 /** What `docker inspect` says about a container name; null when no such container. */
 export interface ContainerNameState { id: string; status: string }
@@ -324,11 +324,17 @@ export class ContainerRunner implements SandboxRunner, ContainerMountBackend, Co
   private osApiBase: string;
   /** Public name the shell uses for itself on the shared docker network. */
   private shellHostname: string;
-  private workspaceRoot: string;
   /** Named volume backing /data (app-data). Resolved once at construction. */
   private appDataVolume!: string;
-  /** Named volume backing /workspace/node_modules. Resolved once. */
+  /** Named volume backing /workspace/node_modules (Developer layout). Resolved once. */
   private nodeModulesVolume!: string;
+  /**
+   * Where the AuraOS tree a workload sees comes from (Phase 6 L,
+   * runtimes/spawn/systemTreeArgs.ts): the host checkout (Developer layout)
+   * or the running release inside the data volume (Normal layout, always
+   * read-only). Resolved once: a release switch restarts the shell.
+   */
+  private systemTree!: SystemTree;
   /** OS-managed shared volumes, mounted into every container. */
   private volumeStore: VolumeStore;
   /** The per-user private Terminal networks (D58). */
@@ -356,17 +362,11 @@ export class ContainerRunner implements SandboxRunner, ContainerMountBackend, Co
     if (this.osApiBase.includes('127.0.0.1') || this.osApiBase.includes('localhost')) {
       this.osApiBase = this.osApiBase.replace(/(127\.0\.0\.1|localhost)/, this.shellHostname);
     }
-    // workspaceRoot is the HOST path that should be bind-mounted into the
-    // app container at /workspace. Sibling containers share the host fs, so
-    // bind sources have to be host paths, not paths inside the AuraOS
-    // container. The env var defaults to /workspace which works when the
-    // AuraOS container itself was started with `-v <hostpath>:/workspace`
-    // and the host path matches inside both containers (the common dev
-    // setup). For non-dev shape this needs to be set explicitly.
-    this.workspaceRoot = process.env['AURA_HOST_WORKSPACE'] ?? '/workspace';
     void opts.baseRootfs; // unused — containers bring their own rootfs via the image
     this.ensureNetwork();
     this.resolveVolumeNames();
+    this.systemTree = resolveSystemTree({ dataVolume: this.appDataVolume, nodeModulesVolume: this.nodeModulesVolume });
+    if (this.systemTree.kind === 'release') console.log(`[ContainerRunner] system tree = release ${this.systemTree.releaseId} (read-only, ${this.appDataVolume})`);
     this.termNetworks = new TermNetworks(() => this.getOwnContainerId());
     // Before adoption: a surviving Terminal is reachable only there.
     this.termNetworks.joinExisting();
@@ -462,11 +462,10 @@ export class ContainerRunner implements SandboxRunner, ContainerMountBackend, Co
     return {
       dataDir: this.dataDir,
       appDataVolume: this.appDataVolume,
-      nodeModulesVolume: this.nodeModulesVolume,
       network: SHARED_NETWORK,
       osApiBase: this.osApiBase,
       shellHostname: this.shellHostname,
-      workspaceRoot: this.workspaceRoot,
+      systemTree: this.systemTree,
       toolsMode: currentToolsMode(this.dataDir),
     };
   }
@@ -588,21 +587,6 @@ export class ContainerRunner implements SandboxRunner, ContainerMountBackend, Co
   }
 
   /**
-   * Translate an in-container path under /workspace to its equivalent host
-   * path so docker bind-mount sources resolve correctly when the daemon
-   * runs in a separate filesystem namespace (Docker Desktop / Rancher
-   * Desktop / OrbStack on macOS, or any rootless setup). On a Linux host
-   * where workspaceRoot===/workspace this is a no-op.
-   */
-  private toHostPath(inContainerPath: string): string {
-    if (inContainerPath === '/workspace') return this.workspaceRoot;
-    if (inContainerPath.startsWith('/workspace/')) {
-      return this.workspaceRoot + inContainerPath.slice('/workspace'.length);
-    }
-    return inContainerPath;
-  }
-
-  /**
    * Mountpoint of the app-data named volume as the DAEMON sees it (e.g.
    * `/var/lib/docker/volumes/aura_aura-app-data/_data`). Cached — a volume's
    * mountpoint is fixed for its lifetime.
@@ -629,16 +613,16 @@ export class ContainerRunner implements SandboxRunner, ContainerMountBackend, Co
    * docker daemon sees. Mirrors `buildAppDirMount`'s scope dispatch, but
    * yields a plain host path instead of docker args:
    *
-   *   - `/workspace/...` (system scope)      → `toHostPath` → `<workspaceRoot>/...`
+   *   - `/workspace/...` (system scope)      → the system tree (`systemTreeHostPath`): the host
+   *                                            checkout, or the release inside the data volume
    *   - `<dataDir>/...`  (user/global scope) → `<volumeMountpoint>/...`
    *
    * Throws on anything else rather than guessing — a wrong bind source here
    * would mount the wrong app's files, which is worse than a hard failure.
    */
   public toDaemonHostPath(shellPath: string): string {
-    if (shellPath === '/workspace' || shellPath.startsWith('/workspace/')) {
-      return this.toHostPath(shellPath);
-    }
+    const tree = systemTreeHostPath(this.systemTree, shellPath, () => this.appDataVolumeMountpoint());
+    if (tree !== null) return tree;
     for (const prefix of [this.dataDir, '/data']) {
       if (shellPath === prefix || shellPath.startsWith(`${prefix}/`)) {
         const rel = shellPath.slice(prefix.length).replace(/^\/+/, '');
@@ -752,7 +736,6 @@ export class ContainerRunner implements SandboxRunner, ContainerMountBackend, Co
     // generated. Names are resolved once in resolveVolumeNames() (discovered
     // from the shell's own mounts, so they match regardless of the compose
     // project name / directory).
-    const nodeModulesVolume = this.nodeModulesVolume;
     const appDataVolume     = this.appDataVolume;
     // Subpath inside the app-data named volume — matches the layout the
     // AppManager creates via mkdirSync(instDataDir) below ("apps/<id>/<inst>",
@@ -777,9 +760,8 @@ export class ContainerRunner implements SandboxRunner, ContainerMountBackend, Co
     // app's folder.
     //
     // Two paths depending on scope:
-    //   • System-scope apps' source lives in the host's workspace, so we
-    //     swap `/workspace` for AURA_HOST_WORKSPACE and do a plain `-v`
-    //     bind (toHostAppDir).
+    //   • System-scope apps' source is part of the system tree
+    //     (systemTreeArgs.ts): the host checkout, or the running release.
     //   • User/global-scope apps live INSIDE the aura-app-data named
     //     volume (path inside-volume is e.g. scopes/users/default/apps/<id>).
     //     Sibling containers can't bind from the volume by host path — the
@@ -851,25 +833,22 @@ export class ContainerRunner implements SandboxRunner, ContainerMountBackend, Co
       // Per-app slice of /workspace. Sibling apps in apps/<other> are not
       // visible — the individual app folder is bound directly, with no parent
       // /workspace/apps bind. buildAppDirMount dispatches on scope:
-      //   • System scope: host-path bind. ctx.appDir (e.g. /workspace/apps/<id>)
-      //     has its /workspace prefix rewritten to workspaceRoot, so bind
-      //     sources resolve on the HOST daemon — a no-op on Linux
-      //     (workspaceRoot==/workspace) and the correct rewrite for Mac VM-based
-      //     daemons where /workspace doesn't exist outside the shell container.
+      //   • System scope: the system tree (systemTreeArgs.ts): a host-path
+      //     bind of the checkout (Developer layout), or the release inside the
+      //     app-data volume, read-only (Normal layout).
       //   • User/global scope: volume-subpath mount of the aura-app-data volume.
       ...appDirMount,
-      ...this.workspaceMounts(),
+      ...systemTreeSlice(this.systemTree),
       // The capability registry. Without it the sandboxed `aura cap …` seeds
       // a PRIVATE copy from the CLI bundle's built-in defaults and never sees
       // entries added to the real file afterwards — `aura cap list` in a
       // terminal then silently disagrees with the same command on the master.
       // Read-only on purpose: the master owns registry edits (`cap registry
       // add`), and a sandbox attempt should fail loudly, not fork the file.
-      '-v', `${this.workspaceRoot}/.aura:/workspace/.aura:ro`,
+      ...systemTreeMount(this.systemTree, '.aura', '/workspace/.aura'),
       // node_modules from the AuraOS named volume (so peer-dep variants
-      // match what pnpm installed inside the shell). --mount syntax
-      // (not -v) is needed because we want a NAMED volume, not a bind.
-      '--mount', `type=volume,source=${nodeModulesVolume},target=/workspace/node_modules,readonly`,
+      // match what pnpm installed inside the shell), or the release's own.
+      ...systemTreeNodeModules(this.systemTree),
       // Per-instance state — subpath of the shared app-data volume so each
       // instance only sees ITS slice, not other instances'.
       '--mount', `type=volume,source=${appDataVolume},target=/data,volume-subpath=${dataSubpath}`,
@@ -879,8 +858,8 @@ export class ContainerRunner implements SandboxRunner, ContainerMountBackend, Co
       // Mounted into /etc/bash.bashrc (loaded by every interactive bash before
       // ~/.bashrc) so the PS1 + PATH customisation kicks in regardless of who
       // owns HOME. /etc/profile.d copy covers login shells.
-      '-v', `${this.workspaceRoot}/os/bashrc.aura.sh:/etc/bash.bashrc:ro`,
-      '-v', `${this.workspaceRoot}/os/bashrc.aura.sh:/etc/profile.d/aura-prompt.sh:ro`,
+      ...systemTreeMount(this.systemTree, 'os/bashrc.aura.sh', '/etc/bash.bashrc'),
+      ...systemTreeMount(this.systemTree, 'os/bashrc.aura.sh', '/etc/profile.d/aura-prompt.sh'),
       // The App Home the kernel resolved (spawn/homeArgs.ts, D65): never the
       // user's Private Home. The resolver created the dir, so docker can mount
       // the subpath at container start; without one the spawn is refused.
@@ -994,8 +973,8 @@ export class ContainerRunner implements SandboxRunner, ContainerMountBackend, Co
    *  `/workspace/apps/<appId>` inside the sibling container. Two paths:
    *
    *  • System scope (ctx.appDir starts with `/workspace/`): the source
-   *    lives on the host at `AURA_HOST_WORKSPACE/apps/<id>`. Plain `-v`
-   *    bind works.
+   *    is part of the system tree (systemTreeArgs.ts): a plain `-v` bind of
+   *    the host checkout, or the release in the data volume (read-only).
    *
    *  • User/global scope (ctx.appDir starts with `/data/`): the source
    *    lives INSIDE the `aura-app-data` named volume. Sibling Docker
@@ -1008,13 +987,8 @@ export class ContainerRunner implements SandboxRunner, ContainerMountBackend, Co
   private buildAppDirMount(
     ctxAppDir: string, appId: string, appDataVolume: string, target = `/workspace/apps/${appId}`, ro = false,
   ): string[] {
-    if (ctxAppDir.startsWith('/workspace/')) {
-      // toHostPath rewrites the /workspace prefix to AURA_HOST_WORKSPACE so the
-      // bind source resolves on the HOST daemon (no-op on Linux, required for
-      // Mac VM-based daemons).
-      const hostPath = this.toHostPath(ctxAppDir);
-      return ['-v', `${hostPath}:${target}${ro ? ':ro' : ''}`];
-    }
+    const treeRel = systemTreeRel(ctxAppDir);
+    if (treeRel) return systemTreeMount(this.systemTree, treeRel, target, { ro });
     if (ctxAppDir.startsWith(`${this.dataDir}/`) || ctxAppDir.startsWith('/data/')) {
       // Strip the dataDir prefix to get the volume-internal path.
       const prefix = ctxAppDir.startsWith(this.dataDir + '/') ? this.dataDir : '/data';
@@ -1507,20 +1481,6 @@ export class ContainerRunner implements SandboxRunner, ContainerMountBackend, Co
    * instance loads from is untouched. The caller installs the result
    * (installBuild) and writes the build stamp.
    */
-  /**
-   * The read-only slice of /workspace every app container and app build
-   * sees: the packages and the workspace root files they resolve against.
-   * tsconfig.base.json because packages/<pkg>/tsconfig.json extends it:
-   * Vite 8 (Astro 7) reads the tsconfig of every file it transforms and
-   * fails on a missing `extends`, where Vite 7 went on without it.
-   */
-  workspaceMounts(): string[] {
-    return [
-      '-v', `${this.workspaceRoot}/packages:/workspace/packages:ro`,
-      ...WORKSPACE_ROOT_FILES.flatMap((f) => ['-v', `${this.workspaceRoot}/${f}:/workspace/${f}:ro`]),
-    ];
-  }
-
   /** Shell-side pids of the `docker run` clients of running builds (getActivePids). */
   private readonly buildPids = new Set<number>();
 
@@ -1533,8 +1493,8 @@ export class ContainerRunner implements SandboxRunner, ContainerMountBackend, Co
       '--workdir', `/workspace/apps/${appId}`,
       ...this.buildAppDirMount(appDir, appId, this.appDataVolume),
       ...this.buildAppDirMount(`${appDir}/dist/${BUILD_STAGING_DIR}`, appId, this.appDataVolume, `/workspace/apps/${appId}/dist`),
-      ...this.workspaceMounts(),
-      '--mount', `type=volume,source=${this.nodeModulesVolume},target=/workspace/node_modules,readonly`,
+      ...systemTreeSlice(this.systemTree),
+      ...systemTreeNodeModules(this.systemTree),
       '-e', 'NODE_ENV=production', '-e', 'GOMAXPROCS=2', '-e', `APP_ID=${appId}`,
       '-e', 'ASTRO_TELEMETRY_DISABLED=1',
       BASE_IMAGE,
@@ -1617,8 +1577,8 @@ export class ContainerRunner implements SandboxRunner, ContainerMountBackend, Co
       ...limitArgs(limits),
       '--workdir', `/workspace/apps/${appId}`,
       ...this.buildAppDirMount(appDir, appId, this.appDataVolume),
-      ...this.workspaceMounts(),
-      '--mount', `type=volume,source=${this.nodeModulesVolume},target=/workspace/node_modules,readonly`,
+      ...systemTreeSlice(this.systemTree),
+      ...systemTreeNodeModules(this.systemTree),
       '--mount', `type=volume,source=${this.appDataVolume},target=${BUILDER_CACHE_PATH},volume-subpath=${BUILDER_CACHE_SUBPATH}`,
       // The builder's own tools (`oras` for `aura sdk install`), as OS infrastructure (BUILDER_TOOLS).
       ...toolArgs,
