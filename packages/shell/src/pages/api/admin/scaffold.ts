@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { join, normalize, dirname, resolve } from 'node:path';
 import { getAppManager, initRepo } from '@aura/core';
 import { auditOwner, ownerAction } from '../../../lib/approvals/admin.ts';
+import { handOwnAppSourceToOwner } from '../../../lib/identityReports.ts';
 
 /**
  * Server-side app scaffolding.
@@ -198,6 +199,10 @@ export const POST: APIRoute = async (ctx) => {
     installError = step.error;
     if (!installOk) console.warn(`[scaffold] dep install for ${appId} failed:`, installError);
   }
+
+  // The owner's own new app is the owner's (P5-2): its Terminal runs as the owner's uid (stream T).
+  const ownership = scope === 'user' ? await handOwnAppSourceToOwner(dest, appId) : null;
+  if (ownership) console.warn(`[scaffold] ${appId}: ${ownership}`);
 
   // AppRegistry's chokidar watcher (packages/core/src/app-manager/AppRegistry.ts)
   // picks up the new manifest file automatically — no explicit reload call
