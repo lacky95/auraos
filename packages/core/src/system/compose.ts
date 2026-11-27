@@ -53,7 +53,7 @@ import {
   grantHomePrivate, homePrivateAuthorized, loadHomePrivateFacts, privateHomeSpawnPort, privateHomeTeardown,
   type HomePrivateFactsDeps, type HomePrivateFactsInput, type PrivateHomeSpawnPort, type PrivateHomeTeardownInput,
 } from '../setup/homeEnvironment.js';
-import { APP_PRIVATE_HOME_OPTION, HOME_PRIVATE_PERMISSION, declaresSetup, type EffectiveConfig } from '../setup/contracts.js';
+import { APP_PRIVATE_HOME_OPTION, HOME_PRIVATE_PERMISSION, declaresSetup, setupError, type EffectiveConfig } from '../setup/contracts.js';
 import { SetupStateMachine } from '../setup/state.js';
 import { SetupConfigStore, tamperAuditInput, vaultHandleRevoker } from '../setup/store.js';
 import { localSystemId } from './systemIdentity.js';
@@ -309,15 +309,17 @@ function homeFactsDeps(mgr: AppManager): HomePrivateFactsDeps {
  */
 export function homeEnvironmentPort(mgr: AppManager): HomeEnvironmentPort {
   const auth = () => getAuthServices();
+  const decide: NonNullable<HomeEnvironmentPort['homePrivateDecision']> = async ({ appId, installationId, userId, sidecar, manifest }) => {
+    const m = manifest ?? mgr.registry.getById(appId);
+    if (!m) return { ok: false, error: setupError('requirement-unauthorized', `${appId} is not installed`, { missing: [HOME_PRIVATE_PERMISSION] }) };
+    const facts = await loadHomePrivateFacts(homeFactsDeps(mgr), {
+      appId, installationId, userId, manifest: m as HomePrivateFactsInput['manifest'], ...(sidecar ? { sidecars: [sidecar] } : {}),
+    });
+    return homePrivateAuthorized(facts, sidecar ? { kind: 'home-private-sidecar', sidecar, userId } : { kind: 'home-private', userId });
+  };
   return {
-    async homePrivateAuthorized({ appId, installationId, userId, sidecar, manifest }) {
-      const m = manifest ?? mgr.registry.getById(appId);
-      if (!m) return false;
-      const facts = await loadHomePrivateFacts(homeFactsDeps(mgr), {
-        appId, installationId, userId, manifest: m as HomePrivateFactsInput['manifest'], ...(sidecar ? { sidecars: [sidecar] } : {}),
-      });
-      return homePrivateAuthorized(facts, sidecar ? { kind: 'home-private-sidecar', sidecar, userId } : { kind: 'home-private', userId }).ok;
-    },
+    homePrivateDecision: decide,
+    async homePrivateAuthorized(q) { return (await decide(q)).ok; },
     async grantHomePrivate({ appId, installationId, userId, homePrivate, sidecars, approvalId, by }) {
       if (!homePrivate && sidecars.length === 0) return;
       await grantHomePrivate(
