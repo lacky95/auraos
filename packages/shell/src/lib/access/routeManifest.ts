@@ -713,6 +713,11 @@ const routes: RouteAccessManifest['routes'] = {
   // owner's credential.store request for one secret field (the value is typed into the shell's dialog only).
   '/api/apps/[id]/setup/secrets': { methods: { GET: SETUP_READ } },
   '/api/apps/[id]/setup/secrets/[field]': { methods: { POST: SETUP_CHANGE } },
+  // D108 P8: the change plan (read-only), the last applied configuration and its restore (decision 13),
+  // and the acting user's own Private Home grants and their revocation (lib/setup/api.ts).
+  '/api/apps/[id]/setup/change': { methods: { POST: SETUP_READ } },
+  '/api/apps/[id]/setup/restore': { methods: { GET: SETUP_READ, POST: SETUP_CHANGE } },
+  '/api/apps/[id]/setup/home-private': { methods: { GET: SETUP_READ, DELETE: SETUP_CHANGE } },
   // D108 value delivery: the app's own server reads its own effective setup
   // values by its instance token (SDK osClient.setup.config()); never a page,
   // never another installation's or user's values; secrets as handles only.
