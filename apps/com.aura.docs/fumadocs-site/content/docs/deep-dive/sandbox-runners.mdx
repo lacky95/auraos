@@ -41,7 +41,12 @@ override, else `manifest.sandbox`, else the Runtime Settings default
 or a missing capability (a closed app on PRoot, sidecars on PRoot) fails
 the start with a clear error; nothing falls back to another runtime. The
 resolved id is latched on the instance as `sandbox`, and every later call
-reaches the runner through it:
+reaches the runner through it (with `runtimeSource` and the revision of
+its effective settings, `runtimeSettingsRev`, so Settings can count the
+instances that need a restart to apply a change). Overrides, the
+capability table and the runtime migration are described in
+[Runtimes](/docs/runtimes); an owner override is checked when it is set and
+again at every start, like any other source:
 
 ```ts
 const runtime = await this.resolveRuntime(appId, manifest);   // throws, never falls back

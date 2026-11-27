@@ -1,0 +1,159 @@
+---
+title: Runtimes
+description: The runtimes apps run in (container, PRoot), how an app's runtime is chosen, what each can do, overrides and the runtime migration.
+---
+
+A **runtime** runs an app's processes. AuraOS ships two, built in:
+
+| Runtime | Isolation | Use |
+|---|---|---|
+| `container` | namespace (a Docker container beside the shell) | the default; everything an app can ask for |
+| `proot` | ptrace, inside the AuraOS container | light open apps without sidecars, mounts or a closed source |
+
+Runtimes plug in behind **ARI**, the Aura Runtime Interface: one contract
+between the kernel and a runtime module. Each module declares its `version`,
+the ARI version it implements (`ari`), its settings schema with a
+`settingsVersion`, its **health** (a list of checks) and its
+**capabilities**. A module that needs a newer ARI than this AuraOS is
+refused at registration.
+
+## How an app's runtime is chosen
+
+First match wins, at every start:
+
+1. the installation's **override**: the owner's (Settings → Apps → Runtime,
+   `aura runtime override set`), or one kept by the runtime migration;
+2. the manifest's `sandbox`;
+3. the default in the Runtime Settings (`container` unless you changed it).
+
+Every instance remembers where its runtime came from (`source`: `override`,
+`migration`, `manifest` or `default`); Settings, `aura runtime ls|show` and
+the migration report show it.
+
+Then the runtime must be installed, enabled and healthy, its stored settings
+valid, and it must have **every capability the app needs**. Otherwise the
+start fails with a clear error and a `code`. **Nothing ever falls back to
+another runtime**, and nothing is picked for you: a capability refusal names
+the runtimes that could run it ("… it could run on: container"), and you
+decide.
+
+## Capabilities: fail closed
+
+What an app needs is derived from its manifest and installation, in one
+place (`aura dev validate` prints it):
+
+| The app has | It needs |
+|---|---|
+| `services[]` | `sidecars` |
+| `ports.exposes` | `portExpose` |
+| `warmPool > 0` | `warmPool` |
+| the permission `apps.mount` | `mounts`, `hostFilesystem` |
+| the `docker` tool, host ports, devices, privileged services | `hostFilesystem` |
+| a closed installation | `readOnlyBinds` (a closed source stays read-only) |
+
+A runtime that lacks a capability **fails closed**: the request is refused,
+never run with a weaker substitute. Settings → Runtimes shows every
+capability of the selected runtime; a missing one reads "no, fails closed".
+`survivesShellRestart` and `usage` are facts, not needs: PRoot instances are
+started again after a shell restart, and a runtime without usage metering
+simply shows no usage.
+
+**Features** describe what a runtime can technically do (supported,
+conditional or unsupported, and whether a change applies live or needs a
+restart). They are shown next to the capabilities. They never authorize
+anything: an app still needs the capability and the permission, and both
+must hold. A conditional feature with an advisory constraint (for example
+the legacy symlink tool mode) is shown as advisory, never as enforced.
+
+## Overrides
+
+An override pins one installation to a runtime, winning over its manifest
+and the default:
+
+```bash
+aura runtime override set io.example.notes container    # needs your password
+aura runtime override set io.example.notes proot placement=master
+aura runtime override ls
+aura runtime override rm io.example.notes                # back to manifest or default
+```
+
+Or Settings → Apps → the app's **RUNTIME…**: pick a runtime, see the live
+check ("ok", or what is missing and where it could run), then **SET
+OVERRIDE…**.
+
+- **Checked when set, and at every start.** An override never bypasses a
+  capability: a closed app can't be pinned to PRoot, and if an installation
+  later becomes closed or its manifest adds sidecars, the next start is
+  refused, not weakened.
+- Only the runtime selector changes. The installation, its App Home, data,
+  permissions, grants and configuration stay.
+- It applies at the app's next start; running instances keep their runtime
+  until you restart them (the Runtimes page counts them: "restart to apply").
+- An app that waits for a runtime migration decision is decided with
+  `aura runtime migrate` first.
+- Set and remove are owner actions with your password, recorded in the audit
+  log (`runtime.override-set`, `runtime.override-removed`).
+
+## Settings → Runtimes
+
+A dropdown of the installed runtimes. For the selected one: version, ARI and
+settings version; health with its checks; enabled and default; the
+capability table and the feature view; its settings as a form built from the
+runtime's own schema (values set in the container environment, such as
+`AURA_USE_PROOT`, are shown read-only); the apps on it with what each needs;
+and **Enable / Disable / Make default**. Disabling a runtime while instances
+run asks you to confirm stopping them. `container` and the current default
+can't be disabled.
+
+Settings changes apply to new starts. Instances started on older settings,
+or on a runtime their installation no longer resolves to, are counted as
+"restart to apply".
+
+## The runtime migration
+
+Before the runtime release, an app without `sandbox` ran in PRoot (or
+unwrapped in the AuraOS container when PRoot was off). Once, at boot, AuraOS
+recorded how every installation ran and:
+
+- **kept** an open app on PRoot through a migration override;
+- **stopped** an app that ran unwrapped, or a closed app on PRoot (which
+  can't keep its source read-only), until you decide. These don't start
+  until then; nothing is moved silently:
+
+```bash
+aura runtime migrate                                   # the open decisions
+aura runtime migrate --adopt-default io.example.old    # container, recommended
+aura runtime migrate --keep io.example.old proot       # open apps only
+```
+
+`aura runtime migrate --report` (and the report at the bottom of Settings →
+Runtimes) shows, read-only, for every installation: how it ran before the
+release, what was recorded for it (override or open decision), and what its
+next start does now, with the source. It also lists the recorded report
+files under `/data/aura/runtime-migration/`. It writes nothing.
+
+No existing installation changes its runtime without a recorded decision:
+the migration's own record, your decision, your override, or an app update
+whose manifest names a runtime itself. Changing the default later moves only
+apps that follow it.
+
+## Commands
+
+| Command | Does |
+|---|---|
+| `aura runtime ls` | the runtimes: version, enabled, default, health, apps, instances |
+| `aura runtime show <id>` | version, ARI, health checks, capabilities, features, settings, apps and instances to restart |
+| `aura runtime set <id> <key>=<value>…` · `enable` · `disable [--stop-instances]` · `default [<id>]` | change the Runtime Settings (password) |
+| `aura runtime check <id> [--app <app>] [--need …]` | would it run there? a read-only dry run |
+| `aura runtime override ls\|set\|rm` | the per-installation overrides |
+| `aura runtime migrate [--report] [--adopt-default <app> \| --keep <app> <rt>]` | the runtime migration |
+
+Refusals say what kind of "no" they are: not authorized, not supported,
+temporarily failed, restart required or not yet applied.
+
+## Installable runtimes (designed, not built)
+
+Runtime modules beyond the built-ins (a signed Nexus package, run out of
+process as an ARI driver) are designed but not available: the security
+option `runtime-install` is reserved at `built-in-only`. See the ARI design
+(`ari-phase-draft.md` §4).

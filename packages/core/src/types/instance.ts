@@ -40,6 +40,13 @@ export interface AppInstance {
    */
   runtimeSource?: RuntimeSource;
   /**
+   * The revision of the runtime settings this instance started with
+   * (`runtimeSettingsRevision`, 5b S): settings changes apply to new starts,
+   * so a differing current revision means "restart to apply". Absent for an
+   * instance adopted after a shell restart.
+   */
+  runtimeSettingsRev?: string;
+  /**
    * The user this instance runs for. Set on spawn and on warm-pool claim;
    * undefined only while the instance is an unclaimed pool member.
    */
