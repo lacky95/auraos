@@ -292,11 +292,11 @@ export function operationResult(
 // A group is present on a module exactly when its features are supported
 // (`GROUP_FEATURE`); the registry refuses a module where they disagree. Shapes
 // carry instance ids, workload ids and opaque refs: never a PID, a container
-// name or id, a host path or an engine handle. The groups whose mechanism still
-// lives in the kernel managers (mounts, endpoints, build, diagnostics, and
-// the create/exec/logs half of workloads) are typed here and move behind ARI
-// in 5b-2 stream D (rows D-M, D-P, D-B, D-R/D-C, D-S/D-X); until then their
-// presence is not required (`GROUPS_PENDING_EXTRACTION`).
+// name or id, a host path or an engine handle. 5b-2 stream D moved the
+// endpoints, build, diagnostics, logs and workload exec/logs mechanisms behind
+// these groups; the mounts group and workload create still live in the kernel
+// managers (rows D-M, D-S: Phase 6) and their presence is not required yet
+// (`GROUPS_PENDING_EXTRACTION`).
 
 /** An instance that outlived the previous kernel, as its runtime reports it (D77). */
 export interface RuntimeSurvivor {

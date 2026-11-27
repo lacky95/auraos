@@ -9,9 +9,11 @@
  * `usage`) are written against the provider-neutral interfaces of `ari.ts`
  * and delegate to today's mechanism, so nothing in the spawn path moves and
  * golden argv is unchanged. Container names, PIDs and engine handles stay in
- * here: a survivor's `ref` is opaque to the kernel. The Docker mechanics of
- * mounts, port expose, sidecar create/exec, logs and builds move behind the
- * pending groups in 5b-2 stream D.
+ * here: a survivor's `ref` is opaque to the kernel. 5b-2 D moved behind its
+ * groups: port expose (`endpoints`), builds (`build`), sidecar exec/logs
+ * (`workloads`), instance logs (`logs`), the dataDir and cap-doctor
+ * inspections (`diagnostics`). Mounts and sidecar create stay in the
+ * managers until Phase 6 (D-M, D-S).
  *
  * The runner is handed in by the composition point (AppManager today,
  * `bootSystem()` in Phase 6): this module imports no app-manager code at

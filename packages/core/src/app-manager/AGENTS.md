@@ -13,6 +13,8 @@ The sector rules are in `packages/core/AGENTS.md`. This module is the kernel's l
   - manifests, interfaces, sidecars and usage.
 - **Runners:** `ContainerRunner.ts` and `ProotRunner.ts` implement `SandboxRunner.ts`. From 5b CR/PR they sit behind ARI modules in `core/src/runtimes/<id>/`.
 - **Resource managers:** `SidecarManager`, `MountManager`, `PortManager`, typed to the container backends (`runtimes/container/backends.ts`, 5b G), never to `ContainerRunner`; names come from `runtimes/container/names.ts`. A writable cross-uid mount is an idmapped bind or refused (`idmappedMounts`, D80).
+  - **5b-2 D:** `PortManager` keeps the policy and drives the runtime's `endpoints` group; `ExecBridge` holds no engine (sidecar exec/logs through `workloads`, instance logs through the module's `logs`); builds and provisioning go through the `build` group (`AppManager.builder()`); the orphan scan is the runtimes' `orphans`, liveness is `isRunning` only; the one `SpawnSpec` comes from `runtimes/spawnSpec.ts`. `MountManager` and `SidecarManager` still hold their Docker mechanism (rows D-M, D-S: Phase 6, `ari-coverage.test.mjs` `PHASE6`).
+  - **Engine helpers** (`engineSession`, `engineExec`, `engineLogs`) live in `DockerApi.ts` inside the boundary; an engine refusal is a neutral `RuntimeExecError` (`runtimes/types.ts`).
 - **System Management parts that still live here:** `AppRegistry`, `appBuild`, `BaseImage`, `tool-provision`, `provisioning`. They move out in the Phase 8 decomposition.
 
 ## Rules

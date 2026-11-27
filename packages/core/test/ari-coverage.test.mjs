@@ -38,7 +38,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 // status  ari     served through ARI or the runner, no runtime bypass
 //         fixed   a §2 bypass closed in 5b-1 (or 5-main), by `by`
 //         bypass  still bypasses: `row` is its 5b-2 stream D extraction row,
-//                 done at the latest in Phase 6 (owner decision 5)
+//                 done at the latest in Phase 6 (owner decision 5; the open ones: PHASE6)
 // group   the ARI group that serves (ari, fixed) or will serve (bypass) it
 
 const ROW = { 'D-B': 'build', 'D-X': 'logs', 'D-P': 'endpoints', 'D-T': null, 'D-R': 'diagnostics', 'D-#11': 'adoption', 'D-S': 'workloads', 'D-M': 'mounts', 'D-C': 'diagnostics', 'D-SDK': null };
@@ -287,9 +287,31 @@ test('ARI coverage: the baseline shrinks: every entry still bypasses, and names 
   }
 });
 
+/**
+ * The rows 5b-2 stream D left open, each with its reason and its Phase 6 owner (owner decision 5: at the
+ * latest Phase 6, never Phase 8). Phase 6 empties this table; a row is closed by moving its mechanism
+ * behind the group, never by a baseline entry.
+ */
+const PHASE6 = {
+  'D-M': 'Phase 6 K: the mounts group (attach/detach/list/verify by consumer) over the container module. MountManager '
+    + 'interleaves policy (kinds, nesting, D80 cross-uid plan, persistence, fan-out) with the helper-container bind, the '
+    + 'consumer mount-table verify and the legacy-root inspect; the split needs the VM mount matrix (idmap-mount, '
+    + 'mount reapply after restart), not an L1/L2 refactor.',
+  'D-S': 'Phase 6 K: workloads.create/start/stop/reconcile. SidecarManager builds the sidecar argv from the spawn '
+    + 'helpers (identity, home, tools, mounts, raw sockets) and keeps Docker labels as its desired state; the argv '
+    + 'builder moves into the container module with the spawn arg helpers it uses (which runtimes/ may not import '
+    + 'from app-manager without a module cycle), golden-tested on the sidecar argv, together with D-M (sidecar '
+    + 'mounts fan out through MountManager).',
+  'D-SDK': 'Phase 6, after the apps move: the owner precondition ("every existing app is on OS-managed sidecars") '
+    + 'does not hold. Two installed apps (io.lakner.trilium, io.lakner.steelaibrowser) call createSidecars() '
+    + 'without a mode, i.e. the SDK docker mode; they move to mode \'os\' (app patches) first, then the mode, its '
+    + 'options and docs are removed.',
+};
+
 test('ARI coverage: every open bypass is a 5b-2 extraction row, at the latest Phase 6 (owner decision 5): the ledger', () => {
   const ledger = {};
   for (const r of ALL.filter((x) => x.status === 'bypass')) (ledger[r.row] ??= []).push(r.id);
-  // The rows this release leaves to 5b-2 stream D; a skipped row goes to Phase 6, never Phase 8.
-  assert.deepEqual(Object.keys(ledger).sort(), ['D-M', 'D-S', 'D-SDK']);
+  // The rows 5b-2 stream D leaves open, each with its reason and a Phase 6 owner; never Phase 8.
+  assert.deepEqual(Object.keys(ledger).sort(), Object.keys(PHASE6).sort());
+  for (const [row, why] of Object.entries(PHASE6)) assert.match(why, /^Phase 6\b/, `${row}: owned by Phase 6`);
 });

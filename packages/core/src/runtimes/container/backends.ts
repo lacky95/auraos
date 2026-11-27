@@ -2,9 +2,10 @@
  * The container runtime's mechanism, as the kernel managers still drive it in
  * 5b-1 (5b G): MountManager, PortManager and SidecarManager are typed to these
  * narrow surfaces, never to `ContainerRunner`. ContainerRunner implements
- * them. The mechanism itself moves behind the provider-neutral ARI groups
- * (`mounts`, `endpoints`, `workloads`) in 5b-2 stream D (rows D-M, D-P, D-S;
- * at the latest Phase 6), and these surfaces go with it.
+ * them. Port expose moved behind the `endpoints` group in 5b-2 D (D-P;
+ * PortManager keeps only `isRunning` here); mounts and sidecars move behind
+ * `mounts` and `workloads` in Phase 6 (D-M, D-S), and these surfaces go
+ * with them.
  *
  * A leaf: types and one constant, no runtime import.
  */

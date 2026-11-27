@@ -51,7 +51,7 @@ presentation-contracts: theme layout keymap
 - **Platform services** may use kernel contracts; kernel sectors reach them only through a contract that is handed in.
 - **Core never imports** `@aura/shell`, `@aura/ui`, `@aura/app-sdk`, `@aura/cli`, Astro, React or socket.io.
 
-**Enforced by `pnpm arch`:** `core-cycle`, `core-module-cycle`, `core-forbidden`, `foundation-leaf`, `kernel-presentation`, `contract-leaf` (5b) and `agent-agnostic`. Planned: `runtime-no-bus` (5b-2), `core-deep-import` and `event-owner` (Phase 7), `kv-owner` (Phase 7–8).
+**Enforced by `pnpm arch`:** `core-cycle`, `core-module-cycle`, `core-forbidden`, `foundation-leaf`, `kernel-presentation`, `contract-leaf` (5b), `runtime-no-bus` (5b-2) and `agent-agnostic`. Planned: `core-deep-import` and `event-owner` (Phase 7), `kv-owner` (Phase 7–8).
 
 ## Public contract
 
