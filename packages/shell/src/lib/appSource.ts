@@ -32,6 +32,7 @@ import { handOwnAppSourceToOwner } from './identityReports.ts';
 import { patchLevel, sourceOpenDetails, sourceOpenLevel } from './approvals/display.ts';
 import { installGate, runInstall } from './approvals/nexus.ts';
 import { json, type ApprovalServiceDeps } from './approvals/service.ts';
+import { errorResponse } from './appResponse.js';
 import { parseIdentity } from './nexusIdentity.js';
 import { TERMINAL_APP_ID } from '../../server/session-hosts.mjs';
 
@@ -540,7 +541,7 @@ export async function startPreview(request: Request, appId: string | undefined, 
   if (candidate.id !== app.id) return json({ error: 'invalid-tree', message: `the workspace is ${candidate.id}, not ${app.id}` }, 422);
   // The start gate (D48, D108): a workspace AuraOS never starts never runs as a preview (activation refuses it in core's install).
   const blocked = core.operationalBlock(candidate);
-  if (blocked) return json(blocked, 422);
+  if (blocked) return errorResponse(422, blocked);
   try {
     const instanceId = await deps.apps.startPreview(app.id, { appDir: tree, workspace: subpath, owner: user });
     return json({ ok: true, appId: app.id, instanceId, workspace: n });

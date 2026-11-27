@@ -7,6 +7,7 @@
 import type { AppManifest } from '../types/manifest.js';
 import type { ScopeId } from '../scopes/types.js';
 import type { AppSourceInfo, SourceMode } from './AppSource.js';
+import type { AuraErrorBody } from '../errors/contracts.js';
 
 /** Where an app came from. Stored in the install record per app. */
 export type NexusSource = 'oci' | 'git' | 'index' | 'local';
@@ -242,7 +243,7 @@ export type NexusProgressEvent =
   | { type: 'publish.start' }
   | { type: 'publish.progress';   message: string }
   | { type: 'publish.done';       ref: string }
-  | { type: 'error';              code: string; message: string; /** A D105 body to answer as is (the start gate). */ body?: Record<string, unknown> | object };
+  | { type: 'error';              code: string; message: string; /** A D105 body (`AuraErrorBody`) to answer as is (the start gate). */ body?: AuraErrorBody };
 
 /**
  * A registry credential for pulling one image on behalf of one installed app

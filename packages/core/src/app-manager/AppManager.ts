@@ -2233,7 +2233,7 @@ export class AppManager {
     | { kind: 'rejected'; appId: string; instanceId: string; code: string; message: string; hint?: string; status: number }
     | { kind: 'disambiguation'; candidates: IntentMatch[] }
     | { kind: 'noHandler' }
-    | { kind: 'setup-required'; appId: string; state: OperationalBlock['state']; error: OperationalBlock }
+    | { kind: 'setup-required'; appId: string; state: OperationalBlock['details']['state']; error: OperationalBlock }
   > {
     let chosen: { appId: string };
     if (intent.appId !== undefined) {
@@ -2254,7 +2254,7 @@ export class AppManager {
     if (!manifest) return { kind: 'noHandler' };
     // D108 A2: an app that may not start is an answer (show its setup or why), not a failed spawn.
     const blocked = operationalBlock(manifest);
-    if (blocked) return { kind: 'setup-required', appId: chosen.appId, state: blocked.state, error: blocked };
+    if (blocked) return { kind: 'setup-required', appId: chosen.appId, state: blocked.details.state, error: blocked };
 
     // Snapshot the app's instances first so the handler can tell a cold
     // start (Android onCreate + intent) from a re-delivery (onNewIntent).
