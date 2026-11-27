@@ -4,8 +4,13 @@
  * owner approved, and nothing else.
  *
  *   - The report is rebuilt from the same candidate rows right before the
- *     apply; if its digest differs from the approved one (the tree or the
- *     rows changed), nothing is changed and the caller shows the new report.
+ *     apply; if its digest differs from the approved one (a row's path,
+ *     owner, mode, type, filesystem identity or planned change differs; not
+ *     its counts, D5), nothing is changed and the caller shows the new report.
+ *   - The worker checks each row's approved facts once more right before its
+ *     first change (`checkApplyRows`): after the owner's approval, and after
+ *     the run-as migration stopped the app. One that differs refuses the
+ *     whole apply with its reason (`changed`); nothing is changed.
  *   - Only `planned` (Private Homes, user workspaces) and `plannedUserPaths`
  *     (the Developer Mode tree, patch repositories, own app source) rows
  *     apply, and only those whose `only` condition the caller says holds.
@@ -32,7 +37,7 @@ import {
 import { dirname, join, resolve } from 'node:path';
 import { coreWorkerPath } from '../system/workerPath.js';
 import { chownTree, type OwnershipJournalEntry } from './appOwnership.js';
-import type { OwnershipReport, OwnershipRow } from './ownershipReport.js';
+import { rootFactsOf, type OwnershipReport, type OwnershipRootFacts, type OwnershipRow } from './ownershipReport.js';
 
 export type ApplySection = 'planned' | 'plannedUserPaths';
 
@@ -47,6 +52,8 @@ export interface ApplyRow {
   mode?: string;
   /** Only entries owned by this uid change (the run-as migration). */
   onlyFrom?: { uid: number; gid: number };
+  /** The row's facts the owner approved (its report row's `from` and `root`), checked right before the apply. */
+  expect: { from: string; root: OwnershipRootFacts };
 }
 
 /**
@@ -80,7 +87,7 @@ export interface OwnershipApplyResult {
 }
 
 export class OwnershipApplyError extends Error {
-  constructor(readonly code: 'digest-mismatch' | 'invalid', message: string) {
+  constructor(readonly code: 'digest-mismatch' | 'invalid' | 'changed', message: string) {
     super(message);
     this.name = 'OwnershipApplyError';
   }
@@ -112,17 +119,46 @@ export function selectApplyRows(
       if (refused.has(r.path)) { skip('refused: no blanket chown (D70)'); continue; }
       if (!to) { skip('its identity is not allocated'); continue; }
       if (to.uid === 0) { skip('never to root'); continue; }
-      if (!r.exists) { skip('does not exist'); continue; }
+      if (!r.exists || !r.from || !r.root) { skip('does not exist'); continue; }
       if (r.only && !opts.holds(r.only)) { skip(`only ${r.only}`); continue; }
       if (r.toChange === 0 && !(r.mode && /^0[0-7]{3}$/.test(r.mode))) { skip('nothing to change'); continue; }
       const onlyFrom = parseTo(r.onlyFrom ?? null);
       rows.push({
         path: r.path, kind: r.kind, to, recursive: r.recursive, ...(r.exclude ? { exclude: r.exclude } : {}), ...(r.mode ? { mode: r.mode } : {}),
         ...(onlyFrom ? { onlyFrom } : {}),
+        expect: { from: r.from, root: r.root },
       });
     }
   }
   return { rows, notApplied };
+}
+
+/**
+ * The security-relevant facts of each row compared with the approved ones
+ * (D5): its path still there, of the same type, filesystem identity, owner
+ * and mode, not a symbolic link, and resolving where it did. A reason per row
+ * that differs; empty when every row holds. Counts are never compared: data
+ * an app wrote since the dry run does not block the apply. Read-only.
+ */
+export function checkApplyRows(rows: readonly ApplyRow[]): string[] {
+  const out: string[] = [];
+  for (const row of rows) {
+    const want = row.expect;
+    if (!want?.root || typeof want.from !== 'string') { out.push(`${row.path}: no approved facts to check`); continue; }
+    let st;
+    try { st = lstatSync(row.path, { bigint: true }); } catch { out.push(`${row.path}: gone`); continue; }
+    let real = row.path;
+    try { real = realpathSync(row.path); } catch { out.push(`${row.path}: can't be resolved`); continue; }
+    const now = rootFactsOf(st, row.path, real);
+    const from = `${st.uid}:${st.gid}`;
+    if (now.type === 'symlink') out.push(`${row.path}: became a symbolic link`);
+    else if (now.type !== want.root.type) out.push(`${row.path}: was a ${want.root.type}, is a ${now.type}`);
+    else if (now.fsid !== want.root.fsid) out.push(`${row.path}: replaced or moved to another filesystem (${want.root.fsid} → ${now.fsid})`);
+    else if ((now.real ?? row.path) !== (want.root.real ?? row.path)) out.push(`${row.path}: now resolves to ${now.real ?? row.path}, not ${want.root.real ?? row.path}`);
+    else if (from !== want.from) out.push(`${row.path}: its owner changed (${want.from} → ${from})`);
+    else if (now.mode !== want.root.mode) out.push(`${row.path}: its mode changed (${want.root.mode} → ${now.mode})`);
+  }
+  return out;
 }
 
 /** Applies `rows` in this process, journaling to `journal` (created 0600, never overwritten). */
@@ -132,9 +168,15 @@ export function applyOwnershipRows(rows: readonly ApplyRow[], journal: string): 
 
 /**
  * `applyOwnershipRows`, with `req.restore` first: that earlier journal's
- * entries, journaled too, so the whole apply reverts exactly.
+ * entries, journaled too, so the whole apply reverts exactly. Every row's
+ * approved facts are checked first (`checkApplyRows`); one that differs
+ * throws `changed` before anything (the journal too) is created or changed.
  */
 export function applyOwnershipRequest(req: ApplyRequest, journal: string): Pick<OwnershipApplyResult, 'rows' | 'restored'> {
+  const changed = checkApplyRows(req.rows);
+  if (changed.length) {
+    throw new OwnershipApplyError('changed', `changed since the dry run, so nothing was applied: ${changed.slice(0, 5).join('; ')}${changed.length > 5 ? ` (and ${changed.length - 5} more)` : ''}`);
+  }
   const fd = openSync(journal, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
   const out: OwnershipApplyResult['rows'] = [];
   let restored: OwnershipApplyResult['restored'];
@@ -284,6 +326,7 @@ export async function runOwnershipApply(
     });
     child.stdin?.end(JSON.stringify(opts.restore ? { rows: [...rows], restore: opts.restore } satisfies ApplyRequest : rows));
   });
-  const out = JSON.parse(stdout) as { rows: OwnershipApplyResult['rows']; restored?: OwnershipApplyResult['restored'] } | OwnershipApplyResult['rows'];
+  const out = JSON.parse(stdout) as { rows: OwnershipApplyResult['rows']; restored?: OwnershipApplyResult['restored']; refused?: { code: string; message: string } } | OwnershipApplyResult['rows'];
+  if (!Array.isArray(out) && out.refused) throw new OwnershipApplyError(out.refused.code === 'changed' ? 'changed' : 'invalid', String(out.refused.message));
   return Array.isArray(out) ? { journal, rows: out } : { journal, rows: out.rows, ...(out.restored ? { restored: out.restored } : {}) };
 }

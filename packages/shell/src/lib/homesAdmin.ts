@@ -3,7 +3,9 @@
  *
  *   POST /api/admin/identity/ownership-apply {digest}
  *        the targeted chown of the dry-run ownership report, for the digest
- *        the owner reviewed; a changed report applies nothing (409 + digest)
+ *        the owner reviewed; a changed report applies nothing (409 + digest),
+ *        and neither does a row whose path, owner, mode or filesystem identity
+ *        changed after the approval (409 `changed`); counts never block (D5)
  *   POST /api/admin/homes/import {appId, paths[], userId?, includePersonal?, apply?}
  *        the selective copy from the owner's Private Home into an App Home;
  *        without `apply` a dry run (an owner view); with it an owner action
@@ -34,6 +36,7 @@ async function body(ctx: Ctx): Promise<Record<string, unknown> | Response> {
 }
 
 function denied(err: unknown): Response {
+  if (err instanceof core.OwnershipApplyError) return json({ error: err.code, message: err.message }, err.code === 'invalid' ? 400 : 409);
   if (err instanceof core.HomeDeniedError) return json({ error: err.reason, message: err.message }, 409);
   if (err instanceof core.RuntimeCapabilityError) return json({ error: err.code, message: err.message }, 409);
   if (err instanceof core.AppHomeAdminError) return json({ error: err.code, message: err.message }, err.code === 'not-found' ? 404 : 400);

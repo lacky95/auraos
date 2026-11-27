@@ -221,8 +221,17 @@ test('the ownership report: deterministic, read-only, refuses blanket and symlin
   assert.equal(app.exists, false);
   assert.equal(app.to, null);
   assert.equal(readFileSync(join(root, 'home', 'default', '.claude', 'x.json'), 'utf8'), before);
+  // D5: ordinary content and byte counts are not in the digest; the row's own facts are.
   writeFileSync(join(root, 'home', 'default', 'new'), 'n');
-  assert.notEqual((await buildOwnershipReport(specs, opts)).digest, a.digest, 'a changed tree changes the digest');
+  writeFileSync(join(root, 'home', 'default', '.claude', 'x.json'), '123456789');
+  const c = await buildOwnershipReport(specs, opts);
+  assert.notEqual(c.planned.find((x) => x.kind === 'private-home').entries, home.entries, 'the counts stay in the report');
+  assert.equal(c.digest, a.digest, 'written data keeps the digest');
+  assert.deepEqual(Object.keys(home.root).sort(), ['fsid', 'mode', 'type']);
+  assert.equal(home.root.type, 'directory');
+  chmodSync(join(root, 'home', 'default'), 0o777);
+  assert.notEqual((await buildOwnershipReport(specs, opts)).digest, a.digest, 'a row root\'s mode changes the digest');
+  assert.equal(a.refused.find((x) => x.path === join(root, 'link')).target, join(root, 'home'), 'a refused link shows its target');
 });
 
 test('the ownership report flags nested rows and truncated walks', async () => {

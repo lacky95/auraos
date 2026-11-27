@@ -307,7 +307,8 @@ test('T: the privilege review records the Terminal as a session host: non-root, 
 });
 
 test('T recovery: an apply is reverted from its journal by name only; owner and mode come back exactly', { skip: process.getuid?.() !== 0 && 'needs root to chown' }, async () => {
-  const { ownershipJournalPath, ownershipJournalDir, applyOwnershipRows, revertOwnershipJournal } = await import('../dist/identity/ownershipApply.js');
+  const { ownershipJournalPath, ownershipJournalDir, applyOwnershipRows, revertOwnershipJournal, selectApplyRows } = await import('../dist/identity/ownershipApply.js');
+  const { buildOwnershipReport } = await import('../dist/identity/ownershipReport.js');
   const root = mkdtempSync(join(tmpdir(), 'aura-t-rev-'));
   try {
     const home = join(root, 'home');
@@ -316,7 +317,9 @@ test('T recovery: an apply is reverted from its journal by name only; owner and 
     const dir = ownershipJournalDir(root);
     mkdirSync(dir, { recursive: true });
     const journal = join(dir, 'apply-test-1.jsonl');
-    applyOwnershipRows([{ path: home, kind: 'private-home', to: { uid: 1000, gid: 1000 }, recursive: true }], journal);
+    // The rows of a reviewed report (they carry the facts the apply checks again, D5).
+    const report = await buildOwnershipReport([{ section: 'planned', path: home, kind: 'private-home', to: { uid: 1000, gid: 1000 }, recursive: true }], { refuseRoots: ['/'] });
+    applyOwnershipRows(selectApplyRows(report, { holds: () => false }).rows, journal);
     assert.equal(statSync(join(home, '.claude', '.credentials.json')).uid, 1000);
     assert.equal(statSync(join(home, '.claude', '.credentials.json')).mode & 0o777, 0o600, 'credential modes kept');
     assert.equal(ownershipJournalPath(root, 'apply-test-1.jsonl'), journal);

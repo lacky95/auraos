@@ -57,7 +57,7 @@ let audits: Array<{ action: string; opts: any }>;
 let records: Map<string, core.AppInstallation>;
 /** What the fake migration saw, in order. */
 let steps: string[];
-let applyFails: boolean;
+let applyFails: boolean | 'changed';
 let restoreSkips: string[];
 /** Apps registered without an installation record (`ensureInstallation` repairs them), and the ones it can't. */
 let missing: Set<string>;
@@ -135,7 +135,7 @@ function deps(): RunAsDeps {
         const plan: core.RunAsOwnershipPlan = {
           version: 1, appId: input.appId, installationId: input.installationId, runAs: input.runAs,
           from: `${input.from.uid}:${input.from.gid}`, to: `${input.to.uid}:${input.to.gid}`,
-          rows: [{ path: `/d/apps/${input.appId}/${input.appId}`, kind: 'app-data', from: '0:0', to: `${input.to.uid}:${input.to.gid}`, recursive: true, exists: true, entries: 3, files: 2, bytes: 9, toChange: 3, rootOwned: 3 }],
+          rows: [{ path: `/d/apps/${input.appId}/${input.appId}`, kind: 'app-data', from: '0:0', root: { type: 'directory', mode: '0755', fsid: '1:2' }, to: `${input.to.uid}:${input.to.gid}`, recursive: true, exists: true, entries: 3, files: 2, bytes: 9, toChange: 3, rootOwned: 3 }],
           refused: [], findings: [], restore: journal ? { journal, entries: 3 } : null,
           digest: PLAN_DIGEST(input.appId, input.runAs, journal),
         };
@@ -145,6 +145,7 @@ function deps(): RunAsDeps {
       journalPath: (name) => `/j/${name}`,
       apply: async (_digest, apply, journal) => {
         steps.push(`apply ${journal}${apply.restore ? ` restoring ${apply.restore.journal}` : ''}`);
+        if (applyFails === 'changed') throw new core.OwnershipApplyError('changed', `changed since the dry run, so nothing was applied: /d/apps/org.a.notes/org.a.notes: its mode changed (0755 → 0777)`);
         if (applyFails) throw new Error('worker died');
         return { rows: [{ path: '/d/x', kind: 'app-data', changed: 3, skipped: 0, skippedSample: [] }], ...(apply.restore ? { restored: { restored: 3, skipped: 0, skippedSample: [] } } : {}) };
       },
@@ -260,6 +261,17 @@ test('a failed apply is restored from its journal: the record stays, the marker 
   assert.deepEqual([r.status, r.body.error, r.body.runAs], [500, 'migration-failed', 'root']);
   assert.match(r.body.message, /restored from the journal.*stays stopped/);
   assert.deepEqual(steps.map((x) => x.split(' ')[0]), ['mark', 'stop', 'apply', 'restore', 'unmark'], 'no flip, no restart');
+  const rec = records.get('i-notes')!;
+  assert.deepEqual([rec.runAs, rec.runAsMigration], [undefined, undefined]);
+  assert.deepEqual(audits.map((a) => [a.action, a.opts.outcome]), [['app.run-as-changed', 'failed']]);
+});
+
+test('a row whose approved facts changed after the approval (D5) refuses before any change: 409, unmarked, restarted as it was', async () => {
+  applyFails = 'changed';
+  const r = await flip('org.a.notes', 'app');
+  assert.deepEqual([r.status, r.body.error, r.body.runAs], [409, 'changed', 'root']);
+  assert.match(r.body.message, /its mode changed.*Nothing was changed.*still runs as root/);
+  assert.deepEqual(steps.map((x) => x.split(' ')[0]), ['mark', 'stop', 'apply', 'unmark', 'restart'], 'no restore needed, no flip');
   const rec = records.get('i-notes')!;
   assert.deepEqual([rec.runAs, rec.runAsMigration], [undefined, undefined]);
   assert.deepEqual(audits.map((a) => [a.action, a.opts.outcome]), [['app.run-as-changed', 'failed']]);

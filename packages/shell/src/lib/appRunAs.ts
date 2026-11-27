@@ -253,6 +253,17 @@ export async function postRunAs(ctx: Ctx, deps: RunAsDeps = liveRunAsDeps()): Pr
     let applied;
     try { applied = await deps.migration.apply(digest, apply, journal); }
     catch (err) {
+      if (err instanceof core.OwnershipApplyError && err.code === 'changed') {
+        // Refused before any change (D5: a security-relevant fact differs from the dry run): nothing to restore.
+        await deps.hosts.setRunAsMigration(inst.installationId, before, null);
+        await deps.audit(actor, core.RUN_AS_AUDIT_ACTIONS.changed, { target, outcome: 'failed', detail: { appId, from: before, to: runAs, digest, refused: 'changed' } });
+        deps.migration.hold(appId, false);
+        const restartFailed = await deps.migration.restart(stopped.restart);
+        return json({
+          error: 'changed', appId, runAs: before, stopped: stopped.stopped, restartFailed,
+          message: `${appId}: ${err.message}. Nothing was changed; it still runs as ${before}. Review the new dry run (aura admin apps run-as ${appId} ${runAs}).`,
+        }, 409);
+      }
       // Restored from its own journal; the app stays stopped (restart only after success).
       const path = deps.migration.journalPath(journalName);
       const back = path ? deps.migration.restore(path, apply.within) : { restored: 0, skipped: [] };

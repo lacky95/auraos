@@ -14,11 +14,19 @@
  * The caller (the shell) names the candidate rows; this module measures them
  * and decides what is refused. Symlinks are never followed, a row's own path
  * must not be a symlink, and a walk stays on its row's filesystem.
- * Deterministic: rows are sorted, and the digest covers every row and count
- * but not `generatedAt`, so a changed tree changes the digest.
+ * Deterministic: rows are sorted, and the digest (`ownershipDigest`, owner
+ * decision D5) covers what is security-relevant: each row's path, the facts
+ * of its own path (`from` owner, `root`: type, mode, filesystem identity, and
+ * where it really resolves to when that differs), and the planned change
+ * (to, onlyFrom, mode, recursive, excludes, refusals). Not the counts
+ * (entries, files, bytes, toChange, rootOwned): an app writing ordinary data
+ * between the dry run and the apply does not invalidate the owner's review.
+ * The apply checks the same facts again right before it changes anything
+ * (`checkApplyRows`, ownershipApply.ts).
  */
 import { createHash } from 'node:crypto';
-import { lstat, opendir } from 'node:fs/promises';
+import type { BigIntStats } from 'node:fs';
+import { lstat, opendir, readlink, realpath } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
 export type OwnershipSection = 'planned' | 'plannedUserPaths' | 'plannedAppPaths' | 'reportOnly';
@@ -46,12 +54,34 @@ export interface OwnershipRowSpec {
   splitGit?: boolean;
 }
 
+/** The security-relevant facts of a row's own path (D5): in the digest, checked again by the apply. */
+export interface OwnershipRootFacts {
+  type: 'directory' | 'file' | 'symlink' | 'other';
+  /** Permission and special bits, octal (`0755`). */
+  mode: string;
+  /** The filesystem identity, `device:inode`: a path replaced or moved to another filesystem differs. */
+  fsid: string;
+  /** Where the path really resolves to, only when that differs from `path` (a component is a link). */
+  real?: string;
+}
+
+/** The facts of `st` (an `lstat` with `bigint`, so no inode loses precision). Pure. */
+export function rootFactsOf(st: BigIntStats, path: string, real: string): OwnershipRootFacts {
+  const type = st.isSymbolicLink() ? 'symlink' : st.isDirectory() ? 'directory' : st.isFile() ? 'file' : 'other';
+  return {
+    type, mode: `0${(Number(st.mode) & 0o7777).toString(8).padStart(3, '0')}`, fsid: `${st.dev}:${st.ino}`,
+    ...(real !== path ? { real } : {}),
+  };
+}
+
 export interface OwnershipRow {
   path: string;
   kind: string;
   owner?: string;
   /** The top directory's current `uid:gid`; null when the path does not exist. */
   from: string | null;
+  /** The facts of the path itself; null when it does not exist. */
+  root: OwnershipRootFacts | null;
   to: string | null;
   /** Only entries owned by this `uid:gid`'s uid change; the rest keep their owner. */
   onlyFrom?: string;
@@ -78,13 +108,13 @@ export interface OwnershipRow {
 export interface OwnershipReport {
   version: 1;
   generatedAt: string;
-  /** sha256 over every row and count (not `generatedAt`): what an apply approves. */
+  /** `ownershipDigest`: the security-relevant facts and the planned change, not the counts. What an apply approves. */
   digest: string;
   planned: OwnershipRow[];
   plannedUserPaths: OwnershipRow[];
   plannedAppPaths: OwnershipRow[];
   reportOnly: OwnershipRow[];
-  refused: Array<{ path: string; reason: string }>;
+  refused: Array<{ path: string; reason: string; target?: string }>;
   /** Findings worth the owner's attention (by path; never file contents). */
   findings: string[];
 }
@@ -102,6 +132,9 @@ const DEFAULT_MAX_ENTRIES = 2_000_000;
 interface Walked {
   exists: boolean;
   from: string | null;
+  root: OwnershipRootFacts | null;
+  /** A symlink root's target. */
+  target?: string;
   entries: number;
   files: number;
   bytes: number;
@@ -114,14 +147,25 @@ interface Walked {
 
 async function walk(spec: OwnershipRowSpec, maxEntries: number): Promise<Walked> {
   const out: Walked = {
-    exists: false, from: null, entries: 0, files: 0, bytes: 0, toChange: 0, rootOwned: 0, rootOwnedGit: 0,
+    exists: false, from: null, root: null, entries: 0, files: 0, bytes: 0, toChange: 0, rootOwned: 0, rootOwnedGit: 0,
     truncated: false, symlinkRoot: false,
   };
-  let top;
-  try { top = await lstat(spec.path); } catch { return out; }
+  let big;
+  try { big = await lstat(spec.path, { bigint: true }); } catch { return out; }
   out.exists = true;
-  out.from = `${top.uid}:${top.gid}`;
-  if (top.isSymbolicLink()) { out.symlinkRoot = true; return out; }
+  out.from = `${big.uid}:${big.gid}`;
+  let real = spec.path;
+  try { real = await realpath(spec.path); } catch { /* gone meanwhile: the facts still differ from a later look */ }
+  out.root = rootFactsOf(big, spec.path, real);
+  if (big.isSymbolicLink()) {
+    out.symlinkRoot = true;
+    try { out.target = await readlink(spec.path); } catch { /* gone meanwhile */ }
+    return out;
+  }
+  const top = {
+    uid: Number(big.uid), gid: Number(big.gid), size: Number(big.size), dev: Number(big.dev),
+    isFile: () => big.isFile(), isDirectory: () => big.isDirectory(),
+  };
   const exclude = new Set(spec.exclude ?? []);
   const count = (st: { uid: number; gid: number; size: number; isFile(): boolean }, inGit: boolean) => {
     out.entries++;
@@ -178,13 +222,14 @@ export async function buildOwnershipReport(specs: readonly OwnershipRowSpec[], o
     seen.add(key);
     const w = await walk({ ...spec, path }, maxEntries);
     if (w.symlinkRoot) {
-      report.refused.push({ path, reason: 'the path is a symbolic link: never followed' });
+      report.refused.push({ path, reason: 'the path is a symbolic link: never followed', ...(w.target !== undefined ? { target: w.target } : {}) });
       continue;
     }
     const row: OwnershipRow = {
       path, kind: spec.kind,
       ...(spec.owner ? { owner: spec.owner } : {}),
       from: w.from,
+      root: w.root,
       to: spec.to ? `${spec.to.uid}:${spec.to.gid}` : null,
       ...(spec.onlyFrom ? { onlyFrom: `${spec.onlyFrom.uid}:${spec.onlyFrom.gid}` } : {}),
       ...(spec.mode ? { mode: spec.mode } : {}),
@@ -197,6 +242,7 @@ export async function buildOwnershipReport(specs: readonly OwnershipRowSpec[], o
       ...(w.truncated ? { truncated: true as const } : {}),
     };
     report[spec.section].push(row);
+    if (w.root?.real) report.findings.push(`${path}: resolves to ${w.root.real} (a component is a symbolic link); an apply refuses if that changes`);
     if (w.truncated) report.findings.push(`${path}: more than ${maxEntries} entries; the counts are lower bounds`);
     if (spec.section !== 'reportOnly' && !spec.to && w.exists) report.findings.push(`${path}: its identity is not allocated yet, so the row is not applicable`);
   }
@@ -214,9 +260,27 @@ export async function buildOwnershipReport(specs: readonly OwnershipRowSpec[], o
       }
     }
   }
-  report.digest = createHash('sha256').update(JSON.stringify({
-    planned: report.planned, plannedUserPaths: report.plannedUserPaths, plannedAppPaths: report.plannedAppPaths,
-    reportOnly: report.reportOnly, refused: report.refused,
-  })).digest('hex');
+  report.digest = ownershipDigest(
+    { planned: report.planned, plannedUserPaths: report.plannedUserPaths, plannedAppPaths: report.plannedAppPaths, reportOnly: report.reportOnly },
+    { refused: report.refused },
+  );
   return report;
+}
+
+/** A row without its counts: what a digest covers of it. */
+function digestRow(row: OwnershipRow): Omit<OwnershipRow, 'entries' | 'files' | 'bytes' | 'toChange' | 'rootOwned' | 'rootOwnedGit' | 'truncated'> {
+  const { entries: _e, files: _f, bytes: _b, toChange: _t, rootOwned: _r, rootOwnedGit: _g, truncated: _x, ...facts } = row;
+  return facts;
+}
+
+/**
+ * The one digest of the ownership migration (the homes report and the run-as
+ * plan, owner decision D5): sha256 over `plan` and the rows of each list
+ * without their counts. So ordinary content and byte-count changes keep it;
+ * a changed path, owner, mode, type, link, filesystem identity, containment
+ * or planned change does not.
+ */
+export function ownershipDigest(rows: Record<string, readonly OwnershipRow[]>, plan: Record<string, unknown>): string {
+  const lists = Object.fromEntries(Object.entries(rows).map(([k, v]) => [k, v.map(digestRow)]));
+  return createHash('sha256').update(JSON.stringify({ ...plan, ...lists })).digest('hex');
 }

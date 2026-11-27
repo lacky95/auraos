@@ -24,13 +24,12 @@
  * an interrupted one blocks the app's start until it is recovered
  * (`runAsMigrationBlock`): the journal restored exactly.
  */
-import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
 import type { AppRunAsMigration } from '../app-hosts/contracts.js';
 import { appOwnershipSpecs, type AppOwnershipInput } from './appOwnership.js';
 import type { ApplyRow, JournalRestore } from './ownershipApply.js';
-import { buildOwnershipReport, type OwnershipRow } from './ownershipReport.js';
+import { buildOwnershipReport, ownershipDigest, type OwnershipRow } from './ownershipReport.js';
 import type { LinuxIdentity } from './types.js';
 
 export type RunAsTarget = 'root' | 'app';
@@ -61,7 +60,12 @@ export interface RunAsOwnershipPlan {
   findings: string[];
   /** The flip back: the earlier journal restored exactly first (its name, and its entries inside the rows). */
   restore: { journal: string; entries: number } | null;
-  /** sha256 over everything above: what the owner approves. */
+  /**
+   * `ownershipDigest` over everything above but the rows' counts and the
+   * findings (D5): what the owner approves. Data the app writes since does
+   * not change it; a changed row path, owner, mode, type, filesystem
+   * identity, containment, refusal or restore does.
+   */
   digest: string;
 }
 
@@ -106,11 +110,12 @@ export async function runAsOwnershipPlan(
   }
   const refused = new Set(report.refused.map((r) => r.path));
   const apply: RunAsOwnershipApply = {
-    rows: rows.filter((r) => r.exists && !refused.has(r.path)).map((r) => ({
+    rows: rows.flatMap((r) => (r.exists && r.from && r.root && !refused.has(r.path) ? [{
       path: r.path, kind: r.kind, to: { uid: input.to.uid, gid: input.to.gid }, recursive: r.recursive,
       ...(r.exclude ? { exclude: r.exclude } : {}), ...(r.mode ? { mode: r.mode } : {}),
       onlyFrom: { uid: input.from.uid, gid: input.from.gid },
-    })),
+      expect: { from: r.from, root: r.root },
+    }] : [])),
     ...(journalRestore ? { restore: journalRestore } : {}),
     within,
   };
@@ -118,7 +123,8 @@ export async function runAsOwnershipPlan(
     version: 1 as const, appId: input.appId, installationId: input.installationId, runAs: input.runAs,
     from: ids(input.from), to: ids(input.to), rows, refused: report.refused, findings: report.findings, restore,
   };
-  const digest = createHash('sha256').update(JSON.stringify(body)).digest('hex');
+  const { rows: _rows, findings: _findings, ...plan } = body;
+  const digest = ownershipDigest({ rows }, plan);
   return { plan: { ...body, digest }, apply };
 }
 

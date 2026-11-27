@@ -14,7 +14,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  appendFileSync, chownSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync,
+  appendFileSync, chmodSync, chownSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
@@ -192,16 +192,58 @@ test('an interrupted apply is restored exactly from its journal (the recovery); 
   } finally { rmSync(f.d, { recursive: true, force: true }); }
 });
 
-test('the plan: a changed tree changes the digest; same identity both ways is refused; a pending migration blocks the start', async () => {
+test('the plan (D5): written data keeps the digest, a row root\'s mode or identity changes it; same identity both ways is refused; a pending migration blocks the start', async () => {
   const f = fixture();
   try {
     const a = await runAsOwnershipPlan(input(f, 'app'), { refuseRoots: refuseRoots(f) });
     writeFileSync(join(f.data, 'more'), 'more');
+    appendFileSync(join(f.data, 'a.txt'), 'more bytes');
     const b = await runAsOwnershipPlan(input(f, 'app'), { refuseRoots: refuseRoots(f) });
-    assert.notEqual(a.plan.digest, b.plan.digest);
+    assert.equal(b.plan.digest, a.plan.digest, 'ordinary data the app wrote keeps the digest');
+    assert.notDeepEqual(b.plan.rows.map((r) => r.files), a.plan.rows.map((r) => r.files), 'the counts stay in the plan');
+    chmodSync(f.data, 0o777);
+    const c = await runAsOwnershipPlan(input(f, 'app'), { refuseRoots: refuseRoots(f) });
+    assert.notEqual(c.plan.digest, a.plan.digest, 'a row root\'s mode changes it');
+    chmodSync(f.data, 0o750);
+    assert.equal((await runAsOwnershipPlan(input(f, 'app'), { refuseRoots: refuseRoots(f) })).plan.digest, a.plan.digest);
+    renameSync(f.home, `${f.home}.old`);
+    mkdirSync(f.home, { mode: 0o755 });
+    chmodSync(f.home, 0o755);
+    assert.notEqual((await runAsOwnershipPlan(input(f, 'app'), { refuseRoots: refuseRoots(f) })).plan.digest, a.plan.digest, 'a replaced row root (another inode) changes it');
     await assert.rejects(runAsOwnershipPlan({ ...input(f, 'app'), from: APP }, { refuseRoots: refuseRoots(f) }), /from root to an app identity or back/);
     assert.equal(runAsMigrationBlock('org.t.app', {}), null);
     assert.match(runAsMigrationBlock('org.t.app', { runAsMigration: { to: 'app', digest: 'a'.repeat(64), journal: 'j.ndjson', startedAt: 0 } }),
       /did not finish.*not started.*aura admin apps run-as org\.t\.app --recover/);
+  } finally { rmSync(f.d, { recursive: true, force: true }); }
+});
+
+test('the apply (D5): data written after the dry run applies with its digest; a row root chmodded, chowned or replaced by a link refuses before any change', { skip: process.getuid?.() !== 0 && 'needs root' }, async () => {
+  const f = fixture();
+  try {
+    const before = snapshot(f.data);
+    let { plan, apply } = await runAsOwnershipPlan(input(f, 'app'), { refuseRoots: refuseRoots(f) });
+    // A chmod of a row root after the review: refused with its reason, nothing changed, no journal.
+    chmodSync(f.data, 0o777);
+    await assert.rejects(runOwnershipApply(f.d, plan.digest, apply.rows), (err) => err.code === 'changed' && /its mode changed \(0750 → 0777\)/.test(err.message));
+    chmodSync(f.data, 0o750);
+    assert.deepEqual(snapshot(f.data), before, 'nothing changed');
+    // A chown of a row root: refused.
+    chownSync(f.data, SIDECAR, SIDECAR);
+    await assert.rejects(runOwnershipApply(f.d, plan.digest, apply.rows), (err) => err.code === 'changed' && /its owner changed \(0:0 → 999:999\)/.test(err.message));
+    chownSync(f.data, 0, 0);
+    // A row root replaced by a link to elsewhere: refused.
+    renameSync(f.home, `${f.home}.real`);
+    symlinkSync(`${f.home}.real`, f.home);
+    await assert.rejects(runOwnershipApply(f.d, plan.digest, apply.rows), (err) => err.code === 'changed' && /became a symbolic link/.test(err.message));
+    rmSync(f.home);
+    renameSync(`${f.home}.real`, f.home);
+    // Ordinary data written meanwhile: the same digest, and the apply proceeds (the new file too).
+    writeFileSync(join(f.data, 'written-later'), 'later', { mode: 0o600 });
+    const again = await runAsOwnershipPlan(input(f, 'app'), { refuseRoots: refuseRoots(f) });
+    assert.equal(again.plan.digest, plan.digest);
+    ({ plan, apply } = again);
+    const r = await runOwnershipApply(f.d, plan.digest, apply.rows);
+    assert.ok(r.rows.some((x) => x.changed > 0));
+    assert.equal(owner(join(f.data, 'written-later')), '200017:200017');
   } finally { rmSync(f.d, { recursive: true, force: true }); }
 });

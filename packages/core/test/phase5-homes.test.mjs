@@ -9,7 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  chmodSync, chownSync, existsSync, lchownSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync,
+  chmodSync, chownSync, existsSync, lchownSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -26,7 +26,7 @@ import { seedHomeAs } from '../dist/app-manager/homeSeed.js';
 import { appOwnershipSpecs, applyAppOwnership } from '../dist/identity/appOwnership.js';
 import { buildOwnershipReport } from '../dist/identity/ownershipReport.js';
 import {
-  applyOwnershipRows, revertOwnershipJournal, runOwnershipApply, selectApplyRows,
+  applyOwnershipRows, checkApplyRows, revertOwnershipJournal, runOwnershipApply, selectApplyRows,
 } from '../dist/identity/ownershipApply.js';
 import { AppManager } from '../dist/app-manager/AppManager.js';
 
@@ -360,7 +360,8 @@ test('ownership apply: only the approved planned rows, journaled; the journal re
   assert.equal(mode(ws) & 0o2000, 0o2000, 'setgid dir');
   assert.equal(owner(join(ws, 'node_modules/p')), '0:0', 'excluded');
   assert.equal(mode(journal), 0o600);
-  assert.throws(() => applyOwnershipRows(rows, journal), /EEXIST/, 'a journal is never overwritten');
+  assert.throws(() => applyOwnershipRows([], journal), /EEXIST/, 'a journal is never overwritten');
+  assert.throws(() => applyOwnershipRows(rows, journal), /its owner changed \(0:0 → 1000:1000\)/, 'the applied rows no longer hold their approved facts');
   const rev = revertOwnershipJournal(journal);
   assert.equal(rev.skipped.length, 0);
   assert.equal(owner(priv), '0:0');
@@ -374,11 +375,72 @@ test('ownership apply runs in a child process, journaled under the data dir', as
   const priv = join(d, 'aura/home/default');
   mkdirSync(priv, { recursive: true });
   writeFileSync(join(priv, 'f'), 'x');
-  const r = await runOwnershipApply(d, 'a'.repeat(64), [{ path: priv, kind: 'private-home', to: { uid: 1000, gid: 1000 }, recursive: true, mode: '0700' }]);
+  const report = await buildOwnershipReport([
+    { section: 'planned', path: priv, kind: 'private-home', to: { uid: 1000, gid: 1000 }, recursive: true, mode: '0700' },
+  ], { refuseRoots: ['/', d] });
+  const { rows } = selectApplyRows(report, { holds: () => false });
+  // A row without the facts the owner approved never applies (fail closed).
+  await assert.rejects(runOwnershipApply(d, 'a'.repeat(64), rows.map(({ expect: _e, ...r }) => r)), (err) => err.code === 'changed' && /no approved facts/.test(err.message));
+  const r = await runOwnershipApply(d, 'a'.repeat(64), rows);
   assert.match(r.journal, /aura\/state\/ownership-journal\/.*-aaaaaaaaaaaa\.ndjson$/);
   assert.equal(owner(join(priv, 'f')), '1000:1000');
   assert.equal(mode(priv), 0o700);
   await assert.rejects(runOwnershipApply(d, 'nope', []), /invalid digest/);
+});
+
+test('ownership apply (D5): content and byte changes keep the digest and apply; a changed mode, owner, inode, filesystem, link or containment refuses before any change', async () => {
+  const d = tmp();
+  const priv = join(d, 'a', 'home');
+  mkdirSync(join(priv, '.claude'), { recursive: true });
+  chmodSync(priv, 0o755);
+  writeFileSync(join(priv, '.claude', 'x'), 'x');
+  const specs = [{ section: 'planned', path: priv, kind: 'private-home', owner: 'default', to: { uid: 1000, gid: 1000 }, mode: '0700', recursive: true }];
+  const opts = { refuseRoots: ['/', d] };
+  const dry = await buildOwnershipReport(specs, opts);
+  const { rows } = selectApplyRows(dry, { holds: () => false });
+  assert.equal(rows.length, 1);
+  assert.deepEqual(rows[0].expect, { from: dry.planned[0].from, root: dry.planned[0].root });
+  // An app writes ordinary data: same digest, the checks hold.
+  writeFileSync(join(priv, '.claude', 'x'), 'a lot more bytes than before');
+  mkdirSync(join(priv, 'new-dir'));
+  writeFileSync(join(priv, 'new-dir', 'f'), 'f');
+  const later = await buildOwnershipReport(specs, opts);
+  assert.equal(later.digest, dry.digest);
+  assert.notEqual(later.planned[0].entries, dry.planned[0].entries);
+  assert.deepEqual(checkApplyRows(rows), []);
+  const reasons = (fn, undo) => { fn(); try { return checkApplyRows(rows).join('\n'); } finally { undo(); } };
+  // Mode.
+  assert.match(reasons(() => chmodSync(priv, 0o777), () => chmodSync(priv, 0o755)), /its mode changed \(0755 → 0777\)/);
+  // Owner (root only: chown).
+  if (process.getuid?.() === 0) {
+    assert.match(reasons(() => chownSync(priv, 4242, 4242), () => chownSync(priv, dry.planned[0].from.split(':').map(Number)[0], Number(dry.planned[0].from.split(':')[1]))), /its owner changed/);
+  }
+  // Another inode at the same path.
+  assert.match(reasons(() => { renameSync(priv, `${priv}.old`); mkdirSync(priv); chmodSync(priv, 0o755); },
+    () => { rmSync(priv, { recursive: true }); renameSync(`${priv}.old`, priv); }), /replaced or moved to another filesystem/);
+  // A row root replaced by a symbolic link.
+  assert.match(reasons(() => { renameSync(priv, `${priv}.old`); symlinkSync(`${priv}.old`, priv); },
+    () => { rmSync(priv); renameSync(`${priv}.old`, priv); }), /became a symbolic link/);
+  // Containment: the same directory (same inode), now reached through a link in its path.
+  assert.match(reasons(() => { renameSync(join(d, 'a'), join(d, 'b')); symlinkSync(join(d, 'b'), join(d, 'a')); },
+    () => { rmSync(join(d, 'a')); renameSync(join(d, 'b'), join(d, 'a')); }), new RegExp(`now resolves to ${join(d, 'b', 'home')}`));
+  // Another filesystem (device): the approved fsid of another device.
+  const moved = [{ ...rows[0], expect: { ...rows[0].expect, root: { ...rows[0].expect.root, fsid: `9999${rows[0].expect.root.fsid}` } } }];
+  assert.match(checkApplyRows(moved).join(), /replaced or moved to another filesystem/);
+  // Each of those also changes the digest; and a refused apply changed nothing and wrote no journal.
+  chmodSync(priv, 0o777);
+  assert.notEqual((await buildOwnershipReport(specs, opts)).digest, dry.digest);
+  await assert.rejects(runOwnershipApply(d, dry.digest, rows), (err) => err.code === 'changed');
+  assert.equal(mode(priv), 0o777);
+  assert.equal(existsSync(join(d, 'aura', 'state', 'ownership-journal')) ? readdirSync(join(d, 'aura', 'state', 'ownership-journal')).length : 0, 0, 'no journal');
+  chmodSync(priv, 0o755);
+  // Back as approved: the apply proceeds with the old digest, the new data included.
+  if (process.getuid?.() === 0) {
+    const r = await runOwnershipApply(d, dry.digest, rows);
+    assert.equal(r.rows[0].skipped, 0);
+    assert.equal(owner(join(priv, 'new-dir', 'f')), '1000:1000');
+    assert.equal(mode(priv), 0o700);
+  }
 });
 
 // ─── the warm pool ────────────────────────────────────────────────────────
