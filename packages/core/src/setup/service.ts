@@ -156,6 +156,16 @@ export class SetupService implements SetupEngine {
   private readonly blocks = new Map<string, OperationalBlock>();
   /** The gate-validated effective configuration of a ready app (sidecar values). */
   private readonly effective = new Map<string, EffectiveConfig>();
+  /**
+   * Decision 13: the desired records a working (`ready`) app ran with when a
+   * reconfiguration of it began (installationId). Until the run executes
+   * (init), a refusal or a denial puts them back and the app stays `ready`
+   * with its old digests, untouched. In memory only: after a kernel restart a
+   * pending reconfiguration that fails ends in `setup-failed`.
+   */
+  private readonly previous = new Map<string, { desired: DesiredConfig | null; userDesired: DesiredConfig | null }>();
+  /** The maintenance instance whose setup hooks run now (installationId → instanceId): only it reads the pending configuration. */
+  private readonly hookInstances = new Map<string, string>();
   private watcher: BlockingWatcher | null = null;
 
   constructor(private readonly deps: SetupEngineDeps) {
@@ -271,7 +281,19 @@ export class SetupService implements SetupEngine {
     if (first.requested.homeEnvironment !== 'private') return first;
     // D107-a: the Private Home is authorized against the requested configuration (the profile's
     // sidecar networks and homes), not the base manifest; the second pass is the answer.
-    return resolveEffective(input, await this.deps.resolverPorts({ ...q, homeView: effectiveManifestView(ctx.m, first.requested) }));
+    const homeView = effectiveManifestView(ctx.m, first.requested);
+    const r = resolveEffective(input, await this.deps.resolverPorts({ ...q, homeView }));
+    // A Private Home no approval can authorize (a shared listener, the runtime, a root installation) is
+    // refused as such, never asked for (P9's reason; the resolver's port only says "not authorized").
+    const decide = this.deps.home?.homePrivateDecision;
+    if (!decide) return r;
+    const hq = { appId: ctx.appId, installationId: ctx.installationId, userId: ctx.userId, manifest: homeView };
+    const unsupported: SetupErrorBody[] = [];
+    for (const sidecar of [undefined, ...r.requested.ownerEnvironmentSidecars]) {
+      const d = await decide(sidecar ? { ...hq, sidecar } : hq).catch(() => null);
+      if (d && !d.ok && d.error.error === 'requirement-unsupported' && !unsupported.some((u) => u.message === d.error.message)) unsupported.push(d.error);
+    }
+    return unsupported.length ? { ...r, effective: null, blocking: [...r.blocking, ...unsupported] } : r;
   }
 
   /** The approval record of the run in `initializing` (kept on the summary), when still readable. */
@@ -447,6 +469,13 @@ export class SetupService implements SetupEngine {
       return { status: 'unchanged', state: this.viewOf(ctx, dry) };
     }
 
+    // Decision 13: a working app's configuration is kept until the new one executes.
+    if (ctx.state === 'ready' && ctx.summary?.configDigest) {
+      this.previous.set(ctx.installationId, { desired: ctx.desired.value, userDesired: ctx.userDesired.value });
+    } else if (ctx.state !== 'configuring' && ctx.state !== 'awaiting-approval') {
+      this.previous.delete(ctx.installationId);
+    }
+
     // 2. configuring: step and desired record before acting (§3.3).
     let summary = await this.deps.states.begin(ctx.installationId, ctx.m);
     let cur = this.withSummary(ctx, summary);
@@ -512,7 +541,13 @@ export class SetupService implements SetupEngine {
   }
 
   private async failRun(ctx: Ctx, s: InstallationSetupSummary, error: SetupErrorBody, r?: Resolution): Promise<SetupOutcome> {
+    // Decision 13: before execution, a reconfiguration of a working app that fails leaves it working.
+    if ((s.state === 'configuring' || s.state === 'awaiting-approval') && this.previous.has(ctx.installationId)) {
+      const kept = await this.keepPrevious(ctx, s, error);
+      if (kept) return kept;
+    }
     const body: SetupErrorBody = { ...error, state: 'setup-failed' };
+    this.effective.delete(ctx.appId);
     let summary = s;
     if (s.state !== 'setup-failed') {
       summary = await this.deps.states.transition(ctx.installationId, s, 'setup-failed', { error: body, approvalId: null });
@@ -520,6 +555,47 @@ export class SetupService implements SetupEngine {
     }
     this.consumed.delete(ctx.installationId);
     return this.refused(this.withSummary(ctx, summary), body, r);
+  }
+
+  /**
+   * Decision 13: a reconfiguration refused or denied before it executed. The
+   * desired records the app ran with are written back and, when they still
+   * resolve to exactly the digests it was `ready` with (current grants,
+   * policy, features), the app is `ready` again: never stopped, nothing asked
+   * again. `ready` is entered through `markReady` (initializing → ready: no
+   * other transition leads there; the configuration was initialized when it
+   * first became ready, so no hook runs). Null when it can't be kept.
+   */
+  private async keepPrevious(ctx: Ctx, s: InstallationSetupSummary, error: SetupErrorBody): Promise<SetupOutcome | null> {
+    const prev = this.previous.get(ctx.installationId);
+    this.previous.delete(ctx.installationId);
+    this.consumed.delete(ctx.installationId);
+    if (!prev?.desired || !s.configDigest || !s.grantDigest) return null;
+    try {
+      const w = await this.deps.store.update({ installationId: ctx.installationId }, () => prev.desired!);
+      if (!w.ok) return null;
+      const userRef = { installationId: ctx.installationId, userId: ctx.userId };
+      const curUser = await this.deps.states.desired(userRef);
+      if (prev.userDesired || curUser.value) {
+        const u = prev.userDesired ?? { ...emptyDesired(prev.desired.setupVersion), updatedAt: this.now().toISOString(), updatedBy: 'kernel' };
+        const uw = await this.deps.store.update(userRef, () => ({ ...u, profile: null, overrides: {} }));
+        if (!uw.ok) return null;
+      }
+      const now = await this.ctx(ctx.appId);
+      if (now.summary?.updatedAt !== s.updatedAt) return null;
+      const r = await this.resolveCurrent(now, now.desired.value, now.userDesired.value);
+      if (!r.effective || r.configDigest !== s.configDigest || r.grantDigest !== s.grantDigest) return null;
+      const transit = await this.deps.states.transition(ctx.installationId, s, 'initializing', { step: 'done', approvalId: null });
+      const ready = await this.deps.states.markReady(ctx.installationId, transit, { configDigest: r.configDigest, grantDigest: r.grantDigest, profile: r.profile });
+      this.effective.set(ctx.appId, r.effective);
+      this.blocks.delete(ctx.appId);
+      this.emit(ctx, s.state, ready);
+      const body: SetupErrorBody = { ...error, state: 'ready', hint: `${ctx.appId} keeps its previous configuration; nothing was changed` };
+      return this.refused(this.withSummary(now, ready), body, r);
+    } catch (err) {
+      console.warn(`[setup] keeping the previous configuration of ${ctx.appId} failed: ${(err as Error).message}`);
+      return null;
+    }
   }
 
   // ── approval ──────────────────────────────────────────────────────────────
@@ -539,7 +615,9 @@ export class SetupService implements SetupEngine {
     if (!created.ok) {
       const why = created.reason === 'too-many-pending' ? 'you already have an open approval request from here; answer it first'
         : created.reason === 'blocked' ? 'requests from here are blocked' : created.reason === 'rate-limited' ? 'too many requests; try again in a minute' : created.reason;
-      return this.refused(this.withSummary(ctx, summary), setupError('setup-blocked', `the approval for ${ctx.appId} could not be requested: ${why}`, { state: summary.state, target: ctx.appId }), r);
+      const body = setupError('setup-blocked', `the approval for ${ctx.appId} could not be requested: ${why}`, { state: summary.state, target: ctx.appId });
+      const kept = this.previous.has(ctx.installationId) ? await this.keepPrevious(ctx, summary, body) : null;
+      return kept ?? this.refused(this.withSummary(ctx, summary), body, r);
     }
     const prev = summary.state;
     summary = await this.deps.states.transition(ctx.installationId, summary, 'awaiting-approval', { step: 'approval', approvalId: created.record.id });
@@ -645,6 +723,13 @@ export class SetupService implements SetupEngine {
   // ── init and readiness ────────────────────────────────────────────────────
 
   private async initialize(ctx: Ctx, s: InstallationSetupSummary, r: Resolution, reason: SetupReason, approvalId?: string): Promise<SetupOutcome> {
+    // Execution starts (decision 13): the previous configuration is no longer kept, and an app that ran
+    // with one stops, so its hooks never run beside it and a failure leaves it stopped in `setup-failed`.
+    this.previous.delete(ctx.installationId);
+    if (s.configDigest) {
+      this.effective.delete(ctx.appId);
+      await this.deps.stopWorkloads(ctx.appId).catch((err) => console.warn(`[setup] stopping ${ctx.appId} failed: ${(err as Error).message}`));
+    }
     const prev = s.state;
     const summary = await this.deps.states.transition(ctx.installationId, s, 'initializing', { step: 'init', attempt: 1, ...(approvalId ? { approvalId } : { approvalId: null }) });
     this.emit(ctx, prev, summary);
@@ -665,6 +750,7 @@ export class SetupService implements SetupEngine {
     try {
       await runSetupHooks({
         appId: ctx.appId, manifest: ctx.m, userId: ctx.userId, starter: this.deps.maintenance(),
+        onSession: (id) => { if (id) this.hookInstances.set(ctx.installationId, id); else this.hookInstances.delete(ctx.installationId); },
         hook: { configDigest: effective.configDigest, previousDigest: summary.configDigest, attempt: summary.attempt, reason },
       });
     } catch (err) {
@@ -736,6 +822,9 @@ export class SetupService implements SetupEngine {
         by: { kind: 'system' }, action: SETUP_AUDIT_ACTIONS.blocked, target: `app:${ctx.appId}`, outcome: 'ok',
         detail: { installation: ctx.installationId, code: d.error.error, missing: d.error.missing ?? [] },
       });
+    } else if (d.kind === 'none' && ctx.state === 'ready' && r.effective && r.configDigest === ctx.summary.configDigest && r.grantDigest === ctx.summary.grantDigest) {
+      // A ready app (also after a kernel restart): its validated configuration is what its authorization reads.
+      this.effective.set(ctx.appId, r.effective);
     } else if (d.kind === 'unblock') {
       const s = await this.deps.states.markReady(ctx.installationId, ctx.summary, { configDigest: r.configDigest, grantDigest: r.grantDigest, profile: r.profile });
       this.effective.set(ctx.appId, r.effective!);
@@ -783,7 +872,9 @@ export class SetupService implements SetupEngine {
   async selfConfig(instance: { appId: string; instanceId: string; userId?: string }): Promise<SetupConfigView> {
     const ctx = await this.ctx(instance.appId);
     if (!ctx.declares) throw fail('setup-required', `${instance.appId} declares no setup`, { target: instance.appId, state: 'ready' });
-    const gate = await this.check(instance.appId, ctx.m, { installationId: ctx.installationId });
+    // The app's own maintenance instance, while its setup hooks run: the configuration this run initializes.
+    const hooks = ctx.state === 'initializing' && this.hookInstances.get(ctx.installationId) === instance.instanceId;
+    const gate = await this.check(instance.appId, ctx.m, { installationId: ctx.installationId, ...(hooks ? { maintenance: 'setup' as const } : {}) });
     if (!gate.ok) {
       const b = gate.block;
       throw new SetupEngineError(setupError(b.error as SetupErrorCode, b.message, { hint: b.hint, state: b.details.state, target: instance.appId }));
@@ -795,8 +886,8 @@ export class SetupService implements SetupEngine {
 
   async check(appId: string, manifest: SetupAppManifest, opts: { installationId: string; maintenance?: MaintenanceReason }): Promise<SetupGateDecision> {
     if (!declaresSetup(manifest)) return { ok: true, effective: null };
-    const decide = (d: SetupGateDecision): SetupGateDecision => {
-      if (d.ok) this.blocks.delete(appId); else { this.blocks.set(appId, d.block); this.effective.delete(appId); }
+    const decide = (d: SetupGateDecision, keepRunning = false): SetupGateDecision => {
+      if (d.ok) this.blocks.delete(appId); else { this.blocks.set(appId, d.block); if (!keepRunning) this.effective.delete(appId); }
       return d;
     };
     let ctx: Ctx;
@@ -823,7 +914,10 @@ export class SetupService implements SetupEngine {
             : ctx.state === 'setup-failed' ? `${name}'s setup failed${why}`
               : ctx.state === 'initializing' ? `${name} is initializing its setup`
                 : `${name} is not set up yet: complete its setup first`;
-      return decide({ ok: false, block: setupGateBlock(appId, code, ctx.state, message, `open it on the desktop, or run aura app setup ${appId}${ctx.state === 'setup-required' ? '' : ' --resume'}`) });
+      // Decision 13: while a reconfiguration waits (not executed), the running app keeps its validated configuration.
+      const keepRunning = (ctx.state === 'configuring' || ctx.state === 'awaiting-approval')
+        && this.previous.has(ctx.installationId) && this.effective.get(appId)?.configDigest === ctx.summary?.configDigest;
+      return decide({ ok: false, block: setupGateBlock(appId, code, ctx.state, message, `open it on the desktop, or run aura app setup ${appId}${ctx.state === 'setup-required' ? '' : ' --resume'}`) }, keepRunning);
     }
     const r = await this.resolveCurrent(ctx, ctx.desired.value, ctx.userDesired.value);
     if (!r.effective) {
@@ -848,6 +942,10 @@ export class SetupService implements SetupEngine {
     if (!declaresSetup(base)) return base;
     const e = effective ?? this.effective.get(appId);
     return e ? effectiveManifestView(base, e) : base;
+  }
+
+  effectiveHome(appId: string): 'app' | 'private' | null {
+    return this.effective.get(appId)?.homeEnvironment ?? null;
   }
 
   knownBlock(appId: string): OperationalBlock | null {
@@ -883,11 +981,17 @@ export class SetupService implements SetupEngine {
     return this.deps.appIds().filter((id) => { const m = this.deps.manifest(id); return !!m && declaresSetup(m); });
   }
 
-  /** Kernel restart: an `initializing` run without its live maintenance start is retried (idempotent) or failed after MAX_INIT_ATTEMPTS. */
+  /**
+   * Kernel restart: an `initializing` run without its live maintenance start is retried (idempotent) or
+   * failed after MAX_INIT_ATTEMPTS; a ready or blocked app is re-checked (blocking.ts).
+   */
   async recover(): Promise<void> {
     for (const appId of this.declaringApps()) {
       try {
         const ctx = await this.ctx(appId);
+        // A ready app gets its validated configuration back (its running instances' authorization reads it);
+        // a blocked one stays blocked until it is re-authorized.
+        if (ctx.state === 'ready' || ctx.state === 'blocked') { await this.recheck(appId); continue; }
         if (ctx.state !== 'initializing') continue;
         await this.serial(ctx.installationId, async () => this.resumeLocked(await this.ctx(appId), null));
       } catch (err) {

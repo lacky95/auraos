@@ -32,3 +32,4 @@ The sector rules are in `packages/core/AGENTS.md`. Design: D108 (`app-profiles-s
 - **Secrets only as vault handles:** never in a record, digest, log, error body or CLI output. A sidecar spec and its hash carry a secret by reference (`secretEnv`), the value only reaches the container env.
 - `ready` is written only by the engine, by CAS with the validated `configDigest`.
 - **The gate** (`spawnContext`, `startIntent`, supervisor skip): `ready` and equal digests, else 409 `needs-setup`; only the engine's maintenance start passes while `initializing`; simple apps never reach it. Only the engine emits `app:setup-state`.
+- **Decision 13:** refused or denied before init: still `ready`, running; from init on: stopped, a failure is `setup-failed`.

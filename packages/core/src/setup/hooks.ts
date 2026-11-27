@@ -85,6 +85,8 @@ export interface RunSetupHooksInput {
   userId: string;
   hook: SetupHookInput;
   starter: MaintenanceStarter | null;
+  /** The maintenance instance while its hooks run (`null` once it finished): the engine lets it read its pending configuration. */
+  onSession?(instanceId: string | null): void;
 }
 
 /**
@@ -109,6 +111,7 @@ export async function runSetupHooks(i: RunSetupHooksInput): Promise<{ validate: 
     throw failed(label, `the maintenance start of ${label} was refused: ${appWords(started.error.message)}`, started.error.hint ? { hint: started.error.hint } : {});
   }
   const session: MaintenanceSession = started.session;
+  i.onSession?.(session.instanceId);
   try {
     if (i.manifest.setup?.init?.hook === true) {
       let answer: unknown;
@@ -143,6 +146,7 @@ export async function runSetupHooks(i: RunSetupHooksInput): Promise<{ validate: 
     }
     return { validate };
   } finally {
+    i.onSession?.(null);
     await session.finish('stop').catch(() => undefined);
   }
 }

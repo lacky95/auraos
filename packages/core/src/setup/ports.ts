@@ -27,7 +27,7 @@ import type { OperationalBlock } from '../contract/types.js';
 import type { SetupConfigStore } from './store.js';
 import type { SetupStateMachine } from './state.js';
 import type {
-  EffectiveConfig, ResolverPorts, SetupActor, SetupApplyPayload, SetupManifestView, SetupServiceContract, SetupStateEvent,
+  EffectiveConfig, ResolverPorts, SetupActor, SetupApplyPayload, SetupErrorBody, SetupManifestView, SetupServiceContract, SetupStateEvent,
 } from './contracts.js';
 
 /** What of a parsed manifest the engine reads (structural; `AppManifest` satisfies it). */
@@ -68,6 +68,12 @@ export interface ResolverPortsQuery {
 export interface HomeEnvironmentPort {
   /** Does `home.private` (or `home.private.sidecar:<sidecar>`) count for this installation and user? */
   homePrivateAuthorized(q: { appId: string; installationId: string; userId: string; sidecar?: string; manifest?: SetupAppManifest }): Promise<boolean>;
+  /**
+   * The same decision with its D105 body (P9 `homePrivateAuthorized`): the engine refuses a proposal whose
+   * Private Home can't be authorized by any approval (a shared listener, the runtime, a root installation)
+   * before asking for one. Absent: only the boolean counts.
+   */
+  homePrivateDecision?(q: { appId: string; installationId: string; userId: string; sidecar?: string; manifest?: SetupAppManifest }): Promise<{ ok: true } | { ok: false; error: SetupErrorBody }>;
   /** An approved `app.setup.apply` with `adds.homePrivate` / `homePrivateSidecars`: record the grants. */
   grantHomePrivate(g: {
     appId: string; installationId: string; userId: string; homePrivate: boolean; sidecars: readonly string[];
@@ -153,6 +159,11 @@ export interface SetupGate {
    * readiness, home, env) reach the spawn only through it.
    */
   manifestView<M extends SetupAppManifest>(appId: string, base: M, effective?: EffectiveConfig | null): M;
+  /**
+   * The home environment of the app's gate-validated effective configuration (null: none known yet).
+   * The warm pool reads it: a `private` app is never warmed (a pool member is for nobody).
+   */
+  effectiveHome?(appId: string): 'app' | 'private' | null;
   /** The sidecar env resolver of a ready app's gate-validated effective configuration (P4), or null. */
   sidecarValues(appId: string): Promise<SidecarSetupValues | null>;
   /** Recovery after a kernel restart (initializing runs) and the blocking subscriptions. Idempotent. */
