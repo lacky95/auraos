@@ -19,8 +19,7 @@ export function runtimeCaps(instanceId: string, mgr: Mgr = core.getAppManager())
 /**
  * Null when the instance's runtime can do what `needs` asks (or the instance
  * has no runtime yet: the operation itself reports that), else the 409
- * `capability-missing` refusal: `error` (the message, as every route
- * answers), `code`, `category`, `runtime` and `missing`. Never a fallback.
+ * `capability-missing` refusal (`refusalResponse`). Never a fallback.
  */
 export function capabilityRefusal(instanceId: string, needs: Partial<RuntimeCapabilities>, what: string, mgr: Mgr = core.getAppManager()): Response | null {
   const caps = runtimeCaps(instanceId, mgr);
@@ -30,12 +29,26 @@ export function capabilityRefusal(instanceId: string, needs: Partial<RuntimeCapa
   const runtime = mgr.getInstance(instanceId)?.sandbox ?? 'unknown';
   const err = new core.RuntimeCapabilityError(runtime, missing,
     `${instanceId} runs on runtime '${runtime}', which can't do ${what} (missing: ${missing.join(', ')})`);
-  return refusalResponse(err)!;
+  return refusalResponse(err, mgr.getInstance(instanceId)?.appId)!;
 }
 
-/** A runtime refusal as the 409 answer (`error` is the message); null for anything else. */
-export function refusalResponse(err: unknown): Response | null {
+/**
+ * A runtime refusal as the 409 answer in the SDK's error convention
+ * (error-messages-review.md §4): `error` is the code (what `OsError.code`
+ * reads), `message` the sentence, plus `category` (D100 §17), `runtime`,
+ * `missing`, `suggest`, and for a missing capability with a runtime that has
+ * it, the owner's `hint` (the move, never a weaker mount). Null for anything
+ * else.
+ */
+export function refusalResponse(err: unknown, appId?: string): Response | null {
   const r = core.runtimeRefusal(err);
   if (!r) return null;
-  return jsonResponse({ error: r.message, code: r.code, category: r.category, ...(r.runtime ? { runtime: r.runtime } : {}), ...(r.missing ? { missing: r.missing } : {}) }, 409);
+  const hint = r.code === 'capability-missing' && r.suggest?.length
+    ? `the owner can move ${appId ?? 'the app'} to a runtime that has it: aura runtime set ${appId ?? '<app>'} ${r.suggest[0]} (or Settings → Runtimes)`
+    : undefined;
+  return jsonResponse({
+    error: r.code, message: r.message, category: r.category,
+    ...(r.runtime ? { runtime: r.runtime } : {}), ...(r.missing ? { missing: r.missing } : {}),
+    ...(r.suggest ? { suggest: r.suggest } : {}), ...(hint ? { hint } : {}),
+  }, 409);
 }

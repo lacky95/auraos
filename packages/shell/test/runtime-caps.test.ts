@@ -38,10 +38,10 @@ test('5b G: gates read capabilities, not ids: a renamed runtime with mounts pass
     const r = capabilityRefusal(id, core.requestNeeds('mount'), 'cross-app mounts', m)!;
     assert.equal(r.status, 409);
     const body = await r.json() as Record<string, unknown>;
-    assert.equal(body['code'], 'capability-missing');
+    assert.equal(body['error'], 'capability-missing');
     assert.equal(body['category'], 'unsupported-feature');
     assert.deepEqual(body['missing'], ['mounts']);
-    assert.match(String(body['error']), /can't do cross-app mounts \(missing: mounts\)/);
+    assert.match(String(body['message']), /can't do cross-app mounts \(missing: mounts\)/);
   }
   assert.ok(capabilityRefusal('c-1', core.requestNeeds('port-expose'), "'into' exposing", m));
   assert.ok(capabilityRefusal('c-1', core.requestNeeds('sidecars'), 'OS sidecars', m));
@@ -50,11 +50,15 @@ test('5b G: gates read capabilities, not ids: a renamed runtime with mounts pass
   assert.equal(runtimeCaps('nope', mgr({})), null);
 });
 
-test('5b G: refusalResponse maps a runtime refusal (D80 idmappedMounts) to 409 and leaves other errors alone', async () => {
+test('5b G: refusalResponse maps a runtime refusal (D80 idmappedMounts) to 409 {error: code, message} and leaves other errors alone', async () => {
   const r = refusalResponse(new core.RuntimeCapabilityError('container', ['idmappedMounts'], 'refusing a writable mount: no idmapped mounts'))!;
   assert.equal(r.status, 409);
-  assert.deepEqual(await r.json(), { error: 'refusing a writable mount: no idmapped mounts', code: 'capability-missing', category: 'unsupported-feature', runtime: 'container', missing: ['idmappedMounts'] });
+  // The SDK convention: `error` is the code, `message` the sentence (error-messages-review.md §4).
+  assert.deepEqual(await r.json(), { error: 'capability-missing', message: 'refusing a writable mount: no idmapped mounts', category: 'unsupported-feature', runtime: 'container', missing: ['idmappedMounts'] });
   assert.equal(refusalResponse(new Error('already mounted')), null);
+  // With a runtime that has it: the owner's move as the hint.
+  const moved = await refusalResponse(new core.RuntimeCapabilityError('proot', ['mounts'], 'no mounts', ['container']), 'io.t.app')!.json();
+  assert.deepEqual([moved.error, moved.suggest, moved.hint], ['capability-missing', ['container'], 'the owner can move io.t.app to a runtime that has it: aura runtime set io.t.app container (or Settings → Runtimes)']);
 });
 
 test('5b G: effective capabilities narrow a root instance (J.5) and never widen', () => {
