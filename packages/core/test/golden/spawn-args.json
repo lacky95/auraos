@@ -88,7 +88,7 @@
       "aura-base",
       "bash",
       "-c",
-      "<sha256:c205308b50951779a3074dacf07d66d6de6eaecaf4ef15d7e6bbbccb18bcb58d>"
+      "<sha256:329673c447090dbeb3c1cc94975fd9eac309d4668c026cf11d8cb85127210fd8>"
     ],
     "proot": {
       "command": "setpriv",
@@ -125,7 +125,7 @@
       "entrypointArgv": [
         "bash",
         "-c",
-        "<sha256:c205308b50951779a3074dacf07d66d6de6eaecaf4ef15d7e6bbbccb18bcb58d>"
+        "<sha256:329673c447090dbeb3c1cc94975fd9eac309d4668c026cf11d8cb85127210fd8>"
       ],
       "env": {
         "APP_ID": "org.golden.system",
@@ -589,7 +589,7 @@
       "--tmpfs",
       "/run/aura-term:rw,nosuid,nodev,noexec,mode=0700,uid=0,gid=0",
       "-e",
-      "AURA_SERVER_SEALED=1",
+      "AURA_SESSION_HOST=1",
       "--mount",
       "type=volume,source=golden_app-data,target=/run/aura-secret,volume-subpath=aura/runtime/com.aura.terminal-1/secret",
       "-e",
@@ -597,7 +597,7 @@
       "aura-base",
       "bash",
       "-c",
-      "<sha256:c205308b50951779a3074dacf07d66d6de6eaecaf4ef15d7e6bbbccb18bcb58d>"
+      "<sha256:329673c447090dbeb3c1cc94975fd9eac309d4668c026cf11d8cb85127210fd8>"
     ],
     "proot": {
       "command": "setpriv",
@@ -634,7 +634,7 @@
       "entrypointArgv": [
         "bash",
         "-c",
-        "<sha256:c205308b50951779a3074dacf07d66d6de6eaecaf4ef15d7e6bbbccb18bcb58d>"
+        "<sha256:329673c447090dbeb3c1cc94975fd9eac309d4668c026cf11d8cb85127210fd8>"
       ],
       "env": {
         "APP_ID": "com.aura.terminal",
@@ -758,9 +758,13 @@
       "-e",
       "AURA_SHELL_PEERS=golden-shell.aura-term-default",
       "--user",
-      "1000:1000",
+      "0:0",
       "--cap-drop",
       "ALL",
+      "--cap-add",
+      "SETUID",
+      "--cap-add",
+      "SETGID",
       "--security-opt",
       "no-new-privileges",
       "--mount",
@@ -773,18 +777,37 @@
       "ASTRO_TELEMETRY_DISABLED=1",
       "-e",
       "AURA_SESSION_USER=default",
-      "--tmpfs",
-      "/run/aura-term:rw,nosuid,nodev,noexec,mode=0700,uid=1000,gid=1000",
       "-e",
-      "AURA_SERVER_SEALED=1",
+      "AURA_SESSION_UID=1000",
+      "--label",
+      "aura.session-identity=1000:1000",
+      "--tmpfs",
+      "/run/aura-term/1000:rw,nosuid,nodev,noexec,mode=0700,uid=1000,gid=1000",
+      "--tmpfs",
+      "/run/aura-term-server:rw,nosuid,nodev,noexec,mode=0711,uid=990,gid=990",
+      "-e",
+      "AURA_SESSION_HOST=1",
+      "-e",
+      "AURA_TERM_TMUX_BIN=/usr/local/libexec/aura-term-tmux",
+      "-e",
+      "AURA_TERM_LAUNCH=/usr/local/libexec/aura-term-launch",
+      "-e",
+      "AURA_TERM_TAP_DIR=/run/aura-term-server/tap",
       "--mount",
       "type=volume,source=golden_app-data,target=/run/aura-secret,volume-subpath=aura/runtime/com.aura.terminal-1/secret",
       "-e",
       "AURA_LIFECYCLE_TOKEN_FILE=/run/aura-secret/lifecycle-token",
       "aura-base",
+      "/usr/local/libexec/aura-term-launch",
+      "serve",
+      "--service",
+      "990:990",
+      "--user",
+      "1000:1000",
+      "--",
       "bash",
       "-c",
-      "<sha256:c205308b50951779a3074dacf07d66d6de6eaecaf4ef15d7e6bbbccb18bcb58d>"
+      "<sha256:329673c447090dbeb3c1cc94975fd9eac309d4668c026cf11d8cb85127210fd8>"
     ],
     "proot": {
       "refused": "com.aura.terminal: PRoot runs an app only under its own app identity (a root process in the master reaches every home, /workspace and the secrets), and this installation runs as uid 1000: not started. Run it as its app identity (`aura admin apps run-as com.aura.terminal app`) or on the container runtime."
@@ -898,7 +921,7 @@
       "aura-base",
       "bash",
       "-c",
-      "<sha256:c205308b50951779a3074dacf07d66d6de6eaecaf4ef15d7e6bbbccb18bcb58d>"
+      "<sha256:329673c447090dbeb3c1cc94975fd9eac309d4668c026cf11d8cb85127210fd8>"
     ],
     "proot": {
       "command": "setpriv",
@@ -935,7 +958,7 @@
       "entrypointArgv": [
         "bash",
         "-c",
-        "<sha256:c205308b50951779a3074dacf07d66d6de6eaecaf4ef15d7e6bbbccb18bcb58d>"
+        "<sha256:329673c447090dbeb3c1cc94975fd9eac309d4668c026cf11d8cb85127210fd8>"
       ],
       "env": {
         "APP_ID": "org.golden.appid",
@@ -1062,7 +1085,7 @@
       "aura-base",
       "bash",
       "-c",
-      "<sha256:c205308b50951779a3074dacf07d66d6de6eaecaf4ef15d7e6bbbccb18bcb58d>"
+      "<sha256:329673c447090dbeb3c1cc94975fd9eac309d4668c026cf11d8cb85127210fd8>"
     ],
     "proot": {
       "refused": "org.golden.rootreq: PRoot runs an app only under its own app identity (a root process in the master reaches every home, /workspace and the secrets), and this installation runs as root: not started. Run it as its app identity (`aura admin apps run-as org.golden.rootreq app`) or on the container runtime."
@@ -1160,7 +1183,7 @@
       "aura-base",
       "bash",
       "-c",
-      "<sha256:c205308b50951779a3074dacf07d66d6de6eaecaf4ef15d7e6bbbccb18bcb58d>"
+      "<sha256:329673c447090dbeb3c1cc94975fd9eac309d4668c026cf11d8cb85127210fd8>"
     ],
     "proot": {
       "command": "setpriv",
@@ -1197,7 +1220,7 @@
       "entrypointArgv": [
         "bash",
         "-c",
-        "<sha256:c205308b50951779a3074dacf07d66d6de6eaecaf4ef15d7e6bbbccb18bcb58d>"
+        "<sha256:329673c447090dbeb3c1cc94975fd9eac309d4668c026cf11d8cb85127210fd8>"
       ],
       "env": {
         "APP_ID": "org.golden.docker",

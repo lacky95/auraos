@@ -26,6 +26,13 @@
 // gets AURA_SERVER_SEALED (production build only, execute-only node) and its
 // lifecycle token as a one-time file, never `-e AURA_LIFECYCLE_TOKEN`; the
 // synthesised start script (every fixture's digest) carries the sealed branch.
+// Stream T2 (owner decision 2026-11-27): no execute-only node. A session host
+// with a session identity runs as --user 0:0 with only SETUID/SETGID (its
+// session launcher `aura-term-launch serve` is the command, the server runs as
+// the Terminal service uid, the sessions as the user), carries
+// AURA_SESSION_HOST/AURA_SESSION_UID, the session-identity label, the user's
+// tmux tmpfs at /run/aura-term/<uid> and the server's /run/aura-term-server;
+// the start script's session-host branch replaces the sealed one (digests).
 // Stream C (owner-approved difference, Q7): no `/run/context` mount or bind;
 // the context env is what the kernel resolved for the start (`ctx.contextEnv`:
 // declared AND granted keys), which the runners pass through unchanged.

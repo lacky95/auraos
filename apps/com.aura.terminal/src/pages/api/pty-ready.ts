@@ -1,6 +1,6 @@
 import type { APIRoute } from 'astro';
 import { getPtyWss } from '../../pty-server';
-import { refreshHookScript } from '../../agent-hooks';
+import { userFiles } from '../../user-files';
 
 /**
  * GET /api/pty-ready — the production server's way into the bundle.
@@ -15,8 +15,10 @@ import { refreshHookScript } from '../../agent-hooks';
 export const GET: APIRoute = () => {
   getPtyWss();
   // Once at boot: an older hook script in the shared home is brought up to date (D89).
-  try { if (refreshHookScript()) console.log('[terminal] agent hook script updated'); } catch (err) {
-    console.warn('[terminal] agent hook script refresh failed:', (err as Error).message);
-  }
+  // As the session user (user-files.ts, stream T2); in the background, never holding up the PTY.
+  userFiles<boolean>('hooks-refresh').then(
+    (done) => { if (done) console.log('[terminal] agent hook script updated'); },
+    (err: unknown) => console.warn('[terminal] agent hook script refresh failed:', (err as Error).message),
+  );
   return new Response(JSON.stringify({ ok: true }), { headers: { 'Content-Type': 'application/json' } });
 };

@@ -37,7 +37,7 @@ export interface ContainerInspect {
   /** The full container id. */
   Id?: string;
   State?: { Running?: boolean; Paused?: boolean; Pid?: number };
-  Config?: { Tty?: boolean; Env?: string[] };
+  Config?: { Tty?: boolean; Env?: string[]; Labels?: Record<string, string> };
 }
 
 export interface LogsQuery {

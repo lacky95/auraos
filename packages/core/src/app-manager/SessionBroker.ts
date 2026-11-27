@@ -68,6 +68,8 @@ export interface SessionTarget {
   containerId: string;
   /** The container's init in the host's PID namespace. */
   pid: number;
+  /** A System Terminal's own user uid (stream T2): its init is its root session launcher; only that user's session may enter it. */
+  sessionHostUid?: number;
 }
 
 /** `docker run` of the broker (golden-tested; nothing here comes from a request). */
@@ -103,6 +105,7 @@ export function enterSpec(spec: SessionSpec, target: SessionTarget, paths: { doc
     sid: spec.sessionId,
     container: target.containerId,
     pid: target.pid,
+    ...(target.sessionHostUid ? { sessionHostUid: target.sessionHostUid } : {}),
     kind: spec.kind,
     home: spec.home.mode,
     ...(spec.home.mode === 'private' ? { homePath: spec.home.hostPath } : {}),

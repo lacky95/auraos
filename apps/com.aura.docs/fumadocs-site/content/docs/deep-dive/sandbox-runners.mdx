@@ -213,10 +213,22 @@ start in it work as before.
 Every Terminal instance belongs to one user from its spawn on, and is that
 user's session host:
 
-- **It runs as the user's uid/gid** (the owner 1000, members from 100000),
-  with `--cap-drop ALL` and `no-new-privileges`. Its generated `/etc/passwd`
-  names the user (`pw_dir=/home/aura`), so `id`, git and ssh agree. Root comes
-  only from a root tab (`aura root`).
+- **Its sessions run as the user's uid/gid** (the owner 1000, members from
+  100000), with no capability and `no-new-privileges`. Its generated
+  `/etc/passwd` names the user (`pw_dir=/home/aura`), so `id`, git and ssh
+  agree. Root comes only from a root tab (`aura root`).
+- **Its server runs as its own service uid** (`aura-terminal`, 990: a fixed,
+  non-login OS service account outside every user, app and principal range),
+  never as the user. The server holds the instance's lifecycle token, the
+  shell's relay key and the session hook key; the sessions run under another
+  uid, so they can't read its `/proc/<pid>` (environment, descriptors, maps,
+  memory), attach a debugger to it or signal it. The container starts as uid 0
+  with only `SETUID` and `SETGID` for its session launcher
+  (`aura-term-launch`, aura-base), which starts the server as the service uid
+  and runs every session command (tmux, the shells, the user-file helper for
+  agent hooks and quick commands) as the user, for the server only (its peer
+  uid is checked); nothing else runs as root. A `docker exec` into it runs as
+  the user.
 - **It mounts only that user's Private Home** at `/home/aura` (the Home
   Resolver's `terminal-session` context). The Terminal service never holds
   another user's home.
@@ -225,7 +237,9 @@ user's session host:
   server's own (`AURA_LIFECYCLE_TOKEN`, listen settings, `NODE_ENV`), with
   `HOME=/home/aura`.
 - **tmux listens on an explicit socket per uid**,
-  `/run/aura-term/<uid>/tmux.sock`, in a tmpfs owned by that uid (0700).
+  `/run/aura-term/<uid>/tmux.sock`, in a tmpfs owned by that uid (0700). The
+  tmux server and every tmux client run as the user; the server never talks to
+  tmux as itself.
 - **Each session has its own agent-hook token** (`AURA_TERM_HOOK_TOKEN`, in
   that session's env only). The hook script sends it; the Terminal refuses an
   agent event without it.
@@ -245,12 +259,11 @@ user's session host:
   start. The build output stays root's and read-only for the session users.
   The owner develops the Terminal in a Preview (its own instance, workspace
   and caches), which never touches other users' sessions.
-- **Its server is sealed from its own sessions:** it runs from an
-  execute-only `node-sealed` (aura-base), so the kernel makes it non-dumpable
-  and the sessions (same uid) can't read its `/proc/<pid>` (environ, memory,
-  descriptors) or ptrace it. Its lifecycle token is never in its environment:
-  the runtime hands it over as a one-time file that the server reads and
-  removes at start.
+- **Its lifecycle token is never in its environment:** the runtime hands it
+  over as a one-time file of the service uid (0400 in a 0700 directory) that
+  the server reads and removes at start; the user can't read it at any time.
+  The instance's data directory (scrollback, saved directories) is the
+  service uid's, with the user's group.
 - **Before the ownership apply** (`aura admin homes ownership --apply`), the
   owner's Private Home is still root's and the owner's Terminal does not start
   (no root fallback). Only inside the 5-main deploy's migration window (the
