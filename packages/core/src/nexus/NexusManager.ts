@@ -13,6 +13,7 @@
 import type { InstanceUpdater } from '../app-manager/maintenance.js';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { layout as releaseLayout } from '../release/paths.js';
 import { join, resolve as resolvePath } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import type { OsEventBus as OsEventBusSingleton } from '../ipc/OsEventBus.js';
@@ -841,6 +842,7 @@ export class NexusManager {
     if (opts.purge) await this.hostLifecycle?.retireApp(appId, scope);
     else await this.hostLifecycle?.reserveApp(appId, scope);
     await this.installerFor(scope).uninstall(appId, opts);
+    this.dropSettingsOverlay(appId);
     // Deregister (or unmask a lower-scope copy) immediately.
     this.onAppChanged?.(appId);
     this.bus?.emit('nexus:uninstall.complete', { id: appId });
@@ -861,8 +863,19 @@ export class NexusManager {
     const removed = existsSync(dest);
     await this.hostLifecycle?.retireApp(appId, scopeId);
     await this.installerFor(scopeId).uninstall(appId, { purge: true });
+    this.dropSettingsOverlay(appId);
     this.onAppChanged?.(appId);
     return { removed, dest };
+  }
+
+  /**
+   * The owner's tool and permission grants of an app (the settings overlay, Phase 6 O) end with its
+   * installation, as they did when they lived in its manifest: a later install or a local copy under
+   * the same id earns them again.
+   */
+  private dropSettingsOverlay(appId: string): void {
+    try { rmSync(releaseLayout(this.rootDataDir).overlayApp(appId), { force: true }); }
+    catch (err) { console.warn(`[nexus] could not drop the settings overlay of ${appId}: ${(err as Error).message}`); }
   }
 
   /**
@@ -877,6 +890,7 @@ export class NexusManager {
   async setAsideForOverwrite(appId: string, scopeId: ScopeId): Promise<{ trash: string | null; retained: boolean }> {
     const installer = this.installerFor(scopeId);
     await this.hostLifecycle?.revokeGrants(appId, scopeId);
+    this.dropSettingsOverlay(appId);
     const bound = await this.hostLifecycle?.boundInstallation(appId, scopeId);
     return installer.setAsideForOverwrite(appId, bound?.state === 'reserved' ? bound.installationId : null);
   }

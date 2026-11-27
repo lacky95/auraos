@@ -11,7 +11,10 @@ import { kvEventAllowed } from '../src/lib/access/kvAccess.ts';
 import { explicitTargetRefusal } from '../src/lib/intentTarget.ts';
 import { followSession, followSocket, streamSessionOf } from '../src/lib/streamSession.ts';
 import { followIdentity } from '../server/access-bridge.mjs';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { operatorRequestSubject } from '@aura/core/setup-tickets';
 import { POST as enabledRoute } from '../src/pages/api/admin/apps/enabled.ts';
 import { GET as selfUpdateGet, POST as selfUpdatePost } from '../src/pages/api/admin/self-update.ts';
 import { POST as manifestEditRoute } from '../src/pages/api/admin/manifest-edit.ts';
@@ -248,36 +251,75 @@ test('self-update: GET reads only and takes no path or git option; POST checks m
   assert.equal(await postStatus({ branch: '-u', dryRun: true }), 400);
 });
 
-// ── 11. aura grant/revoke perms refuses a system app ────────────────────────
+// ── 11. grants on any app, a system app's permissions included, go to the settings overlay (Phase 6 O) ──
 
-test('manifest-edit refuses a permission change on a system app (Phase 6 overlay), not its tools', async () => {
+test('manifest-edit writes the settings overlay for every scope, a system app\'s permissions too; never app.manifest.json', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'aura-manifest-edit-'));
+  const dataDir = join(root, 'data');
+  const appDir = (id: string) => join(root, id);
+  const manifests: Record<string, string> = {};
+  for (const [id, m] of Object.entries({
+    'com.aura.settings': { tools: ['git'], permissions: ['apps.read'], services: [{ name: 'db', image: 'x' }] },
+    'com.acme.notes': { tools: [] },
+  })) {
+    mkdirSync(appDir(id), { recursive: true });
+    manifests[id] = `${JSON.stringify({ id, name: id, version: '1.0.0', ...m }, null, 2)}\n`;
+    writeFileSync(join(appDir(id), 'app.manifest.json'), manifests[id]);
+  }
+  const reloaded: string[] = [];
+  const audited: Array<{ action: string; detail?: unknown }> = [];
   const auth = {
     version: Number.MAX_SAFE_INTEGER,
     apiKeys: { verify: async () => null },
-    audit: { record: async () => undefined },
+    audit: { record: async (e: { action: string; detail?: unknown }) => { audited.push(e); } },
+    // The host operator's one-time ticket for exactly this request (acts directly, D50).
+    setupTickets: { peek: async () => ({ subject: operatorRequestSubject('POST', '/api/admin/manifest-edit') }) },
   };
   const mgr = {
     registry: {
       getScopeId: (id: string) => (id === 'com.aura.settings' ? 'system' : 'user'),
-      getAppDir: () => '/nonexistent/aura-test-app',
+      getAppDir: (id: string) => appDir(id),
     },
+    getDataDir: () => dataDir,
+    reloadManifest: (id: string) => { reloaded.push(id); },
+    refreshInstanceTools: () => [],
     getInstance: () => undefined,
     getInstancesByApp: () => [],
+    permissions: { hasPermission: () => true },
   };
   await withGlobals({ [MANAGER]: mgr, [AUTH_SERVICES]: auth }, async () => {
     const call = async (body: unknown) => {
-      const res = await manifestEditRoute({ request: post('http://x/api/admin/manifest-edit', body) } as never) as Response;
-      return { status: res.status, body: await res.json() as { error?: string; message?: string } };
+      const res = await manifestEditRoute({ request: post('http://x/api/admin/manifest-edit', body, { 'x-aura-operator': 'AAAAA-AAAAA-AAAAA-AAAAA' }) } as never) as Response;
+      return { status: res.status, body: await res.json() as Record<string, unknown> };
     };
-    for (const action of ['add-permission', 'remove-permission']) {
-      const r = await call({ appId: 'com.aura.settings', action, permission: 'apps.mount' });
-      assert.equal(r.status, 409, action);
-      assert.equal(r.body.error, 'system-scope');
-      assert.match(String(r.body.message), /Phase 6/);
+    const overlay = (id: string) => JSON.parse(readFileSync(join(dataDir, 'aura/overlay/apps', `${id}.json`), 'utf8'));
+    let r = await call({ appId: 'com.aura.settings', action: 'add-permission', permission: 'apps.mount' });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.deepEqual([r.body['changed'], r.body['permissions']], [true, ['apps.read', 'apps.mount']]);
+    r = await call({ appId: 'com.aura.settings', action: 'remove-permission', permission: 'apps.read' });
+    assert.deepEqual(r.body['permissions'], ['apps.mount']);
+    r = await call({ appId: 'com.aura.settings', action: 'add-tool', tool: 'rg' });
+    assert.deepEqual([r.body['changed'], r.body['tools']], [true, ['git', 'rg']]);
+    r = await call({ appId: 'com.aura.settings', action: 'add-tool', tool: 'rg' });
+    assert.equal(r.body['changed'], false, 'decided on the effective manifest');
+    r = await call({ appId: 'com.aura.settings', action: 'add-service-tool', service: 'db', tool: 'git' });
+    assert.deepEqual([r.body['changed'], r.body['tools'], r.body['created']], [true, ['git'], true]);
+    r = await call({ appId: 'com.acme.notes', action: 'set-tools', tools: ['node', 'git'] });
+    assert.deepEqual(r.body['tools'], ['node', 'git']);
+    assert.deepEqual(overlay('com.aura.settings'), {
+      v: 1, tools: { add: ['rg'], remove: [] }, permissions: { add: ['apps.mount'], remove: ['apps.read'] }, services: { db: { tools: { add: ['git'], remove: [] } } },
+    });
+    assert.deepEqual(overlay('com.acme.notes'), { v: 1, tools: { add: ['node', 'git'], remove: [] } });
+    for (const id of Object.keys(manifests)) {
+      assert.equal(readFileSync(join(appDir(id), 'app.manifest.json'), 'utf8'), manifests[id], `${id}: the installed manifest is untouched`);
+      assert.deepEqual(readdirSync(appDir(id)), ['app.manifest.json'], `${id}: nothing written under the app dir`);
     }
-    // A user app, and a system app's tools, go on to the manifest (absent here: 404).
-    assert.equal((await call({ appId: 'com.acme.notes', action: 'add-permission', permission: 'apps.mount' })).status, 404);
-    assert.equal((await call({ appId: 'com.aura.settings', action: 'add-tool', tool: 'git' })).status, 404);
+    assert.ok(reloaded.includes('com.aura.settings') && reloaded.includes('com.acme.notes'));
+    assert.ok(audited.some((e) => e.action === 'manifest.add-permission'));
+    // A corrupt overlay is refused, not overwritten.
+    writeFileSync(join(dataDir, 'aura/overlay/apps/com.acme.notes.json'), '{');
+    r = await call({ appId: 'com.acme.notes', action: 'add-tool', tool: 'x' });
+    assert.deepEqual([r.status, r.body['error']], [500, 'overlay-invalid']);
   });
 });
 

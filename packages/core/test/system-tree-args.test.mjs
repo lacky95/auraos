@@ -46,9 +46,9 @@ test('runningRelease: only a complete release dir named releases/<id> counts', (
 test('resolveSystemTree: the layout decides, AURA_HOST_WORKSPACE only for the checkout', () => {
   const volumes = { dataVolume: 'dv', nodeModulesVolume: 'nm' };
   assert.deepEqual(resolveSystemTree(volumes, { AURA_WORKSPACE_DIR: join(TMP, 'absent'), AURA_HOST_WORKSPACE: '/srv/aura' }),
-    { kind: 'checkout', hostRoot: '/srv/aura', nodeModulesVolume: 'nm' });
+    { kind: 'checkout', hostRoot: '/srv/aura', nodeModulesVolume: 'nm', dataVolume: 'dv' });
   assert.deepEqual(resolveSystemTree(volumes, { AURA_WORKSPACE_DIR: join(TMP, 'absent') }),
-    { kind: 'checkout', hostRoot: '/workspace', nodeModulesVolume: 'nm' }, 'today\'s default');
+    { kind: 'checkout', hostRoot: '/workspace', nodeModulesVolume: 'nm', dataVolume: 'dv' }, 'today\'s default');
   assert.deepEqual(resolveSystemTree(volumes, { AURA_WORKSPACE_DIR: release(ID), AURA_HOST_WORKSPACE: '/srv/aura' }),
     { kind: 'release', releaseId: ID, dataVolume: 'dv' });
 });

@@ -27,7 +27,7 @@
  */
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { COMPLETE_MARKER, RELEASES_DIR, RELEASE_ID_RE, RELEASE_RECORD, STAGING_PREFIX } from '../../release/paths.js';
+import { COMPLETE_MARKER, OVERLAY_CAPABILITIES_FILE, RELEASES_DIR, RELEASE_ID_RE, RELEASE_RECORD, STAGING_PREFIX } from '../../release/paths.js';
 
 /** Where the shell (and every workload) sees the AuraOS tree. */
 export const WORKSPACE_DIR = '/workspace';
@@ -43,7 +43,7 @@ export const WORKSPACE_ROOT_FILES = ['package.json', 'pnpm-lock.yaml', 'pnpm-wor
 
 export type SystemTree =
   /** Developer layout: the host checkout (`AURA_HOST_WORKSPACE`) and the shell's node_modules volume. */
-  | { kind: 'checkout'; hostRoot: string; nodeModulesVolume: string }
+  | { kind: 'checkout'; hostRoot: string; nodeModulesVolume: string; dataVolume?: string }
   /** Normal layout: release `releaseId` inside the data volume `dataVolume`. */
   | { kind: 'release'; releaseId: string; dataVolume: string };
 
@@ -78,7 +78,7 @@ export function resolveSystemTree(
   if (release) return { kind: 'release', releaseId: release.id, dataVolume: volumes.dataVolume };
   // The host path bound at /workspace (docker-compose.yml): sibling containers share the
   // host's filesystem, not the shell's view, so their bind sources are host paths.
-  return { kind: 'checkout', hostRoot: env['AURA_HOST_WORKSPACE'] ?? WORKSPACE_DIR, nodeModulesVolume: volumes.nodeModulesVolume };
+  return { kind: 'checkout', hostRoot: env['AURA_HOST_WORKSPACE'] ?? WORKSPACE_DIR, nodeModulesVolume: volumes.nodeModulesVolume, dataVolume: volumes.dataVolume };
 }
 
 function assertRel(rel: string): void {
@@ -93,8 +93,24 @@ function assertRel(rel: string): void {
  */
 export function systemTreeMount(tree: SystemTree, rel: string, target: string, opts: { ro?: boolean } = {}): string[] {
   assertRel(rel);
+  if (rel === '.aura') {
+    const reg = capabilityRegistryMount(tree, target);
+    if (reg) return reg;
+  }
   if (tree.kind === 'checkout') return ['-v', `${tree.hostRoot}/${rel}:${target}${opts.ro === false ? '' : ':ro'}`];
   return ['--mount', `type=volume,source=${tree.dataVolume},target=${target},volume-subpath=${RELEASES_DIR}/${tree.releaseId}/${rel},readonly`];
+}
+
+/**
+ * `.aura` (Phase 6 O): the EFFECTIVE capability registry, read-only at `<target>/capabilities.yaml`, from
+ * the data volume's `aura/overlay/capabilities.yaml` (the release's registry + the owner's entries, which the
+ * shell writes at boot before any app starts and rewrites in place: core capabilities/registryOverlay.ts), in
+ * both layouts; never the release tree's own file. Null for a tree without a data volume (the checkout's old
+ * bind of `.aura`).
+ */
+function capabilityRegistryMount(tree: SystemTree, target: string): string[] | null {
+  if (!tree.dataVolume) return null;
+  return ['--mount', `type=volume,source=${tree.dataVolume},target=${target}/capabilities.yaml,volume-subpath=${OVERLAY_CAPABILITIES_FILE},readonly`];
 }
 
 /** `node_modules` at `target`, read-only: the shell's named volume (checkout) or the release's own. */

@@ -6,6 +6,7 @@ import { OsEventBus } from '../ipc/OsEventBus.js';
 import type { ScopeDefinition, ScopedManifest } from '../scopes/types.js';
 import type { ManifestHostGuard } from '../app-hosts/manifestHostGuard.js';
 import { operationalBlock, type OperationalBlock } from '../contract/types.js';
+import { applyManifestOverlay, readManifestOverlay } from './manifestOverlay.js';
 
 export interface AppRegistryOptions {
   /**
@@ -15,6 +16,12 @@ export interface AppRegistryOptions {
    * (`runtime.module-refused`).
    */
   onBlocked?(block: OperationalBlock): void;
+  /**
+   * The settings overlay's apps dir (`/data/aura/overlay/apps`, release/paths.ts): the owner's
+   * grants, applied to every manifest this registry loads, in every scope (Phase 6 O,
+   * manifestOverlay.ts). Absent: manifests load as installed.
+   */
+  overlayAppsDir?: string;
 }
 
 export class AppRegistry {
@@ -82,8 +89,7 @@ export class AppRegistry {
   private loadManifestFile(manifestPath: string, scope: ScopeDefinition): void {
     if (!existsSync(manifestPath)) return;
     try {
-      const raw = JSON.parse(readFileSync(manifestPath, 'utf-8'));
-      const base = AppManifestSchema.parse(raw);
+      const base = this.parseManifest(manifestPath);
       const candidate = this.guarded({
         ...base,
         scopeId: scope.id,
@@ -109,6 +115,19 @@ export class AppRegistry {
     } catch (err) {
       console.error(`[AppRegistry] Invalid manifest at ${manifestPath}:`, err);
     }
+  }
+
+  /**
+   * One manifest file, the app's settings overlay applied (Phase 6 O), schema-checked. The
+   * overlay is keyed by the manifest's own id. An invalid overlay throws: the app is refused
+   * like an invalid manifest, never loaded without the owner's revokes.
+   */
+  private parseManifest(manifestPath: string): AppManifest {
+    const raw = JSON.parse(readFileSync(manifestPath, 'utf-8')) as Record<string, unknown>;
+    const dir = this.opts.overlayAppsDir;
+    const id = raw['id'];
+    const overlay = dir && typeof id === 'string' ? readManifestOverlay(dir, id) : null;
+    return AppManifestSchema.parse(applyManifestOverlay(raw, overlay));
   }
 
   private handleUnlink(manifestPath: string, scope: ScopeDefinition): void {
@@ -141,8 +160,7 @@ export class AppRegistry {
       const manifestPath = join(scope.appsDir, appId, 'app.manifest.json');
       if (!existsSync(manifestPath)) continue;
       try {
-        const raw = JSON.parse(readFileSync(manifestPath, 'utf-8'));
-        const base = AppManifestSchema.parse(raw);
+        const base = this.parseManifest(manifestPath);
         return this.guarded({ ...base, scopeId: scope.id, appDir: join(scope.appsDir, base.id) });
       } catch { /* skip corrupt */ }
     }
@@ -174,8 +192,7 @@ export class AppRegistry {
       const manifestPath = join(scope.appsDir, appId, 'app.manifest.json');
       if (!existsSync(manifestPath)) continue;
       try {
-        const raw = JSON.parse(readFileSync(manifestPath, 'utf-8'));
-        const base = AppManifestSchema.parse(raw);
+        const base = this.parseManifest(manifestPath);
         candidates.push({ ...base, scopeId: scope.id, appDir: join(scope.appsDir, base.id) });
       } catch { /* skip */ }
     }

@@ -1,28 +1,27 @@
 import type { APIRoute } from 'astro';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { closestName, closestPermission, isKnownPermission, listToolchainBinaries, namedTools, readAliasMap, sourceClosedBody, toolchainMirrorBin, toolsGrant } from '@aura/core';
+import {
+  applyManifestOverlay, closestName, closestPermission, editManifestOverlay, isKnownPermission, listToolchainBinaries, namedTools,
+  readAliasMap, readManifestOverlay, releasePaths, toolchainMirrorBin, toolsGrant, writeManifestOverlay, type ManifestOverlay, type OverlayEdit,
+} from '@aura/core';
 import { liveCapabilityDeps, resolveRegistry } from '../../../lib/capabilities.ts';
 import { auditOwner, manifestEditLevel, ownerAction } from '../../../lib/approvals/admin.ts';
 
 /**
- * Server-side manifest mutation. Required because container-sandbox apps
- * (Terminal, etc.) get a SLICED bind of `/workspace/apps` — only their own
- * `apps/<self>/` subdir is visible. The CLI's local `addToolToManifest` /
- * `removeToolFromManifest` helpers therefore can't reach a sibling app's
- * manifest and throw "Manifest not found for com.aura.example".
+ * An app's grants (tools[], services[].tools, permissions[]): `aura cap
+ * grant/revoke`, `aura grant/revoke perms`, Settings. Routed through the shell
+ * so it works from anywhere (terminal sandboxes, sibling containers, the host).
  *
- * Routing the edit through the shell (which has the full `/workspace/apps`
- * bind via the project-root mount) makes `aura cap grant/revoke` work from
- * anywhere — terminal proots, sibling containers, host shell. AppRegistry's
- * chokidar watcher picks up the JSON change automatically and re-parses,
- * but we ALSO trigger the per-app /aura/my-tools refresh so the running
- * container sees the new binding within a tick (no respawn).
- *
- * The manifest path is resolved via `AppRegistry.getAppDir`, which knows each
- * app's real install directory across ALL scopes (system `/workspace/apps`,
- * global + user `/data/scopes/…/apps`). A hardcoded `/workspace/apps` only
- * covers system-scope apps and 404s on user/global installs.
+ * Phase 6 O (settings overlay): the edit is written as add/remove ops to the
+ * app's overlay `/data/aura/overlay/apps/<appId>.json` (core
+ * manifestOverlay.ts), never into `app.manifest.json`: installed trees and
+ * the release stay untouched, in every scope. The registry applies the
+ * overlay when it loads the manifest; this route reloads the app and
+ * refreshes its running instances' /aura/my-tools (no respawn). Whether an
+ * edit changes anything is decided on the EFFECTIVE manifest (installed +
+ * overlay). The installed manifest is resolved via `AppRegistry.getAppDir`
+ * (every scope).
  *
  * THE OWNER'S (D50): it changes what an app may do (permissions[], tools[],
  * services[].tools). The owner and the host operator edit directly; the CLI
@@ -34,10 +33,8 @@ import { auditOwner, manifestEditLevel, ownerAction } from '../../../lib/approva
  * permission here (notifications.locked / popup) only REQUESTS it — the grant
  * is separate (POST /api/admin/grants).
  *
- * A system app's permissions are part of the release and are not edited in
- * place (`aura grant/revoke perms` on one → 409 `system-scope`); changing
- * them comes with the system overlay (Phase 6). Its tools stay editable
- * (`aura cap grant`), as before.
+ * A system app's permissions are edited the same way (in its overlay; the
+ * release stays read-only), at the same levels as any app's (D9).
  */
 
 const APP_ID_RE = /^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/;
@@ -114,22 +111,22 @@ export const POST: APIRoute = async (ctx) => {
   // system dir — otherwise user/global-scoped apps 404.
   const { getAppManager } = await import('@aura/core');
   const mgr = getAppManager();
-  if (PERMISSION_ACTIONS.has(action) && mgr.registry.getScopeId(appId) === 'system') {
-    return json({
-      error: 'system-scope',
-      message: `${appId} is a system app: its permissions ship with AuraOS and are not edited in place. `
-        + 'Changing them comes with the system overlay (Phase 6). Privileged permissions it already requests are granted with `aura grant notif-perms`.',
-    }, 409);
-  }
   const path = join(mgr.registry.getAppDir(appId), 'app.manifest.json');
   if (!existsSync(path)) {
     // The host path is internal (D105 Pass B, review row 33): the app is named, not where it lives.
     return json({ error: 'manifest-not-found', target: appId, appId, message: `${appId} has no app.manifest.json where it is installed.` }, 404);
   }
 
-  let manifest: Record<string, unknown>;
-  try { manifest = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>; }
+  // The installed manifest (the base the ops are relative to), the app's overlay, and the
+  // effective manifest both make (what the registry serves).
+  let base: Record<string, unknown>;
+  try { base = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>; }
   catch (err) { return json({ error: 'manifest-parse-failed', message: `${appId}'s app.manifest.json is not valid JSON: ${(err as Error).message}` }, 500); }
+  const overlayApps = releasePaths.layout(mgr.getDataDir()).overlayApps;
+  let overlay: ManifestOverlay | null;
+  try { overlay = readManifestOverlay(overlayApps, appId); }
+  catch { return json({ error: 'overlay-invalid', message: `${appId}'s settings overlay is invalid: fix or remove it (diagnose/overlay names the problem); the app is refused until then.` }, 500); }
+  const manifest = applyManifestOverlay(base, overlay);
 
   // D105 Pass B (review row 21): a tool the capability registry does not know is refused before the owner is asked.
   // Only names this edit adds: a set-tools that keeps an old, since removed tool stays possible.
@@ -166,14 +163,9 @@ export const POST: APIRoute = async (ctx) => {
   // the shell restarted.
   if (PERMISSION_ACTIONS.has(action)) {
     const perm = body.permission!;
-    const current = Array.isArray(manifest['permissions']) ? (manifest['permissions'] as string[]) : [];
-    let next = current;
-    let changed = false;
-    if (action === 'add-permission') {
-      if (!current.includes(perm)) { next = [...current, perm]; changed = true; }
-    } else if (current.includes(perm)) {
-      next = current.filter((p) => p !== perm); changed = true;
-    }
+    const r = editManifestOverlay(overlay, base, { action: action as 'add-permission' | 'remove-permission', permission: perm });
+    const changed = r.changed;
+    const next = listOf(applyManifestOverlay(base, r.overlay)['permissions']);
 
     // Unknown names are allowed through (PermissionSchema is a free-form
     // string and apps may define their own) but flagged, since a typo would
@@ -182,17 +174,15 @@ export const POST: APIRoute = async (ctx) => {
     const suggest = unknown ? closestPermission(perm) : null;
 
     if (changed) {
-      manifest['permissions'] = next;
-      try { writeFileSync(path, JSON.stringify(manifest, null, 2) + '\n'); }
-      catch (err) { return writeFailed(appId, err); }
-      await auditOwner(admin, `manifest.${action}`, { target: `app:${appId}`, detail: { permission: perm } });
+      const failed = saveOverlay(overlayApps, appId, r.overlay);
+      if (failed) return failed;
+      await auditOwner(admin, `manifest.${action}`, { target: `app:${appId}`, detail: { permission: perm, overlay: true } });
     }
 
     // Reload even on a no-op. The in-memory registry can drift from disk (a
-    // manifest edited outside the OS, or written before this shell booted),
-    // and in that state the permission LOOKS granted in the file while every
-    // request still 403s. Re-reading unconditionally makes this endpoint the
-    // way to resync, not just the way to mutate.
+    // manifest or overlay edited outside the OS), and in that state the
+    // permission LOOKS granted in the file while every request still 403s.
+    // Re-reading unconditionally makes this endpoint the way to resync.
     try {
       // reloadManifest, not reloadFromDisk: the latter refreshes the manifest
       // but leaves every projection derived from it (intents, keymaps,
@@ -230,26 +220,21 @@ export const POST: APIRoute = async (ctx) => {
     if (action === 'add-service-tool' && svc['inheritTools'] === true) {
       return json({ error: 'inherit-tools', message: `template '${body.service}' sets inheritTools (the app's whole set) — drop it from the manifest before giving the template tools of its own.` }, 409);
     }
+    // A template without `tools` gains its own list (and its sidecars their
+    // own dir on their next spawn: the spec changes, so they are recreated);
+    // a removal keeps the list (`tools: []` keeps the own dir, runtime grants).
     const had = Array.isArray(svc['tools']);
-    const current = had ? (svc['tools'] as string[]) : [];
-    let next = current;
-    if (action === 'add-service-tool') {
-      // A template without `tools` gains its own list (and its sidecars their
-      // own dir on their next spawn — the spec changes, so they are recreated).
-      if (!had || !current.includes(tool!)) next = [...current, tool!];
-    } else if (current.includes(tool!)) {
-      // Never drop the key: `tools: []` keeps the own dir (runtime grants).
-      next = current.filter((t) => t !== tool!);
-    }
-    const changed = next !== current;
-    const appTools = Array.isArray(manifest['tools']) ? (manifest['tools'] as string[]) : [];
+    const r = editManifestOverlay(overlay, base, { action: action as 'add-service-tool' | 'remove-service-tool', service: body.service!, tool: tool! });
+    const changed = r.changed;
+    const next = listOf((applyManifestOverlay(base, r.overlay)['services'] as Array<Record<string, unknown>>)
+      .find((s) => s?.['name'] === body.service)?.['tools']);
+    const appTools = listOf(manifest['tools']);
     // A tool the app lacks is kept but not provisioned — tell the caller.
     const appHolds = tool === '*' || tool === '#' || toolsGrant(appTools, tool!, {}, readAliasMap(toolchainMirrorBin(mgr.getDataDir())));
     if (changed) {
-      svc['tools'] = next;
-      try { writeFileSync(path, JSON.stringify(manifest, null, 2) + '\n'); }
-      catch (err) { return writeFailed(appId, err); }
-      await auditOwner(admin, `manifest.${action}`, { target: `app:${appId}`, detail: { service: body.service, tool } });
+      const failed = saveOverlay(overlayApps, appId, r.overlay);
+      if (failed) return failed;
+      await auditOwner(admin, `manifest.${action}`, { target: `app:${appId}`, detail: { service: body.service, tool, overlay: true } });
     }
     // Editing the manifest stays an admin action, but its sidecars only get
     // own tools when the app holds sidecars.tools (spawn 403s otherwise).
@@ -264,35 +249,26 @@ export const POST: APIRoute = async (ctx) => {
     }
   }
 
-  const tools = Array.isArray(manifest['tools']) ? (manifest['tools'] as string[]) : [];
-  let changed = false;
-  let nextTools = tools;
-  if (action === 'set-tools') {
-    nextTools = setTools!;
-    // Order-insensitive equality check so a no-op reorder doesn't rewrite.
-    const a = [...tools].sort(), b = [...nextTools].sort();
-    changed = a.length !== b.length || a.some((t, i) => t !== b[i]);
-  } else if (action === 'add-tool') {
-    if (!tools.includes(tool!)) { nextTools = [...tools, tool!]; changed = true; }
-  } else {
-    if (tools.includes(tool!))  { nextTools = tools.filter((t) => t !== tool!); changed = true; }
-  }
+  const tools = listOf(manifest['tools']);
+  // Order-insensitive: a no-op reorder (set-tools) changes nothing.
+  const toolEdit: OverlayEdit = action === 'set-tools' ? { action, tools: setTools! } : { action: action as 'add-tool' | 'remove-tool', tool: tool! };
+  const r = editManifestOverlay(overlay, base, toolEdit);
+  const changed = r.changed;
+  const nextTools = changed ? listOf(applyManifestOverlay(base, r.overlay)['tools']) : tools;
 
   if (changed) {
-    manifest['tools'] = nextTools;
-    try { writeFileSync(path, JSON.stringify(manifest, null, 2) + '\n'); }
-    catch (err) { return writeFailed(appId, err); }
-    await auditOwner(admin, `manifest.${action}`, { target: `app:${appId}`, detail: action === 'set-tools' ? { tools: nextTools } : { tool } });
+    const failed = saveOverlay(overlayApps, appId, r.overlay);
+    if (failed) return failed;
+    await auditOwner(admin, `manifest.${action}`, { target: `app:${appId}`, detail: { ...(action === 'set-tools' ? { tools: nextTools } : { tool }), overlay: true } });
 
     // Hot-refresh running instances of this app so their /aura/my-tools
     // allowlist picks up the change without a backend respawn. AppManager
     // already drives this via refreshInstanceTools — same path
     // /api/admin/cap-refresh uses after `cap install`.
     try {
-      // Force the registry to re-read the manifest from disk before refreshing
-      // tools dirs — chokidar will eventually fire `change` but the lag
-      // between our write and that event means refreshInstanceTools would
-      // otherwise use a stale in-memory tools[].
+      // Re-read the manifest with its overlay before refreshing tools dirs:
+      // nothing watches the overlay, so refreshInstanceTools would otherwise
+      // use a stale in-memory tools[].
       // reloadManifest, not reloadFromDisk: the latter refreshes the manifest
       // but leaves every projection derived from it (intents, keymaps,
       // interfaces) stale until a restart.
@@ -309,14 +285,14 @@ export const POST: APIRoute = async (ctx) => {
   return json({ ok: true, appId, action, tool, changed: false, tools });
 };
 
-/**
- * A manifest write that failed. A closed install is read-only: EROFS is
- * `source-closed` with the way out (D105 Pass B, review row 30); anything
- * else names the app, not the host path.
- */
-function writeFailed(appId: string, err: unknown): Response {
-  if ((err as NodeJS.ErrnoException).code === 'EROFS') return json(sourceClosedBody(appId), 409);
-  return json({ error: 'write-failed', message: `${appId}'s app.manifest.json could not be written (${(err as NodeJS.ErrnoException).code ?? 'error'}).` }, 500);
+const listOf = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
+
+/** Write the app's overlay (/data, never the installed tree); a Response when that failed (names the app, not the path). */
+function saveOverlay(dir: string, appId: string, overlay: ManifestOverlay): Response | null {
+  try { writeManifestOverlay(dir, appId, overlay); return null; }
+  catch (err) {
+    return json({ error: 'write-failed', message: `${appId}'s settings overlay could not be written (${(err as NodeJS.ErrnoException).code ?? 'error'}).` }, 500);
+  }
 }
 
 /**
