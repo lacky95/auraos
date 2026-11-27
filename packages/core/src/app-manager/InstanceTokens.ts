@@ -61,11 +61,13 @@ export class InstanceTokens {
 
   private secret(): Buffer {
     if (this.key) return this.key;
+    // The key store is the shell's alone, also on an install whose first writer created it open (repaired here,
+    // once per process: this is the first secret every start reads).
+    ensurePrivateDir(dirname(this.keyFile));
     if (existsSync(this.keyFile)) {
       const raw = readFileSync(this.keyFile);
       if (raw.length >= 32) return (this.key = raw);
     }
-    ensurePrivateDir(dirname(this.keyFile));
     const fresh = randomBytes(32);
     writeFileSync(this.keyFile, fresh, { mode: 0o600 });
     try { chmodSync(this.keyFile, 0o600); } catch { /* best effort on odd filesystems */ }

@@ -461,4 +461,8 @@ test("5-main (VM finding): <data>/aura/secrets is 0700, also when a first writer
   new InstanceTokens(join(c, "aura", "secrets", "instance-token.key")).mint("a-1");
   assert.equal(mode(join(c, "aura", "secrets")), 0o700);
   assert.equal(mode(join(c, "aura", "secrets", "instance-token.key")), 0o600);
+  // An existing key in an open store: the next process repairs the store at its first read.
+  chmodSync(join(c, "aura", "secrets"), 0o755);
+  new InstanceTokens(join(c, "aura", "secrets", "instance-token.key")).mint("a-2");
+  assert.equal(mode(join(c, "aura", "secrets")), 0o700, "repaired with the key already there");
 });
