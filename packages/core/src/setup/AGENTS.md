@@ -9,6 +9,8 @@ The sector rules are in `packages/core/AGENTS.md`. Design: D108 (`app-profiles-s
 - **`merge.ts`** (P1): the merge rules (overlay over base, desired overrides on the configurable keys, sorted request union, services by name with the overlay keys only, fields tightened never loosened) and `effectiveManifestView` (base order kept: an app without setup/profiles gets its base back).
 - **`requirements.ts`** (P1): requirement evaluation through the `ResolverPorts`: explicit (`setup`/profile, level, `when`), implied (Private Home: D64 `app-private-home`, `home.private[.sidecar:<n>]`, `storage.privateHome`; `instance` network: `network.isolation`; resources: `resources.limits`) and derived (`requirementsOf()` → `FEATURE_OF_NEED`). Only `supported` meets a requirement.
 - **`digest.ts`** (P1): `configDigestOf` (secrets by field name only) and `grantDigestOf` (`GrantBearing`), `sha256:<hex>` over canonical JSON.
+- **`store.ts`** (P2): `SetupConfigStore`, the sealed `app:config:*` records (`read` → `{value, stored, tampered}`, `compareAndSet`, `update`, `forgetInstallation` revoking handles via `vaultHandleRevoker`). Wiring: `onTampered` → audit `tamperAuditInput`; lifecycle `forgetSetup`.
+- **`state.ts`** (P2): `SetupStateMachine` over `AppHostStore.setSetup`: `state`, `begin`, `transition`, `progress`, `markReady` (the only way into `ready`), `desired` (tamper → `resetTampered`, once). Errors carry `code`.
 - **`index.ts`**: the module's public surface, re-exported by the core barrel. Named exports only; one region per work package.
 - Related leaves outside this directory: `config/schema.ts` (the one field model, also behind runtime settings) and `types/setupManifest.ts` (the manifest blocks `setup`, `profiles`, `homeEnvironments`, env references).
 

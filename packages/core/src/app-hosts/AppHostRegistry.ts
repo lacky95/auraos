@@ -27,6 +27,7 @@ import type {
 import {
   MAX_APP_HOST_SLOT, appHostNameForSlot, isValidHostName, proposeAppHostName,
 } from './hostRules.js';
+import { OPERATIONAL_STATES, SETUP_STEPS, type InstallationSetupSummary } from '../setup/contracts.js';
 
 export const APP_HOST_PREFIX = 'apphost:';
 /** The alpha's one user (D19). */
@@ -42,6 +43,33 @@ const MANIFEST_HOSTS_KEY = 'apphost:manifest-hosts';
 const MAX_COMMIT_ATTEMPTS = 256;
 /** Proposal retries: the installation id supplies at most 25 suffixes. */
 const MAX_NAME_ATTEMPTS = 26;
+
+const SETUP_DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
+const SETUP_KEYS = new Set(['state', 'profile', 'configDigest', 'grantDigest', 'step', 'attempt', 'approvalId', 'updatedAt', 'error']);
+
+/** A setup summary as setup/contracts.ts declares it (`ready` always carries its digests). */
+function validSetupSummary(s: InstallationSetupSummary): boolean {
+  const digest = (d: unknown) => d === null || (typeof d === 'string' && SETUP_DIGEST_RE.test(d));
+  return !!s && typeof s === 'object' && Object.keys(s).every((k) => SETUP_KEYS.has(k))
+    && (OPERATIONAL_STATES as readonly string[]).includes(s.state)
+    && (s.profile === null || (typeof s.profile === 'string' && /^[a-z][a-z0-9-]{0,47}$/.test(s.profile)))
+    && digest(s.configDigest) && digest(s.grantDigest)
+    && (s.state !== 'ready' || (s.configDigest !== null && s.grantDigest !== null))
+    && (s.step === null || (SETUP_STEPS as readonly string[]).includes(s.step))
+    && Number.isSafeInteger(s.attempt) && s.attempt >= 0
+    && (s.approvalId === undefined || (typeof s.approvalId === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(s.approvalId)))
+    && typeof s.updatedAt === 'string' && !Number.isNaN(Date.parse(s.updatedAt))
+    && (s.error === undefined || (typeof s.error === 'object' && s.error !== null && typeof s.error.error === 'string'));
+}
+
+/** Equal summaries, whatever their key order. */
+function sameSetupSummary(a: InstallationSetupSummary | null | undefined, b: InstallationSetupSummary | null | undefined): boolean {
+  const canon = (v: unknown): string => (v && typeof v === 'object' && !Array.isArray(v)
+    ? `{${Object.keys(v).sort().filter((k) => (v as Record<string, unknown>)[k] !== undefined)
+      .map((k) => `${JSON.stringify(k)}:${canon((v as Record<string, unknown>)[k])}`).join(',')}}`
+    : JSON.stringify(v ?? null));
+  return canon(a ?? null) === canon(b ?? null);
+}
 
 export function instanceScopeKey(scope: AppInstanceScope): string {
   return scope.kind === 'shared' ? 'shared' : `user:${scope.userId}`;
@@ -148,6 +176,13 @@ export interface AppHostStore extends AppHostRegistry {
    * `setRunAs(…, migrated)` clears it with the flip.
    */
   setRunAsMigration(installationId: string, expect: 'root' | 'app', migration: AppRunAsMigration | null): Promise<{ ok: boolean; installation: AppInstallation | null }>;
+  /**
+   * D108: replace (or, with null, remove) the setup summary of an active
+   * installation, compare-and-set on `expect` (the summary the caller
+   * decided on; null: none). A changed summary is refused (`{ ok: false }`),
+   * never overwritten. Shape only: the transitions are setup/state.ts's.
+   */
+  setSetup(installationId: string, expect: InstallationSetupSummary | null, next: InstallationSetupSummary | null): Promise<{ ok: boolean; installation: AppInstallation | null }>;
   /** `null` until the first boot migration recorded them. */
   getKnownManifestHosts(): Promise<Set<string> | null>;
   addKnownManifestHosts(claims: readonly string[]): Promise<void>;
@@ -319,6 +354,20 @@ export function createAppHostRegistry(kv: Redis | (() => Redis), opts: AppHostRe
         [{ op: 'set', key: installKey(id), value: JSON.stringify(next) }],
       );
       return ok ? { ok: true, installation: next } : { ok: false, installation: (await readInstallation(id))?.value ?? null };
+    },
+
+    async setSetup(id, expect, next) {
+      if (next !== null && !validSetupSummary(next)) throw new Error('invalid setup summary');
+      const cur = await readInstallation(id);
+      if (!cur) return { ok: false, installation: null };
+      if (cur.value.state !== 'active' || !sameSetupSummary(cur.value.setup, expect)) return { ok: false, installation: cur.value };
+      const { setup: _old, ...rest } = cur.value;
+      const value: AppInstallation = { ...rest, ...(next ? { setup: { ...next } } : {}), updatedAt: now() };
+      const ok = await commit(
+        [{ key: installKey(id), expect: cur.raw }],
+        [{ op: 'set', key: installKey(id), value: JSON.stringify(value) }],
+      );
+      return ok ? { ok: true, installation: value } : { ok: false, installation: (await readInstallation(id))?.value ?? null };
     },
 
     async allocate({ installation, instanceScope, isSystemApp }) {

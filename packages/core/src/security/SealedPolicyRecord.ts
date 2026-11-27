@@ -4,8 +4,9 @@
  * identity.key, written by compare-and-set. A Valkey writer can delete the
  * record but cannot forge or change it.
  *
- * Shared by the security options (`user:policy:security`) and the Runtime
- * Settings (`user:policy:runtimes`, ARI §9.7): the seal, the MAC check, the
+ * Shared by the security options (`user:policy:security`), the Runtime
+ * Settings (`user:policy:runtimes`, ARI §9.7) and the app setup records
+ * (`app:config:*`, D108, one instance per key): the seal, the MAC check, the
  * report-once of a bad record and the compare-and-set live here once (D36).
  * What the value is, and the defaults a missing or bad record means, are the
  * caller's.
@@ -15,11 +16,12 @@ import type { Redis } from '@aura/kv-store';
 import { deriveIdentitySubkey, IdentityKeyError } from '../auth/identityKey.js';
 
 const SET_IF_UNCHANGED = `if redis.call('GET', KEYS[1]) == ARGV[1] then redis.call('SET', KEYS[1], ARGV[2]) return 1 end return 0`;
+const DEL_IF_UNCHANGED = `if redis.call('GET', KEYS[1]) == ARGV[1] then redis.call('DEL', KEYS[1]) return 1 end return 0`;
 
-export type SealedRecordPurpose = 'security-policy' | 'runtime-policy';
+export type SealedRecordPurpose = 'security-policy' | 'runtime-policy' | 'app-config';
 
 export interface SealedPolicyRecordOptions<T> {
-  /** The Valkey key, in the `user:` namespace. */
+  /** The Valkey key, in a namespace `/api/kv` cannot reach (`user:`, `app:config:`). */
   key: string;
   /** The identity.key subkey the MAC uses: a MAC of one record never passes for another. */
   purpose: SealedRecordPurpose;
@@ -37,6 +39,8 @@ export interface SealedPolicyRecordOptions<T> {
 export interface SealedRead<T> {
   value: T | null;
   stored: string | null;
+  /** A stored record failed its MAC or its shape (not set for an unusable identity.key). */
+  tampered?: boolean;
 }
 
 export class SealedPolicyRecord<T> {
@@ -53,8 +57,8 @@ export class SealedPolicyRecord<T> {
     return JSON.stringify({ v: 1, values: value, mac: this.mac(value).toString('base64url') });
   }
 
-  /** The stored value if the MAC holds, else null. Reports a bad record once. */
-  private unseal(raw: string): T | null {
+  /** The stored value if the MAC holds, else null (`bad`: it failed). Reports a bad record once. */
+  private unseal(raw: string): { value: T | null; bad: boolean } {
     try {
       const o = JSON.parse(raw) as Record<string, unknown>;
       const value = o['v'] === 1 ? this.opts.parse(o['values']) : null;
@@ -62,22 +66,24 @@ export class SealedPolicyRecord<T> {
       const given = Buffer.from(o['mac'], 'base64url');
       const want = this.mac(value);
       if (given.length !== want.length || !timingSafeEqual(given, want)) throw new Error('mac');
-      return value;
+      return { value, bad: false };
     } catch (err) {
-      if (err instanceof IdentityKeyError) return null;
+      if (err instanceof IdentityKeyError) return { value: null, bad: false };
       const digest = createHash('sha256').update(raw).digest('hex');
       if (digest !== this.reportedTamper) {
         this.reportedTamper = digest;
         this.opts.onTampered?.();
       }
-      return null;
+      return { value: null, bad: true };
     }
   }
 
   /** The trusted value and the stored bytes. A Valkey error throws. */
   async read(): Promise<SealedRead<T>> {
     const stored = await this.opts.redis().get(this.opts.key);
-    return { value: stored ? this.unseal(stored) : null, stored };
+    if (!stored) return { value: null, stored };
+    const { value, bad } = this.unseal(stored);
+    return { value, stored, ...(bad ? { tampered: true } : {}) };
   }
 
   /** Throws before a write when identity.key is unusable. */
@@ -97,5 +103,12 @@ export class SealedPolicyRecord<T> {
       : (await r.set(this.opts.key, this.seal(next), 'NX')) === 'OK';
     if (written) this.reportedTamper = null;
     return written;
+  }
+
+  /** Delete the record only if it still holds `stored`. False when it changed meanwhile. */
+  async compareAndDelete(stored: string): Promise<boolean> {
+    const deleted = (await this.opts.redis().eval(DEL_IF_UNCHANGED, 1, this.opts.key, stored)) === 1;
+    if (deleted) this.reportedTamper = null;
+    return deleted;
   }
 }

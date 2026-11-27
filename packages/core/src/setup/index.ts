@@ -17,6 +17,15 @@ export { configDigestOf, grantDigestOf, grantBearingOf, type DigestableConfig } 
 export { FEATURE_OF_NEED } from './requirements.js';
 
 // ── P2 store and state ──────────────────────────────────────────────────────
+export {
+  SetupConfigStore, SetupStoreError, parseDesiredConfig, tamperAuditInput, vaultHandleRevoker,
+  type ConfigRecordRef, type DesiredRead, type RevokeSecretHandle, type SetupConfigStoreOptions,
+} from './store.js';
+export {
+  SetupStateMachine, SetupStateError, canTransition, deriveSetupState,
+  type DeclaringManifest, type DerivedSetupState, type SetupProgress, type SetupStateErrorCode,
+  type SetupStateMachineOptions, type SetupTransitionPatch,
+} from './state.js';
 
 // ── P3 engine, gate, hooks ──────────────────────────────────────────────────
 
