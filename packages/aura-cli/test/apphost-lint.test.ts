@@ -5,13 +5,14 @@
 //   pnpm --filter @aura/cli test
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { AppManifestSchema } from '@aura/core';
 import {
   browserLineRange, collectExports, findAppSdkDir, lintAppSources, lintManifestKeys, lintProxyPaths,
-  lintRemovedGlobals, lintSdkImports, lintUpgradeAndHmr, readSdkExports, strippedKeyPaths, type Finding,
+  lintRemovedGlobals, lintSdkImports, lintTrackedRuntimeData, lintUpgradeAndHmr, readSdkExports, strippedKeyPaths, type Finding,
 } from '../src/lib/apphost-lint.js';
 import { REMOVED_MANIFEST_KEYS } from '../src/commands/dev.js';
 
@@ -163,4 +164,19 @@ test('lintAppSources walks the app, skipping node_modules, dist, .astro and .nex
   stubSdk(join(app, 'node_modules', '@aura', 'app-sdk'));
   const f = lintAppSources(app, { upcomingSdk: null });
   assert.deepEqual(f.map((x) => `${x.file.slice(app.length + 1)}:${x.line}:${x.severity}`), ['src/pages/index.astro:2:error']);
+});
+
+test('validate warns about runtime data and secrets the app\'s git repo tracks', () => {
+  const app = write(join(root, 'tracked-data'), {
+    'app.manifest.json': '{}', 'src/a.ts': '', 'io.x.app/secrets.json': '{}', '.sidecars/webui/data/webui.db': 'x',
+  });
+  const git = (...args: string[]) => execFileSync('git', ['-C', app, '-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { stdio: 'ignore' });
+  git('init', '-q');
+  git('add', '-A');
+  const f = lintTrackedRuntimeData(app, 'io.x.app');
+  assert.deepEqual(f.map((x) => `${x.file.slice(app.length + 1)}:${x.severity}:${x.rule}`),
+    ['.sidecars/webui/data/webui.db:warn:runtime-data', 'io.x.app/secrets.json:warn:runtime-data']);
+  assert.match(f[0]!.message, /git rm --cached/);
+  git('rm', '-rq', '--cached', 'io.x.app', '.sidecars');
+  assert.deepEqual(lintTrackedRuntimeData(app, 'io.x.app'), [], 'untracked: quiet');
 });

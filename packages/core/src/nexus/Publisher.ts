@@ -11,6 +11,9 @@
  *   4. Initialise or clone the target repo into the staging dir.
  *   5. Sync source on top, commit, tag, push.
  *
+ * Both publishes refuse while the app tracks runtime data or secrets
+ * (PublishFiles `refuseTrackedRuntimeData`, D105 `runtime-data-tracked`).
+ *
  * No tokens stored — relies on the user's existing `git` credentials
  * (~/.gitconfig, ssh keys, GitHub CLI auth, etc.). For v1 that's the
  * simplest auth surface; per-Nexus tokens land in v2 with cosign.
@@ -24,7 +27,7 @@ import { validateStagedDir } from './Validator.js';
 import { orasPushArtifact, orasSync } from './RegistryAuth.js';
 import { APP_ARTIFACT_TYPE, APP_REPO_PREFIX, buildStoreAnnotations } from './ociMetadata.js';
 import { readListing, screenshotInput, writeListing, type ListingInput } from './OciListing.js';
-import { publishFileList, type PublishFileList } from './PublishFiles.js';
+import { publishFileList, refuseTrackedRuntimeData, type PublishFileList } from './PublishFiles.js';
 import { buildPublishMarker, PUBLISH_MARKER, readAppSource, stampManifest, type PublishMarker } from './AppSource.js';
 import { upsertOciCatalog } from './OciCatalog.js';
 import type { AppManifest } from '../types/manifest.js';
@@ -62,6 +65,8 @@ export async function publishGit(opts: PublishGitOpts): Promise<PublishGitResult
   log('validating manifest...');
   const manifest = validateStagedDir(appPath);
   requireOriginId(manifest);
+  // The release leaves runtime data out, but tracked it is in the source repo.
+  refuseTrackedRuntimeData(appPath, manifest.id);
   const tag = opts.tag ?? `v${manifest.version}`;
   const branch = opts.branch ?? 'main';
 
@@ -297,6 +302,7 @@ export async function publishOci(opts: PublishOciOpts): Promise<{ ref: string }>
   log('validating manifest...');
   const manifest = validateStagedDir(opts.appPath);
   requireOriginId(manifest);
+  refuseTrackedRuntimeData(opts.appPath, manifest.id);
   // Screenshot files are checked before anything is pushed (pushed after the
   // release, below): a bad image must not leave a half-published app.
   const shotRefs = manifest.store?.screenshots ?? [];

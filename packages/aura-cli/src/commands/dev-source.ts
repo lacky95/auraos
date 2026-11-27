@@ -20,7 +20,8 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import {
-  initRepo, patchesOverride, readSeries, safeDirectoryArgs, SYSTEM_APP_LATER_MESSAGE, SYSTEM_APP_OVERLAYS, type SeriesBase,
+  initRepo, patchesOverride, readSeries, runtimeDataIgnoreLines, safeDirectoryArgs, SYSTEM_APP_LATER_MESSAGE, SYSTEM_APP_OVERLAYS,
+  trackedRuntimeData, trackedRuntimeDataRefusal, type SeriesBase,
 } from '@aura/core';
 import { api } from '../lib/client.js';
 import { color, fail, info, ok, warn } from '../lib/format.js';
@@ -358,6 +359,15 @@ export function setManifestRepository(appDir: string, url: string): boolean {
   return true;
 }
 
+/** The app id of `appDir`'s manifest (its runtime data dir is named after it). */
+function manifestId(appDir: string): string {
+  try {
+    const id = (JSON.parse(readFileSync(join(appDir, 'app.manifest.json'), 'utf-8')) as { id?: unknown }).id;
+    if (typeof id === 'string' && id) return id;
+  } catch { /* reported below */ }
+  return fail(`app.manifest.json in ${appDir} has no readable "id"`);
+}
+
 function git(cwd: string, args: string[], timeout = 60_000): string {
   return execFileSync('git', ['-C', cwd, ...args], { stdio: ['ignore', 'pipe', 'pipe'], timeout }).toString().trim();
 }
@@ -365,13 +375,27 @@ function git(cwd: string, args: string[], timeout = 60_000): string {
 /**
  * The source half of `dev publish`: make sure `appDir` is a repo, record
  * `repository`, set origin and push the branch with its tags. Git runs here,
- * with this Terminal's credentials.
+ * with this Terminal's credentials. An app dir is also where its instances
+ * keep their data (`<appId>/`, `.sidecars/`): a new repo excludes it, and the
+ * push is refused while the index or the commits it would send hold runtime
+ * data or secrets (PublishFiles `trackedRuntimeData`).
  */
 export function pushSource(appDir: string, url: string, log: (m: string) => void = info): { branch: string; commit: string } {
   if (!existsSync(join(appDir, 'app.manifest.json'))) fail(`no app.manifest.json in ${appDir}`);
+  const appId = manifestId(appDir);
   if (!existsSync(join(appDir, '.git'))) {
-    initRepo(appDir, 'Initial commit');
-    log('made it a git repo (git init -b main, one commit)');
+    initRepo(appDir, 'Initial commit', runtimeDataIgnoreLines(appId));
+    log('made it a git repo (git init -b main, one commit; runtime data excluded)');
+  }
+  const branch = gitOut(appDir, ['symbolic-ref', '--short', '-q', 'HEAD']);
+  if (!branch) fail('HEAD is detached — check out the branch to publish (e.g. git switch main)');
+  // What the push sends: the index plus the branch's commits — only those not
+  // on a remote yet when origin stays the same repo, all of them for a new one.
+  const sameOrigin = gitOut(appDir, ['remote', 'get-url', 'origin']) === url;
+  const tracked = trackedRuntimeData(appDir, appId, { pushing: sameOrigin ? [branch!, '--not', '--remotes=origin'] : [branch!] });
+  if (tracked.length) {
+    const body = trackedRuntimeDataRefusal(appId, tracked, 'dev publish');
+    fail(`${body.message}\n  Fix: ${body.hint}`);
   }
   if (setManifestRepository(appDir, url)) {
     git(appDir, ['add', 'app.manifest.json']);
@@ -383,8 +407,6 @@ export function pushSource(appDir: string, url: string, log: (m: string) => void
   if (dirty) warn('uncommitted changes are not pushed (the release records the last commit as dirty)');
   if (gitOut(appDir, ['remote', 'get-url', 'origin']) === null) git(appDir, ['remote', 'add', 'origin', url]);
   else git(appDir, ['remote', 'set-url', 'origin', url]);
-  const branch = gitOut(appDir, ['symbolic-ref', '--short', '-q', 'HEAD']);
-  if (!branch) fail('HEAD is detached — check out the branch to publish (e.g. git switch main)');
   try {
     execFileSync('git', ['-C', appDir, 'push', '-u', 'origin', branch!, '--tags'],
       { stdio: ['ignore', 'pipe', 'pipe'], timeout: 300_000, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });

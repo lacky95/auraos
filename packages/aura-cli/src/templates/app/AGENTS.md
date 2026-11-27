@@ -347,9 +347,12 @@ The manifest says which contract the app follows (`"auraContract": 1`) and
 declares everything it uses: `permissions[]`, the Context keys it reads
 (`context[]`), its sidecars (`services[]`), `"docker"` in `tools[]` if it
 drives docker, and other apps' interfaces (`consumes[]`). App data goes in
-`getAppContext().dataDir` (`/data`), never in `~` or the app folder. Read
-Context on the server with `osClient.context.get('KEY')`, not from
-`/run/context`. `aura dev validate <dir>` checks all of it; the Aura Docs page
+`getAppContext().dataDir` (`/data`), never in `~` or the app folder. In the
+user and global scopes that data is stored inside this folder (`{{APP_ID}}/`,
+sidecar volumes in `.sidecars/`, with logins and databases): keep the
+runtime-data lines of `.gitignore`; `aura dev publish` refuses while any of it
+is tracked. Read Context on the server with `osClient.context.get('KEY')`,
+not from `/run/context`. `aura dev validate <dir>` checks all of it; the Aura Docs page
 "The Aura app contract" (`app-contract`) has the checklist.
 
 ## Common patterns
