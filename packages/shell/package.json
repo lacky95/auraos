@@ -10,7 +10,7 @@
     "start": "exec node server.mjs",
     "start:check": "node server.mjs --check",
     "typecheck": "astro check",
-    "test":      "tsx --test test/*.test.ts"
+    "test":      "npm run --silent --prefix ../ui build && tsx --test test/*.test.ts"
   },
   "dependencies": {
     "@aura/core":            "workspace:*",
