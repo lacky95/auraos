@@ -1,7 +1,7 @@
 import type { Command } from 'commander';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { api } from '../lib/client.js';
+import { api, type ShellError } from '../lib/client.js';
 import { color, fail, info, ok, table, warn } from '../lib/format.js';
 import { promptChoice, promptConfirm, promptMultiSelect, BACK, PromptCancelled } from '../lib/prompts.js';
 import { BUILTIN_PERMISSIONS, ENFORCED_PERMISSIONS as CORE_ENFORCED } from '@aura/core';
@@ -163,11 +163,22 @@ export function registerApp(program: Command): void {
           throw err;
         }
       }
-      const res = await api.post<{ ok?: boolean; removed?: boolean; dest?: string; error?: string; homeDeleted?: boolean }>(
-        `/api/apps/${encodeURIComponent(appId)}/remove${opts.deleteHome ? '?deleteHome=1' : ''}`,
-      );
-      if (!res?.ok) fail(`remove failed: ${res?.error ?? 'unknown error'}`);
-      ok(`deleted ${color.bold(appId)} and its data${res.dest ? color.dim(` (${res.dest})`) : ''}`);
+      let res: { ok?: boolean; removed?: boolean; dest?: string; error?: string; message?: string; homeDeleted?: boolean } | undefined;
+      try {
+        res = await api.post(`/api/apps/${encodeURIComponent(appId)}/remove${opts.deleteHome ? '?deleteHome=1' : ''}`);
+      } catch (err) {
+        // The shell's own reason (a built-in app is refused, 409), not the raw HTTP line.
+        const e = err as ShellError;
+        let why: string | undefined;
+        try { why = (JSON.parse(e.body ?? '') as { error?: string }).error; } catch { /* not JSON */ }
+        fail(`${appId} was not deleted: ${why ?? e.message}`);
+      }
+      if (!res?.ok) fail(`${appId} was not deleted: ${res?.error ?? 'unknown error'}`);
+      if (res.removed === false) {
+        ok(`${color.bold(appId)} is no longer registered; nothing was on disk to delete${res.dest ? color.dim(` (${res.dest})`) : ''}`);
+      } else {
+        ok(`deleted ${color.bold(appId)} and its data${res.dest ? color.dim(` (${res.dest})`) : ''}`);
+      }
       if (opts.deleteHome) info(res.homeDeleted ? 'its App Homes were deleted' : 'it had no App Home');
       else info('its App Homes were kept (aura app remove --delete-home deletes them)');
     });

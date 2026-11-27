@@ -2,7 +2,7 @@ import type { APIRoute } from 'astro';
 import { mkdirSync, writeFileSync, chmodSync, existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join, normalize, dirname, resolve } from 'node:path';
-import { getAppManager, initRepo } from '@aura/core';
+import { getAppManager, getNexusManager, initRepo } from '@aura/core';
 import { auditOwner, ownerAction } from '../../../lib/approvals/admin.ts';
 import { handOwnAppSourceToOwner } from '../../../lib/identityReports.ts';
 
@@ -16,8 +16,9 @@ import { handOwnAppSourceToOwner } from '../../../lib/identityReports.ts';
  * filesystem, which the host AppManager never sees. Routing the write
  * through the shell (which has the full `/workspace/apps` mount via the
  * project-root bind) makes scaffolding work from anywhere — terminal proots,
- * sibling containers, the host shell. AppRegistry's chokidar watcher then
- * picks up the new manifest automatically.
+ * sibling containers, the host shell. The route then registers the app the
+ * way an install does (`reloadScopedApp` + `syncAppHost`), so it answers with
+ * the app's installation, intents and interfaces in place.
  *
  * Same idea as /api/admin/cap, which exists for the same reason (cap install
  * needs apt/gnupg + write access to /os/toolchain).
@@ -109,11 +110,17 @@ export const POST: APIRoute = async (ctx) => {
   // Overwriting an EXISTING app replaces the code that runs under its id —
   // and with it whatever was granted to that id. That is the owner's decision
   // on exactly these files (D50, lib/approvals/admin.ts). Creating a new app is not.
-  if (existsSync(dest) && force) {
+  const replacing = existsSync(dest) && !!force;
+  // A built-in app's code is the AuraOS repo's: never overwritten by a scaffold (D1).
+  if (replacing && scope === 'system') {
+    return json({ error: 'system-app', message: `${appId} is in the system scope (the AuraOS repo): a scaffold does not overwrite it. Use --scope user.` }, 409);
+  }
+  if (replacing) {
     const admin = await ownerAction(ctx, {
       action: 'admin.change', level: 'session', payload: { op: 'scaffold.overwrite', appId, scope, files },
       title: `Overwrite ${appId} with a new scaffold`,
-      details: [`Scope: ${scope}`, `Files: ${files.length}`, 'The code that runs under that app id is replaced.'],
+      details: [`Scope: ${scope}`, `Files: ${files.length}`, 'The code that runs under that app id is replaced.',
+        'Its grants are revoked; its files and data go to trash (data a kept uninstall left is set aside for that app).'],
     });
     if (admin instanceof Response) return admin;
     await auditOwner(admin, 'app.scaffold-overwrite', { target: `app:${appId}`, detail: { scope } });
@@ -132,6 +139,24 @@ export const POST: APIRoute = async (ctx) => {
     const resolved = normalize(join(dest, f.relPath));
     if (!resolved.startsWith(dest + '/') && resolved !== dest) {
       return json({ error: 'path-escape', file: f.relPath, resolved }, 400);
+    }
+  }
+
+  // Replace, never merge (B2/S2): the old app's instances stop, its grants are
+  // revoked, its tree goes to trash with its install record, and data a
+  // keep-data uninstall left is set aside for its installation instead of
+  // being handed to the new app. Same as `aura dev clone --force`.
+  const warnings: string[] = [];
+  if (replacing) {
+    const mgr = getAppManager();
+    try { await mgr.stopAll(appId); }
+    catch (err) { warnings.push(`stopping ${appId} failed: ${(err as Error).message}; continuing with the overwrite.`); }
+    try {
+      const aside = await getNexusManager().setAsideForOverwrite(appId, scope);
+      if (aside.trash) warnings.push(`previous ${appId} moved to ${aside.trash}`);
+      if (aside.retained) warnings.push(`data kept from the uninstalled ${appId} was set aside for that app, not handed to this one`);
+    } catch (err) {
+      return json({ error: 'overwrite-failed', message: `could not set ${appId} aside: ${(err as Error).message}; nothing was written.` }, 500);
     }
   }
 
@@ -159,6 +184,19 @@ export const POST: APIRoute = async (ctx) => {
   let gitError: string | undefined;
   try { gitCommit = initRepo(dest, `Scaffold ${appId} (aura dev new)`); }
   catch (err) { gitError = (err as Error).message; console.warn(`[scaffold] ${gitError}`); }
+
+  // Register it like an install (B1): manifest-derived projections (intents,
+  // keymaps, interfaces), mounts, `app:installed`; then its installation and
+  // host (D20), awaited. The watcher alone left the projections stale and,
+  // over an existing app, made no installation at all.
+  try {
+    const mgr = getAppManager();
+    mgr.reloadScopedApp(appId);
+    const hostError = await mgr.syncAppHost(appId, scope);
+    if (hostError) warnings.push(`${appId} has no installation record yet (${hostError}); a shell restart allocates it.`);
+  } catch (err) {
+    warnings.push(`registering ${appId} failed: ${(err as Error).message}; the watcher and the next shell start reconcile it.`);
+  }
 
   // Register the new app with pnpm so its workspace-dep symlinks (@aura/
   // app-sdk, astro, etc.) get created under apps/<id>/node_modules. Without
@@ -204,12 +242,9 @@ export const POST: APIRoute = async (ctx) => {
   const ownership = scope === 'user' ? await handOwnAppSourceToOwner(dest, appId) : null;
   if (ownership) console.warn(`[scaffold] ${appId}: ${ownership}`);
 
-  // AppRegistry's chokidar watcher (packages/core/src/app-manager/AppRegistry.ts)
-  // picks up the new manifest file automatically — no explicit reload call
-  // needed. The chokidar `add` event fires within ~100 ms and triggers
-  // `loadManifestFile`, which emits `app:installed` on the OsEventBus.
   return json({
     ok: true, appId, scope, dest, fileCount: files.length,
+    ...(warnings.length ? { warnings } : {}),
     installed: installOk,
     ...(installError ? { installError } : {}),
     git: { commit: gitCommit, ...(gitError ? { error: gitError } : {}) },

@@ -5,12 +5,15 @@
  * retires its App Hosts.
  */
 import { getAppManager } from '../app-manager/AppManager.js';
+import { SystemAppRemovalError } from './NexusManager.js';
 import { getNexusManager } from './singleton.js';
 
 export async function removeInstalledApp(appId: string): Promise<{ removed: boolean; dest: string }> {
   const mgr = getAppManager();
   const scope = mgr.registry.getScopeId(appId);
   if (!scope) throw new Error(`App not installed: ${appId}`);
+  // Before anything stops: a built-in app is never deleted (D1).
+  if (scope === 'system') throw new SystemAppRemovalError(appId);
   mgr.markUninstalling(appId, true);
   try {
     try {
