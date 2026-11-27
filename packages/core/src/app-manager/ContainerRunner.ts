@@ -6,30 +6,38 @@ import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import { lifecyclePath } from '../types/manifest.js';
 import { MY_TOOLS_PATH, currentToolsMode, provisionAllowlist, toolchainMirrorBin } from './tool-provision.js';
-import { containerHomeEnv, containerHomeMount } from './spawn/homeArgs.js';
-import { containerContextEnv, containerContextMounts } from './spawn/contextArgs.js';
-import { containerNetworkArgs, containerNetworkEnv, containerShellBase, rawSocketArgs, terminalNetworkUser } from './spawn/networkArgs.js';
-import { TERM_NETWORK_CONTAINER_LABEL, TermNetworks, type TermNetwork } from './TermNetworks.js';
-import { containerIdentityArgs, isNonRootIdentity, writeIdentityFiles } from './spawn/identityArgs.js';
-import { readKernelSessionSecret, sessionHostUser, terminalSessionArgs, writeSessionSecret } from './spawn/sessionArgs.js';
+import { containerHomeEnv, containerHomeMount } from '../runtimes/spawn/homeArgs.js';
+import { containerContextEnv, containerContextMounts } from '../runtimes/spawn/contextArgs.js';
+import { containerNetworkArgs, containerNetworkEnv, containerShellBase, rawSocketArgs, terminalNetworkUser } from '../runtimes/spawn/networkArgs.js';
+import { InstanceNetworks, TERM_NETWORK_CONTAINER_LABEL, TermNetworks, type TermNetwork } from '../runtimes/container/networks.js';
+import { containerIdentityArgs, isNonRootIdentity, writeIdentityFiles } from '../runtimes/spawn/identityArgs.js';
+import {
+  SESSION_IDENTITY_LABEL, readKernelSessionSecret, sessionHostUser, sessionServerOwner, terminalSessionArgs, terminalSessionCommand, writeSessionSecret,
+} from '../runtimes/spawn/sessionArgs.js';
+import { containerName } from '../runtimes/container/names.js';
 import type { RuntimeCapabilities } from '../runtimes/types.js';
+import type { ForwarderFacts } from '../runtimes/container/endpoints.js';
+import type { RuntimeLogsRequest, RuntimeLogsStream, RuntimeOutputStream, RuntimeWorkloadExec } from '../runtimes/ari.js';
+import { IDMAP_HELPER_PATH, type ContainerMountBackend, type ContainerPortBackend, type ContainerSidecarBackend, type FacilityProbe, type SidecarRuntimeFacts } from '../runtimes/container/backends.js';
 // Value import, but MountManager imports ContainerRunner type-only, so there
 // is no runtime cycle.
-import { MOUNT_ROOT_PATH } from './MountManager.js';
+import { DEFAULT_BUILD_LIMITS, limitArgs } from '../runtimes/container/limits.js';
+import type { ResourceLimits } from '../runtimes/ari.js';
+import { MOUNT_ROOT_PATH } from '../runtimes/spawn/paths.js';
 import { KEEP_RESTART_LABEL, keptAcrossRestart, type KeepSiblings } from './sidecarParking.js';
 import type { SandboxExecOpts, SandboxRunner, SandboxRunnerOpts } from './SandboxRunner.js';
-import type { EngineContainer, ExecSession, SessionSpec } from './ExecBridge.js';
+import type { ExecSession, SessionSpec } from './ExecBridge.js';
 import { ExecBridgeError } from './ExecBridge.js';
-import { DockerApi, type EngineClient } from './DockerApi.js';
-import { SessionBroker } from './SessionBroker.js';
+import { DockerApi, engineExec, engineLogs, type EngineClient } from './DockerApi.js';
+import { SessionBroker, stageSessionEnter } from './SessionBroker.js';
 import type { ResourceUsage, SidecarInfo } from '../types/instance.js';
 import { SIDECAR_PS_FORMAT, USAGE_STATS_FORMAT, parseSidecarPs, parseUsageStats } from './sidecars.js';
 import type { InstanceSpawnContext } from './SandboxRunner.js';
 import { OWNER_LABEL, PREVIEW_LABEL } from './instanceOwner.js';
 import { VolumeStore, type VolumeEntry } from '../context/VolumeStore.js';
 import {
-  ASTRO_START_SHELL, RAW_START_SHELL, PROVISION_TIMEOUT_MS, ProvisionWatch, nextHealthDeadline,
-  BUILDER_CACHE_PATH, BUILDER_CACHE_SUBPATH, builderProvisionEnv, builderProvisionShell,
+  ASTRO_START_SHELL, RAW_START_SHELL, PROVISION_TIMEOUT_MS, ProvisionWatch,
+  BUILDER_CACHE_PATH, BUILDER_CACHE_SUBPATH, builderProvisionEnv, builderProvisionShell, provisionBuilderTools,
 } from './provisioning.js';
 import { BUILD_STAGING_DIR, serveState } from './appBuild.js';
 import { BASE_IMAGE, whenBaseImageReady } from './BaseImage.js';
@@ -37,11 +45,13 @@ import {
   checkHealthGuard, classifyHealthIdentity, healthIdentityRefusal, lifecycleHeaders, lifecycleStatusRefusal,
   newLifecycleToken, relayStrictEnv, type HealthIdentityClass, type LifecycleStatus,
 } from './lifecycleGate.js';
+import {
+  StartupFailure, callMaintenanceHook, callOptionalHook, callRequiredHook, lifecycleUrl, waitHealthy, type LifecycleDestination, type LifecycleTraits,
+} from './lifecycleClient.js';
 import { relayKey } from '../app-hosts/relayClaim.js';
 
-const HEALTH_CHECK_INTERVAL_MS = 200;
-const HEALTH_CHECK_TIMEOUT_MS = 60_000; // slightly higher than PRoot because container spawn adds ~100 ms
-const LIFECYCLE_TIMEOUT_MS = 5_000;
+/** The container's part of the one lifecycle client (lifecycleClient.ts): a 60 s boot budget (spawn adds ~100 ms), 5 s probes. */
+const LIFECYCLE: LifecycleTraits = { name: '[ContainerRunner]', bootBudgetMs: 60_000, probeTimeoutMs: 5_000 };
 const SHARED_NETWORK = process.env['AURA_DOCKER_NETWORK'] ?? 'aura-net';
 
 const execFileAsync = promisify(execFile);
@@ -223,9 +233,16 @@ function dockerOut(args: string[]): string {
   return execFileSync('docker', args, { encoding: 'utf-8', timeout: 5_000, stdio: ['ignore', 'pipe', 'ignore'] });
 }
 
-/** `http://<address>:<port>/api/lifecycle/<hook>`; an IPv6 address gets brackets. */
-function lifecycleUrl(address: string, port: number, hook: string): string {
-  return `http://${address.includes(':') ? `[${address}]` : address}:${port}${lifecyclePath(hook)}`;
+
+/** A throwaway builder container's name (`aura-build-<app>`, `aura-provision-<app>`). */
+function builderName(kind: 'build' | 'provision', appId: string): string {
+  return `aura-${kind}-${appId.replace(/[^a-zA-Z0-9_.-]/g, '_')}`;
+}
+
+/** A session host's own user, from its label (stream T2): the session launcher's target check. */
+function sessionHostTarget(label: string | undefined): { sessionHostUid?: number } {
+  const uid = Number(/^(\d+):\d+$/.exec(label ?? '')?.[1] ?? 0);
+  return uid > 0 ? { sessionHostUid: uid } : {};
 }
 
 interface TrackedContainer {
@@ -255,6 +272,8 @@ interface TrackedContainer {
   addresses: string[];
   /** This start's lifecycle secret (`AURA_LIFECYCLE_TOKEN` in the container's env). */
   lifecycleToken?: string;
+  /** A session host's session uid:gid (stream T2): `docker exec` runs as it, never as the container's root launcher. */
+  sessionUser?: string;
   /** Health identity and runtime-check result, once healthy (not for adopted containers). */
   lifecycle?: LifecycleStatus;
   port: number;
@@ -297,7 +316,7 @@ interface TrackedContainer {
  * Cleanup is automatic — every container is started with `--rm`, so when the
  * astro process inside exits (or we `docker kill`), the container disappears.
  */
-export class ContainerRunner implements SandboxRunner {
+export class ContainerRunner implements SandboxRunner, ContainerMountBackend, ContainerPortBackend, ContainerSidecarBackend {
   private containers = new Map<string, TrackedContainer>();
   private toolchainDir: string;
   private appsDir: string;
@@ -314,6 +333,8 @@ export class ContainerRunner implements SandboxRunner {
   private volumeStore: VolumeStore;
   /** The per-user private Terminal networks (D58). */
   private termNetworks: TermNetworks;
+  /** D107: the per-instance workload networks (isolated sidecars). */
+  private instanceNetworks: InstanceNetworks;
 
   /**
    * Whether the survivors of the last shell lifetime are still unknown: the
@@ -349,6 +370,8 @@ export class ContainerRunner implements SandboxRunner {
     this.termNetworks = new TermNetworks(() => this.getOwnContainerId());
     // Before adoption: a surviving Terminal is reachable only there.
     this.termNetworks.joinExisting();
+    this.instanceNetworks = new InstanceNetworks(() => this.getOwnContainerId());
+    this.instanceNetworks.joinExisting();
   }
 
   /**
@@ -372,14 +395,19 @@ export class ContainerRunner implements SandboxRunner {
       readOnlyBinds: true,
       hostFilesystem: true,
       mounts: true,
-      // D80: until 5b G's idmapped-bind probe lands, cross-uid writable mounts are refused, never downgraded.
-      idmappedMounts: false,
+      // D80: an idmapped bind passed the boot probe (`probeIdmappedMounts`); false until then, and
+      // where it fails: a cross-uid writable mount is then refused, never downgraded.
+      idmappedMounts: this.idmapProbe?.ok === true,
       portExpose: true,
       sidecars: true,
       warmPool: true,
       survivesShellRestart: true,
       usage: true,
       gpu: false,
+      // D107: Docker's default seccomp profile (and AppArmor where it restricts unprivileged user
+      // namespaces) refuses a workload's own user namespace; granting it would mean weakening the
+      // container (privileged, seccomp=unconfined), which this runtime never does. Declared honestly.
+      userNamespaces: false,
     };
   }
 
@@ -387,7 +415,7 @@ export class ContainerRunner implements SandboxRunner {
   public toolsDir(instanceId: string): string {
     return join(this.dataDir, 'aura', 'runtime', instanceId, 'tools');
   }
-  public provisionToolsDir(instanceId: string, manifest: AppManifest): string {
+  public provisionToolsDir(instanceId: string, manifest: Pick<AppManifest, 'tools'>): string {
     const dir = this.toolsDir(instanceId);
     provisionAllowlist({
       dataDir: this.dataDir,
@@ -430,10 +458,7 @@ export class ContainerRunner implements SandboxRunner {
    * What SidecarManager needs to start a container the way this runner starts
    * app containers: the shared volumes, network and OS coordinates.
    */
-  public sidecarRuntime(): {
-    dataDir: string; appDataVolume: string; nodeModulesVolume: string; network: string;
-    osApiBase: string; shellHostname: string; workspaceRoot: string; toolsMode: string;
-  } {
+  public sidecarRuntime(): SidecarRuntimeFacts {
     return {
       dataDir: this.dataDir,
       appDataVolume: this.appDataVolume,
@@ -444,6 +469,15 @@ export class ContainerRunner implements SandboxRunner {
       workspaceRoot: this.workspaceRoot,
       toolsMode: currentToolsMode(this.dataDir),
     };
+  }
+
+  /**
+   * D107: the instance's own workload network (`aura-inst-<id>`), created
+   * when missing, with the shell and the instance's container on it. Throws
+   * when it can't be (the isolated workload is then not created).
+   */
+  public isolatedNetwork(instanceId: string): string {
+    return this.instanceNetworks.ensure(instanceId, this.containerName(instanceId));
   }
 
   // ─── Spawn ────────────────────────────────────────────────────────────
@@ -487,7 +521,7 @@ export class ContainerRunner implements SandboxRunner {
     // (`-e AURA_LIFECYCLE_TOKEN` without a value), not its command line.
     const lifecycleToken = newLifecycleToken();
     // A session host's server takes its token from a one-time file, not its env (stream T).
-    if (sessionHostUser(appId, ctx)) writeSessionSecret(this.dataDir, instanceId, lifecycleToken, ctx.identity ?? { uid: 0, gid: 0 });
+    if (sessionHostUser(appId, ctx)) writeSessionSecret(this.dataDir, instanceId, lifecycleToken, sessionServerOwner(ctx.identity));
     const r = spawnSync('docker', args, {
       stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000, encoding: 'utf-8',
       env: { ...process.env, AURA_LIFECYCLE_TOKEN: lifecycleToken },
@@ -526,6 +560,7 @@ export class ContainerRunner implements SandboxRunner {
     const tracked: TrackedContainer = {
       containerId, hostname, address, dialByAddress: !!term, addresses, lifecycleToken, port, appId, logTail, pid,
       exitCb: null, expectingKill: false, provision,
+      ...(sessionHostUser(appId, ctx) && ctx.identity?.uid ? { sessionUser: `${ctx.identity.uid}:${ctx.identity.gid}` } : {}),
     };
     this.containers.set(instanceId, tracked);
 
@@ -619,7 +654,7 @@ export class ContainerRunner implements SandboxRunner {
    * peer group); a `private` mount receives nothing and cross-app mounting
    * would silently no-op. Cached after the first probe.
    */
-  private propagationCache: { ok: boolean; reason?: string } | null = null;
+  private propagationCache: FacilityProbe | null = null;
   public canPropagateMounts(): { ok: boolean; reason?: string } {
     if (this.propagationCache) return this.propagationCache;
     let result: { ok: boolean; reason?: string };
@@ -641,6 +676,50 @@ export class ContainerRunner implements SandboxRunner {
     }
     if (!result.ok) console.warn(`[ContainerRunner] mount propagation unavailable: ${result.reason}`);
     this.propagationCache = result;
+    return result;
+  }
+
+  /** The last idmapped-bind probe (D80), the helper it ran as a daemon host path; null before it ran. */
+  private idmapProbe: FacilityProbe | null = null;
+  private idmapHelper: string | null = null;
+
+  /** D80: whether an idmapped bind works on the data filesystem (`ok: false` until probed). */
+  public canIdmapMounts(): FacilityProbe {
+    return this.idmapProbe ?? { ok: false, reason: 'not probed yet' };
+  }
+
+  /** The idmap helper (the staged session launcher) as a daemon host path, once the probe passed. */
+  public idmapHelperHostPath(): string | null {
+    return this.idmapProbe?.ok ? this.idmapHelper : null;
+  }
+
+  /**
+   * D80: probes an idmapped bind of a scratch dir on the data filesystem, in
+   * the privileged mount helper with the session launcher's `idmap-probe`
+   * (it attaches nothing). Run at boot (AppManager init). Any failure (no
+   * kernel support, a filesystem that refuses it, a launcher that predates
+   * the subcommand, no engine, no base image yet) makes `idmappedMounts`
+   * false: cross-uid writable mounts are then refused with that reason. Only
+   * the composition point asks for it (AppManager `probeIdmappedMounts`):
+   * tests never run a privileged helper.
+   */
+  public async probeIdmappedMounts(run: (args: string[]) => Promise<unknown> = (args) => execFileAsync('docker', args, { timeout: 60_000 })): Promise<FacilityProbe> {
+    let result: FacilityProbe;
+    try {
+      // No base-image wait: a probe must never start an image build. Missing, it fails (false until the next boot).
+      const helper = this.toDaemonHostPath(await stageSessionEnter(this.dataDir));
+      const scratch = join(this.dataDir, 'aura', 'runtime', 'idmap-probe');
+      mkdirSync(scratch, { recursive: true, mode: 0o700 });
+      await run(idmapProbeArgs({ helper, scratch: this.toDaemonHostPath(scratch), image: BASE_IMAGE }));
+      this.idmapHelper = helper;
+      result = { ok: true };
+    } catch (err) {
+      const e = err as { stderr?: string | Buffer; message?: string };
+      const detail = String(e.stderr ?? '').trim().split('\n').pop() || e.message || String(err);
+      result = { ok: false, reason: `idmapped mounts unavailable: ${detail}` };
+      console.warn(`[ContainerRunner] ${result.reason}`);
+    }
+    this.idmapProbe = result;
     return result;
   }
 
@@ -888,7 +967,8 @@ export class ContainerRunner implements SandboxRunner {
       ...terminalSessionArgs(appId, ctx, { appDataVolume, instanceId }),
       BASE_IMAGE,
     );
-    a.push(...entrypoint);
+    // A session host's command runs under its session launcher (spawn/sessionArgs.ts, stream T2).
+    a.push(...terminalSessionCommand(appId, ctx, entrypoint));
     void manifest; // unused — kept for future per-manifest customisation
     return a;
   }
@@ -948,10 +1028,7 @@ export class ContainerRunner implements SandboxRunner {
   }
 
   private containerName(instanceId: string): string {
-    // Docker names must be [a-zA-Z0-9_.-]; instance IDs are
-    // "com.aura.terminal-3" — `.` is allowed but `:` (used in some
-    // instanceId schemes) is not. Sanitise defensively.
-    return 'aura-' + instanceId.replace(/[^a-zA-Z0-9_.-]/g, '_');
+    return containerName(instanceId);
   }
 
   /**
@@ -1111,8 +1188,10 @@ export class ContainerRunner implements SandboxRunner {
     dialByAddress?: boolean;
     lifecycleToken?: string;
     preview?: string;
-    /** `Config.User` (P5-3): `<uid>:<gid>` of a non-root app; empty for root. */
+    /** `Config.User` (P5-3): `<uid>:<gid>` of a non-root app; empty for root. A session host's session uid:gid (its label). */
     user?: string;
+    /** A session host's session uid:gid (stream T2). */
+    sessionUser?: string;
   }> | null> {
     type DockerInspect = {
       Config: { Env: string[]; Labels?: Record<string, string>; User?: string }; State: { Pid: number };
@@ -1132,23 +1211,31 @@ export class ContainerRunner implements SandboxRunner {
       return null;
     }
     const names = psOut.split('\n').map((l) => l.trim()).filter(Boolean);
-    const out: Array<{ instanceId: string; appId: string; port: number; hostname: string; pid: number; tokenNonce?: string; ownerLabel?: string; address?: string; addresses?: string[]; dialByAddress?: boolean; lifecycleToken?: string; preview?: string; user?: string }> = [];
+    const out: Array<{ instanceId: string; appId: string; port: number; hostname: string; pid: number; tokenNonce?: string; ownerLabel?: string; address?: string; addresses?: string[]; dialByAddress?: boolean; lifecycleToken?: string; preview?: string; user?: string; sessionUser?: string }> = [];
     for (const name of names) {
       if (!name.startsWith('aura-')) continue;
       // Skip aura-shell itself — it's not an app instance, just the
       // controller container that owns this runner.
       if (name === 'aura-shell') continue;
-      let inspect: DockerInspect;
-      try {
-        const { stdout: raw } = await execFileAsync('docker', ['inspect', name, '--format', '{{json .}}'], {
-          encoding: 'utf-8',
-          timeout: 3_000,
-        });
-        inspect = JSON.parse(raw) as DockerInspect;
-      } catch (err) {
-        console.warn(`[ContainerRunner] inspect ${name} failed: ${(err as Error).message}`);
-        continue;
+      // A survivor whose inspect fails is not "no survivor": skipped, it kept
+      // running untracked and its port went to the next spawn (two instances
+      // on one port after the following restart, live 0.0.51). One retry with
+      // more time (a busy daemon at boot); still unreadable: the scan is
+      // incomplete (null, the reconciler retries). Gone since `ps`: skipped.
+      let inspect: DockerInspect | null = null;
+      for (const timeout of [3_000, 10_000]) {
+        try {
+          const { stdout: raw } = await execFileAsync('docker', ['inspect', name, '--format', '{{json .}}'], { encoding: 'utf-8', timeout });
+          inspect = JSON.parse(raw) as DockerInspect;
+          break;
+        } catch (err) {
+          const why = `${(err as { stderr?: string }).stderr ?? ''} ${(err as Error).message}`;
+          if (/no such (object|container)/i.test(why)) break;
+          console.warn(`[ContainerRunner] adoption scan: inspect ${name} failed (${timeout} ms): ${(err as Error).message}`);
+          if (timeout === 10_000) return null;
+        }
       }
+      if (!inspect) continue;
       // App-spawned SIBLING runtime containers (labelled `aura.parent`) are not
       // AppManager instances — they belong to an app and are managed via
       // reapSiblings, not adopted as instances.
@@ -1183,7 +1270,9 @@ export class ContainerRunner implements SandboxRunner {
         // A session host has none in its env: the kernel's own copy (spawn/sessionArgs.ts).
         lifecycleToken: env['AURA_LIFECYCLE_TOKEN'] || readKernelSessionSecret(this.dataDir, instanceId) || undefined,
         ...(inspect.Config?.Labels?.[PREVIEW_LABEL] ? { preview: inspect.Config.Labels[PREVIEW_LABEL] } : {}),
-        ...(inspect.Config?.User ? { user: inspect.Config.User } : {}),
+        // A session host runs as root (its launcher): its session identity is the label's (stream T2).
+        ...(inspect.Config?.Labels?.[SESSION_IDENTITY_LABEL] ? { user: inspect.Config.Labels[SESSION_IDENTITY_LABEL], sessionUser: inspect.Config.Labels[SESSION_IDENTITY_LABEL] }
+          : inspect.Config?.User ? { user: inspect.Config.User } : {}),
       });
     }
     return out;
@@ -1206,6 +1295,7 @@ export class ContainerRunner implements SandboxRunner {
     addresses?: string[];
     dialByAddress?: boolean;
     lifecycleToken?: string;
+    sessionUser?: string;
   }): void {
     if (this.containers.has(rec.instanceId)) return;
     // We don't have the container ID handy — docker inspect would have it,
@@ -1234,6 +1324,7 @@ export class ContainerRunner implements SandboxRunner {
       dialByAddress: rec.dialByAddress === true,
       addresses:     [...(rec.addresses ?? [])],
       ...(rec.address && rec.lifecycleToken ? { lifecycleToken: rec.lifecycleToken } : {}),
+      ...(rec.sessionUser ? { sessionUser: rec.sessionUser } : {}),
       port:          rec.port,
       appId:         rec.appId,
       logTail,
@@ -1256,104 +1347,47 @@ export class ContainerRunner implements SandboxRunner {
   }
 
   /**
-   * Probe the app's health endpoint until ready or timeout, at the address of
-   * the container `docker run` created, with the lifecycle token. Stops as
-   * soon as that container is no longer the one tracked (it exited: its
-   * address may go to someone else).
+   * The one health loop (lifecycleClient.ts) at the address of the container
+   * `docker run` created, with the lifecycle token. Stops as soon as that
+   * container is no longer the one tracked (it exited: its address may go to
+   * someone else).
    */
-  private async waitHealthy(instanceId: string, appId: string, containerId: string, port: number): Promise<HealthIdentityClass> {
-    // Two clocks, because "not answering yet" has two very different causes.
-    //
-    // A cold user/global-scope app installs its whole dependency tree in the
-    // entrypoint before astro ever starts. Timing that with the boot budget
-    // meant every heavy app was killed mid-install on first launch and only
-    // worked on the retry that found a warm node_modules. So: while the
-    // entrypoint says it is provisioning, keep pushing the boot deadline out —
-    // the app has not been asked to start yet — and bound the whole thing with
-    // an absolute ceiling so a wedged install still fails instead of hanging.
-    const startedAt   = Date.now();
-    const hardDeadline = startedAt + PROVISION_TIMEOUT_MS;
-    const provision   = this.containers.get(instanceId)?.provision;
-    let   deadline    = startedAt + HEALTH_CHECK_TIMEOUT_MS;
-    let lastBody: string | null = null;
-    while (Date.now() < deadline) {
-      const tracked = this.containers.get(instanceId);
-      if (!tracked || tracked.containerId !== containerId || !tracked.address) {
-        throw new Error(`container ${instanceId} exited before it became healthy`);
-      }
-      let refusal: string | null = null;
-      try {
-        const res = await fetch(lifecycleUrl(tracked.address, port, 'health'), {
-          headers: lifecycleHeaders(tracked.lifecycleToken), signal: AbortSignal.timeout(5_000),
-        });
-        // Capture body regardless of status so the timeout error message
-        // surfaces what the app actually said (403 = host gate, etc.).
-        const body = await res.text();
-        lastBody = body;
-        if (res.ok) {
-          // The shared identity check (lifecycleGate.ts), same as ProotRunner.
-          const identity = classifyHealthIdentity(body, appId, instanceId);
-          refusal = healthIdentityRefusal(identity, appId, instanceId);
-          if (!refusal) {
-            if (identity.kind === 'legacy') console.warn(`[ContainerRunner] ${instanceId} health endpoint returned no identity body; admitted as a known legacy app (warn mode).`);
-            return identity.kind;
-          }
+  private waitHealthy(instanceId: string, appId: string, containerId: string, port: number): Promise<HealthIdentityClass> {
+    const provision = this.containers.get(instanceId)?.provision;
+    return waitHealthy(LIFECYCLE, instanceId, appId, {
+      next: () => {
+        const tracked = this.containers.get(instanceId);
+        if (!tracked || tracked.containerId !== containerId || !tracked.address) {
+          throw new StartupFailure(`container ${instanceId} exited before it became healthy`);
         }
-      } catch (e) {
-        // Network refused / not ready yet — retry until deadline.
-        void e;
-      }
-      if (refusal) throw new Error(refusal);
-      // Re-arm only while provisioning is actually in flight, so the boot
-      // budget starts counting from the moment dependencies are ready.
-      deadline = nextHealthDeadline({
-        now: Date.now(), deadline, hardDeadline,
-        isProvisioning: provision?.isProvisioning ?? false,
-        bootBudgetMs:   HEALTH_CHECK_TIMEOUT_MS,
-      });
-      await new Promise((r) => setTimeout(r, HEALTH_CHECK_INTERVAL_MS));
-    }
-    const waited = Math.round((Date.now() - startedAt) / 1000);
-    throw new Error(
-      provision?.everProvisioned
-        ? `container ${instanceId} did not become healthy ${waited}s after starting to install its dependencies (lastBody=${lastBody?.slice(0, 200)})`
-        : `container ${instanceId} did not become healthy within ${HEALTH_CHECK_TIMEOUT_MS}ms (lastBody=${lastBody?.slice(0, 200)})`,
-    );
+        return { host: tracked.address, port, token: tracked.lifecycleToken, unbound: () => null };
+      },
+      ...(provision ? { provision } : {}),
+    });
   }
 
-  // ─── Lifecycle hooks (identical shape to ProotRunner) ─────────────────
-  async callLifecycle(instanceId: string, hook: string, opts: { reason?: string } = {}): Promise<void> {
-    const tracked = this.containers.get(instanceId);
-    if (!tracked) return;
-    const url = lifecycleUrl(tracked.address ?? tracked.hostname, tracked.port, hook);
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), LIFECYCLE_TIMEOUT_MS);
-    try {
-      const res = await fetch(url, {
-        method: 'POST', signal: ctrl.signal,
-        headers: lifecycleHeaders(tracked.lifecycleToken, opts.reason ? { 'x-aura-stop-reason': opts.reason } : {}),
-      });
-      if (!res.ok) throw new Error(`${hook} → HTTP ${res.status}`);
-    } finally { clearTimeout(t); }
-  }
-  async callOptionalLifecycle(instanceId: string, hook: string, body?: unknown): Promise<unknown> {
+  /**
+   * Where the instance answers: the address bound at spawn (its host name for
+   * an instance adopted without one). The binding is that address itself,
+   * so there is nothing more to prove per call.
+   */
+  private destination(instanceId: string): LifecycleDestination | null {
     const tracked = this.containers.get(instanceId);
     if (!tracked) return null;
-    const url = lifecycleUrl(tracked.address ?? tracked.hostname, tracked.port, hook);
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), LIFECYCLE_TIMEOUT_MS);
-    try {
-      const res = await fetch(url, {
-        method: 'POST',
-        signal: ctrl.signal,
-        headers: lifecycleHeaders(tracked.lifecycleToken, body !== undefined ? { 'Content-Type': 'application/json' } : {}),
-        body: body !== undefined ? JSON.stringify(body) : undefined,
-      });
-      if (!res.ok) return null;
-      try { return await res.json(); } catch { return null; }
-    } catch { return null; }
-    finally { clearTimeout(t); }
+    return { host: tracked.address ?? tracked.hostname, port: tracked.port, token: tracked.lifecycleToken, unbound: () => null };
   }
+
+  // ─── Lifecycle hooks (the one client, lifecycleClient.ts) ─────────────
+  callLifecycle(instanceId: string, hook: string, opts: { reason?: string } = {}): Promise<void> {
+    return callRequiredHook(LIFECYCLE, instanceId, this.destination(instanceId), hook, opts);
+  }
+  callOptionalLifecycle(instanceId: string, hook: string, body?: unknown): Promise<unknown> {
+    return callOptionalHook(LIFECYCLE, this.destination(instanceId), hook, body);
+  }
+  callMaintenanceHook(instanceId: string, hook: string, body: unknown, opts: { timeoutMs: number; reason: string }): Promise<unknown> {
+    return callMaintenanceHook(LIFECYCLE, instanceId, this.destination(instanceId), hook, body, opts);
+  }
+
 
   // ─── Kill / cleanup ───────────────────────────────────────────────────
   async kill(instanceId: string, opts: { keep?: KeepSiblings } = {}): Promise<void> {
@@ -1490,12 +1524,12 @@ export class ContainerRunner implements SandboxRunner {
   /** Shell-side pids of the `docker run` clients of running builds (getActivePids). */
   private readonly buildPids = new Set<number>();
 
-  async buildApp(appId: string, appDir: string, opts: { timeoutMs?: number } = {}): Promise<{ ok: boolean; output: string }> {
-    await whenBaseImageReady();
-    const name = `aura-build-${appId.replace(/[^a-zA-Z0-9_.-]/g, '_')}`;
-    const args = [
-      'run', '--rm', '--name', name,
-      '--pids-limit', '512', '--memory', '3g', '--cpus', '2',
+  /** The `docker run` argv of an app build (golden: test/golden-spawn-args.test.mjs, golden/build-args.json). */
+  buildAppArgs(appId: string, appDir: string, limits: ResourceLimits = DEFAULT_BUILD_LIMITS): string[] {
+    return [
+      'run', '--rm', '--name', builderName('build', appId),
+      // D106: the one limits mapping (runtimes/container/limits.ts); the build profile unless the caller names one.
+      ...limitArgs(limits),
       '--workdir', `/workspace/apps/${appId}`,
       ...this.buildAppDirMount(appDir, appId, this.appDataVolume),
       ...this.buildAppDirMount(`${appDir}/dist/${BUILD_STAGING_DIR}`, appId, this.appDataVolume, `/workspace/apps/${appId}/dist`),
@@ -1507,6 +1541,12 @@ export class ContainerRunner implements SandboxRunner {
       'bash', '-c',
       'set -e; ASTRO=node_modules/.bin/astro; [ -x "$ASTRO" ] || ASTRO=/workspace/node_modules/.bin/astro; exec "$ASTRO" build',
     ];
+  }
+
+  async buildApp(appId: string, appDir: string, opts: { timeoutMs?: number; limits?: ResourceLimits } = {}): Promise<{ ok: boolean; output: string }> {
+    await whenBaseImageReady();
+    const name = builderName('build', appId);
+    const args = this.buildAppArgs(appId, appDir, opts.limits);
     const timeoutMs = opts.timeoutMs ?? 10 * 60_000;
     return await new Promise((resolve) => {
       let output = '';
@@ -1536,26 +1576,17 @@ export class ContainerRunner implements SandboxRunner {
    * runs here. Capped like a build.
    */
   async provisionApp(
-    appId: string, appDir: string, runtime: 'astro' | 'raw', opts: { timeoutMs?: number; onLine?: (line: string) => void } = {},
+    appId: string, appDir: string, runtime: 'astro' | 'raw', opts: { timeoutMs?: number; onLine?: (line: string) => void; limits?: ResourceLimits } = {},
   ): Promise<{ ok: boolean; output: string }> {
     await whenBaseImageReady();
     const cacheDir = join(this.dataDir, BUILDER_CACHE_SUBPATH);
     mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
     chmodSync(cacheDir, 0o700);
-    const name = `aura-provision-${appId.replace(/[^a-zA-Z0-9_.-]/g, '_')}`;
-    const args = [
-      'run', '--rm', '--name', name,
-      '--network', SHARED_NETWORK, ...rawSocketArgs(),
-      '--pids-limit', '512', '--memory', '3g', '--cpus', '2',
-      '--workdir', `/workspace/apps/${appId}`,
-      ...this.buildAppDirMount(appDir, appId, this.appDataVolume),
-      ...this.workspaceMounts(),
-      '--mount', `type=volume,source=${this.nodeModulesVolume},target=/workspace/node_modules,readonly`,
-      '--mount', `type=volume,source=${this.appDataVolume},target=${BUILDER_CACHE_PATH},volume-subpath=${BUILDER_CACHE_SUBPATH}`,
-      ...builderProvisionEnv(appId),
-      BASE_IMAGE,
-      'bash', '-c', builderProvisionShell(runtime),
-    ];
+    const name = builderName('provision', appId);
+    // `oras` for `aura sdk install`, as OS infrastructure (BUILDER_TOOLS).
+    const tools = provisionBuilderTools({ dataDir: this.dataDir, appDataVolume: this.appDataVolume, name });
+    if (tools.missing.length) console.warn(`[provision] ${appId}: the builder lacks ${tools.missing.join(', ')} (not in the toolchain)`);
+    const args = this.provisionAppArgs(appId, appDir, runtime, opts.limits, tools.args);
     const timeoutMs = opts.timeoutMs ?? PROVISION_TIMEOUT_MS;
     return await new Promise((resolve) => {
       let output = '';
@@ -1566,7 +1597,7 @@ export class ContainerRunner implements SandboxRunner {
       const child = spawn('docker', args, { stdio: ['ignore', 'pipe', 'pipe'], env: WATCHER_ENV });
       const pid = child.pid;
       if (pid) this.buildPids.add(pid);
-      const untrack = () => { if (pid) this.buildPids.delete(pid); };
+      const untrack = () => { if (pid) this.buildPids.delete(pid); tools.release(); };
       child.stdout?.on('data', keep);
       child.stderr?.on('data', keep);
       const timer = setTimeout(() => {
@@ -1578,20 +1609,63 @@ export class ContainerRunner implements SandboxRunner {
     });
   }
 
+  /** The `docker run` argv of a dependency install (golden: golden/build-args.json). */
+  provisionAppArgs(appId: string, appDir: string, runtime: 'astro' | 'raw', limits: ResourceLimits = DEFAULT_BUILD_LIMITS, toolArgs: readonly string[] = []): string[] {
+    return [
+      'run', '--rm', '--name', builderName('provision', appId),
+      '--network', SHARED_NETWORK, ...rawSocketArgs(),
+      ...limitArgs(limits),
+      '--workdir', `/workspace/apps/${appId}`,
+      ...this.buildAppDirMount(appDir, appId, this.appDataVolume),
+      ...this.workspaceMounts(),
+      '--mount', `type=volume,source=${this.nodeModulesVolume},target=/workspace/node_modules,readonly`,
+      '--mount', `type=volume,source=${this.appDataVolume},target=${BUILDER_CACHE_PATH},volume-subpath=${BUILDER_CACHE_SUBPATH}`,
+      // The builder's own tools (`oras` for `aura sdk install`), as OS infrastructure (BUILDER_TOOLS).
+      ...toolArgs,
+      ...builderProvisionEnv(appId),
+      BASE_IMAGE,
+      'bash', '-c', builderProvisionShell(runtime),
+    ];
+  }
+
   /** Run `argv` in the instance's container (`docker exec`), in its app dir. */
   async exec(instanceId: string, argv: string[], opts: SandboxExecOpts = {}): Promise<{ stdout: string; stderr: string }> {
     const c = this.containers.get(instanceId);
     if (!c || !argv.length) throw new Error(`${instanceId} is not running in a container`);
     const envFlags = Object.entries(opts.env ?? {}).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
-    return execFileAsync('docker', ['exec', '-w', `/workspace/apps/${c.appId}`, ...envFlags, this.containerName(instanceId), ...argv], {
+    // A session host's container runs as root (its launcher): an exec runs as its session user (stream T2).
+    const user = c.sessionUser ? ['--user', c.sessionUser] : [];
+    return execFileAsync('docker', ['exec', '-w', `/workspace/apps/${c.appId}`, ...user, ...envFlags, this.containerName(instanceId), ...argv], {
       timeout: opts.timeoutMs ?? 120_000, maxBuffer: 16 * 1024 * 1024,
     });
   }
 
-  /** The exec bridge's target (SandboxRunner `engineContainer`): the app container, in its app dir. */
-  engineContainer(instanceId: string): EngineContainer | null {
-    const c = this.containers.get(instanceId);
-    return c ? { container: this.containerName(instanceId), workdir: `/workspace/apps/${c.appId}` } : null;
+  /**
+   * An instance's own output, the engine's log of its container (the module's
+   * `logs`, 5b-2 D-X). An untracked instance keeps no log here.
+   */
+  async instanceLogs(instanceId: string, req: RuntimeLogsRequest, onChunk: (stream: RuntimeOutputStream, data: Buffer) => void): Promise<RuntimeLogsStream> {
+    if (!this.containers.has(instanceId)) throw new ExecBridgeError(409, 'runtime-unsupported', `${instanceId} keeps no output log`);
+    return engineLogs(this.engine(), this.containerName(instanceId), req, onChunk);
+  }
+
+  /** What a port forwarder is created with (the module's `endpoints`, 5b-2 D-P). */
+  forwarderFacts(): ForwarderFacts {
+    return { image: BASE_IMAGE, network: SHARED_NETWORK, rawSocketArgs: rawSocketArgs() };
+  }
+
+  /** A process in a running associated workload (`workloads.exec`, 5b-2 D-X): an Engine exec in its container. */
+  execWorkload(workloadId: string, spec: RuntimeWorkloadExec, onOutput: (channel: 1 | 2, data: Buffer) => void): Promise<ExecSession> {
+    return engineExec(this.engine(), workloadId, spec, onOutput);
+  }
+
+  /** An associated workload's own output (`workloads.logs`). */
+  workloadLogs(workloadId: string, req: RuntimeLogsRequest, onChunk: (stream: RuntimeOutputStream, data: Buffer) => void): Promise<RuntimeLogsStream> {
+    return engineLogs(this.engine(), workloadId, req, onChunk);
+  }
+
+  private engine(): EngineClient {
+    return (this.engineClient ??= new DockerApi());
   }
 
   /** The Engine API client (stream X's), shared by the session broker. */
@@ -1637,7 +1711,7 @@ export class ContainerRunner implements SandboxRunner {
     }
     return broker.openSession({
       ...spec, env: { ...env, ...spec.env }, cwd: spec.cwd ?? `/workspace/apps/${c.appId}`,
-    }, { containerId: info.Id, pid: info.State.Pid }, onOutput);
+    }, { containerId: info.Id, pid: info.State.Pid, ...sessionHostTarget(info.Config?.Labels?.[SESSION_IDENTITY_LABEL]) }, onOutput);
   }
 
   isRunning(instanceId: string): boolean {
@@ -1766,4 +1840,13 @@ export class ContainerRunner implements SandboxRunner {
 export function ownSourceReadOnly(ctx: { appDir: string; sourceMode?: 'closed' | 'open' }, manifest: AppManifest): boolean {
   if (ctx.sourceMode !== 'closed' || !(manifest.tools ?? []).includes('*')) return false;
   return serveState(ctx.appDir, manifest).mode === 'prod';
+}
+
+/** `docker run` of the D80 idmap probe (paths are daemon host paths; nothing comes from a request). */
+export function idmapProbeArgs(o: { helper: string; scratch: string; image: string }): string[] {
+  return [
+    'run', '--rm', '--privileged', '--network', 'none', '--label', 'aura.mount=1',
+    '-v', `${o.helper}:${IDMAP_HELPER_PATH}:ro`, '-v', `${o.scratch}:/probe`,
+    o.image, IDMAP_HELPER_PATH, 'idmap-probe', '/probe',
+  ];
 }

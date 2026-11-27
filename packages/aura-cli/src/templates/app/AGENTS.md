@@ -129,6 +129,7 @@ your own file if you really need to.
 | `src/pages/api/lifecycle/onStop.ts`           | `POST` — before destroy                                                |
 | `src/pages/api/lifecycle/onDestroy.ts`        | `POST` — final shutdown hook                                           |
 | `src/pages/api/lifecycle/onActivityCreate.ts` | (Optional) `POST` returning `{ path, title? }` for activity apps       |
+| `src/pages/api/lifecycle/onUpdate.ts`         | (Optional) `POST {fromVersion, toVersion}`: runs once in the new version after an update, before it gets traffic |
 
 The scaffold ships every required hook as a one-liner that uses
 `createLifecycleHandler()` from `@aura/app-sdk`. Add your own behaviour by
@@ -141,6 +142,22 @@ import { state } from '../../../state.js';
 export const POST = createLifecycleHandler('onDestroy', async () => {
   state.activities.clear();
   await flushPendingWrites();
+});
+```
+
+The stop hooks get the reason (`createLifecycleHandler`'s `ctx.reason`):
+`user` (a real stop), `restart` (it comes right back) or `update` (the drain
+before an update: finish writes; the new version starts next). After an
+update that changed the manifest `version`, the OS starts the new version with
+no traffic routed and calls `onUpdate` first (2-minute timeout). A thrown
+error fails the update, and a store update puts the previous version back.
+An app without the route is updated as before:
+
+```ts
+// src/pages/api/lifecycle/onUpdate.ts
+import { createUpdateHandler } from '@aura/app-sdk';
+export const POST = createUpdateHandler(async ({ fromVersion, toVersion }) => {
+  await migrateData(fromVersion, toVersion);
 });
 ```
 

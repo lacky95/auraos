@@ -89,6 +89,8 @@ function deps(): BaseInstallDeps {
     },
     exists: () => true,
     baseRootfs: '/os/base-rootfs',
+    // 5b PR: the mechanism is the PRoot module's action (the route authorizes and audits).
+    action: () => core.prootOwnerActions('/os/base-rootfs').baseInstall,
   };
 }
 
@@ -314,6 +316,10 @@ test('source: no shell string, no insecure apt flag, the route delegates to the 
     assert.doesNotMatch(src, /\bexecSync\b|\bexec\(|\bexecFile\(|shell:\s*true|\/bin\/sh|bash -c/);
     assert.doesNotMatch(src, INSECURE);
   }
+  // The mechanism is the PRoot module's action (5b PR): argv only, no shell either.
+  const action = readFileSync(new URL('../../core/src/runtimes/proot/actions.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(action, /\bexecSync\b|\bexec\(|\bexecFile\(|shell:\s*true|\/bin\/sh|bash -c|child_process/);
+  assert.doesNotMatch(action, INSECURE);
   // The one runner (lib/privilegedExec.ts, shared with SF-2) is spawnSync with argv.
   assert.match(readFileSync(new URL('../src/lib/privilegedExec.ts', import.meta.url), 'utf8'), /spawnSync\(file, \[\.\.\.args\], \{/);
   assert.match(lib, /from '\.\/privilegedExec\.ts'/);

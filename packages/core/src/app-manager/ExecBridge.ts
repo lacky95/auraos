@@ -26,45 +26,46 @@
  * refuse every mode; their logs come from the runner's output ring
  * (outputLog.ts).
  *
- * A sidecar target stays an owner-only Engine exec in the actual sidecar with
- * its image user, never with a Private Home (J.4).
+ * A sidecar target stays an owner-only exec in the actual sidecar with its
+ * image user, never with a Private Home (J.4), through its runtime's
+ * `workloads.exec`; logs come from the runtime's `logs` (5b-2 D-X). This
+ * module holds no engine client: it only validates, gates and streams.
  *
  * Who may call is the route and surface rules' (owner, or the instance
  * itself, or a member with `app.jump`); this module trusts the caller it is
  * handed and never reads a credential.
  */
+import type { ErrorCategory } from '../errors/contracts.js';
 import { randomUUID } from 'node:crypto';
-import type { Duplex, Readable } from 'node:stream';
 import type { AccessPrincipal } from '../auth/types.js';
 import { homeRequirements } from '../homes/HomeResolver.js';
 import { HomeDeniedError, type JumpHomeMode } from '../homes/types.js';
-import { RuntimeCapabilityError, missingCapabilities } from '../runtimes/types.js';
+import { RuntimeCapabilityError, RuntimeExecError, missingCapabilities } from '../runtimes/types.js';
 import { isRootGrantToken } from './rootTabs.js';
 import type { AuditInput } from '../auth/AdminAudit.js';
 import { userAttribution } from '../auth/AdminAudit.js';
 import type { SidecarInfo } from '../types/instance.js';
 import type { SandboxRunner } from './SandboxRunner.js';
-import { DockerApiError, EngineDemux, type EngineClient } from './DockerApi.js';
 import type { OutputStream } from './outputLog.js';
-import type { SessionSpec } from '../runtimes/ari.js';
+import type { RuntimeExecSession, RuntimeLogs, RuntimeWorkloads, SessionSpec } from '../runtimes/ari.js';
 
 export const EXEC_SUBPROTOCOL = 'aura.exec.v1';
 
 /** Binary frame channel bytes (first byte of every binary WS frame). */
 export const EXEC_CHANNEL = { stdin: 0, stdout: 1, stderr: 2 } as const;
 
+/** The D105 category of each exec/session refusal code (errors/contracts.ts `ErrorCategory`). */
+const EXEC_CATEGORY: Readonly<Record<string, ErrorCategory>> = Object.freeze({
+  'bad-request': 'invalid-request', 'too-large': 'invalid-request', forbidden: 'permission-denied', 'home-denied': 'permission-denied',
+  'not-found': 'not-found', 'not-running': 'instance-not-found', 'capability-missing': 'unsupported-feature',
+  'runtime-unsupported': 'unsupported-operation', 'broker-unavailable': 'unavailable', engine: 'runtime-unavailable', internal: 'unavailable',
+});
+
 export class ExecBridgeError extends Error {
   override readonly name = 'ExecBridgeError';
   constructor(readonly status: number, readonly code: string, message: string) { super(message); }
-}
-
-/** The engine container a runtime offers for a running instance (SandboxRunner `engineContainer`). */
-export interface EngineContainer {
-  container: string;
-  /** The app's directory inside the container: the default working directory. */
-  workdir?: string;
-  /** Always set for a session (today's `docker exec` set them too). */
-  env?: Record<string, string>;
+  /** What a client may do about it (D105); absent for a code without one. */
+  get category(): ErrorCategory | undefined { return EXEC_CATEGORY[this.code]; }
 }
 
 /**
@@ -104,22 +105,8 @@ export interface SessionOpen {
   root?: string;
 }
 
-export interface ExecSession {
-  input(data: Buffer): void;
-  /** Close the process's stdin (non-TTY: EOF). */
-  endInput(): void;
-  resize(cols: number, rows: number): void;
-  /**
-   * A signal for the process. With a TTY, INT, QUIT and TSTP go in as the
-   * terminal's control characters; anything else (and every signal without a
-   * TTY) ends the session: the Engine API cannot signal an exec process.
-   * Returns false when the session was ended instead.
-   */
-  signal(sig: string): boolean;
-  close(): void;
-  /** The exit code; null when it could not be read (the session was cut). */
-  readonly exited: Promise<number | null>;
-}
+/** A session's process, its stdio streamed (the ARI shape). */
+export type ExecSession = RuntimeExecSession;
 
 export interface RunRequest {
   cmd: string[];
@@ -155,9 +142,12 @@ export interface LogsStream {
 interface InstanceLike { appId: string; instanceId: string; state?: string }
 
 export interface ExecBridgeDeps {
-  engine: EngineClient;
   instance(instanceId: string): InstanceLike | undefined;
-  runner(instanceId: string): Pick<SandboxRunner, 'isRunning' | 'engineContainer' | 'outputLog' | 'openSession' | 'capabilities'>;
+  runner(instanceId: string): Pick<SandboxRunner, 'isRunning' | 'outputLog' | 'openSession' | 'capabilities'>;
+  /** The instance runtime's `logs` (absent: the runner's output ring, if it keeps one). */
+  logs(instanceId: string): RuntimeLogs | undefined;
+  /** The instance runtime's associated workloads (absent: the runtime has none). */
+  workloads(instanceId: string): Pick<RuntimeWorkloads, 'exec' | 'logs'> | undefined;
   sidecars(instanceId: string): SidecarInfo[];
   /** The kernel's decision for a session (identity, home, env): throws HomeDeniedError / RuntimeCapabilityError. */
   sessionContext(instanceId: string, req: { mode: JumpHomeMode; caller: SessionCaller }): Promise<SessionContext>;
@@ -176,7 +166,6 @@ const RESERVED_ENV = new Set(['HOME', 'USER', 'LOGNAME', 'TMPDIR', 'AURA_SESSION
 const HOME_MODES: readonly JumpHomeMode[] = ['private', 'app', 'ephemeral'];
 /** An interactive jump without argv: bash if the image has it, else sh. */
 export const DEFAULT_JUMP_ARGV = ['sh', '-c', 'command -v bash >/dev/null 2>&1 && exec bash -i || exec sh -i'];
-const TTY_SIGNALS: Record<string, string> = { INT: '\x03', QUIT: '\x1c', TSTP: '\x1a' };
 
 const bad = (message: string) => new ExecBridgeError(400, 'bad-request', message);
 
@@ -256,87 +245,33 @@ export function engineError(err: unknown): ExecBridgeError {
     }
     return new ExecBridgeError(409, 'home-denied', err.message);
   }
-  if (err instanceof DockerApiError) {
-    if (err.status === 404) return new ExecBridgeError(404, 'not-found', err.message);
-    if (err.status === 409) return new ExecBridgeError(409, 'not-running', err.message);
+  if (err instanceof RuntimeExecError) {
+    if (err.code === 'not-found') return new ExecBridgeError(404, 'not-found', err.message);
+    if (err.code === 'not-running') return new ExecBridgeError(409, 'not-running', err.message);
     return new ExecBridgeError(502, 'engine', err.message);
   }
   return new ExecBridgeError(500, 'internal', err instanceof Error ? err.message : String(err));
 }
 
-interface SidecarTarget { container: string; label: string }
-
-const TTY_SIGNAL = (sig: string): string | undefined => TTY_SIGNALS[String(sig).toUpperCase().replace(/^SIG/, '')];
-
-/** The exit code of an Engine exec once it finished; null if it still runs (a cut session). */
-export async function engineExitCode(engine: EngineClient, id: string): Promise<number | null> {
-  for (let i = 0; i < 20; i++) {
-    const r = await engine.execInspect(id);
-    if (!r.Running) return r.ExitCode;
-    await new Promise((res) => setTimeout(res, 100));
-  }
-  return null;
-}
-
-/**
- * An `ExecSession` over a started Engine exec (its hijacked stream): the
- * sidecar exec here and the container runtime's session broker share it.
- * `onEnd` runs once when the session is closed by the caller (not when the
- * process exits by itself): the broker ends the session's processes there.
- */
-export function engineSession(
-  engine: EngineClient, id: string, sock: Duplex,
-  open: { tty: boolean; cols: number; rows: number },
-  onOutput: (channel: 1 | 2, data: Buffer) => void,
-  opts: { onEnd?: () => void; exitCode?: () => Promise<number | null> } = {},
-): ExecSession {
-  const resize = (cols: number, rows: number) => {
-    if (open.tty) void engine.execResize(id, dimension(cols, open.cols), dimension(rows, open.rows)).catch(() => undefined);
-  };
-  resize(open.cols, open.rows);
-  const demux = open.tty ? null : new EngineDemux(onOutput);
-  sock.on('data', (d: Buffer) => { if (demux) demux.push(d); else onOutput(1, d); });
-  const exited = new Promise<number | null>((resolve) => {
-    let settled = false;
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      void (opts.exitCode ?? (() => engineExitCode(engine, id)))().then(resolve, () => resolve(null));
-    };
-    sock.once('end', finish);
-    sock.once('close', finish);
-    sock.once('error', finish);
-  });
-  let ended = false;
-  const close = () => {
-    if (!ended) { ended = true; try { opts.onEnd?.(); } catch { /* best effort */ } }
-    try { sock.destroy(); } catch { /* gone */ }
-  };
-  return {
-    input: (data) => { if (sock.writable) sock.write(data); },
-    endInput: () => { try { sock.end(); } catch { /* gone */ } },
-    resize,
-    signal: (sig) => {
-      const ch = open.tty ? TTY_SIGNAL(sig) : undefined;
-      if (ch && sock.writable) { sock.write(ch); return true; }
-      close();
-      return false;
-    },
-    close,
-    exited,
-  };
-}
+interface SidecarTarget { workload: string; label: string }
 
 export class ExecBridge {
   constructor(private readonly deps: ExecBridgeDeps) {}
 
-  /** A sidecar of the instance: its engine container, entered with the image's own user. */
+  /** A sidecar of the instance: its workload, entered with the image's own user. */
   private sidecarTarget(instanceId: string, sidecar: string): SidecarTarget {
     const sc = this.deps.sidecars(instanceId).find((s) => s.service === sidecar || s.id === sidecar);
     if (!sc) throw new ExecBridgeError(404, 'not-found', `no sidecar '${sidecar}' in ${instanceId}`);
     if (sc.backend !== 'container') throw new ExecBridgeError(409, 'runtime-unsupported', `sidecar ${sc.id} has no engine container`);
     if (sc.state !== 'running') throw new ExecBridgeError(409, 'not-running', `sidecar ${sc.id} is ${sc.state}`);
-    return { container: sc.id, label: `${instanceId}/${sc.service}` };
+    return { workload: sc.id, label: `${instanceId}/${sc.service}` };
+  }
+
+  /** The runtime's workload exec of an instance; a runtime without associated workloads has no sidecar to enter. */
+  private workloadExec(instanceId: string): RuntimeWorkloads['exec'] {
+    const w = this.deps.workloads(instanceId);
+    if (!w) throw new ExecBridgeError(409, 'runtime-unsupported', `${instanceId}'s runtime has no associated workloads`);
+    return w.exec;
   }
 
   private instanceOf(instanceId: string): InstanceLike {
@@ -387,13 +322,12 @@ export class ExecBridge {
     this.instanceOf(instanceId);
     if (open.sidecar) {
       const t = this.sidecarTarget(instanceId, open.sidecar);
-      const env = Object.entries(open.env).map(([k, v]) => `${k}=${v}`);
-      const { engine } = this.deps;
+      const exec = this.workloadExec(instanceId);
       try {
-        const id = await engine.execCreate(t.container, {
-          Cmd: open.argv ?? DEFAULT_JUMP_ARGV, Tty: open.tty, Env: env, ...(open.cwd ? { WorkingDir: open.cwd } : {}),
-        });
-        return engineSession(engine, id, await engine.execStart(id, open.tty), open, onOutput);
+        return await exec(t.workload, {
+          argv: open.argv ?? DEFAULT_JUMP_ARGV, tty: open.tty, env: open.env, cols: open.cols, rows: open.rows,
+          ...(open.cwd ? { workdir: open.cwd } : {}),
+        }, onOutput);
       } catch (err) {
         throw engineError(err);
       }
@@ -443,15 +377,13 @@ export class ExecBridge {
     let session: ExecSession;
     if (opts.sidecar) {
       const t = this.sidecarTarget(instanceId, opts.sidecar);
-      const { engine } = this.deps;
+      const exec = this.workloadExec(instanceId);
       try {
-        const id = await engine.execCreate(t.container, {
-          Cmd: cmd, Tty: false, AttachStdin: req.stdin !== undefined,
-          Env: Object.entries(env).map(([k, v]) => `${k}=${v}`),
-          ...(req.user ? { User: req.user } : {}),
-          ...(req.workdir ? { WorkingDir: req.workdir } : {}),
-        });
-        session = engineSession(engine, id, await engine.execStart(id, false), { tty: false, cols: 80, rows: 24 }, collect);
+        session = await exec(t.workload, {
+          argv: cmd, tty: false, attachStdin: req.stdin !== undefined, env, cols: 80, rows: 24,
+          ...(req.user ? { user: req.user } : {}),
+          ...(req.workdir ? { workdir: req.workdir } : {}),
+        }, collect);
       } catch (err) {
         throw engineError(err);
       }
@@ -478,7 +410,7 @@ export class ExecBridge {
   }
 
   /**
-   * The instance's own output (or a sidecar's): the engine's log for a
+   * The instance's own output (or a sidecar's): the runtime's log for a
    * container, the runner's output ring otherwise. `onChunk` gets each piece
    * as it comes; with `follow` it keeps coming until `close`.
    */
@@ -486,17 +418,22 @@ export class ExecBridge {
     const inst = this.deps.instance(instanceId);
     if (!inst) throw new ExecBridgeError(404, 'not-found', `Instance not found: ${instanceId}`);
     const tail = req.tail !== undefined ? Math.min(Math.max(Math.floor(req.tail), 0), MAX_TAIL) : undefined;
-    let container: string | null = null;
+    const q = {
+      ...(tail !== undefined ? { tail } : {}),
+      ...(req.since !== undefined ? { since: req.since } : {}),
+      timestamps: req.timestamps === true, follow: req.follow === true,
+    };
+    let read: () => ReturnType<RuntimeLogs>;
     if (req.sidecar) {
       const sc = this.deps.sidecars(instanceId).find((s) => s.service === req.sidecar || s.id === req.sidecar);
       if (!sc) throw new ExecBridgeError(404, 'not-found', `no sidecar '${req.sidecar}' in ${instanceId}`);
-      if (sc.backend !== 'container') throw new ExecBridgeError(409, 'runtime-unsupported', `sidecar ${sc.id} has no engine log`);
-      container = sc.id;
+      const w = this.deps.workloads(instanceId);
+      if (sc.backend !== 'container' || !w) throw new ExecBridgeError(409, 'runtime-unsupported', `sidecar ${sc.id} has no engine log`);
+      read = () => w.logs(sc.id, q, onChunk);
     } else {
-      const runner = this.deps.runner(instanceId);
-      container = runner.engineContainer?.(instanceId)?.container ?? null;
-      if (!container) {
-        const log = runner.outputLog?.(instanceId) ?? null;
+      const logs = this.deps.logs(instanceId);
+      if (!logs) {
+        const log = this.deps.runner(instanceId).outputLog?.(instanceId) ?? null;
         if (!log) throw new ExecBridgeError(409, 'runtime-unsupported', `${instanceId} keeps no output log`);
         for (const c of log.read({ ...(tail !== undefined ? { tail } : {}), ...(req.since !== undefined ? { since: req.since } : {}), timestamps: req.timestamps === true })) {
           onChunk(c.stream, Buffer.from(c.data));
@@ -509,28 +446,13 @@ export class ExecBridge {
         });
         return { done, close: () => stop() };
       }
+      read = () => logs(instanceId, q, onChunk);
     }
-    const { engine } = this.deps;
-    let stream: Readable;
-    let tty = false;
     try {
-      tty = (await engine.containerInspect(container)).Config?.Tty === true;
-      stream = await engine.logs(container, {
-        ...(tail !== undefined ? { tail } : {}),
-        ...(req.since !== undefined ? { since: req.since } : {}),
-        timestamps: req.timestamps === true, follow: req.follow === true,
-      });
+      return await read();
     } catch (err) {
       throw engineError(err);
     }
-    const demux = tty ? null : new EngineDemux((ch, data) => onChunk(ch === 2 ? 'err' : 'out', data));
-    stream.on('data', (d: Buffer) => { if (demux) demux.push(d); else onChunk('out', d); });
-    const done = new Promise<void>((resolve) => {
-      stream.once('end', resolve);
-      stream.once('close', resolve);
-      stream.once('error', () => resolve());
-    });
-    return { done, close: () => { try { stream.destroy(); } catch { /* gone */ } } };
   }
 }
 

@@ -78,7 +78,7 @@ export interface ObserverManager {
   isTrustedSystemCopy?(appId: string): boolean;
   /** AppManager `getInstanceAddresses`: the sandbox's addresses on every network (D28; B7 binding signal). */
   getInstanceAddresses?(instanceId: string): string[];
-  registry?: { getById(id: string): unknown };
+  registry?: { getById(id: string): unknown; getScopeId?(id: string): string | undefined };
   providers?: {
     resolveProvider(authority: string, path: string): {
       appId: string;

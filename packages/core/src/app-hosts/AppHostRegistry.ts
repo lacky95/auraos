@@ -22,7 +22,7 @@ import type { ExecutionApproval } from '../identity/execution.js';
 import type { Redis } from '@aura/kv-store';
 import type {
   AllocateAppHostInput, AppHostLabelTombstone, AppHostRecord, AppHostRegistry, AppHostResolution,
-  AppHostSlotAssignment, AppInstallation, AppInstanceScope, AppSourceFingerprint, ReactivateAppHostInput,
+  AppHostSlotAssignment, AppInstallation, AppInstanceScope, AppRunAsMigration, AppSourceFingerprint, ReactivateAppHostInput,
 } from './contracts.js';
 import {
   MAX_APP_HOST_SLOT, appHostNameForSlot, isValidHostName, proposeAppHostName,
@@ -137,7 +137,17 @@ export interface AppHostStore extends AppHostRegistry {
    * `execution` (only with `root`): the approved privileged execution config
    * it records; `app`, or `root` without it, removes any (identity/execution.ts).
    */
-  setRunAs(installationId: string, runAs: 'root' | 'app', expect?: 'root' | 'app', execution?: ExecutionApproval): Promise<{ ok: boolean; installation: AppInstallation | null }>;
+  setRunAs(
+    installationId: string, runAs: 'root' | 'app', expect?: 'root' | 'app', execution?: ExecutionApproval,
+    migrated?: { journal: string | null },
+  ): Promise<{ ok: boolean; installation: AppInstallation | null }>;
+  /**
+   * Marks (or, with null, clears) a run-as migration in progress
+   * (identity/runAsOwnership.ts), compare-and-set on `expect` (the runAs it
+   * migrates from). Marking fails while another one is pending.
+   * `setRunAs(…, migrated)` clears it with the flip.
+   */
+  setRunAsMigration(installationId: string, expect: 'root' | 'app', migration: AppRunAsMigration | null): Promise<{ ok: boolean; installation: AppInstallation | null }>;
   /** `null` until the first boot migration recorded them. */
   getKnownManifestHosts(): Promise<Set<string> | null>;
   addKnownManifestHosts(claims: readonly string[]): Promise<void>;
@@ -267,7 +277,7 @@ export function createAppHostRegistry(kv: Redis | (() => Redis), opts: AppHostRe
       });
     },
 
-    async setRunAs(id, runAs, expect, execution) {
+    async setRunAs(id, runAs, expect, execution, migrated) {
       if (runAs !== 'root' && runAs !== 'app') throw new Error(`invalid runAs '${String(runAs)}'`);
       if (execution && (runAs !== 'root' || execution.runAs !== 'root' || !/^sha256:[0-9a-f]{64}$/.test(execution.digest))) {
         throw new Error('invalid execution approval');
@@ -276,9 +286,34 @@ export function createAppHostRegistry(kv: Redis | (() => Redis), opts: AppHostRe
       if (!cur) return { ok: false, installation: null };
       if (expect !== undefined && (cur.value.runAs ?? 'root') !== expect) return { ok: false, installation: cur.value };
       const sameExecution = (cur.value.execution?.digest ?? null) === (execution?.digest ?? null);
-      if ((cur.value.runAs ?? 'root') === runAs && cur.value.runAs !== undefined && sameExecution) return { ok: true, installation: cur.value };
-      const { execution: _old, ...rest } = cur.value;
-      const next: AppInstallation = { ...rest, runAs, ...(execution ? { execution } : {}), updatedAt: now() };
+      if ((cur.value.runAs ?? 'root') === runAs && cur.value.runAs !== undefined && sameExecution && !migrated) return { ok: true, installation: cur.value };
+      if (migrated && migrated.journal !== null && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(migrated.journal)) throw new Error('invalid journal name');
+      const { execution: _old, runAsMigration: _pending, runAsJournal: _journal, ...rest } = cur.value;
+      const next: AppInstallation = {
+        ...rest, runAs, ...(execution ? { execution } : {}),
+        // The flip of a run-as migration ends it and names its journal; a plain flip keeps both.
+        ...(migrated ? (migrated.journal ? { runAsJournal: migrated.journal } : {})
+          : { ...(_pending ? { runAsMigration: _pending } : {}), ...(_journal ? { runAsJournal: _journal } : {}) }),
+        updatedAt: now(),
+      };
+      const ok = await commit(
+        [{ key: installKey(id), expect: cur.raw }],
+        [{ op: 'set', key: installKey(id), value: JSON.stringify(next) }],
+      );
+      return ok ? { ok: true, installation: next } : { ok: false, installation: (await readInstallation(id))?.value ?? null };
+    },
+
+    async setRunAsMigration(id, expect, migration) {
+      if (migration && (!['root', 'app'].includes(migration.to) || !/^[0-9a-f]{64}$/.test(migration.digest)
+        || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(migration.journal) || !Number.isSafeInteger(migration.startedAt))) {
+        throw new Error('invalid run-as migration');
+      }
+      const cur = await readInstallation(id);
+      if (!cur) return { ok: false, installation: null };
+      if ((cur.value.runAs ?? 'root') !== expect) return { ok: false, installation: cur.value };
+      if (migration && cur.value.runAsMigration) return { ok: false, installation: cur.value };
+      const { runAsMigration: _pending, ...rest } = cur.value;
+      const next: AppInstallation = { ...rest, ...(migration ? { runAsMigration: { ...migration } } : {}), updatedAt: now() };
       const ok = await commit(
         [{ key: installKey(id), expect: cur.raw }],
         [{ op: 'set', key: installKey(id), value: JSON.stringify(next) }],

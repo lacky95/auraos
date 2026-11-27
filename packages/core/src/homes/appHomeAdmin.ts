@@ -234,6 +234,26 @@ export function installationHomesDir(dataDir: string, installationId: string): s
   return join(dataDir, ...APP_HOMES_SUBPATH.split('/'), installationId);
 }
 
+/**
+ * Every App Home of an installation that exists (`global`, `users/<id>`,
+ * `previews/<id>`), as real directories: a symlink is never listed. The
+ * run-as migration's rows (identity/runAsOwnership.ts).
+ */
+export function installationAppHomes(dataDir: string, installationId: string): string[] {
+  const root = installationHomesDir(dataDir, installationId);
+  const isDir = (p: string) => { try { const st = lstatSync(p); return st.isDirectory() && !st.isSymbolicLink(); } catch { return false; } };
+  const out: string[] = [];
+  if (isDir(join(root, 'global'))) out.push(join(root, 'global'));
+  for (const group of ['users', 'previews']) {
+    const dir = join(root, group);
+    if (!isDir(dir)) continue;
+    let names: string[] = [];
+    try { names = readdirSync(dir); } catch { names = []; }
+    for (const n of names.sort()) if (SEGMENT.test(n) && isDir(join(dir, n))) out.push(join(dir, n));
+  }
+  return out;
+}
+
 /** Moves `dir` out of reach in one rename, then deletes it (never following a link). False when it did not exist. */
 function removeDir(dir: string): boolean {
   let st;

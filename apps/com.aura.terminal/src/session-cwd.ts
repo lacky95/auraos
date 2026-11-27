@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
-import { TMUX_SOCKET_ARGS, tmuxBin, tmuxName } from './tmux-control.ts';
+import { TMUX_SOCKET_ARGS, sessionLauncher, tmuxBin, tmuxName } from './tmux-control.ts';
 
 /**
  * The working directory of every session, so a shell that has to be
@@ -16,6 +16,12 @@ import { TMUX_SOCKET_ARGS, tmuxBin, tmuxName } from './tmux-control.ts';
  */
 const FILE = join(process.env['AURA_DATA_DIR'] ?? '/data', 'session-cwd.json');
 const RECORD_MS = 10_000;
+/**
+ * Under the session launcher (stream T2) this server is not the session user
+ * and can't look into their directories: a path is kept as tmux reported it,
+ * and tmux (as the user) falls back to the home when it is gone.
+ */
+const checkable = (): boolean => sessionLauncher() === null;
 
 function read(): Record<string, string> {
   try {
@@ -34,6 +40,7 @@ function write(map: Record<string, string>): void {
 export function savedCwd(sessionId: string): string | null {
   const dir = read()[sessionId];
   if (!dir) return null;
+  if (!checkable()) return dir;
   try { return statSync(dir).isDirectory() ? dir : null; } catch { return null; }
 }
 
@@ -55,7 +62,7 @@ function currentCwd(sessionId: string): string | null {
     const r = spawnSync(tmuxBin, [...TMUX_SOCKET_ARGS, 'display-message', '-p', '-t', tmuxName(sessionId), '#{pane_current_path}'],
       { encoding: 'utf-8', timeout: 2_000 });
     const dir = r.status === 0 ? r.stdout.trim() : '';
-    return dir && existsSync(dir) ? dir : null;
+    return dir && (!checkable() || existsSync(dir)) ? dir : null;
   } catch { return null; }
 }
 

@@ -39,17 +39,18 @@ export function appIdentityProvider(store: () => Promise<Pick<LinuxIdentityStore
 }
 
 /**
- * Stream T (D69): the System Terminal is not an app identity. Each of its
- * instances is the session host of one user and runs as that user's uid/gid
- * (the owner 1000, members from 100000; D70), with no capability, never as
- * root and never as an app uid. Every other app keeps `base`.
+ * Stream T (D69): a user environment (`isUserEnvironment`, D107 S1; the
+ * System Terminal today) is not an app identity. Each such instance is the
+ * session host of one user and runs as that user's uid/gid (the owner 1000,
+ * members from 100000; D70), with no capability, never as root and never as
+ * an app uid. Every other instance keeps `base`.
  *
  * Fail closed: an instance with no user, a user without an enabled account,
  * or one whose identity can't be allocated or is retired does not start.
  */
 export interface SessionHostIdentityDeps {
-  /** The apps whose instances are user session hosts (homes/plan.ts TERMINAL_SESSION_APPS). */
-  sessionApps: ReadonlySet<string>;
+  /** Whether the instance hosts a user's environment (system/systemApps.ts `isUserEnvironment`, D107 S1). */
+  isUserEnvironment(instance: { appId: string }): boolean;
   /** The user's account: its username (the passwd name) and whether it is disabled; null when unknown. */
   account(userId: string): Promise<{ username: string; disabled: boolean } | null>;
   /** The user's Linux identity, allocated on first use (LinuxIdentityStore `ensureUser`). */
@@ -68,7 +69,7 @@ export class SessionIdentityError extends Error {
 export function sessionHostIdentityProvider(base: SpawnIdentityProvider, deps: SessionHostIdentityDeps): SpawnIdentityProvider {
   return {
     async identityFor(req: SpawnIdentityRequest): Promise<SpawnIdentity> {
-      if (!deps.sessionApps.has(req.appId)) return base.identityFor(req);
+      if (!deps.isUserEnvironment(req)) return base.identityFor(req);
       const userId = req.userId;
       if (!userId) throw new SessionIdentityError(req.appId, `${req.appId} hosts a user's sessions and was asked to start for nobody; not started`);
       let account;

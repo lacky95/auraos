@@ -13,7 +13,7 @@
  * `{ kind: 'noHandler' }`, and a handler declining is `{ kind: 'rejected' }`.
  * `OsClient.startIntent` is a deprecated alias.
  */
-import { OsError, statusCode } from './errors.js';
+import { OsError, statusCode, type OsErrorFacts } from './errors.js';
 import { osAuthHeaders } from './os-auth.js';
 
 export interface StartIntent {
@@ -34,7 +34,9 @@ export type StartIntentResult =
   | { kind: 'started'; appId: string; instanceId: string; activityId?: string; intentDelivered?: boolean; result?: Record<string, unknown> }
   | { kind: 'rejected'; appId: string; instanceId: string; code: string; message: string; hint?: string; status: number }
   | { kind: 'disambiguation'; candidates: Array<{ appId: string; score: number }> }
-  | { kind: 'noHandler' };
+  | { kind: 'noHandler' }
+  /** D108 A2: the app may not start yet (setup needed, or blocked); `error` is the D105 body to show. */
+  | { kind: 'setup-required'; appId: string; state: 'blocked' | 'setup-required'; error: { error: string; message: string; details?: { state?: string } } & OsErrorFacts };
 
 export class IntentsApi {
   constructor(private readonly base: () => string) {}
@@ -49,7 +51,7 @@ export class IntentsApi {
     });
     const body = await res.json().catch(() => null) as { kind?: string; error?: string; code?: string; hint?: string } | null;
     // The handler declining is an answer, not a failure — whatever status it chose.
-    if (body?.kind === 'rejected') return body as StartIntentResult;
+    if (body?.kind === 'rejected' || body?.kind === 'setup-required') return body as StartIntentResult;
     if (res.status === 404 && body?.kind !== 'error') return { kind: 'noHandler' };
     if (!res.ok) {
       const detail = body?.error ? `: ${body.code ? `${body.code} — ` : ''}${body.error}${body.hint ? ` (${body.hint})` : ''}` : '';

@@ -17,6 +17,12 @@
  * is a new row and no existing assignment moves.
  */
 export const LINUX_ID_RANGES = {
+  /**
+   * Fixed OS service accounts (owner decision 2026-11-27, D84-consistent: a
+   * system id below the owner, outside every principal range). Never
+   * allocated, never a principal: one constant per service, below.
+   */
+  service: { first: 900, last: 999 },
   /** The owner, fixed (D70): `node` in the base image, the host user. */
   owner: { first: 1000, last: 1000 },
   /** Other human users (D82 member accounts). */
@@ -34,6 +40,16 @@ export type LinuxIdRange = keyof typeof LINUX_ID_RANGES;
 export type AllocatedLinuxIdRange = 'user' | 'app';
 
 export const OWNER_UID = LINUX_ID_RANGES.owner.first;
+
+/**
+ * The System Terminal's server (`aura-terminal`, stream T2): a non-login
+ * service uid/gid, separate from every user. The server holds the instance's
+ * lifecycle token and the shell's relay key; its users' sessions run as their
+ * own uid and can't inspect, debug or signal it (os/term-launch).
+ */
+export const TERMINAL_SERVICE_UID = 990;
+export const TERMINAL_SERVICE_GID = 990;
+export const TERMINAL_SERVICE_ACCOUNT = 'aura-terminal';
 export const OWNER_GID = OWNER_UID;
 
 /** Which range a logical uid belongs to; null outside every range (e.g. 0). */

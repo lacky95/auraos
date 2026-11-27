@@ -106,6 +106,12 @@ pnpm --filter @aura/shell start:check  # load the build, attach servers, exit
 pnpm --filter @aura/shell start        # HOST/PORT, default 0.0.0.0:3000
 ```
 
-Only one shell may own the KV server and the apps: the first request that
-reaches an Astro route starts the AppManager. Don't start a second shell
-against the same `/data` next to a running one.
+Only one shell may own the KV server and the apps. The kernel boots when the
+shell starts, never on a request (Phase 6): `server.mjs` starts it before it
+loads the request handler, `astro dev` from its boot plugin. Until it is
+ready, requests get `503 starting` (`/api/auth/status` answers
+`{"login":"starting"}`), and `/data/aura/boot/status.json` shows its progress
+(`kernelReadyAt`, `systemId`, `composition`, the services). A stop runs one
+shutdown sequence (desktop save, kernel stop, Valkey stop) within 8 s; app
+containers keep running and are adopted at the next start. Don't start a
+second shell against the same `/data` next to a running one.

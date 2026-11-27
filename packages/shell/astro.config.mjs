@@ -1,11 +1,12 @@
 import { defineConfig, passthroughImageService } from 'astro/config';
 import node from '@astrojs/node';
-import react from '@astrojs/react';
 import tailwindcss from '@tailwindcss/vite';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { attachAppHosts, attachSio, attachWsProxy } from './server/attach.mjs';
+import { attachExecBridge } from './server/exec-bridge.mjs';
+import { compositionMarker, compositionOf } from './src/integrations/composition.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -31,6 +32,16 @@ function wsProxyPlugin() {
   };
 }
 
+/** The exec bridge (server/exec-bridge.mjs): `aura exec`/`jump`/`logs` through the shell. The shell runs in dev on every install. */
+function execBridgePlugin() {
+  return {
+    name: 'aura-exec-bridge',
+    configureServer(server) {
+      if (server.httpServer) attachExecBridge(server.httpServer);
+    },
+  };
+}
+
 function sioPlugin() {
   return {
     name: 'aura-sio',
@@ -40,10 +51,63 @@ function sioPlugin() {
   };
 }
 
+/**
+ * The kernel boots eagerly (Phase 6 K, D78), never on a request:
+ *  - dev: at server start, `src/lib/bootHooks.ts` is imported through the SSR
+ *    runner, the same module graph the middleware runs in (never a stale dist);
+ *  - build: the same file is emitted as its own server entry `aura-boot.mjs`,
+ *    which server.mjs imports before it loads the request handler.
+ */
+const BOOT_ENTRY = resolve(__dirname, 'src/lib/bootHooks.ts');
+function bootPlugin() {
+  let system = null;
+  return {
+    name: 'aura-boot',
+    apply: 'serve',
+    configureServer(server) {
+      const ssr = server.environments?.ssr;
+      if (!ssr?.runner) {
+        console.error('[aura-boot] no runnable SSR environment: the kernel is not started');
+        return;
+      }
+      // After the server is up, so the boot never holds Vite's startup.
+      setTimeout(() => {
+        ssr.runner.import(BOOT_ENTRY)
+          // A Vite server restart (config change) keeps the kernel: bootShell is idempotent per process.
+          // SIGTERM / SIGINT run the kernel shutdown (bootSystem handleSignals).
+          .then((m) => { system = m.bootShell('astro-dev'); })
+          .catch((err) => console.error(`[aura-boot] the kernel did not start: ${err?.stack ?? err}`));
+      }, 0);
+    },
+    // Vite's own SIGTERM handler closes the server and exits; closing awaits this hook,
+    // so a signalled kernel shutdown (already running) finishes before the process exits.
+    async closeBundle() {
+      if (system?.status().stoppingAt) await system.shutdown('stop');
+    },
+  };
+}
+
+/** Emit the boot entry next to entry.mjs (the server build only). */
+function bootEntryPlugin() {
+  return {
+    name: 'aura-boot-entry',
+    apply: 'build',
+    applyToEnvironment(env) { return env.name === 'ssr'; },
+    buildStart() {
+      this.emitFile({ type: 'chunk', id: BOOT_ENTRY, fileName: 'aura-boot.mjs' });
+    },
+  };
+}
+
+// D76 (Phase 6 W): `AURA_COMPOSITION=server` builds without the Web Shell (src/integrations/composition.mjs);
+// the desktop half (React, the desktop pages) is loaded only for `desktop`.
+const COMPOSITION = compositionOf(process.env);
+const desktop = COMPOSITION === 'desktop' ? (await import('./src/desktop-pages/integration.mjs')).default() : [];
+
 export default defineConfig({
   output: 'server',
   adapter: node({ mode: 'standalone' }),
-  integrations: [react()],
+  integrations: [compositionMarker(COMPOSITION), ...desktop],
   // No image transcoding: the shell doesn't use astro:assets, so Sharp behind
   // `/_image` would only be an image decoder anyone can feed
   // (GHSA-26w7-cxv4-gfx2 was one). Apps: the same via auraAppIntegration.
@@ -105,7 +169,9 @@ export default defineConfig({
       // dies with "Failed to fetch dynamically imported module
       // .../astro:scripts/before-hydration.js" (dead clock, no notifications)
       // until the user reloads. Pre-bundling them at server start avoids it.
-      include: ['react-dom/client', 'react/jsx-runtime', 'react/jsx-dev-runtime', 'socket.io-client', '@aura/core > lucide'],
+      include: COMPOSITION === 'desktop'
+        ? ['react-dom/client', 'react/jsx-runtime', 'react/jsx-dev-runtime', 'socket.io-client', '@aura/core > lucide']
+        : [],
     },
     // SSR-process @aura/ui through Vite (it ships .css + .tsx). Vite would
     // otherwise treat workspace packages as external and Node's native
@@ -124,6 +190,6 @@ export default defineConfig({
     },
     // tailwindcss() must come before wsProxyPlugin so its content-scanning
     // hooks run on every transformed module.
-    plugins: [tailwindcss(), appHostsPlugin(), wsProxyPlugin(), sioPlugin()],
+    plugins: [tailwindcss(), appHostsPlugin(), wsProxyPlugin(), execBridgePlugin(), sioPlugin(), bootPlugin(), bootEntryPlugin()],
   },
 });

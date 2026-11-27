@@ -208,21 +208,14 @@ const routes: RouteAccessManifest['routes'] = {
       rule: ownerManages('Gives an app another identity: the owner decides. Assigning a missing one needs nobody.'),
     }],
   },
+  // D109 AF2: every new app (`aura dev new`, `aura dev clone`) is the owner's decision (`app.create`, forced),
+  // every overwrite too (`admin.change`); the routes ask through ownerAction on the facts of the manifest they
+  // write. Every other app is refused, in every mode.
   '/api/admin/clone-app': {
-    variants: [{
-      id: 'force',
-      methods: ['POST'],
-      match: { on: 'body', field: 'force', equals: true, read: true },
-      rule: ownerManages('Overwriting an app replaces the code under its id: the owner decides. Decided on `force: true` alone, since the route checks the existing copy after the rule.'),
-    }],
+    methods: { POST: ownerManages('Creates an app as a copy of another, or overwrites one: the owner decides every new app (app.create, D109 AF2) and every overwrite. A dry run writes nothing and asks nobody.') },
   },
   '/api/admin/scaffold': {
-    variants: [{
-      id: 'force',
-      methods: ['POST'],
-      match: { on: 'body', field: 'force', equals: true, read: true },
-      rule: ownerManages('Overwriting an app replaces the code under its id: the owner decides. Decided on `force: true` alone, as clone-app.'),
-    }],
+    methods: { POST: ownerManages('Creates a new app from a template, or overwrites one: the owner decides every new app (app.create, D109 AF2) and every overwrite.') },
   },
   // M2, D60: restarting, updating and switching how the OS runs, in every mode. The owner and the
   // operator act directly; Settings and `aura` in the System Terminal ask the owner (ownerAction).
@@ -300,7 +293,13 @@ const routes: RouteAccessManifest['routes'] = {
     methods: { POST: ownerManages('Disables a runtime (and stops its instances when asked): the owner decides with the password (fresh).') },
   },
   '/api/admin/runtimes/overrides/[installationId]': {
-    methods: { DELETE: ownerManages('Removes a runtime override (D75 step 6): the owner decides with the password (fresh).') },
+    methods: {
+      PUT: ownerManages('Sets an installation\'s runtime override (ARI-3), capability-checked: the owner decides with the password (fresh).'),
+      DELETE: ownerManages('Removes a runtime override (D75 step 6): the owner decides with the password (fresh).'),
+    },
+  },
+  '/api/admin/runtimes/migration': {
+    methods: { GET: rule(OWNER, 'system', why('The D75 runtime migration report (`aura runtime migrate --report`): read-only, an owner view.')) },
   },
   '/api/admin/runtimes/migrate': {
     methods: { POST: ownerManages('A D75 runtime migration decision: the owner decides with the password (fresh).') },
@@ -555,6 +554,10 @@ const routes: RouteAccessManifest['routes'] = {
   '/api/instances/[instanceId]/exec': {
     methods: { POST: rule(INSTANCE, 'instance', { guard: 'rule', ...why(
       'The owner (the CLI through the trusted Terminal, D29, or the host operator) or the instance itself by its own token. A non-interactive session in the running app environment (J, D74): `home` private|ephemeral as the user, app as the app identity (the instance itself: app only); `sidecar` in the body is the owner\'s only (the handler). Audited as instance.exec.') }) },
+  },
+  '/api/instances/[instanceId]/runtime': {
+    methods: { GET: rule(INSTANCE, 'instance', { guard: 'rule', ...why(
+      'The owner or the instance itself: where it runs (its runtime, the source of that choice, the runtime\'s features), for `aura info` (5b, D100 §7). Nothing secret.') }) },
   },
   '/api/instances/[instanceId]/logs': {
     methods: { GET: rule(INSTANCE, 'instance', { guard: 'rule', ...why(

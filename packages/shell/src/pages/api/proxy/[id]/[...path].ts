@@ -2,11 +2,12 @@ import { APP_HOST_ROUTE_HEADER, lifecycleRequestPath } from '@aura/core/host-rul
 import type { APIContext, APIRoute } from 'astro';
 import { browserDocumentRequest, plainProxyPath } from '../../../../../server/host-policy.mjs';
 import { dropServiceWorkerScope, stripShellCredentials } from '../../../../../server/shell-credentials.mjs';
-import { getAppManager, resolveProxyConfig, INTERFACE_PATH_KINDS, RELAY_CLAIM_HEADER } from '@aura/core';
+import { getAppManager, operationalBlockOf, resolveProxyConfig, INTERFACE_PATH_KINDS, RELAY_CLAIM_HEADER } from '@aura/core';
 import { relayCaller, relayClaimFor, type RelaySigner } from '../../../../lib/access/relay.ts';
 import { actingUser } from '../../../../lib/access/decide.ts';
 import { SESSION_HOST_APPS } from '../../../../lib/access/identify.ts';
 import { requestUserId } from '../../../../lib/userContext.ts';
+import { errorResponse } from '../../../../lib/appResponse.js';
 
 /**
  * The machine proxy: a call to a running app's server, for machine callers
@@ -144,9 +145,10 @@ const forward = async ({ params, request, locals }: APIContext): Promise<Respons
   }
   const mine = (i: { owner?: string }) => sessionUser === null || i.owner === sessionUser;
   const exact = mgr.getInstance(id);
-  let instance = exact && isLive(exact.state) && mine(exact)
+  // An instance in a maintenance start (D108 A3: an update's new code before its onUpdate) gets no traffic.
+  let instance = exact && !exact.maintenance && isLive(exact.state) && mine(exact)
     ? exact
-    : mgr.getInstancesByApp(id).find((i) => !i.inPool && !i.preview && isLive(i.state) && i.port != null && mine(i));
+    : mgr.getInstancesByApp(id).find((i) => !i.inPool && !i.preview && !i.maintenance && isLive(i.state) && i.port != null && mine(i));
 
   if (!instance?.port) {
     // Cold-start: a bare-appId request for a path the app's manifest declares
@@ -165,8 +167,11 @@ const forward = async ({ params, request, locals }: APIContext): Promise<Respons
       try {
         await ensureInstance(mgr, id, sessionUser);
         instance = mgr.getInstancesByApp(id)
-          .find((i) => !i.inPool && !i.preview && isLive(i.state) && i.port != null && mine(i));
+          .find((i) => !i.inPool && !i.preview && !i.maintenance && isLive(i.state) && i.port != null && mine(i));
       } catch (err) {
+        // The start gate (D48, D108): never started; say why (its D105 body).
+        const blocked = operationalBlockOf(err);
+        if (blocked) return errorResponse(409, blocked);
         console.error(`[proxy] cold-start of ${id} failed: ${(err as Error).message}`);
       }
     }

@@ -19,8 +19,8 @@ import {
   RuntimeUnavailableError, RuntimeCapabilityError, RuntimeResolutionError,
   SecurityPolicyStore, SECURITY_POLICY_KEY, FRESH_AUTH_REQUIRE_HTTPS, deriveIdentitySubkey,
 } from '../dist/index.js';
-import { containerRuntime } from '../dist/runtimes/builtins/container.js';
-import { prootRuntime } from '../dist/runtimes/builtins/proot.js';
+import { containerRuntime } from '../dist/runtimes/container/index.js';
+import { prootRuntime } from '../dist/runtimes/proot/index.js';
 import { AppManifestSchema } from '../dist/types/manifest.js';
 import { AppManager } from '../dist/app-manager/AppManager.js';
 import { ContainerRunner } from '../dist/app-manager/ContainerRunner.js';
@@ -342,7 +342,8 @@ test('D75 owner decision: adopt the default, or keep PRoot for an open app only;
 
 test('a fake runtime registers through the registry and resolves in AppManager with no edit to it', async () => {
   const dataDir = mkdtempSync(join(TMP, 'mgr-'));
-  const fakeCaps = { ...CONTAINER_CAPS, isolation: 'vm' };
+  // A provider with none of the container's groups (5b CR: a group is present exactly when its feature is).
+  const fakeCaps = { ...CONTAINER_CAPS, isolation: 'vm', survivesShellRestart: false, sidecars: false, usage: false, sessionExec: false, hostFilesystem: false, portExpose: false, mounts: false };
   const fake = { descriptor: { id: 'fake', version: '0.1.0', ari: 1, title: 'Fake', description: 'test', builtIn: false, settingsSchema: { type: 'object', properties: {} }, settingsVersion: 1 },
     runner: { capabilities: () => fakeCaps }, capabilities: () => fakeCaps, health: () => ({ status: 'ok', checks: [] }), endpoint: () => null };
   const mgr = new AppManager({ appsDir: join(dataDir, 'apps'), dataDir, baseRootfs: ROOTFS, toolchainDir: join(dataDir, 'tc'), runtimes: [fake] });

@@ -76,3 +76,12 @@ export function defaultRedis(): Redis {
   g[REDIS_GLOBAL_KEY] = { uri, redis };
   return redis;
 }
+
+/** Kernel shutdown (Phase 6 K `bootSystem().shutdown()`): close the shared connection before Valkey stops. */
+export async function closeSharedRedis(): Promise<void> {
+  const g = globalThis as GlobalWithRedis;
+  const cur = g[REDIS_GLOBAL_KEY];
+  if (!cur) return;
+  delete g[REDIS_GLOBAL_KEY];
+  await cur.redis.quit().catch(() => cur.redis.disconnect());
+}

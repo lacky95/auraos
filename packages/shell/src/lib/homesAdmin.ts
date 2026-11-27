@@ -21,6 +21,7 @@ import { ownershipReport } from './identityReports.ts';
 import { systemModeState } from './systemMode.ts';
 
 type Ctx = Parameters<typeof ownerAction>[0];
+type Mgr = ReturnType<typeof core.getAppManager>;
 const dataDir = (): string => process.env['AURA_DATA_DIR'] ?? '/data';
 const USER_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
@@ -191,18 +192,30 @@ export async function postHomesReset(ctx: Ctx): Promise<Response> {
 }
 
 /**
- * Uninstall with `deleteHome` (D65 §13, "explicit keep or delete"): looked
- * up before the app goes, deleted after. Default: kept.
+ * Uninstall with `deleteHome` (D65 §13, "explicit keep or delete"): the
+ * installation whose App Homes go, looked up before the app goes (repaired
+ * when its record is missing: AppManager `ensureInstallation`), deleted
+ * after. Without one nothing names the homes: the route refuses the whole
+ * uninstall (`deleteHomeRefusal`) rather than silently delete nothing.
+ * Default: kept.
  */
-export async function installationBeforeRemove(appId: string): Promise<string | null> {
-  const mgr = core.getAppManager();
-  const scope = mgr.registry.getScopeId(appId);
-  if (!scope) return null;
-  try { return (await core.getAppHostServices().registry.findInstallation(appId, scope))?.installationId ?? null; } catch { return null; }
+export async function installationBeforeRemove(
+  appId: string, mgr: Pick<Mgr, 'ensureInstallation'> = core.getAppManager(),
+): Promise<{ installationId: string } | { error: string }> {
+  try {
+    const r = await mgr.ensureInstallation(appId);
+    return r.installation ? { installationId: r.installation.installationId } : { error: r.error };
+  } catch (err) {
+    return { error: `${appId}: its installation record can't be read (${(err as Error).message})` };
+  }
 }
 
-export async function deleteHomesAfterRemove(appId: string, installationId: string | null): Promise<boolean> {
-  if (!installationId) return false;
+/** Why an uninstall with `deleteHome` removed nothing: its homes can't be named. */
+export function deleteHomeRefusal(appId: string, error: string): string {
+  return `${appId} was not removed: its App Homes can't be named for --delete-home (${error}). Nothing was changed; remove it without --delete-home to keep them.`;
+}
+
+export async function deleteHomesAfterRemove(appId: string, installationId: string): Promise<boolean> {
   const removed = core.deleteInstallationHomes(dataDir(), installationId);
   console.log(`[homes] ${appId}: App Homes of installation ${installationId} ${removed ? 'deleted' : 'were not there'} (uninstall --delete-home)`);
   return removed;

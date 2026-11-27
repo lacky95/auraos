@@ -15,6 +15,8 @@
  *   aura-session-enter end <pid>        end the session whose launcher is <pid>
  *   aura-session-enter reap [<pid>...]  end every launcher except the listed ones
  *   aura-session-enter check '<spec>'   validate a spec only (tests)
+ *   aura-session-enter idmap-probe <dir>   D80: does this filesystem take an idmapped bind
+ *   aura-session-enter idmap-bind <src> <dst> <from> <to>   D80: an idmapped writable bind
  *   aura-session-enter version
  *
  * enter, in order (J.2):
@@ -300,6 +302,7 @@ struct spec {
   int kind, home, tty;
   uid_t uid;
   gid_t gid;
+  uid_t session_host_uid;   /* a System Terminal's own user (0: not a session host) */
   gid_t groups[32];
   int ngroups;
   char **env, **argv;
@@ -353,6 +356,9 @@ static void read_spec(const char *json, struct spec *sp) {
   if (sp->kind == KIND_ROOT && (sp->uid != 0 || sp->gid != 0)) { errno = 0; die("spec: a root session runs as 0:0"); }
   if (sp->kind == KIND_APP && sp->home != HOME_APP) { errno = 0; die("spec: an app session has the App Home"); }
   if (sp->kind != KIND_APP && sp->home == HOME_APP) { errno = 0; die("spec: the App Home is the app identity's"); }
+  /* A System Terminal (stream T2) runs its launcher as root: its own user, and only they, may enter it. */
+  jv *sh = jget(o, "sessionHostUid");
+  if (sh) sp->session_host_uid = (uid_t)jnum(o, "sessionHostUid", 1, 0x7ffffffe);
   sp->cwd = jstr(o, "cwd", 0);
   if (sp->cwd && !valid_abs_path(sp->cwd)) { errno = 0; die("spec: cwd must be an absolute path"); }
   sp->passwd = jstr(o, "passwd", 0);
@@ -465,6 +471,7 @@ struct pinned {
   struct sock_fprog filters[8];
   int nfilters;
   char apparmor[256];
+  char selinux[256];
 };
 
 /* The init's seccomp filters, oldest first; the session gets exactly the app's filter class. */
@@ -508,7 +515,9 @@ static void pin(const struct spec *sp, struct pinned *pn) {
   if (!uidline) { errno = 0; die("no Uid in the app's init status"); }
   unsigned ruid = 0, euid = 0;
   if (sscanf(uidline + 5, "%u %u", &ruid, &euid) != 2) { errno = 0; die("bad Uid line"); }
-  if (sp->kind == KIND_USER && (ruid == 0 || euid == 0)) { errno = 0; die("the app runs as root: a user session is refused (capability-missing: identity)"); }
+  /* T2: a session host's init is root (its session launcher, SETUID/SETGID only); its own user's session may enter it. */
+  int own_terminal = sp->session_host_uid != 0 && sp->kind == KIND_USER && sp->uid == sp->session_host_uid;
+  if (sp->kind == KIND_USER && (ruid == 0 || euid == 0) && !own_terminal) { errno = 0; die("the app runs as root: a user session is refused (capability-missing: identity)"); }
   free(status);
 
   char procs[4200];
@@ -538,17 +547,35 @@ static void pin(const struct spec *sp, struct pinned *pn) {
   pn->nfilters = copy_seccomp(sp->pid, pn->filters, 8);
   if (pn->nfilters == 0) { errno = 0; die("the app container has no seccomp filter; refusing a session without one"); }
 
-  /* The init's AppArmor profile ("docker-default (enforce)"); none on a host without AppArmor. */
+  /* The init's LSM label, so the session is confined exactly like the app. AppArmor: its profile
+   * ("docker-default (enforce)"). The generic /proc/<pid>/attr/current is AppArmor's only when AppArmor is the
+   * active LSM: on an SELinux host it is the SELinux context ("system_u:system_r:container_t:s0:c1,c2"), which is
+   * applied as such (the VM finding: it was written as an AppArmor profile and every session failed). */
   char attr[64];
+  pn->apparmor[0] = pn->selinux[0] = '\0';
+  char *aa_on = read_file("/sys/module/apparmor/parameters/enabled", 7);
+  int apparmor = aa_on && aa_on[0] == 'Y';
+  free(aa_on);
   snprintf(attr, sizeof attr, "/proc/%d/attr/apparmor/current", (int)sp->pid);
-  char *cur = read_file(attr, 255);
-  if (!cur) { snprintf(attr, sizeof attr, "/proc/%d/attr/current", (int)sp->pid); cur = read_file(attr, 255); }
+  char *cur = apparmor ? read_file(attr, 255) : NULL;
+  int generic = 0;
+  if (!cur) { snprintf(attr, sizeof attr, "/proc/%d/attr/current", (int)sp->pid); cur = read_file(attr, 255); generic = 1; }
   if (cur) {
-    char *sp_ = strstr(cur, " (");
-    if (sp_) *sp_ = '\0';
     char *nl = strchr(cur, '\n');
     if (nl) *nl = '\0';
-    if (*cur && strcmp(cur, "unconfined")) snprintf(pn->apparmor, sizeof pn->apparmor, "%s", cur);
+    if (apparmor) {
+      char *sp_ = strstr(cur, " (");
+      if (sp_) *sp_ = '\0';
+      if (*cur && strcmp(cur, "unconfined")) snprintf(pn->apparmor, sizeof pn->apparmor, "%s", cur);
+    } else if (generic && strchr(cur, ':') && strcmp(cur, "unconfined")) {
+      /* Only a different context needs an exec transition: the same one (an SELinux host whose Docker does not
+       * label containers: app and broker both in the daemon's domain) is inherited as is, and an explicit setexec
+       * under no_new_privs is refused there (vm: "bash: Operation not permitted", 126). */
+      char *self = read_file("/proc/self/attr/current", 255);
+      if (self) { char *n2 = strchr(self, '\n'); if (n2) *n2 = '\0'; }
+      if (!self || strcmp(self, cur)) snprintf(pn->selinux, sizeof pn->selinux, "%s", cur);
+      free(self);
+    }
     free(cur);
   }
 }
@@ -706,6 +733,13 @@ static void drop(const struct spec *sp, const struct pinned *pn) {
     if (fd < 0 || write(fd, cmd, (size_t)n) != n) die("AppArmor profile %s", pn->apparmor);
     close(fd);
   }
+  /* SELinux: the app's own context from the next exec on (fail closed: never less confined than the app). */
+  if (pn->selinux[0]) {
+    size_t n = strlen(pn->selinux);
+    int fd = open("/proc/self/attr/exec", O_WRONLY | O_CLOEXEC);
+    if (fd < 0 || write(fd, pn->selinux, n) != (ssize_t)n) die("SELinux context %s", pn->selinux);
+    close(fd);
+  }
   unsigned long long keep = 0;
   if (sp->kind == KIND_ROOT) for (size_t i = 0; i < sizeof ROOT_CAPS / sizeof *ROOT_CAPS; i++) keep |= 1ULL << ROOT_CAPS[i];
   int last = last_cap();
@@ -857,6 +891,7 @@ static int cmd_enter(const char *json) {
   if (sp.kind == KIND_ROOT) relay_identity.kind = KIND_APP;
   struct pinned none = pn;
   none.apparmor[0] = '\0';
+  none.selinux[0] = '\0';
   drop(&relay_identity, &none);
   prctl(PR_SET_PDEATHSIG, SIGHUP);
   return relay(master, shell, alive[0]);
@@ -906,8 +941,114 @@ static int cmd_end(int argc, char **argv, int reap) {
   return 0;
 }
 
+/* ─── idmapped binds (D80, Phase 5b G) ────────────────────────────────────
+ *
+ *   aura-session-enter idmap-probe <dir>
+ *   aura-session-enter idmap-bind <src> <dst> <fromUid>:<fromGid> <toUid>:<toGid>
+ *
+ * A writable cross-app mount between different app uids: <src> is bound at
+ * <dst> with an idmapping that shows the files <fromUid> owns on disk as
+ * <toUid>'s inside the bind (and writes back as <fromUid>), the same for the
+ * gid. Every other owner shows as the overflow id and is not writable through
+ * the bind; the on-disk owner never changes. The bind is nosuid and nodev.
+ * Node has no mount_setattr, so MountManager runs this in its privileged
+ * helper container (the one that makes every cross-app bind). probe only
+ * checks that the filesystem under <dir> accepts an idmapped mount: it never
+ * attaches one. Both fail (exit 125, the reason on stderr) rather than make a
+ * weaker mount; nothing falls back to a plain bind.
+ */
+#ifndef MOUNT_ATTR_IDMAP
+#define MOUNT_ATTR_IDMAP 0x00100000
+#endif
+
+static int parse_id_pair(const char *s, unsigned *uid, unsigned *gid) {
+  char *end;
+  errno = 0;
+  unsigned long u = strtoul(s, &end, 10);
+  if (errno || end == s || *end != ':') return -1;
+  const char *g0 = end + 1;
+  unsigned long g = strtoul(g0, &end, 10);
+  if (errno || end == g0 || *end || u > 4294967294UL || g > 4294967294UL) return -1;
+  *uid = (unsigned)u;
+  *gid = (unsigned)g;
+  return 0;
+}
+
+static void write_map(pid_t pid, const char *which, unsigned inside, unsigned outside) {
+  char path[64], line[64];
+  snprintf(path, sizeof path, "/proc/%d/%s", (int)pid, which);
+  int n = snprintf(line, sizeof line, "%u %u 1\n", inside, outside);
+  int fd = open(path, O_WRONLY | O_CLOEXEC);
+  if (fd < 0) die("%s", path);
+  if (write(fd, line, (size_t)n) != n) die("write %s", path);
+  close(fd);
+}
+
+/* A user namespace whose only mapping is from → to (uid and gid), as an fd. */
+static int idmap_userns(unsigned from_uid, unsigned from_gid, unsigned to_uid, unsigned to_gid) {
+  int ready[2], go[2];
+  if (pipe2(ready, O_CLOEXEC) || pipe2(go, O_CLOEXEC)) die("pipe");
+  pid_t pid = fork();
+  if (pid < 0) die("fork");
+  if (pid == 0) {
+    char c = 'u';
+    close(ready[0]); close(go[1]);
+    if (unshare(CLONE_NEWUSER)) _exit(1);
+    if (write(ready[1], &c, 1) != 1) _exit(1);
+    (void)!read(go[0], &c, 1);
+    _exit(0);
+  }
+  close(ready[1]); close(go[0]);
+  char c;
+  if (read(ready[0], &c, 1) != 1) { errno = 0; die("the idmap user namespace could not be created"); }
+  write_map(pid, "uid_map", from_uid, to_uid);
+  write_map(pid, "gid_map", from_gid, to_gid);
+  char path[64];
+  snprintf(path, sizeof path, "/proc/%d/ns/user", (int)pid);
+  int fd = open(path, O_RDONLY | O_CLOEXEC);
+  if (fd < 0) die("%s", path);
+  if (write(go[1], &c, 1) != 1) { /* the child exits anyway */ }
+  close(go[1]); close(ready[0]);
+  waitpid(pid, NULL, 0);
+  return fd;
+}
+
+/* A detached clone of <src> carrying the idmapping (and nosuid, nodev). */
+static int idmapped_tree(const char *src, unsigned from_uid, unsigned from_gid, unsigned to_uid, unsigned to_gid) {
+  int tree = sys_open_tree(AT_FDCWD, src, OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC);
+  if (tree < 0) die("open_tree %s", src);
+  int ns = idmap_userns(from_uid, from_gid, to_uid, to_gid);
+  struct mount_attr_s a = { .attr_set = MOUNT_ATTR_IDMAP | MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV, .userns_fd = (uint64_t)ns };
+  if (sys_mount_setattr(tree, "", AT_EMPTY_PATH, &a)) die("idmapped mounts are not supported on %s", src);
+  close(ns);
+  return tree;
+}
+
+static int cmd_idmap(int argc, char **argv) {
+  if (geteuid() != 0) { errno = 0; die("idmap needs root (MountManager's privileged helper)"); }
+  if (argc == 2 && !strcmp(argv[0], "idmap-probe")) {
+    /* Any two distinct ids prove the filesystem takes an idmapping; nothing is attached. */
+    close(idmapped_tree(argv[1], 0, 0, 65534, 65534));
+    puts("idmapped-mounts ok");
+    return 0;
+  }
+  if (argc == 5 && !strcmp(argv[0], "idmap-bind")) {
+    unsigned fu, fg, tu, tg;
+    if (parse_id_pair(argv[3], &fu, &fg) || parse_id_pair(argv[4], &tu, &tg)) { errno = 0; die("ids are <uid>:<gid>"); }
+    if (fu == tu && fg == tg) { errno = 0; die("an idmap from %u:%u onto itself is no idmap", fu, fg); }
+    int tree = idmapped_tree(argv[1], fu, fg, tu, tg);
+    if (sys_move_mount(tree, "", AT_FDCWD, argv[2], MOVE_MOUNT_F_EMPTY_PATH)) die("move_mount %s", argv[2]);
+    close(tree);
+    return 0;
+  }
+  errno = 0;
+  die("usage: idmap-probe <dir> | idmap-bind <src> <dst> <fromUid>:<fromGid> <toUid>:<toGid>");
+  return SETUP_FAILED;
+}
+
 int main(int argc, char **argv) {
   if (argc >= 2 && !strcmp(argv[1], "version")) { puts(VERSION); return 0; }
+  if (argc >= 2 && !strncmp(argv[1], "idmap-", 6)) return cmd_idmap(argc - 1, argv + 1);
   if (argc == 3 && !strcmp(argv[1], "enter")) {
     if (geteuid() != 0) { errno = 0; die("must run as root in the session broker"); }
     return cmd_enter(argv[2]);
@@ -925,6 +1066,6 @@ int main(int argc, char **argv) {
   }
   if (argc >= 2 && !strcmp(argv[1], "end")) return cmd_end(argc - 2, argv + 2, 0);
   if (argc >= 2 && !strcmp(argv[1], "reap")) return cmd_end(argc - 2, argv + 2, 1);
-  fputs("usage: aura-session-enter enter '<spec>' | end <pid> | check '<spec>' | reap [<pid>...] | version\n", stderr);
+  fputs("usage: aura-session-enter enter '<spec>' | end <pid> | check '<spec>' | reap [<pid>...] | idmap-probe <dir> | idmap-bind <src> <dst> <from> <to> | version\n", stderr);
   return 2;
 }

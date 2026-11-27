@@ -28,9 +28,11 @@ import type {
 import type { CallerPrincipal } from './access/identify.ts';
 import { isOwnerPrincipal } from './access/identify.ts';
 import { ownerAction, type OwnerActionDeps } from './approvals/admin.ts';
+import { handOwnAppSourceToOwner } from './identityReports.ts';
 import { patchLevel, sourceOpenDetails, sourceOpenLevel } from './approvals/display.ts';
 import { installGate, runInstall } from './approvals/nexus.ts';
 import { json, type ApprovalServiceDeps } from './approvals/service.ts';
+import { errorResponse } from './appResponse.js';
 import { parseIdentity } from './nexusIdentity.js';
 import { auditActor, auditPatch, isSeriesError, preparedSeries, type PreparedSeries } from './patchActivation.ts';
 import { TERMINAL_APP_ID } from '../../server/session-hosts.mjs';
@@ -49,7 +51,8 @@ export interface AppSourceDeps {
     get(appId: string): ScopedApp | undefined;
     scopes(): ScopeDefinition[];
     sourceMode(appId: string): SourceModeInfo | null;
-    instance(instanceId: string): { appId: string; sandbox?: string } | undefined;
+    /** The instance's app, runtime id and effective capabilities (5b G: null before a start). */
+    instance(instanceId: string): { appId: string; runtime?: string; capabilities: core.RuntimeCapabilities | null } | undefined;
     instancesOf(appId: string): string[];
     /** AppManager `isTrustedSystemCopy`: the active copy is the system installation. */
     trustedSystemCopy(appId: string): boolean;
@@ -67,9 +70,11 @@ export interface AppSourceDeps {
     /** Live binds of a workspace dir (relative to dataDir), in every instance. */
     workspaceBinds(subpath: string): Array<{ instanceId: string; mountId: string }>;
   };
-  /** The App Host installation of an app in a scope (`apphost:install:*`), or null. */
-  installationId(appId: string, scope: string): Promise<string | null>;
+  /** The app's App Host installation, repaired when it is missing (AppManager `ensureInstallation`). */
+  ensureInstallation(appId: string): Promise<{ installation: { installationId: string } } | { installation: null; error: string }>;
   nexus: Pick<NexusManager, 'install' | 'setSourceMode' | 'rollbackTrees' | 'records'>;
+  /** Open user-scope source becomes the owner's (identityReports `handOwnAppSourceToOwner`); a note, or null. */
+  handToOwner(appDir: string, appId: string): Promise<string | null>;
   /** The admin audit (patch lifecycle rows, Phase 7a). */
   audit: Pick<core.AuthServices['audit'], 'record'>;
 }
@@ -84,7 +89,10 @@ export function liveAppSourceDeps(authenticate: AppSourceDeps['authenticate'], a
       get: (id) => mgr.registry.getById(id) as ScopedApp | undefined,
       scopes: () => mgr.getScopeDefinitions(),
       sourceMode: (id) => mgr.sourceModeOf(id),
-      instance: (id) => mgr.getInstance(id),
+      instance: (id) => {
+        const i = mgr.getInstance(id);
+        return i ? { appId: i.appId, ...(i.sandbox ? { runtime: i.sandbox } : {}), capabilities: mgr.instanceCapabilities(id) } : undefined;
+      },
       instancesOf: (appId) => mgr.getInstancesByApp(appId).map((i) => i.instanceId),
       trustedSystemCopy: (appId) => mgr.isTrustedSystemCopy(appId),
       startPreview: (appId, opts) => mgr.startPreview(appId, opts),
@@ -92,8 +100,9 @@ export function liveAppSourceDeps(authenticate: AppSourceDeps['authenticate'], a
       stopPreview: (instanceId) => mgr.stopPreview(instanceId),
     },
     mounts: mgr.mounts,
-    installationId: async (appId, scope) => (await core.getAppHostServices().registry.findInstallation(appId, scope))?.installationId ?? null,
+    ensureInstallation: (appId) => mgr.ensureInstallation(appId),
     nexus: core.getNexusManager(),
+    handToOwner: handOwnAppSourceToOwner,
     audit: { record: (input) => core.getAuthServices().audit.record(input) },
   };
 }
@@ -121,10 +130,18 @@ function builtInApp(app: ScopedApp): boolean {
   return app.scopeId === 'system';
 }
 
-/** The installation patches and workspaces belong to: the active copy's. */
-async function patchInstallation(deps: AppSourceDeps, app: ScopedApp): Promise<{ key: string | null; active: string | null }> {
-  const active = await deps.installationId(app.id, app.scopeId).catch(() => null);
-  return { key: active, active };
+/**
+ * The installation patches and workspaces belong to: the active copy's. A
+ * registered app without one (a clone before 0.0.50 never got one) is
+ * repaired here (`ensureInstallation`); `error` says why there is none.
+ */
+async function patchInstallation(deps: AppSourceDeps, app: ScopedApp): Promise<{ key: string | null; error: string }> {
+  try {
+    const r = await deps.ensureInstallation(app.id);
+    return r.installation ? { key: r.installation.installationId, error: '' } : { key: null, error: r.error };
+  } catch (err) {
+    return { key: null, error: `${app.id}: its installation record can't be read (${(err as Error).message})` };
+  }
 }
 
 /** The user a request acts for: workspaces are per user. */
@@ -146,13 +163,16 @@ function upstreamOf(deps: AppSourceDeps, app: ScopedApp): core.AppSourceInfo | n
   return core.readPublishMarker(app.appDir)?.source ?? null;
 }
 
-/** The caller of an instance route, which must run in a container to receive binds. */
+/** The caller of an instance route, whose runtime must take live binds (`mounts`, 5b G). */
 function consumer(deps: AppSourceDeps, instanceId: string | undefined): string | Response {
   if (!instanceId) return json({ error: 'invalid-instance' }, 400);
   const inst = deps.apps.instance(instanceId);
   if (!inst) return json({ error: 'instance-not-found' }, 404);
-  if (inst.sandbox && inst.sandbox !== 'container') {
-    return json({ error: 'not-a-container', message: `${instanceId} runs in a '${inst.sandbox}' sandbox; source views need sandbox: container` }, 409);
+  if (inst.capabilities && !inst.capabilities.mounts) {
+    return json({
+      error: 'capability-missing', category: core.CATEGORY_OF_CODE['capability-missing'], missing: ['mounts'], ...(inst.runtime ? { runtime: inst.runtime } : {}),
+      message: `${instanceId} runs on runtime '${inst.runtime ?? 'unknown'}', which can't take source views (missing: mounts)`,
+    }, 409);
   }
   return instanceId;
 }
@@ -223,7 +243,7 @@ export async function appSourceStatus(request: Request, instanceId: string | und
   const app = resolveApp(deps, ref);
   if (app instanceof Response) return app;
   const mode = deps.apps.sourceMode(app.id) ?? { mode: 'closed', defaultMode: 'closed', from: 'default' } as SourceModeInfo;
-  const { key, active } = await patchInstallation(deps, app);
+  const { key } = await patchInstallation(deps, app);
   const userId = actingUser(principal);
 
   // `aura dev patch save` reports the revision it saved: the kernel side reads
@@ -261,7 +281,7 @@ export async function appSourceStatus(request: Request, instanceId: string | und
         : `Read the source at ${path} (read-only). To change it: \`aura dev patch start ${app.id}\`.`;
   return json({
     appId: app.id, name: app.name, version: app.version, scope: app.scopeId,
-    installationId: key, activeInstallationId: active,
+    installationId: key, activeInstallationId: key,
     mode: mode.mode, defaultMode: mode.defaultMode, modeFrom: mode.from,
     upstream: upstreamOf(deps, app),
     source: { path, writable: view?.mode === 'rw', mounted: !!view },
@@ -311,8 +331,8 @@ export async function mountAppVolume(
   }
   const cap = deps.mounts.capable();
   if (!cap.ok) return json({ error: 'mounts-unavailable', message: cap.reason ?? 'mount propagation is unavailable on this host' }, 503);
-  const { key } = await patchInstallation(deps, app);
-  if (!key) return json({ error: 'no-installation', message: `${app.id} has no installation record yet; try again once it has started` }, 409);
+  const { key, error } = await patchInstallation(deps, app);
+  if (!key) return json({ error: 'no-installation', message: error }, 409);
 
   const bound = deps.mounts.list(inst).find((m) => m.id === `${app.id}:${body.kind}`);
   let subpath: string;
@@ -369,8 +389,8 @@ export async function cleanWorkspaces(request: Request, instanceId: string | und
     return json({ error: 'invalid-delete', message: 'delete must be a list of workspace numbers' }, 400);
   }
   const force = body['force'] === true;
-  const { key } = await patchInstallation(deps, app);
-  if (!key) return json({ error: 'no-installation', message: `${app.id} has no installation record` }, 409);
+  const { key, error } = await patchInstallation(deps, app);
+  if (!key) return json({ error: 'no-installation', message: error }, 409);
   const userId = actingUser(principal);
   const all = core.listWorkspaces(deps.dataDir, userId, key);
   const bound = deps.mounts.list(inst).find((m) => m.id === `${app.id}:work`);
@@ -432,6 +452,11 @@ export async function setSourceMode(ctx: RouteCtx, appId: string | undefined, de
   catch (err) { return json({ error: 'not-installed', message: (err as Error).message }, 409); }
   // Closed: writable views of it come back read-only.
   if (mode === 'closed') await deps.mounts.rebindTarget(app.id);
+  // Open in the user scope: the owner's from now on (P5-2), as `aura dev new` and `aura dev clone` hand it over.
+  if (mode === 'open' && app.scopeId === 'user') {
+    const ownership = await deps.handToOwner(app.appDir, app.id);
+    if (ownership) console.warn(`[app-source] ${app.id}: ${ownership}`);
+  }
   try {
     await deps.approvals.audit({ by, action: `app.source.${mode === 'open' ? 'open' : 'close'}`, target: `app:${app.id}`, outcome: 'ok' });
   } catch { /* the audit trail must not fail the request */ }
@@ -472,7 +497,7 @@ export async function activatePrepared(request: Request, appId: string | undefin
   let tree: string;
   let series: PreparedSeries | null = null;
   const rollback = body['rollback'] === true;
-  const { key } = await patchInstallation(deps, app);
+  const { key, error: keyError } = await patchInstallation(deps, app);
   if (rollback) {
     const newest = deps.nexus.rollbackTrees(app.id, scope).newest;
     if (!newest) return json({ error: 'no-rollback-tree', message: `no earlier tree of ${app.id} is kept` }, 404);
@@ -482,7 +507,7 @@ export async function activatePrepared(request: Request, appId: string | undefin
     if (!Number.isInteger(n)) return json({ error: 'invalid-workspace', message: 'pass workspace: <n>, or rollback: true' }, 400);
     const user = workspaceOwner(principal, body['user']);
     if (user instanceof Response) return user;
-    if (!key) return json({ error: 'no-installation', message: `${app.id} has no installation record` }, 409);
+    if (!key) return json({ error: 'no-installation', message: keyError ?? `${app.id} has no installation record` }, 409);
     try { tree = join(deps.dataDir, core.workspaceSubpath(user, key, n as number)); }
     catch (err) { return json({ error: 'invalid-workspace', message: (err as Error).message }, 400); }
     if (!existsSync(tree)) return json({ error: 'no-workspace', message: `workspace ${String(n)} of ${app.id} does not exist` }, 404);
@@ -567,8 +592,8 @@ export async function startPreview(request: Request, appId: string | undefined, 
   if (body instanceof Response) return body;
   const n = body['workspace'];
   if (!Number.isInteger(n)) return json({ error: 'invalid-workspace', message: 'pass workspace: <n>' }, 400);
-  const { key } = await patchInstallation(deps, app);
-  if (!key) return json({ error: 'no-installation', message: `${app.id} has no installation record` }, 409);
+  const { key, error } = await patchInstallation(deps, app);
+  if (!key) return json({ error: 'no-installation', message: error }, 409);
   const user = actingUser(principal);
   let subpath: string;
   try { subpath = core.workspaceSubpath(user, key, n as number); }
@@ -579,6 +604,9 @@ export async function startPreview(request: Request, appId: string | undefined, 
   try { candidate = core.validateStagedDir(tree); }
   catch (err) { return json({ error: 'invalid-tree', message: (err as Error).message }, 422); }
   if (candidate.id !== app.id) return json({ error: 'invalid-tree', message: `the workspace is ${candidate.id}, not ${app.id}` }, 422);
+  // The start gate (D48, D108): a workspace AuraOS never starts never runs as a preview (activation refuses it in core's install).
+  const blocked = core.operationalBlock(candidate);
+  if (blocked) return errorResponse(422, blocked);
   try {
     const instanceId = await deps.apps.startPreview(app.id, { appDir: tree, workspace: subpath, owner: user });
     return json({ ok: true, appId: app.id, instanceId, workspace: n });

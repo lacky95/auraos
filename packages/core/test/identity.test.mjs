@@ -2,6 +2,8 @@
 // REAL valkey-server (KvServer on a tmp dataDir).
 import { test, after, before, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+// The composition root (system/compose.ts, Phase 6 K) wires the service accessors when the barrel loads.
+import '../dist/index.js';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';

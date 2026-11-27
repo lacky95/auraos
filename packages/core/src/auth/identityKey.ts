@@ -12,7 +12,8 @@
  * closed until the operator moves it aside and runs a password reset.
  */
 import { createHmac, randomBytes } from 'node:crypto';
-import { chmodSync, linkSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, linkSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { ensurePrivateDir } from '../system/privateDir.js';
 import { dirname, join } from 'node:path';
 
 const IDENTITY_KEY_PATTERN = /^aura_identity_[A-Za-z0-9_-]{43}$/;
@@ -55,7 +56,7 @@ export function ensureIdentityKey(keyFile: string): string {
   if (existing) return existing;
   const tmp = `${keyFile}.tmp-${process.pid}-${randomBytes(4).toString('hex')}`;
   try {
-    mkdirSync(dirname(keyFile), { recursive: true, mode: 0o700 });
+    ensurePrivateDir(dirname(keyFile));
     writeFileSync(tmp, `aura_identity_${randomBytes(32).toString('base64url')}\n`, { mode: 0o600 });
     chmodSync(tmp, 0o600);
     // link() fails if the target exists, unlike rename(): the first writer wins.

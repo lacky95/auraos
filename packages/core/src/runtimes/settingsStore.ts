@@ -10,12 +10,16 @@
  * audit entry are the caller's (the shell's `/api/admin/runtimes`). Every
  * write is a compare-and-set, so a concurrent change is never overwritten.
  */
+import { createHash } from 'node:crypto';
 import type { Redis } from '@aura/kv-store';
+import { requirementsOf, type RequirementsInstallation, type RequirementsManifest } from './requirements.js';
 import { SealedPolicyRecord } from '../security/SealedPolicyRecord.js';
 import { builtInRuntimeRecord, type RuntimeRegistry } from './registry.js';
 import { RuntimeSettingsError, settingsDefaults, validateSettings } from './settingsSchema.js';
+import { healthRefusal } from './ari.js';
 import {
-  RUNTIME_ID_PATTERN, type RuntimeMigrationPending, type RuntimeOverride, type RuntimeSettingsRecord,
+  CATEGORY_OF_CODE, missingCapabilities, RUNTIME_ID_PATTERN, suggestText, type RuntimeErrorCategory,
+  type RuntimeCapability, type RuntimeMigrationPending, type RuntimeOverride, type RuntimeSettings, type RuntimeSettingsRecord,
 } from './types.js';
 
 export const RUNTIME_POLICY_KEY = 'user:policy:runtimes';
@@ -26,6 +30,8 @@ export const RUNTIME_AUDIT_ACTIONS = {
   enabled: 'runtime.enabled',
   disabled: 'runtime.disabled',
   defaultChanged: 'runtime.default-changed',
+  /** ARI-3: the owner set (or replaced) one installation's runtime override. */
+  overrideSet: 'runtime.override-set',
   overrideRemoved: 'runtime.override-removed',
   migrationDecided: 'runtime.migration-decided',
   migrationRecorded: 'runtime.migration-recorded',
@@ -79,16 +85,106 @@ function stable(v: unknown): unknown {
 }
 const canonical = (r: RuntimeSettingsRecord) => JSON.stringify([RUNTIME_POLICY_KEY, 1, stable(r)]);
 
+/**
+ * A short revision of a runtime's effective settings (5b S): latched on an
+ * instance at spawn (`AppInstance.runtimeSettingsRev`), so the Runtimes page
+ * can say how many instances still run on older settings. Key order never
+ * changes it.
+ */
+export function runtimeSettingsRevision(settings: RuntimeSettings): string {
+  return createHash('sha256').update(JSON.stringify(stable(settings))).digest('hex').slice(0, 12);
+}
+
 export type RuntimeChange<T = undefined> =
   | { ok: true; changed: boolean; previous: RuntimeSettingsRecord; record: RuntimeSettingsRecord; result: T }
   | { ok: false; reason: 'conflict' };
 
+export type RuntimeChangeCode =
+  | 'unknown-runtime' | 'not-enabled' | 'cannot-disable' | 'invalid-settings' | 'not-found' | 'invalid-decision'
+  /** ARI-3: the installation cannot run on the runtime an override names (with `missing` and `suggest`, D73). */
+  | 'capability-missing'
+  /** ARI-3: a D75 decision is open for the installation: `aura runtime migrate` decides it first. */
+  | 'decision-open'
+  /** The record changed after the owner approved the change (compare-and-set on what was shown). */
+  | 'conflict';
+
+/**
+ * D100 §17: the category of each change refusal, so clients tell "not
+ * supported" from "temporarily failed" without reading the message. A
+ * capability miss is the runtime layer's own code (`CATEGORY_OF_CODE`).
+ */
+const CHANGE_CATEGORY: Readonly<Record<RuntimeChangeCode, RuntimeErrorCategory>> = Object.freeze({
+  'unknown-runtime': CATEGORY_OF_CODE['runtime-not-installed'],
+  'not-enabled': CATEGORY_OF_CODE['runtime-disabled'],
+  'cannot-disable': 'unsupported-operation',
+  'invalid-settings': 'unsupported-operation',
+  'not-found': 'conflict',
+  'invalid-decision': CATEGORY_OF_CODE['capability-missing'],
+  'capability-missing': CATEGORY_OF_CODE['capability-missing'],
+  'decision-open': CATEGORY_OF_CODE['runtime-decision-needed'],
+  conflict: 'conflict',
+});
+
 export class RuntimeChangeError extends Error {
   override readonly name = 'RuntimeChangeError';
+  get category(): RuntimeErrorCategory { return CHANGE_CATEGORY[this.code]; }
   constructor(
-    readonly code: 'unknown-runtime' | 'not-enabled' | 'cannot-disable' | 'invalid-settings' | 'not-found' | 'invalid-decision',
+    readonly code: RuntimeChangeCode,
     message: string,
+    readonly missing?: RuntimeCapability[],
+    readonly suggest?: string[],
   ) { super(message); }
+}
+
+/** The installation an owner override is for (ARI-3), with the facts its requirements are derived from. */
+export interface OverrideTarget extends RequirementsInstallation {
+  installationId: string;
+  appId: string;
+  manifest: RequirementsManifest;
+}
+
+/**
+ * ARI-3: may `target` get an owner override to `runtime` under `cur`? The
+ * one check, used for the dry run before the owner is asked and inside the
+ * write (`setOverride`); `registry.resolve` checks the same at every start.
+ * Throws `RuntimeChangeError`: `unknown-runtime`, `not-enabled` (disabled,
+ * invalid stored settings or unavailable), `invalid-settings`,
+ * `decision-open` (a D75 decision is decided by `aura runtime migrate`, so
+ * the record never holds both) and `capability-missing` with `missing` and
+ * `suggest` (D73: named, never picked).
+ */
+export function checkOverride(
+  registry: RuntimeRegistry, cur: RuntimeSettingsRecord, target: OverrideTarget, runtime: string, settings?: RuntimeSettings,
+): void {
+  if (cur.pending?.[target.installationId]) {
+    throw new RuntimeChangeError('decision-open',
+      `${target.appId} waits for its runtime migration decision: \`aura runtime migrate --adopt-default ${target.appId}\` or \`--keep ${target.appId} <runtime>\` first`);
+  }
+  const module = registry.get(runtime);
+  if (!module) throw new RuntimeChangeError('unknown-runtime', `runtime ${runtime} is not installed`);
+  if (!registry.isEnabled(runtime, cur)) throw new RuntimeChangeError('not-enabled', `runtime ${runtime} is disabled; enable it first`);
+  const base = registry.settingsState(runtime, cur);
+  if (!base.ok) throw new RuntimeChangeError('not-enabled', `runtime ${runtime} is disabled: ${base.reason}`);
+  let effective: RuntimeSettings;
+  try {
+    if (settings !== undefined && !isObj(settings)) throw new RuntimeSettingsError('settings must be an object');
+    effective = validateSettings(module.descriptor.settingsSchema, { ...base.settings, ...settings });
+    module.checkSettings?.(effective);
+  } catch (err) {
+    if (err instanceof RuntimeSettingsError) throw new RuntimeChangeError('invalid-settings', err.message);
+    throw err;
+  }
+  const down = healthRefusal(module.health(effective));
+  if (down) throw new RuntimeChangeError('not-enabled', `runtime ${runtime} is not available: ${down}`);
+  const { needs } = requirementsOf(target.manifest, { sourceMode: target.sourceMode, ...(target.runAs ? { runAs: target.runAs } : {}) });
+  const missing = missingCapabilities(module.capabilities(effective), needs);
+  if (missing.length) {
+    const suggest = registry.suggest(needs, cur, runtime);
+    throw new RuntimeChangeError('capability-missing',
+      `${target.appId} cannot run on ${runtime}: missing ${missing.join(', ')}`
+      + (missing.includes('readOnlyBinds') ? ' (a closed app needs enforced read-only binds, ARI-4)' : '') + suggestText(suggest),
+      missing, suggest);
+  }
 }
 
 export interface RuntimeSettingsStoreOptions {
@@ -190,6 +286,42 @@ export class RuntimeSettingsStore {
       const next: RuntimeSettingsRecord = { ...cur, settings: { ...cur.settings, [id]: settings } };
       if ((cur.settingsVersions?.[id] ?? 1) !== v) next.settingsVersions = { ...cur.settingsVersions, [id]: v };
       return { next };
+    });
+  }
+
+  /**
+   * ARI-3: the owner's runtime for one installation (`source: 'override'`),
+   * winning over the manifest and the default; it replaces a migration
+   * override. Capability-checked now, as a dry run of the start through the
+   * one derivation (`requirementsOf`), and again at every start
+   * (`registry.resolve`): an override never bypasses a capability (D75).
+   * Refused: an unknown or disabled runtime, settings its schema refuses, an
+   * unavailable runtime, a capability miss (`capability-missing` with
+   * `suggest`, never auto-picked) and an open D75 decision (decided by `aura
+   * runtime migrate`, so the record never holds both). `expected` is the
+   * override's runtime the owner saw (null: none); a different one is a
+   * `conflict`. Settings are stored as given (validated merged over the
+   * runtime's own, like `resolve` merges them).
+   */
+  setOverride(
+    target: OverrideTarget, runtime: string, opts: { settings?: RuntimeSettings; expected?: string | null; now?: () => Date } = {},
+  ): Promise<RuntimeChange<{ override: RuntimeOverride; previous: RuntimeOverride | null }>> {
+    return this.update((cur) => {
+      const previous = cur.overrides[target.installationId] ?? null;
+      if (opts.expected !== undefined && (previous?.runtime ?? null) !== opts.expected) {
+        throw new RuntimeChangeError('conflict', `the runtime override of ${target.appId} changed meanwhile (now ${previous?.runtime ?? 'none'}); try again`);
+      }
+      checkOverride(this.registry, cur, target, runtime, opts.settings);
+      const override: RuntimeOverride = {
+        runtime, source: 'override', recordedAt: (opts.now ?? (() => new Date()))().toISOString(), appId: target.appId,
+        ...(opts.settings && Object.keys(opts.settings).length ? { settings: { ...opts.settings } } : {}),
+      };
+      // The same choice again changes nothing (no new timestamp, no audit).
+      if (previous && previous.source === 'override' && previous.runtime === runtime
+        && JSON.stringify(stable(previous.settings ?? {})) === JSON.stringify(stable(override.settings ?? {}))) {
+        return { next: cur, result: { override: previous, previous } };
+      }
+      return { next: { ...cur, overrides: { ...cur.overrides, [target.installationId]: override } }, result: { override, previous } };
     });
   }
 

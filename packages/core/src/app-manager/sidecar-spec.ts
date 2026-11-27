@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { AppManifest } from '../types/manifest.js';
+import type { AuraErrorBody } from '../errors/contracts.js';
 import { SHARED_HOME_PATH } from './tool-provision.js';
 
 /**
@@ -118,6 +119,12 @@ export interface ResolvedSidecarSpec {
    * container. Present only when set, like `inheritHome`.
    */
   ownTools?: true;
+  /**
+   * D107: on its instance's own network only (`services[].network`, default
+   * `instance` for an inheritHome sidecar). Present only when set, like
+   * `inheritHome`: a `shared` sidecar's spec hash is unchanged.
+   */
+  network?: 'instance';
   mounts: { own: boolean; inherit: boolean; exclude: string[]; forceRo: boolean };
 }
 
@@ -136,6 +143,28 @@ export interface ResolveContext {
 
 export class SpecError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
+}
+
+/**
+ * B12 (D107): an `inheritHome` sidecar runs as its app's identity; a template
+ * `user` that conflicts with it is refused, never honoured and never
+ * overridden silently. The D105 body (errors/contracts.ts) travels with it.
+ */
+export class SidecarIdentityError extends SpecError {
+  readonly code = 'sidecar-identity-conflict';
+  readonly body: AuraErrorBody;
+  constructor(appId: string, template: string, user: string, appUser: string | null) {
+    const message = `template '${template}' sets user '${user}' and inheritHome: a sidecar with ${appId}'s home runs as `
+      + (appUser ? `the app's identity (${appUser})` : 'the app\'s own user (a root installation: its image user, without capabilities)')
+      + ', so it is not created';
+    super(409, message);
+    this.name = 'SidecarIdentityError';
+    this.body = {
+      error: this.code, message, category: 'invalid-request',
+      manifestField: `services[${template}].user`,
+      hint: `drop "user" from services[${template}] in app.manifest.json (an inheritHome sidecar always runs as its app's identity)`,
+    };
+  }
 }
 
 export const SIDECAR_NAME_RE = /^[a-z][a-z0-9-]{0,47}$/;
@@ -277,6 +306,7 @@ export function resolveSidecarSpec(req: SidecarSpawnRequest, ctx: ResolveContext
     inheritTools: tpl.inheritTools === true,
     ...(tpl.inheritHome ? { inheritHome: true as const } : {}),
     ...(tpl.tools ? { ownTools: true as const } : {}),
+    ...((tpl.network ?? (tpl.inheritHome ? 'instance' : 'shared')) === 'instance' ? { network: 'instance' as const } : {}),
     mounts,
   };
 }

@@ -3,6 +3,8 @@ import '@aura/ui/styles/scificn-bridge.css';
 import '../styles/settings.css';
 import Icon from '../components/Icon.astro';
 import { shellFetch } from '../lib/shellClient';
+import { escapeJsonForScript } from '@aura/ui/lib/utils';
+import { readDoc, type LastWindowDoc } from '../scripts/activitiesProcesses';
 
 // SSR-fetch the apps list + enable state from the shell. /api/apps already
 // includes `enabled` per app since the route was extended to surface it for
@@ -21,6 +23,8 @@ interface AppDto {
     autoStart?: boolean;
   };
   enabled: boolean;
+  /** D48: built for a newer Aura contract (never started): the refusal message. */
+  incompatible?: string | null;
   instances: Array<{ instanceId: string; state: string }>;
 }
 
@@ -40,6 +44,15 @@ try {
   if (r.ok) for (const s of (await r.json() as { apps: Array<{ appId: string; mode: string; label: string; detail?: string }> }).apps) serve.set(s.appId, s);
 } catch { /* older shell: no label */ }
 
+// D101: the user's last-window preference (Activities & processes). The
+// section script re-reads it; this only paints the first frame.
+let lastWindow: LastWindowDoc = readDoc(null);
+try {
+  const r = await shellFetch(Astro.request, `/api/kv/os/lastWindow`, 1500);
+  if (r.ok) lastWindow = readDoc(((await r.json()) as { value?: unknown }).value);
+} catch { /* defaults: the question is on, nothing remembered */ }
+const appNames = Object.fromEntries(apps.map((a) => [a.manifest.id, a.manifest.name]));
+
 // Stable ordering: system apps last (they're the OS components — Console,
 // Terminal, Settings — and the user rarely needs to disable them).
 apps.sort((a, b) => {
@@ -55,6 +68,17 @@ apps.sort((a, b) => {
   <meta charset="UTF-8" />
   <title>Settings · Apps — AuraOS</title>
   <link rel="stylesheet" href="/api/os/theme.css" />
+  <style is:global>
+    /* Settings → Apps → Runtime: built at runtime (components/appRuntimeView.ts). */
+    .app-runtime { margin-top: 4px; font-size: 0.62rem; color: var(--aura-color-text-dim); }
+    .ar-line, .ar-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .ar-panel { margin-top: 6px; display: flex; flex-direction: column; gap: 6px; }
+    .ar-note { font-size: 0.6rem; color: var(--aura-color-text-dim); margin: 0; }
+    .ar-no { color: var(--aura-color-warning); }
+    .app-runtime .btn { font: inherit; font-size: 0.58rem; letter-spacing: 0.08em; padding: 2px 7px; background: var(--aura-color-surface); color: var(--aura-color-text); border: var(--aura-border); cursor: pointer; }
+    .app-runtime .btn:disabled { opacity: 0.4; cursor: default; }
+    .app-runtime .sf-select { font: inherit; font-size: 0.62rem; background: var(--aura-color-surface); color: var(--aura-color-text); border: var(--aura-border); padding: 2px 4px; }
+  </style>
   <style>
     .apps-list {
       display: flex;
@@ -121,6 +145,7 @@ apps.sort((a, b) => {
     .app-tag[data-kind="running"]  { color: var(--aura-color-primary); border-color: var(--aura-color-primary); }
     .app-tag[data-kind="bg"]       { color: var(--aura-color-secondary); border-color: var(--aura-color-secondary); }
     .app-tag[data-kind="service"]  { color: var(--aura-color-secondary); border-color: var(--aura-color-secondary); }
+    .app-tag[data-kind="incompatible"] { color: var(--aura-color-danger); border-color: var(--aura-color-danger); }
     .toggle {
       position: relative;
       display: inline-flex;
@@ -272,6 +297,29 @@ apps.sort((a, b) => {
       letter-spacing: 0.08em;
     }
     #status[data-tone="error"] { color: var(--aura-color-danger); }
+
+    /* ACTIVITIES & PROCESSES (D101): the same section frame and pills as
+       Users & Identities / Notifications & Access. */
+    .acc-section { border: var(--aura-border); padding: 14px 16px; margin: 12px 0 14px; display: flex; flex-direction: column; gap: 10px; }
+    .acc-head { display: flex; align-items: center; gap: 10px; }
+    .acc-title { flex: 1; display: inline-flex; align-items: center; gap: 6px; font-size: var(--aura-font-size-sm); letter-spacing: 0.1em; text-transform: uppercase; color: var(--aura-color-primary); }
+    .acc-note { font-size: 0.65rem; color: var(--aura-color-text-dim); letter-spacing: 0.04em; line-height: 1.5; }
+    .pill { display: inline-block; padding: 1px 6px; border: var(--aura-border); font-size: 0.6rem; letter-spacing: 0.08em; }
+    .pill.on { color: var(--aura-color-primary); }
+    .pill.off { color: var(--aura-color-text-dim); }
+    .lw-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 0.75rem; }
+    .lw-sub { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 0.6rem; letter-spacing: 0.1em; color: var(--aura-color-text-dim); }
+    #lw-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+    .lw-item { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 10px; padding: 6px 8px; border: 1px solid var(--aura-color-border); }
+    .lw-item-meta { display: flex; flex-direction: column; min-width: 0; }
+    .lw-item-name { font-size: 0.75rem; overflow-wrap: anywhere; }
+    .lw-item-id { font-size: 0.6rem; color: var(--aura-color-text-dim); font-family: var(--aura-font-mono); overflow-wrap: anywhere; }
+    .lw-reset, #lw-reset-all {
+      background: transparent; border: 1px solid var(--aura-color-border); color: var(--aura-color-text);
+      font: inherit; font-size: 0.6rem; letter-spacing: 0.08em; padding: 2px 8px; cursor: pointer;
+    }
+    .lw-reset:hover, #lw-reset-all:hover { border-color: var(--aura-color-primary); color: var(--aura-color-primary); }
+    #lw-section [hidden] { display: none; }
   </style>
 </head>
 <body>
@@ -280,6 +328,29 @@ apps.sort((a, b) => {
     <p style="font-size: 0.7rem; color: var(--aura-color-text-dim); letter-spacing: 0.06em;">
       Toggle apps off to hide them from the dock + launcher and stop their backends. Re-enable any time.
     </p>
+
+    <!-- D101: the shell's last-window question (lib/lastWindow.ts); your own preference (os/lastWindow, per user). -->
+    <section class="acc-section" id="lw-section" aria-labelledby="lw-title">
+      <div class="acc-head">
+        <span class="acc-title" id="lw-title"><Icon name="activity" /> Activities &amp; processes</span>
+      </div>
+      <p class="acc-note">
+        Apps tagged BACKGROUND keep their process running after their last window closes. AuraOS can ask
+        you then whether to stop it or keep it running. Other apps stop with their last window; services never do.
+      </p>
+      <div class="lw-row">
+        <span id="lw-ask-label">Ask when the last window of a background app closes</span>
+        <button class="toggle" id="lw-ask" type="button" role="switch" aria-labelledby="lw-ask-label"
+                aria-checked={lastWindow.ask ? 'true' : 'false'} data-on={String(lastWindow.ask)}></button>
+      </div>
+      <div class="lw-sub">
+        <span>REMEMBERED CHOICES · APPLY EVEN WITH THE QUESTION OFF</span>
+        <button id="lw-reset-all" type="button">RESET ALL</button>
+      </div>
+      <ul id="lw-list" aria-label="Remembered choices"></ul>
+      <p class="acc-note" id="lw-empty">None yet. Tick "Remember for this app" in the question to add one.</p>
+      <script type="application/json" id="lw-initial" set:html={escapeJsonForScript({ doc: lastWindow, names: appNames })}></script>
+    </section>
 
     <div class="app-filter">
       <input
@@ -312,12 +383,14 @@ apps.sort((a, b) => {
               <div class="app-name">{m.name}</div>
               <div class="app-id">{m.id} · v{m.version}{serve.get(m.id) && serve.get(m.id)!.label !== '-' && <span title={serve.get(m.id)!.detail ?? (serve.get(m.id)!.mode === 'prod' ? 'Runs from its production build' : 'Runs with astro dev — `aura build app` builds it')}> · {serve.get(m.id)!.label}</span>}</div>
               <div class="app-tags">
+                {app.incompatible && <span class="app-tag" data-kind="incompatible" title={app.incompatible}>incompatible</span>}
                 {running > 0 && <span class="app-tag" data-kind="running">{running} running</span>}
                 {isService && <span class="app-tag" data-kind="service">service</span>}
                 {m.backgroundService && <span class="app-tag" data-kind="bg">background</span>}
                 {m.autoStart && <span class="app-tag">autostart</span>}
                 {m.category && <span class="app-tag">{m.category}</span>}
               </div>
+              <div class="app-runtime" data-app-runtime></div>
             </div>
             <button
               class="toggle"
@@ -361,7 +434,7 @@ apps.sort((a, b) => {
       <button class="cd-btn" type="submit" value="confirm" data-variant="danger">Delete app data</button>
     </form>
   </dialog>
-  <footer class="settings-foot">PROVIDER · /api/admin/apps/enabled</footer>
+  <footer class="settings-foot">PROVIDER · /api/admin/apps/enabled + /api/kv/os/lastWindow (yours)</footer>
 
   <script is:inline>
     const statusEl = document.getElementById('status');
@@ -514,13 +587,83 @@ apps.sort((a, b) => {
        from jumping sideways into the trash button. -->
   <script>
     import { OsClient } from '@aura/app-sdk';
-    import '../scripts/os.ts';
+    import { osUrl } from '@aura/app-sdk/os-auth';
+    import { ownerFetch } from '../scripts/os.ts';
+    import { initActivitiesProcesses } from '../scripts/activitiesProcesses.ts';
+    import { renderAppRuntime, type RuntimeCheck } from '../components/appRuntimeView';
+    import type { RuntimesState } from '../components/runtimesView';
+
+    // Settings → Apps → Runtime (ARI-3): each row's effective runtime, its source and the owner override.
+    // The runtimes are an owner read; without them (an older shell) the rows simply show no runtime line.
+    const runtimeStatus = document.getElementById('status') as HTMLElement;
+    let runtimes: RuntimesState | null = null;
+    const enc = encodeURIComponent;
+    async function loadRuntimes(): Promise<void> {
+      const r = await fetch(osUrl('/api/admin/runtimes'), { cache: 'no-store' });
+      if (!r.ok) return;
+      runtimes = await r.json() as RuntimesState;
+      for (const slot of document.querySelectorAll<HTMLElement>('[data-app-runtime]')) {
+        const appId = slot.closest<HTMLElement>('.app-row')?.dataset['appId'];
+        if (appId && runtimes) renderAppRuntime(slot, appId, runtimes, runtimeActions);
+      }
+    }
+    async function runtimeChange(label: string, method: string, path: `/${string}`, body?: unknown): Promise<void> {
+      runtimeStatus.textContent = `${label}…`;
+      try {
+        const r = await ownerFetch(path, method, body);
+        const data = await r.json().catch(() => ({})) as Record<string, unknown>;
+        if (r.status === 403 && data['error'] === 'cancelled') { runtimeStatus.textContent = 'Not approved: nothing changed.'; return; }
+        if (!r.ok) throw new Error(String(data['message'] || data['error'] || `HTTP ${r.status}`));
+        runtimeStatus.textContent = `${label}: done. Applies at its next start.`;
+      } catch (err) {
+        runtimeStatus.textContent = (err as Error).message;
+        runtimeStatus.dataset['tone'] = 'error';
+      } finally {
+        await loadRuntimes().catch(() => {});
+      }
+    }
+    const runtimeActions = {
+      async check(appId: string, runtime: string): Promise<RuntimeCheck> {
+        const r = await fetch(osUrl('/api/admin/runtimes/check'), {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runtime, appId }),
+        });
+        const data = await r.json().catch(() => ({})) as RuntimeCheck & { message?: string };
+        if (!r.ok) throw new Error(data.message ?? `HTTP ${r.status}`);
+        return data;
+      },
+      setOverride(installationId: string, appId: string, runtime: string, expected: string | null) {
+        void runtimeChange(`Running ${appId} on ${runtime}`, 'PUT', `/api/admin/runtimes/overrides/${enc(installationId)}`, { runtime, expected });
+      },
+      removeOverride(installationId: string, appId: string) {
+        void runtimeChange(`Removing the runtime override of ${appId}`, 'DELETE', `/api/admin/runtimes/overrides/${enc(installationId)}`);
+      },
+    };
+    void loadRuntimes().catch(() => {});
     // getElements (not `selector`) because it is re-resolved on every
     // keypress: a row hidden by the filter must drop out of the arrow-walk,
     // and a static selector would keep walking onto invisible rows.
     new OsClient().nav.installGridNav({
-      getElements: () => Array.from(document.querySelectorAll('.app-row:not([hidden]) .toggle')),
+      getElements: () => Array.from(document.querySelectorAll(
+        '#lw-ask, #lw-list .lw-reset, #lw-reset-all:not([hidden]), .app-row:not([hidden]) .toggle')),
     });
+
+    // Activities & processes (D101).
+    const lwRoot = document.getElementById('lw-section');
+    if (lwRoot) {
+      const initial = JSON.parse(document.getElementById('lw-initial')?.textContent || '{}');
+      const statusEl = document.getElementById('status');
+      const lw = initActivitiesProcesses({
+        root: lwRoot, url: (p) => osUrl(p), names: initial.names ?? {},
+        status: (msg, tone) => {
+          if (!statusEl) return;
+          statusEl.textContent = msg;
+          if (tone) statusEl.dataset['tone'] = tone; else delete statusEl.dataset['tone'];
+        },
+      });
+      void lw.refresh();
+      // A choice remembered in the desktop's question shows up when you come back here.
+      document.addEventListener('visibilitychange', () => { if (!document.hidden) void lw.refresh(); });
+    }
   </script>
 </body>
 </html>

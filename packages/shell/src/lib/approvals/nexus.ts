@@ -9,7 +9,8 @@
  *
  * Stream C (Q7): the approved binding names the app's Context keys
  * (`context[]`); once the install lands, the same decision grants each as
- * `context.read:<KEY>`, attributed to whoever approved it (`grantContext`).
+ * `context.read:<KEY>` to the installation it landed as (S1), attributed to
+ * whoever approved it (`grantContext`).
  * A key the update no longer declares keeps its grant, which counts only
  * while declared.
  *
@@ -22,6 +23,7 @@ import * as core from '@aura/core';
 import type { AccessPrincipal, ApprovalLevel, InstallBinding, InstallRecord, NexusProgressEvent, PermissionDiff } from '@aura/core';
 import { installDisplay, installLevel } from './display.ts';
 import { actionGate, json, presentedApproval, type ApprovalServiceDeps } from './service.ts';
+import { errorResponse } from '../appResponse.js';
 
 type InstallGenerator = AsyncGenerator<NexusProgressEvent, InstallRecord | null, { approve: boolean } | void>;
 
@@ -37,8 +39,11 @@ export function installGate(
     /** A patch activation's series lines and exact diff (lib/patchActivation.ts), added to the dialog. */
     details?: string[]; exactDiff?: string;
   },
-  /** Where the approved Context keys are granted; default GrantStore and the admin audit. */
-  contextGrants: () => Pick<core.AuthServices, 'grants' | 'audit'> = () => core.getAuthServices(),
+  /** Where the approved Context keys are granted: GrantStore, the admin audit, the installation the app landed as. */
+  contextGrants: () => Pick<core.AuthServices, 'grants' | 'audit'> & { installationOf(appId: string, scope: string): Promise<string | null> } = () => {
+    const svc = core.getAuthServices();
+    return { grants: svc.grants, audit: svc.audit, installationOf: (appId, scope) => core.getAppManager().installationIdOf(appId, scope) };
+  },
 ) {
   const gate = actionGate(deps, principal, {
     approvalId: presentedApproval(request),
@@ -58,12 +63,17 @@ export function installGate(
     grantContext: async (): Promise<void> => {
       if (!approved || !(approved.binding.context ?? []).length) return;
       const { binding, by } = approved;
-      const { grants, audit } = contextGrants();
+      const { grants, audit, installationOf } = contextGrants();
+      const installationId = await installationOf(binding.appId, binding.scope);
+      if (!installationId) {
+        console.warn(`[nexus] ${binding.appId} has no installation in scope ${binding.scope}: its approved Context keys are not granted (aura grant them after it has one)`);
+        return;
+      }
       for (const key of binding.context) {
         try {
-          const r = await grants.grant({ kind: 'app', id: binding.appId }, core.contextReadPermission(key), { by, appScope: binding.scope });
+          const r = await grants.grant({ kind: 'app', id: binding.appId }, core.contextReadPermission(key), { by, appScope: binding.scope, installationId });
           if (r.changed) {
-            await audit.record({ by, action: 'grant', target: `app:${binding.appId}`, outcome: 'ok', detail: { permission: core.contextReadPermission(key), appScope: binding.scope, via: binding.action } })
+            await audit.record({ by, action: 'grant', target: `app:${binding.appId}`, outcome: 'ok', detail: { permission: core.contextReadPermission(key), appScope: binding.scope, installationId, via: binding.action } })
               .catch(() => undefined);
           }
         } catch (err) {
@@ -122,6 +132,8 @@ export async function runInstall(
         await it.return(null).catch(() => undefined);
         return gate.needsApproval(ev.binding, ev.diff);
       }
+      // The start gate (D48, D108 A1): an app this AuraOS never starts is 422 with its D105 body on every install path.
+      if (ev.type === 'error' && ev.body) return errorResponse(422, ev.body);
       if (ev.type === 'error') return json({ error: ev.message }, errorStatus(ev));
       if (ev.type === 'install.done') { await gate.grantContext(); await gate.auditExecution(); return json({ ok: true, record: ev.record }); }
       cursor = await it.next();

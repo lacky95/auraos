@@ -27,6 +27,7 @@ import { promisify } from 'node:util';
 import { appendFileSync, existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
+import { authorGitOptions } from './PublishFiles.js';
 import { NEXUS_APP_ID, SETTINGS_APP_ID, TERMINAL_APP_ID } from '../system/systemApps.js';
 import { isDevCheckout } from '../app-manager/contracts.js';
 
@@ -83,6 +84,14 @@ export function cloneUrl(s: string): string {
  */
 export function readAppSource(appPath: string, manifest: AppManifest): AppSourceInfo {
   const out: AppSourceInfo = {};
+  // The author's tree may belong to the author (5-main): git runs as its owner (authorGitOptions).
+  const as = authorGitOptions(appPath);
+  const tryGit = (cwd: string, args: string[]): string | null => {
+    try {
+      return execFileSync('git', ['-C', cwd, ...args], { ...as, stdio: ['ignore', 'pipe', 'pipe'], timeout: 15_000, env: { ...GIT_ENV, ...as.env } })
+        .toString().trim() || null;
+    } catch { return null; }
+  };
   const inTree = tryGit(appPath, ['rev-parse', '--is-inside-work-tree']) === 'true';
   const declared = manifest.repository?.url;
   const origin = inTree ? tryGit(appPath, ['remote', 'get-url', 'origin']) : null;

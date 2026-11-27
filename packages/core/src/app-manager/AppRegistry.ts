@@ -5,6 +5,17 @@ import { AppManifestSchema, type AppManifest } from '../types/manifest.js';
 import { OsEventBus } from '../ipc/OsEventBus.js';
 import type { ScopeDefinition, ScopedManifest } from '../scopes/types.js';
 import type { ManifestHostGuard } from '../app-hosts/manifestHostGuard.js';
+import { operationalBlock, type OperationalBlock } from '../contract/types.js';
+
+export interface AppRegistryOptions {
+  /**
+   * The start gate refuses an app that was loaded (D48 newer Aura contract,
+   * D108 reserved setup/profiles). It stays listed (`incompatible`) and is
+   * never started; the kernel audits it here, like a refused runtime module
+   * (`runtime.module-refused`).
+   */
+  onBlocked?(block: OperationalBlock): void;
+}
 
 export class AppRegistry {
   private manifests = new Map<string, ScopedManifest>();
@@ -13,7 +24,7 @@ export class AppRegistry {
   /** Decides which manifest `hosts[]` take effect, however the app arrived. */
   private hostGuard: ManifestHostGuard | null = null;
 
-  constructor(scopes: ScopeDefinition[]) {
+  constructor(scopes: ScopeDefinition[], private readonly opts: AppRegistryOptions = {}) {
     this.scopes = scopes.slice().sort((a, b) => a.priority - b.priority);
   }
 
@@ -89,6 +100,11 @@ export class AppRegistry {
         this.manifests.set(base.id, candidate);
         if (isNew) OsEventBus.emit('app:installed', { appId: base.id });
         console.log(`[AppRegistry] Loaded: ${base.id} v${base.version} (scope=${scope.id})`);
+        const blocked = operationalBlock(base);
+        if (blocked) {
+          console.warn(`[AppRegistry] ${base.id} is incompatible and is never started: ${blocked.message}`);
+          this.opts.onBlocked?.(blocked);
+        }
       }
     } catch (err) {
       console.error(`[AppRegistry] Invalid manifest at ${manifestPath}:`, err);

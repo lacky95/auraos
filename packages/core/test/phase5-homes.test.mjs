@@ -107,23 +107,24 @@ test('fail closed: no installation, no identity, a bad id', async () => {
     (e) => e.reason === 'identity-unresolved');
 });
 
-test('terminal-session: the user\'s own Private Home on a namespace runtime; never PRoot, never another user or an app uid', async () => {
+// D107 S2: `user-environment`; `terminal-session` is its read alias for one release (same rules).
+for (const executionContext of ['user-environment', 'terminal-session']) test(`${executionContext}: the user's own Private Home on a namespace runtime; never PRoot, never another user or an app uid`, async () => {
   const d = tmp();
   const r = resolver(d);
-  const h = await r.resolve(req({ executionContext: 'terminal-session', userId: 'default', principal: OWNER, appIdentity: { uid: 0, gid: 0 } }));
+  const h = await r.resolve(req({ executionContext, userId: 'default', principal: OWNER, appIdentity: { uid: 0, gid: 0 } }));
   assert.equal(h.kind, 'private');
   assert.equal(h.volumeSubpath, 'aura/home/default');
   assert.equal(owner(h.hostPath), '1000:1000', 'created lazily for its user');
   assert.equal(mode(h.hostPath), 0o700);
-  const asUser = await r.resolve(req({ executionContext: 'terminal-session', userId: 'default', principal: OWNER, appIdentity: { uid: 1000, gid: 1000 } }));
+  const asUser = await r.resolve(req({ executionContext, userId: 'default', principal: OWNER, appIdentity: { uid: 1000, gid: 1000 } }));
   assert.equal(asUser.hostPath, h.hostPath);
-  await assert.rejects(r.resolve(req({ executionContext: 'terminal-session', userId: 'default', principal: OWNER, appIdentity: { uid: 0, gid: 0 }, runtime: PROOT })),
+  await assert.rejects(r.resolve(req({ executionContext, userId: 'default', principal: OWNER, appIdentity: { uid: 0, gid: 0 }, runtime: PROOT })),
     (e) => e instanceof RuntimeCapabilityError && e.missing.includes('isolation'));
-  await assert.rejects(r.resolve(req({ executionContext: 'terminal-session', userId: 'default', principal: MEMBER, appIdentity: { uid: 0, gid: 0 } })),
+  await assert.rejects(r.resolve(req({ executionContext, userId: 'default', principal: MEMBER, appIdentity: { uid: 0, gid: 0 } })),
     (e) => e.reason === 'not-authorized');
-  await assert.rejects(r.resolve(req({ executionContext: 'terminal-session', userId: 'default', principal: OWNER, appIdentity: APP })),
+  await assert.rejects(r.resolve(req({ executionContext, userId: 'default', principal: OWNER, appIdentity: APP })),
     (e) => e.reason === 'not-authorized', 'an app identity never gets a Private Home');
-  await assert.rejects(r.resolve(req({ executionContext: 'terminal-session', userId: 'default' })), (e) => e.reason === 'user-required');
+  await assert.rejects(r.resolve(req({ executionContext, userId: 'default' })), (e) => e.reason === 'user-required');
 });
 
 test('jump: private and ephemeral need session capabilities and a non-root target; app needs authorization (D74, D79, J.5)', async () => {
@@ -397,6 +398,7 @@ test('pool: a member warmed for a user is that user\'s only; one from before App
     recycling: new Set(),
     instanceAlive: () => true,
     savePoolIds() {},
+    noteRespawn() {},
     registry: { getById: () => null },
     stop: async (id) => { stopped.push(id); },
   };
@@ -440,4 +442,32 @@ test("5-main (VM finding): core finds its worker scripts when another build bund
   assert.equal(real(coreWorkerPath(bundled, "homeSeedWorker.js", "home-seed")), dist("app-manager/homeSeedWorker.js"));
   // Nothing found: an error, never another file.
   assert.throws(() => coreWorkerPath("file:///nonexistent/x.js", "ownershipApplyWorker.js", "ownership-apply"));
+});
+
+test("5-main (VM finding): <data>/aura/secrets is 0700, also when a first writer created it open; parents keep their mode", async () => {
+  const { ensurePrivateDir } = await import("../dist/system/privateDir.js");
+  const { InstanceTokens } = await import("../dist/app-manager/InstanceTokens.js");
+  const { mkdtempSync, mkdirSync, statSync, chmodSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const mode = (p) => statSync(p).mode & 0o777;
+  const root = mkdtempSync(join(tmpdir(), "aura-secrets-"));
+  // Fresh: the parent /data/aura keeps the default mode, the secrets dir is 0700.
+  ensurePrivateDir(join(root, "aura", "secrets"));
+  assert.equal(mode(join(root, "aura", "secrets")), 0o700);
+  assert.notEqual(mode(join(root, "aura")) & 0o055, 0, "the parent is not made private");
+  // An install whose first writer created it open is repaired.
+  const open = join(root, "b", "secrets");
+  mkdirSync(open, { recursive: true }); chmodSync(open, 0o755);
+  ensurePrivateDir(open);
+  assert.equal(mode(open), 0o700);
+  // The instance-token key (the first writer on a fresh install) goes through it.
+  const c = join(root, "c");
+  new InstanceTokens(join(c, "aura", "secrets", "instance-token.key")).mint("a-1");
+  assert.equal(mode(join(c, "aura", "secrets")), 0o700);
+  assert.equal(mode(join(c, "aura", "secrets", "instance-token.key")), 0o600);
+  // An existing key in an open store: the next process repairs the store at its first read.
+  chmodSync(join(c, "aura", "secrets"), 0o755);
+  new InstanceTokens(join(c, "aura", "secrets", "instance-token.key")).mint("a-2");
+  assert.equal(mode(join(c, "aura", "secrets")), 0o700, "repaired with the key already there");
 });

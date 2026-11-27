@@ -38,7 +38,7 @@ test('the per-user namespaces are valid server-side, and none of them is an /api
   }
   // The route builds `os` or `app/<id>` from the URL: a user or per-user app area never.
   for (const ns of ['user', 'user/x', 'app/com.a.b/u', 'app/com.a.b/u/', 'user/../prefs']) assert.equal(isValidNamespace(ns), false, ns);
-  assert.deepEqual([...USER_PREF_KEYS], ['theme', 'locale', 'keymap', 'workspaces', 'app-mru', 'session']);
+  assert.deepEqual([...USER_PREF_KEYS], ['theme', 'locale', 'keymap', 'workspaces', 'app-mru', 'session', 'lastWindow']);
   assert.equal(isUserPrefKey('lockscreen'), false);
 });
 

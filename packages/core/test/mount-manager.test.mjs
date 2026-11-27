@@ -12,12 +12,13 @@ import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { containerMounts } from '../dist/runtimes/container/mounts.js';
 import { MountManager, KIND_POLICY, isSidecarConsumer, parentOfConsumer } from '../dist/app-manager/MountManager.js';
 
 const INST = 'io.test.app-2';
 const SC = `${INST}--box`;
 
-function world(t, { noCat = new Set(), noMountRoot = new Set(), pidFallbackFails = false, closed = new Set() } = {}) {
+function world(t, { noCat = new Set(), noMountRoot = new Set(), pidFallbackFails = false, closed = new Set(), identity = null } = {}) {
   const dataDir = fs.mkdtempSync(join(tmpdir(), 'aura-mm-'));
   const kernel = new Map();   // shell-side dest → 'ro' | 'rw'
   const calls = [];
@@ -69,14 +70,15 @@ function world(t, { noCat = new Set(), noMountRoot = new Set(), pidFallbackFails
     dataDir,
     registry: { getById: (id) => (id.startsWith('gone.') ? undefined : { id, appDir: `/workspace/apps/${id}`, scopeId: id.startsWith('com.aura.') ? 'system' : 'global' }) },
     scopeRegistry: { getById: () => ({ dataDir: join(dataDir, 'scopes', 'system') }) },
-    runner: {
+    mounts: containerMounts({
       canPropagateMounts: () => ({ ok: true }),
       mountRootDir,
       toDaemonHostPath: (p) => p,
-    },
+    }, { helperImage: 'aura-base' }),
     instanceDataDir: (k) => join(dataDir, 'scopes', 'system', 'apps', 'io.test.app', parentOfConsumer(k)),
     fanoutTargets: () => targets,
     sourceMode: (id) => (closed.has(id) ? 'closed' : 'open'),
+    consumerIdentity: () => identity,
   });
   return {
     mm, kernel, calls, dataDir, mountRootDir,
@@ -395,4 +397,21 @@ test('KIND_POLICY (F11): one row per kind, today\'s rules', () => {
   assert.deepEqual([ws.persist, ws.fanout, ws.inheritToSidecar, ws.rebindOnReinstall], [false, false, false, false]);
   // No `socket` kind: the root tab gets the socket in its own session namespace (J.6, P5-4).
   assert.equal('socket' in KIND_POLICY, false);
+});
+
+test('5-main (VM finding): a fresh work/patches dir belongs to the consumer that writes it; existing and data dirs keep theirs', async (t) => {
+  if (process.getuid?.() !== 0) return t.skip('needs root to chown');
+  const who = { uid: 54321, gid: 54321 };
+  const w = world(t, { identity: who });
+  const ws = 'aura/workspaces/u-new/inst-9/1';
+  await w.mm.add(INST, { targetAppId: 'io.shop.app', workspace: ws });
+  await w.mm.settled();
+  const own = (p) => { const st = fs.statSync(join(w.dataDir, p)); return [st.uid, st.gid]; };
+  assert.deepEqual(own(ws), [who.uid, who.gid], 'the workspace dir');
+  assert.deepEqual(own('aura/workspaces/u-new'), [who.uid, who.gid], 'the user dir it created on the way');
+  assert.deepEqual(own('aura/workspaces'), [0, 0], 'a dir it did not create keeps its owner');
+  // An existing dir is never re-owned.
+  fs.mkdirSync(join(w.dataDir, 'aura/workspaces/u-new/inst-9/2'));
+  await w.mm.add(INST, { targetAppId: 'io.shop.app', workspace: 'aura/workspaces/u-new/inst-9/2' }).catch(() => {});
+  assert.deepEqual(own('aura/workspaces/u-new/inst-9/2'), [0, 0]);
 });

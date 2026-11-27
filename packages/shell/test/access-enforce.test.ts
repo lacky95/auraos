@@ -71,7 +71,7 @@ const declared: Record<string, string[]> = {
 const authorizer = new Authorizer({
   grants: { get: async () => null } as never,
   declared: (id: string) => declared[id],
-  appScope: (id: string) => scopes[id],
+  appBinding: async (id: string) => ({ scope: scopes[id], installationId: scopes[id] ? 'inst-1' : null }),
 });
 
 /** What a route's own hasPermission check answered (core's MVP auto-grant counts), and what `enforce` answers. */
@@ -238,9 +238,9 @@ test('D29: TerminalX lists the Terminal\'s instances with its terminal.sessions.
   const of = (id: string) => ({ path: `/api/apps/${id}/instances`, route, params: { id } });
   const granted: Record<string, string[]> = { ...declared, 'com.acme.notes': [...declared['com.acme.notes']!, 'terminal.sessions.list'] };
   const tx = new Authorizer({
-    grants: { get: async (s: { id: string }, p: string) => (s.id === 'com.acme.notes' && p === 'terminal.sessions.list' ? { appScope: 'user' } : null) } as never,
+    grants: { get: async (s: { id: string }, p: string) => (s.id === 'com.acme.notes' && p === 'terminal.sessions.list' ? { appScope: 'user', installationId: 'inst-1' } : null) } as never,
     declared: (id: string) => granted[id],
-    appScope: (id: string) => scopes[id],
+    appBinding: async (id: string) => ({ scope: scopes[id], installationId: scopes[id] ? 'inst-1' : null }),
   });
   const asTx = async (call: ReturnType<typeof of>) => {
     const r = await accessGate(ctx(call), { ...deps('enforce', { principal: inst('com.acme.notes'), via: 'instance-token' }), authorizer: tx });
@@ -359,6 +359,20 @@ test('guard ownerManages (conditional) → only the body variant that needed it'
   }
 });
 
+test('D109 AF2: creating an app (scaffold, clone, with or without force) is the owner\'s or the System Terminal\'s, in every mode', async () => {
+  const scaffold = (force: boolean) => ({ method: 'POST', path: '/api/admin/scaffold', route: '/api/admin/scaffold', body: { appId: 'com.acme.notes', force } });
+  const clone = (force: boolean) => ({ method: 'POST', path: '/api/admin/clone-app', route: '/api/admin/clone-app', body: { sourceAppId: 'a', force } });
+  const term = inst('com.aura.terminal', 'com.aura.terminal-1', { userId: 'default' });
+  for (const mode of MODES) {
+    for (const call of [scaffold(false), scaffold(true), clone(false), clone(true)]) {
+      assert.equal(await gate(mode, term, call), 'pass', `${mode} ${call.path} ${call.body.force}: the route then asks the owner`);
+      assert.equal(await gate(mode, owner, call), 'pass');
+      assert.equal(await gate(mode, inst('com.acme.notes'), call), '403 access-denied', `${mode} ${call.path}: another app`);
+      assert.equal(await gate(mode, anon, call), '401 unauthenticated');
+    }
+  }
+});
+
 test('guard sidecarGate → the instance\'s own token and its app\'s permission, in every mode', async () => {
   const spawn = (id: string) => ({ method: 'POST', path: `/api/instances/${id}/sidecars`, route: '/api/instances/[instanceId]/sidecars', params: { instanceId: id }, body: { template: 't' } });
   for (const mode of MODES) {
@@ -459,7 +473,10 @@ test('decide: an auto-granted permission counts outside enforce only (strict)', 
     accessProfile: 'open', systemMode: 'normal', deployment: 'private',
   });
   assert.deepEqual(await d(input(false)), { outcome: 'allow', reason: 'auto-granted' });
-  assert.deepEqual(await d(input(true)), { outcome: 'deny', reason: 'missing-permission' });
+  // The decision is unchanged; the refusal also names what is missing (refusalText.ts).
+  assert.deepEqual(await d(input(true)), {
+    outcome: 'deny', reason: 'missing-permission', facts: { permission: 'apps.zzz', missing: 'declaration', holder: 'caller' },
+  });
 });
 
 // ── surfaces ────────────────────────────────────────────────────────────────

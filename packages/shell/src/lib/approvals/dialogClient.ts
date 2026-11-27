@@ -5,7 +5,9 @@
  *
  * An app learns only the outcome. `aura.user.confirm.result` carries
  * `{confirmed, approvalId?}` (D49): no password, no reason for a no, so a
- * wrong password and a cancel look the same.
+ * wrong password and a cancel look the same. The one exception is the
+ * owner's own words typed with a Deny (D102 denial feedback): they are the
+ * owner's deliberate message to the requester and grant nothing.
  */
 
 /** The owner's view of a pending approval (lib/approvals/service.ts `ownerView`). */
@@ -13,12 +15,18 @@ export interface ApprovalDialogView {
   id: string;
   action: string;
   level: 'session' | 'fresh';
-  state: 'pending' | 'approved' | 'denied' | 'consumed' | 'expired';
+  state: 'pending' | 'approved' | 'denied' | 'consumed' | 'expired' | 'cancelled';
   expiresAt: number;
+  /** D102: `deferrable` offers Later; older servers send none (forced). */
+  class: 'forced' | 'deferrable';
+  /** D102: when the owner put it on hold; a held request never pops up by itself. */
+  heldAt?: number;
   display: {
     title: string; details: string[]; requestedBy: string; reason?: string;
     /** The server's high-risk review, shown first (lib/approvals/display.ts `installRisks`). */
     highRisk?: Array<{ item: string; why: string; added: boolean }>;
+    /** D109 AF2: the requester's summary (Markdown), rendered apart from the facts. */
+    explanation?: { format: 'markdown'; text: string };
     /** The exact change (a patch activation), shown collapsed. */
     diff?: string;
   };
@@ -30,7 +38,7 @@ export interface ApprovalDialogView {
 }
 
 export type ApprovalWaiterKind = 'approval' | 'confirm';
-export type ApprovalOutcome = 'approved' | 'denied' | 'expired' | 'unavailable';
+export type ApprovalOutcome = 'approved' | 'denied' | 'expired' | 'cancelled' | 'unavailable';
 
 /** Approve stays disabled this long after the dialog appears (5.10 "No accidental approval"). */
 export const APPROVE_DELAY_MS = 1500;
@@ -48,17 +56,26 @@ export function parseApprovalView(x: unknown, protocol = 'https:'): ApprovalDial
   if (!d || typeof d['title'] !== 'string' || typeof d['requestedBy'] !== 'string' || !Array.isArray(d['details'])) return null;
   return {
     id: v['id'], action: v['action'], level: v['level'], state: v['state'] as ApprovalDialogView['state'], expiresAt: v['expiresAt'],
+    class: v['class'] === 'deferrable' ? 'deferrable' : 'forced',
+    ...(typeof v['heldAt'] === 'number' ? { heldAt: v['heldAt'] } : {}),
     display: {
       title: d['title'], requestedBy: d['requestedBy'],
       details: (d['details'] as unknown[]).filter((l): l is string => typeof l === 'string'),
       ...(typeof d['reason'] === 'string' ? { reason: d['reason'] } : {}),
       ...(Array.isArray(d['highRisk']) ? { highRisk: parseRisks(d['highRisk']) } : {}),
+      ...(explanationOf(d['explanation']) ? { explanation: explanationOf(d['explanation'])! } : {}),
       ...(typeof d['diff'] === 'string' && d['diff'] ? { diff: d['diff'] } : {}),
     },
     appId: typeof v['appId'] === 'string' ? v['appId'] : null,
     blockable: typeof v['blockable'] === 'string' ? v['blockable'] : null,
     freshVia: freshViaOf(v['freshVia'], protocol),
   };
+}
+
+/** D109 AF2: a well-formed requester summary (Markdown text), else none. */
+function explanationOf(x: unknown): { format: 'markdown'; text: string } | null {
+  const o = x as Record<string, unknown> | null;
+  return o && typeof o === 'object' && o['format'] === 'markdown' && typeof o['text'] === 'string' && o['text'] ? { format: 'markdown', text: o['text'] } : null;
 }
 
 /** The well-formed high-risk lines of a view; anything else is dropped. */
@@ -85,21 +102,23 @@ export function outcomeOf(state: string | undefined): ApprovalOutcome | null {
     case 'approved': case 'consumed': return 'approved';
     case 'denied': return 'denied';
     case 'expired': return 'expired';
+    case 'cancelled': return 'cancelled';
     default: return 'unavailable';
   }
 }
 
 /** The one answer to an app's `aura.approval.request` or `aura.user.confirm.request`. */
-export function approvalReply(kind: ApprovalWaiterKind, requestId: unknown, approvalId: string, outcome: ApprovalOutcome) {
+export function approvalReply(kind: ApprovalWaiterKind, requestId: unknown, approvalId: string, outcome: ApprovalOutcome, feedback?: string) {
   const rid = typeof requestId === 'string' ? requestId : '';
+  const words = outcome === 'denied' && feedback ? { feedback } : {};
   if (kind === 'confirm') {
     return outcome === 'approved'
       ? { type: 'aura.user.confirm.result' as const, requestId: rid, confirmed: true, approvalId }
-      : { type: 'aura.user.confirm.result' as const, requestId: rid, confirmed: false };
+      : { type: 'aura.user.confirm.result' as const, requestId: rid, confirmed: false, ...words };
   }
   return outcome === 'approved'
     ? { type: 'aura.approval.result' as const, requestId: rid, approvalId, ok: true }
-    : { type: 'aura.approval.result' as const, requestId: rid, approvalId, ok: false, error: outcome };
+    : { type: 'aura.approval.result' as const, requestId: rid, approvalId, ok: false, error: outcome, ...words };
 }
 
 /** D18: a `fresh` approval on HTTP with HTTPS required (D63). The server refuses the password there (`operator-required`). */
@@ -138,6 +157,8 @@ export function decisionErrorText(error: string | undefined, approvalId: string)
     case 'secret-too-long': return 'That secret is too long (4 KiB at most).';
     case 'other-user': return 'This request acts for another user.';
     case 'store-failed': return 'AuraOS could not keep the secret. Try again.';
+    case 'not-deferrable': return 'This request must be decided now.';
+    case 'stale': return 'This request is no longer valid and was cancelled.';
     default: return 'That did not work. Try again.';
   }
 }

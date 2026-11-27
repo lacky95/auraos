@@ -13,7 +13,7 @@ The kernel decides and owns state. It covers:
 
 It never presents anything, and it never transports anything itself. HTTP lives in `packages/shell` (the server layer); the CLI and the Web Shell are clients.
 
-**It must work with no Web Shell (D73, D78).** Services start in `AppManager.init()` with no session, and from Phase 6 `bootSystem()` boots the kernel eagerly.
+**It must work with no Web Shell (D73, D78).** Services start in `AppManager.init()` with no session, and `bootSystem()` boots the kernel eagerly at process start (Phase 6 K).
 
 ## Sectors (D97, owner-adopted)
 
@@ -22,7 +22,7 @@ Sectors are logical groups over the existing directories. There is no sector dir
 `tools/dep-check.mjs` reads the block below. Adding, removing or renaming a module without updating it fails `pnpm arch`.
 
 ```text dep-check:sectors
-foundation: types logger ipc system index
+foundation: types logger ipc system errors index
 execution: app-manager scopes runtimes
 identity-security: auth permissions approvals security identity
 resource: context users homes
@@ -34,7 +34,7 @@ presentation-contracts: theme layout keymap
 
 | Sector | Responsibility | Not here |
 |---|---|---|
-| **Foundation** (`types`, `logger`, `ipc`, `system`, `index`) | the manifest schema and shared types, logging, the event-bus primitive (`OsEventBus`), system identity (D47); from Phase 6 the composition root `system/bootstrap.ts` (`bootSystem()`); `index.ts` is the public barrel | any domain logic. **Foundation is leaf-only:** apart from the composition root and the barrel, it imports no other sector |
+| **Foundation** (`types`, `logger`, `ipc`, `system`, `errors`, `index`) | the manifest schema and shared types, logging, error codes (D105), the event-bus primitive (`OsEventBus`), system identity (D47); the composition root `system/bootstrap.ts` (`bootSystem()`) and `system/compose.ts` (Phase 6 K, `system/AGENTS.md`); `index.ts` is the public barrel | any domain logic. **Foundation is leaf-only:** apart from the composition root and the barrel, it imports no other sector |
 | **Execution** (`app-manager`, `scopes`, `runtimes`) | the app, instance and activity lifecycle; supervision, services and pools; intents; sidecars, ports and mounts as runtime capabilities; the ARI and the runtime providers (`ContainerRunner`, `ProotRunner`); the spawn context | window flight and other presentation (debt); install and build policy |
 | **Identity & Security** (`auth`, `permissions`, `approvals`, `security`, `identity`) | users, sessions, principals; grants; the authorizer; the approval state machine; the D64 security options and policy records; the credential vault lives in `context/CredentialVault.ts` | transport-side enforcement, which is `packages/shell/src/lib/access` |
 | **Resource** (`context`, `users`, `homes`) | Context env and secrets (sealed), volumes, per-user data, Private and App Homes | mounts and ports (Execution until 5b G) |
@@ -45,13 +45,13 @@ presentation-contracts: theme layout keymap
 
 ## Dependency direction
 
-- **Foundation** imports only Foundation. The exceptions are `system/bootstrap.ts` (the composition root) and `index.ts` (the barrel).
+- **Foundation** imports only Foundation. The exceptions are the composition root (`system/bootstrap.ts`, the order; `system/compose.ts`, the construction) and `index.ts` (the barrel). Only the barrel imports the composition root.
 - **Kernel sectors** may import Foundation, and other sectors only through those sectors' contracts (leaf `types.ts` or `contracts.ts`, an `index.ts`). There must be no entanglement: if A imports B, then B's chain must not lead back into A.
 - **Nothing in a kernel sector imports presentation contracts at runtime.** Type-only imports are allowed.
 - **Platform services** may use kernel contracts; kernel sectors reach them only through a contract that is handed in.
 - **Core never imports** `@aura/shell`, `@aura/ui`, `@aura/app-sdk`, `@aura/cli`, Astro, React or socket.io.
 
-**Enforced by `pnpm arch`:** `core-cycle`, `core-module-cycle`, `core-forbidden`, `foundation-leaf`, `kernel-presentation`, `contract-leaf` (5b), `agent-agnostic`, and from Phase 7 `core-deep-import`, `event-owner` and `kv-owner` (keys of auth, approvals, app-hosts, nexus). Planned: `runtime-no-bus` (5b-2).
+**Enforced by `pnpm arch`:** `core-cycle`, `core-module-cycle`, `core-forbidden`, `foundation-leaf`, `kernel-presentation`, `contract-leaf` (5b), `runtime-no-bus` (5b-2), `agent-agnostic`, and from Phase 7 `core-deep-import`, `event-owner` and `kv-owner` (keys of auth, approvals, app-hosts, nexus).
 
 ## Public contract
 
@@ -70,8 +70,10 @@ presentation-contracts: theme layout keymap
 | `apphost:*`, `hosts:` | `app-hosts` | |
 | `notif:*` | `notifications` | |
 | `os:sidecars` | `app-manager` (`SidecarManager`) | editable through `/api/kv/os/sidecars` |
-| `os:app-enabled` | **unowned (debt):** written by shell routes, hydrated by the middleware | Phase 6 K: AppManager owns it |
-| Events (`OsEvents` in `ipc/OsEventBus.ts`) | the owner in its `dep-check:event-owners` block | rule `event-owner`: emitted only in the owner's files. `app:*` and `activity:*` are app-manager's (the activity routes call the kernel since Phase 7); the remaining shell emits are baselined |
+| `os:app-enabled` | `app-manager` (`AppManager`: hydrated in `init()`, persisted by `setEnabled` / `forgetEnabledState`) | Phase 6 K |
+| `os:interfaces` | `interfaces` (`interfaces/custom.ts`) | hydrated by `bootSystem()` (D98 R2) |
+| `/data/aura/boot/status.json` | `system` (`status.ts`) | readiness |
+| Events (`OsEvents` in `ipc/OsEventBus.ts`) | the owner in its `dep-check:event-owners` block | rule `event-owner`; `app:*`, `activity:*`: app-manager; shell emits left are baselined |
 | Key prefixes in a module's `keys.ts` (`*_KV_PREFIXES`) | that module | rule `kv-owner`: auth, approvals, app-hosts, nexus (Phase 7); the rest in Phase 8 |
 
 **Singletons pinned on `globalThis`** (two copies of core exist: the Astro SSR bundle and the Node `dist`):
@@ -79,7 +81,7 @@ presentation-contracts: theme layout keymap
 - `LayoutStrategyRegistry`, `KeymapRegistry`, registry logins, the system identity cache;
 - `NotificationService` (plus its hooks and cache).
 
-Each module creates its own lazily today. Add no new one; Phase 6 K moves their creation into `bootSystem()`.
+The composition root constructs them (`system/AGENTS.md`); `auth/services.ts` and `app-hosts/services.ts` are accessors. Add no new pin.
 
 ## Kernel-wide invariants
 
@@ -92,7 +94,7 @@ Each module creates its own lazily today. Add no new one; Phase 6 K moves their 
 
 ## Known debt
 
-`tools/dep-baseline.json` is the one list: each entry names its owning phase, and it must shrink (`pnpm arch` reports a fixed entry). Phase 7 removed the `app-hosts`/`nexus` → `app-manager` cycles and the Foundation exception, and recorded the debt of its three new rules.
+`tools/dep-baseline.json` is the one list: each entry names its owning phase; it must shrink (`pnpm arch` reports fixed entries).
 
 **Phase 8 (committed):** AppManager is decomposed behind a compatibility facade into real modules. Each gets its own responsibility, state, contract and tests: activities and navigation, the service supervisor, previews, build and tools.
 

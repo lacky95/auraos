@@ -627,6 +627,24 @@ export function registerCap(program: Command): void {
     });
 }
 
+/** One instance's tool provisioning, as its runtime reported it (a `RuntimeOperationResult`). */
+export interface ToolApplyResult {
+  target: { instanceId: string };
+  state: 'applying' | 'applied' | 'failed' | 'restart-required' | 'recreate-required' | 'unsupported';
+  error?: { code: string; category: string; message: string };
+  detail?: Record<string, string | number | boolean>;
+}
+
+/** `applied (enforced)`, `applied (advisory: …)`, `failed: …`, `unsupported: …`. */
+export function toolApplyText(t: ToolApplyResult): string {
+  if (t.state === 'applied') {
+    return t.detail?.['enforcement'] === 'advisory'
+      ? 'applied, advisory only (legacy symlink tool mode: every tool stays reachable by absolute path)'
+      : `applied${t.detail?.['enforcement'] ? ` (${String(t.detail['enforcement'])})` : ''}, live`;
+  }
+  return `${t.state}${t.error ? `: ${t.error.message}` : ''}`;
+}
+
 /**
  * Hot-refresh every running instance of `appId` so it sees the updated
  * manifest tools[] without a backend respawn. The shell rewrites the
@@ -635,12 +653,17 @@ export function registerCap(program: Command): void {
  */
 async function refreshRunning(appId: string): Promise<void> {
   try {
-    const res = await api.post<{ ok: boolean; refreshed?: string[]; error?: string }>(
+    const res = await api.post<{ ok: boolean; refreshed?: string[]; tools?: ToolApplyResult[]; error?: string }>(
       '/api/admin/cap-refresh',
       { appId },
     );
     if (!res?.ok) {
       info(`hot-refresh skipped: ${res?.error ?? 'unknown error'}`);
+      return;
+    }
+    if (res.tools) {
+      // D100 §5: what each instance's runtime confirmed, not just that the call went through.
+      for (const t of res.tools) info(`  ${t.target.instanceId}: ${toolApplyText(t)}`);
       return;
     }
     const n = res.refreshed?.length ?? 0;

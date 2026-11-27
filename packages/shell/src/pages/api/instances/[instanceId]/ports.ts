@@ -1,5 +1,7 @@
 import type { APIRoute } from 'astro';
+import * as core from '@aura/core';
 import { getAppManager } from '@aura/core';
+import { capabilityRefusal } from '../../../../lib/runtimeCaps.ts';
 import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
 
 /**
@@ -49,13 +51,10 @@ export const POST: APIRoute = async ({ params, request }) => {
     return errorResponse('sourcePort must be a valid port number', 400);
   }
 
-  // `into` needs a container target to join; a PRoot instance has no netns of
-  // its own to receive the forwarder.
-  if (kind === 'into' && instance.sandbox && instance.sandbox !== 'container') {
-    return errorResponse(
-      `${instanceId} runs in a '${instance.sandbox}' sandbox; 'into' exposing requires sandbox: container`,
-      409,
-    );
+  // `into` joins the target's own network: its runtime's `portExpose` (5b G).
+  if (kind === 'into') {
+    const refused = capabilityRefusal(instanceId, core.requestNeeds('port-expose'), "'into' exposing");
+    if (refused) return refused;
   }
 
   // For `into`, the source is another app; for `host`, the source IS this app.

@@ -79,30 +79,34 @@ export const POST: APIRoute = async (ctx) => {
 
   const { appId, action, tool } = body;
   if (typeof appId !== 'string' || !APP_ID_RE.test(appId)) {
-    return json({ error: 'invalid-app-id', message: `appId must be reverse-domain (got ${JSON.stringify(appId)}).` }, 400);
+    return json({ error: 'invalid-app-id', category: appId ? 'invalid-input' : 'missing-input', message: `appId must be reverse-domain (got ${JSON.stringify(appId)}).`,
+      missing: [{ input: 'appId', kind: 'field', expects: 'reverse-domain id, e.g. com.example.notes' }] }, 400);
   }
   const VALID: Action[] = ['add-tool', 'remove-tool', 'set-tools', 'add-permission', 'remove-permission', 'add-service-tool', 'remove-service-tool'];
   if (!action || !VALID.includes(action)) {
-    return json({ error: 'invalid-action', message: `action must be one of ${VALID.join(', ')} (got ${JSON.stringify(action)}).` }, 400);
+    return json({ error: 'invalid-action', category: action ? 'invalid-input' : 'missing-input', message: `action must be one of ${VALID.join(', ')} (got ${JSON.stringify(action)}).` }, 400);
   }
   if (PERMISSION_ACTIONS.has(action) && (typeof body.permission !== 'string' || body.permission.length === 0)) {
-    return json({ error: 'invalid-permission', message: `${action} requires a non-empty \`permission\`.` }, 400);
+    return json({ error: 'invalid-permission', category: body.permission ? 'invalid-input' : 'missing-input', message: `${action} requires a non-empty \`permission\`.`,
+      missing: [{ input: 'permission', kind: 'field', expects: 'a permission name, e.g. apps.mount' }] }, 400);
   }
   // Validate the payload shape per action.
   let setTools: string[] | null = null;
   if (SERVICE_ACTIONS.has(action) && (typeof body.service !== 'string' || body.service.length === 0)) {
-    return json({ error: 'invalid-service', message: `${action} requires the services[] template name as \`service\`.` }, 400);
+    return json({ error: 'invalid-service', category: body.service ? 'invalid-input' : 'missing-input', message: `${action} requires the services[] template name as \`service\`.`,
+      missing: [{ input: 'service', kind: 'field', expects: 'the name of a services[] template' }] }, 400);
   }
   if (PERMISSION_ACTIONS.has(action)) {
     // no tools payload to validate
   } else if (action === 'set-tools') {
     if (!Array.isArray(body.tools) || body.tools.some((t) => typeof t !== 'string' || t.length === 0)) {
-      return json({ error: 'invalid-tools', message: 'set-tools requires a non-empty-string array `tools`.' }, 400);
+      return json({ error: 'invalid-tools', category: 'invalid-input', message: 'set-tools requires a non-empty-string array `tools`.' }, 400);
     }
     // De-dupe while preserving order (markers '*'/'#' are valid entries).
     setTools = [...new Set(body.tools)];
   } else if (typeof tool !== 'string' || tool.length === 0) {
-    return json({ error: 'invalid-tool' }, 400);
+    return json({ error: 'invalid-tool', category: tool ? 'invalid-input' : 'missing-input', message: `${action} requires a non-empty \`tool\`.`,
+      missing: [{ input: 'tool', kind: 'field', expects: 'a capability name, e.g. git' }] }, 400);
   }
 
   // Resolve the manifest across every scope via the registry, not a hardcoded
@@ -187,6 +191,11 @@ export const POST: APIRoute = async (ctx) => {
       // refill (grant) or empty (revoke) the running ones now, not at their
       // next spawn.
       if (changed && perm === 'sidecars.tools') mgr.refreshInstanceTools(appId);
+      // D80 (owner answer 4): losing apps.mount revokes the access: every cross-app mount its instances (and
+      // their sidecars) hold, read-only and writable, with the declarations.
+      if (changed && perm === 'apps.mount' && action !== 'add-permission') {
+        for (const i of mgr.getInstancesByApp(appId)) mgr.mounts.revokeConsumer(i.instanceId);
+      }
       return json({ ok: true, appId, action, permission: perm, changed, permissions: next, unknown, reloaded: true });
     } catch (err) {
       // The file is written but the running registry still has the old value,

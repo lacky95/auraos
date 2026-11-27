@@ -4,7 +4,7 @@ import type { SpawnContext } from '../scopes/types.js';
 import type { ResourceUsage, SidecarInfo } from '../types/instance.js';
 import type { LifecycleStatus } from './lifecycleGate.js';
 import type { RuntimeCapabilities, RuntimeSettings } from '../runtimes/types.js';
-import type { EngineContainer, ExecSession, SessionSpec } from './ExecBridge.js';
+import type { ExecSession, SessionSpec } from './ExecBridge.js';
 import type { OutputLog } from './outputLog.js';
 
 /**
@@ -43,7 +43,7 @@ export interface SandboxRunner {
    * manifest's `tools[]` grants. Delegates to `provisionAllowlist` — see
    * tool-provision.ts for the hardlink/symlink modes.
    */
-  provisionToolsDir(instanceId: string, manifest: AppManifest): string;
+  provisionToolsDir(instanceId: string, manifest: Pick<AppManifest, 'tools'>): string;
   /** Tear down the allowlist dir. Called on instance destroy. */
   clearToolsDir(instanceId: string): void;
 
@@ -64,6 +64,12 @@ export interface SandboxRunner {
   callLifecycle(instanceId: string, hook: string, opts?: { reason?: string }): Promise<void>;
   /** Invoke a best-effort lifecycle hook with optional payload. */
   callOptionalLifecycle(instanceId: string, hook: string, body?: unknown): Promise<unknown>;
+  /**
+   * A maintenance hook (D108 A3, stream M): its JSON answer, null when the
+   * app doesn't implement it (404); throws on a failure or the timeout
+   * (lifecycleClient.ts `callMaintenanceHook`).
+   */
+  callMaintenanceHook(instanceId: string, hook: string, body: unknown, opts: { timeoutMs: number; reason: string }): Promise<unknown>;
   /** Health identity class and runtime-check outcome of this start; null when
    *  not measured (not healthy yet, or adopted from a previous shell). */
   lifecycleStatus(instanceId: string): LifecycleStatus | null;
@@ -104,13 +110,7 @@ export interface SandboxRunner {
    */
   exec?(instanceId: string, argv: string[], opts?: SandboxExecOpts): Promise<{ stdout: string; stderr: string }>;
 
-  /**
-   * Phase 5 stream X: the Engine container behind a running instance, which
-   * the exec bridge enters and reads logs from (ExecBridge.ts). Only runtimes
-   * that have one implement it; the container name stays the runtime's (D85 A7).
-   */
-  engineContainer?(instanceId: string): EngineContainer | null;
-  /** Phase 5 stream X: the instance's own output, for runtimes without an engine log. */
+  /** Phase 5 stream X: the instance's own output, for runtimes whose module has no `logs` (ExecBridge.ts). */
   outputLog?(instanceId: string): OutputLog | null;
   /**
    * Phase 5 stream J (D74, ARI §9.6): open a session INSIDE the running
@@ -163,6 +163,8 @@ export interface SandboxRunner {
     addresses?: string[];
     dialByAddress?: boolean;
     lifecycleToken?: string;
+    /** A session host's session uid:gid (stream T2, container runtime). */
+    sessionUser?: string;
   }): void;
   /**
    * The lifecycle checks again for an instance adopted from a previous shell

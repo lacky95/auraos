@@ -26,6 +26,13 @@
 // gets AURA_SERVER_SEALED (production build only, execute-only node) and its
 // lifecycle token as a one-time file, never `-e AURA_LIFECYCLE_TOKEN`; the
 // synthesised start script (every fixture's digest) carries the sealed branch.
+// Stream T2 (owner decision 2026-11-27): no execute-only node. A session host
+// with a session identity runs as --user 0:0 with only SETUID/SETGID (its
+// session launcher `aura-term-launch serve` is the command, the server runs as
+// the Terminal service uid, the sessions as the user), carries
+// AURA_SESSION_HOST/AURA_SESSION_UID, the session-identity label, the user's
+// tmux tmpfs at /run/aura-term/<uid> and the server's /run/aura-term-server;
+// the start script's session-host branch replaces the sealed one (digests).
 // Stream C (owner-approved difference, Q7): no `/run/context` mount or bind;
 // the context env is what the kernel resolved for the start (`ctx.contextEnv`:
 // declared AND granted keys), which the runners pass through unchanged.
@@ -56,7 +63,7 @@ delete process.env['AURA_HOST_WORKSPACE'];
 const { AppManifestSchema } = await import('../dist/types/manifest.js');
 const { ContainerRunner } = await import('../dist/app-manager/ContainerRunner.js');
 const { ProotRunner } = await import('../dist/app-manager/ProotRunner.js');
-const { prootRuntime } = await import('../dist/runtimes/builtins/proot.js');
+const { prootRuntime } = await import('../dist/runtimes/proot/index.js');
 const { healthRefusal } = await import('../dist/runtimes/ari.js');
 
 const TMP = mkdtempSync(join(tmpdir(), 'aura-golden-'));
@@ -319,4 +326,26 @@ test('audit N4: every AURA_* variable the spawn args set is on exactly one kerne
     assert.equal(n, 1, `${name}: add it to SERVER_ONLY_ENV (a session must not see it) or SESSION_VISIBLE_ENV (runtimes/workloadEnv.ts)`);
   }
   for (const name of SERVER_ONLY_ENV) assert.ok(!SESSION_VISIBLE_ENV.includes(name), name);
+});
+
+// D106 (owner decision, 2026-11-27): the app build and dependency-install containers take their resource limits
+// from the one mapping (runtimes/container/limits.ts `limitArgs`): `--cpus=2 --memory=<3 GiB> --memory-swap=<same>
+// --pids-limit=512` by default (the caps they always had, now with no swap beyond memory), or the limits the
+// caller names. Recorded in golden/build-args.json (written on the first run).
+const BUILD_GOLDEN = join(dirname(fileURLToPath(import.meta.url)), 'golden', 'build-args.json');
+test('build and provision container argv match golden/build-args.json (D106 limits)', () => {
+  const runner = new ContainerRunner(opts);
+  const appDir = join(dataDir, 'scopes', 'users', 'default', 'apps', 'io.golden.build');
+  mkdirSync(appDir, { recursive: true });
+  const out = {
+    'build:default': norm(runner.buildAppArgs('io.golden.build', appDir)),
+    'build:limits': norm(runner.buildAppArgs('io.golden.build', appDir, { cpus: 0.5, memoryBytes: 268435456, pids: 64 })),
+    'provision:default:astro': norm(runner.provisionAppArgs('io.golden.build', appDir, 'astro')),
+    'provision:limits:raw': norm(runner.provisionAppArgs('io.golden.build', appDir, 'raw', { memoryBytes: 1073741824 })),
+  };
+  if (!existsSync(BUILD_GOLDEN)) {
+    writeFileSync(BUILD_GOLDEN, `${JSON.stringify(out, null, 2)}\n`);
+    assert.fail(`recorded a new golden file at ${BUILD_GOLDEN}: review and commit it`);
+  }
+  assert.deepEqual(out, JSON.parse(readFileSync(BUILD_GOLDEN, 'utf-8')));
 });

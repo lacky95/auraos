@@ -94,6 +94,7 @@ test('credential.read:<NAME> is grantable only to an app, for one user\'s vault'
   await assert.rejects(g.grant({ kind: 'app', id: 'com.example.notes' }, 'notifications.popup', { by: { kind: 'system' }, scope: userScope('default') }), GrantError);
   await assert.rejects(g.grant({ kind: 'app', id: 'com.example.notes' }, 'credential.read:lower', { by: { kind: 'system' }, scope: userScope('default') }), GrantError);
   assert.equal(used.length, 0, 'refused before touching Valkey');
-  const { record } = await g.grant({ kind: 'app', id: 'com.example.notes' }, perm, { by: { kind: 'system' }, scope: userScope('default') });
+  const { record } = await g.grant({ kind: 'app', id: 'com.example.notes' }, perm, { by: { kind: 'system' }, installationId: 'inst-1', scope: userScope('default') });
   assert.deepEqual(record.scope, { kind: 'user', id: 'default' });
+  assert.equal(record.installationId, 'inst-1', 'given to one installation (S1)');
 });

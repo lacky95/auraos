@@ -1,6 +1,6 @@
 /**
  * Layout-manager SDK — the contract between the shell desktop
- * (`pages/index.astro` renderLayout) and a layout strategy.
+ * (`desktop-pages/index.astro` renderLayout) and a layout strategy.
  *
  * The core `layoutRegistry` (packages/core/src/layout) owns a strategy's
  * METADATA (id, name, icon — what `/api/os/layouts` lists). This module owns
@@ -146,6 +146,7 @@ export interface LayoutHost {
   focus(viewId: string): void;
   minimize(viewId: string): void;
   restore(viewId: string): void;
+  /** A USER close (the layout's own close control): may ask about a background process left without a window (D101). */
   close(viewId: string): void;
   toggleMaximize(viewId: string): void;
 

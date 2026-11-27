@@ -6,8 +6,10 @@ import '../styles/settings.css';
  * run in. A dropdown of the installed runtimes; for the selected one its
  * capabilities (read-only), its settings as a form rendered from the
  * runtime's own schema (components/schemaForm.ts), the apps on it, and
- * Enable / Disable / Make default. Below: the per-installation overrides
- * (Remove) and the open runtime-migration decisions.
+ * Enable / Disable / Make default; its version, ARI, health checks, the
+ * feature view (when served) and how many instances need a restart to
+ * apply. Below: the per-installation overrides (Remove), the open
+ * runtime-migration decisions and the read-only migration report.
  *
  * Every read goes to the shell's /api/admin/runtimes as the owner acting
  * through Settings (D45); every change opens the Shell's approval dialog and
@@ -34,7 +36,8 @@ import '../styles/settings.css';
     .rt-table { border-collapse: collapse; font-size: 0.7rem; }
     .rt-table th { text-align: left; font-weight: normal; color: var(--aura-color-text-dim); padding: 2px 16px 2px 0; }
     .rt-table td { padding: 2px 0; }
-    .rt-table td.rt-no { color: var(--aura-color-warning); }
+    .rt-table td.rt-no, .rt-list li.rt-no, .rt-stale { color: var(--aura-color-warning); }
+    .rt-dim { color: var(--aura-color-text-dim); }
     .rt-list { margin: 0; padding-left: 18px; font-size: 0.68rem; line-height: 1.9; }
     .rt-list code { font-family: var(--aura-font-mono, monospace); font-size: 0.65rem; }
     .rt-actions { display: flex; gap: 8px; flex-wrap: wrap; }
@@ -86,7 +89,13 @@ import '../styles/settings.css';
       const r = await fetch(osUrl('/api/admin/runtimes'), { cache: 'no-store' });
       const data = await r.json().catch(() => ({})) as RuntimesState & { error?: string; message?: string };
       if (!r.ok) throw new Error(data.message || data.error || `HTTP ${r.status}`);
-      state = data;
+      // The migration report is a second, read-only owner view; the page works without it.
+      let report = null;
+      try {
+        const m = await fetch(osUrl('/api/admin/runtimes/migration'), { cache: 'no-store' });
+        if (m.ok) report = await m.json();
+      } catch { /* an older shell: no report */ }
+      state = { ...data, report };
       paint();
     }
 

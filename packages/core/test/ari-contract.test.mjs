@@ -22,8 +22,8 @@ import {
   RUNTIME_CAPABILITY_KEYS, RUNTIME_BOOLEAN_CAPABILITIES, missingCapabilities, BUILTIN_RUNTIMES, RUNTIME_AUDIT_ACTIONS,
   securityOption,
 } from '../dist/index.js';
-import { containerRuntime } from '../dist/runtimes/builtins/container.js';
-import { prootRuntime } from '../dist/runtimes/builtins/proot.js';
+import { containerRuntime } from '../dist/runtimes/container/index.js';
+import { prootRuntime } from '../dist/runtimes/proot/index.js';
 import { AppManifestSchema } from '../dist/types/manifest.js';
 import { AppManager } from '../dist/app-manager/AppManager.js';
 import { ContainerRunner } from '../dist/app-manager/ContainerRunner.js';
@@ -36,6 +36,8 @@ mkdirSync(ROOTFS);
 
 const CONTAINER_CAPS = ContainerRunner.prototype.capabilities.call({});
 const PROOT_CAPS = ProotRunner.prototype.capabilities.call({});
+/** A test module with no capability groups declares none of their features (5b CR: groups ⇔ features). */
+const NO_GROUP_CAPS = { ...CONTAINER_CAPS, survivesShellRestart: false, sessionExec: false, sidecars: false, usage: false, hostFilesystem: false, portExpose: false, mounts: false };
 const runner = (caps) => ({ capabilities: () => caps, getHost: () => null, getPort: () => null });
 const app = (extra = {}) => AppManifestSchema.parse({ id: 'org.k.app', name: 'K', version: '1.0.0', ...extra });
 
@@ -51,7 +53,7 @@ function versioned(migrate = (from, raw) => { if (from !== 1) throw new Error(`u
   return {
     descriptor: { id: 'vers', version: '2.0.0', ari: 1, title: 'V', description: 'v', builtIn: false, settingsVersion: 2,
       settingsSchema: { type: 'object', properties: { slots: { type: 'integer', title: 'Slots', minimum: 1, default: 1 } } } },
-    runner: runner(CONTAINER_CAPS), capabilities: () => CONTAINER_CAPS, health: () => HEALTHY, endpoint: () => null,
+    runner: runner(NO_GROUP_CAPS), capabilities: () => NO_GROUP_CAPS, health: () => HEALTHY, endpoint: () => null,
     ...(migrate ? { migrateSettings: migrate } : {}),
   };
 }
@@ -80,7 +82,7 @@ test('ARI refusal: a newer ARI, a bad id, a non-semver version or a missing sett
   assert.equal(ariRefusal({ ...ok, ari: 0 })?.code, 'invalid-descriptor');
   const reg = registry();
   assert.throws(() => reg.register(containerRuntime(runner(CONTAINER_CAPS))), (e) => e.code === 'runtime-duplicate' && /already registered/.test(e.message));
-  assert.deepEqual(runtimeRefusal(newer), { code: 'ari-unsupported', message: newer.message, runtime: 'good' });
+  assert.deepEqual(runtimeRefusal(newer), { code: 'ari-unsupported', category: 'unsupported-operation', message: newer.message, runtime: 'good' });
 });
 
 test('BUILTIN_RUNTIMES: container and proot, each with version, ari and settings version; AppManager registers exactly these', () => {
@@ -215,14 +217,19 @@ test('requestNeeds: one table for request needs; the Home Resolver and the check
   assert.deepEqual(requestNeeds('jump', { jumpHomeMode: 'app' }), { sessionExec: true });
   assert.deepEqual(requestNeeds('home-ephemeral'), { sessionExec: true, privateHomeSession: true });
   assert.deepEqual(requestNeeds('home-app'), { sessionExec: true });
-  assert.deepEqual(requestNeeds('terminal-session'), { isolation: 'namespace' });
+  assert.deepEqual(requestNeeds('user-environment'), { isolation: 'namespace' });
+  // D107 S2: `terminal-session` is the read alias of `user-environment` for one release.
+  assert.deepEqual(requestNeeds('terminal-session'), requestNeeds('user-environment'));
+  assert.ok(REQUEST_KINDS.includes('user-environment') && REQUEST_KINDS.includes('terminal-session'));
   assert.deepEqual(requestNeeds('idmap-mount'), { mounts: true, idmappedMounts: true });
   assert.deepEqual(requestNeeds('host-filesystem'), { hostFilesystem: true });
   for (const k of REQUEST_KINDS) assert.equal(typeof requestNeeds(k), 'object', k);
   for (const mode of ['private', 'app', 'ephemeral']) {
     assert.deepEqual(homeRequirements({ executionContext: 'jump', jumpHomeMode: mode }).capabilities, requestNeeds('jump', { jumpHomeMode: mode }));
   }
-  assert.deepEqual(homeRequirements({ executionContext: 'terminal-session' }).capabilities, { isolation: 'namespace' });
+  assert.deepEqual(homeRequirements({ executionContext: 'user-environment' }).capabilities, { isolation: 'namespace' });
+  assert.deepEqual(homeRequirements({ executionContext: 'terminal-session' }), homeRequirements({ executionContext: 'user-environment' }));
+  assert.equal(homeRequirements({ executionContext: 'terminal-session' }).executionContext, 'user-environment', 'the alias is read, never produced');
   assert.deepEqual(homeRequirements({ executionContext: 'application' }).capabilities, {});
 });
 
@@ -238,7 +245,7 @@ test('suggest: a sidecar app on PRoot names sidecars and suggests container; not
   assert.deepEqual(err.missing, ['sidecars']);
   assert.deepEqual(err.suggest, ['container']);
   assert.match(err.message, /it could run on: container$/);
-  assert.deepEqual(runtimeRefusal(err), { code: 'capability-missing', message: err.message, runtime: 'proot', missing: ['sidecars'], suggest: ['container'] });
+  assert.deepEqual(runtimeRefusal(err), { code: 'capability-missing', category: 'unsupported-feature', message: err.message, runtime: 'proot', missing: ['sidecars'], suggest: ['container'] });
   // Nothing can: the message says so. A disabled runtime is never suggested.
   assert.deepEqual(reg.suggest({ gpu: true }, rec), []);
   assert.equal(suggestText([]), '; no installed runtime can run it');
@@ -273,4 +280,38 @@ test('D89: a spawn context or spec without instanceToken does not compile', () =
       '--target', 'ES2022', file], { encoding: 'utf-8' });
     assert.equal(r.status, 0, r.stdout + r.stderr);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ── D100 K addendum: features, error categories, operation results ──────────
+
+test('D100 §12: featuresOf is one derived table over every feature id; overrides refine it', async () => {
+  const { featuresOf, RUNTIME_FEATURE_IDS } = await import('../dist/index.js');
+  const caps = ContainerRunner.prototype.capabilities.call({});
+  const fs = featuresOf(caps);
+  assert.equal(fs.length, RUNTIME_FEATURE_IDS.length);
+  assert.equal(fs.find((f) => f.id === 'instance.adoption').support, 'supported');
+  assert.equal(fs.find((f) => f.id === 'mount.live').applyMode, 'live');
+  const prootFs = featuresOf(ProotRunner.prototype.capabilities.call({}, {}));
+  assert.equal(prootFs.find((f) => f.id === 'instance.adoption').support, 'unsupported');
+  assert.equal(prootFs.find((f) => f.id === 'workload.dynamic').support, 'unsupported');
+  const advisory = featuresOf(caps, { 'tools.liveRevoke': { support: 'conditional', constraints: { enforcement: 'advisory' } } });
+  assert.deepEqual(advisory.find((f) => f.id === 'tools.liveRevoke'), { id: 'tools.liveRevoke', support: 'conditional', applyMode: 'live', constraints: { enforcement: 'advisory' } });
+});
+
+test('D100 §17: every refusal code has exactly one category', async () => {
+  const { CATEGORY_OF_CODE } = await import('../dist/index.js');
+  const cats = new Set(['unsupported-operation', 'unsupported-feature', 'permission-denied', 'runtime-unavailable', 'instance-not-found',
+    'resource-exhausted', 'restart-required', 'recreate-required', 'provisioning-failed', 'enforcement-failed', 'operation-timeout',
+    'operation-cancelled', 'conflict']);
+  for (const [code, cat] of Object.entries(CATEGORY_OF_CODE)) assert.ok(cats.has(cat), `${code} -> ${cat}`);
+  assert.equal(CATEGORY_OF_CODE['runtime-disabled'], 'runtime-unavailable');
+});
+
+test('D100 §13: an operation result is plain data with a terminal state and a categorized error', async () => {
+  const { operationResult } = await import('../dist/index.js');
+  const a = operationResult('tools.liveGrant', { instanceId: 'i-1' }, 'applied', { detail: { mode: 'hardlink' } });
+  const b = operationResult('tools.liveGrant', { instanceId: 'i-1' }, 'failed', { error: { code: 'provisioning-failed', message: 'x' } });
+  assert.notEqual(a.opId, b.opId);
+  assert.deepEqual(JSON.parse(JSON.stringify(b)), b);
+  assert.equal(b.error.category, 'provisioning-failed');
 });

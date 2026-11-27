@@ -1,7 +1,7 @@
 import type { APIRoute } from 'astro';
 import { getAppManager, getNexusManager } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
-import { deleteHomesAfterRemove, installationBeforeRemove } from '../../../../lib/homesAdmin.ts';
+import { deleteHomeRefusal, deleteHomesAfterRemove, installationBeforeRemove } from '../../../../lib/homesAdmin.ts';
 
 /**
  * Uninstall an app. Stops every running instance first so the runner
@@ -20,7 +20,8 @@ export const POST: APIRoute = async ({ params, url }) => {
   }
   const purge = url.searchParams.get('purge') === '1';
   const deleteHome = url.searchParams.get('deleteHome') === '1';
-  const installationId = deleteHome ? await installationBeforeRemove(id) : null;
+  const home = deleteHome ? await installationBeforeRemove(id) : null;
+  if (home && 'error' in home) return errorResponse(deleteHomeRefusal(id, home.error), 409);
 
   // Suppress warm-pool refill for this app so the reconciler can't respawn
   // instances while we're killing them, then kill EVERY instance + sweep any
@@ -29,7 +30,7 @@ export const POST: APIRoute = async ({ params, url }) => {
   try {
     await mgr.killAllForApp(id);
     await nexus.uninstall(id, { purge });   // move files to trash + deregister
-    const homeDeleted = deleteHome ? await deleteHomesAfterRemove(id, installationId) : false;
+    const homeDeleted = home ? await deleteHomesAfterRemove(id, home.installationId) : false;
     return jsonResponse({ ok: true, id, purged: purge, homeDeleted });
   } catch (err) {
     return errorResponse((err as Error).message, 500);

@@ -356,6 +356,34 @@ export class Installer {
     for (const name of entries) moveOrCopy(join(appDir, name), join(dest, name));
   }
 
+  /**
+   * Make room for a local copy that replaces whatever is under `appId`
+   * (`aura dev clone --force`, `aura dev new --force`). Data a keep-data
+   * uninstall left is set aside for `retainedFor`, its installation, as a
+   * denied restore does (the new app is not entitled to it); without an
+   * installation it goes to trash. The tree, the replaced app's runtime data
+   * included, moves to trash. The install record goes: it described the old
+   * tree. Nothing is deleted. Returns the trash entry, if any.
+   */
+  setAsideForOverwrite(appId: string, retainedFor: string | null): { trash: string | null; retained: boolean } {
+    if (!APP_ID_PATTERN.test(appId)) throw new Error(`invalid app id: ${JSON.stringify(appId)}`);
+    const appDir = join(this.opts.appsDir, appId);
+    let retained = false;
+    if (retainedFor && this.hasRetainedData(appId)) {
+      this.setAsideRetainedData(appId, retainedFor);
+      retained = true;
+    }
+    let trash: string | null = null;
+    if (existsSync(appDir)) {
+      const trashRoot = join(this.opts.dataDir, 'nexus', 'trash');
+      mkdirSync(trashRoot, { recursive: true });
+      trash = join(trashRoot, `${appId}-${Date.now()}`);
+      moveOrCopy(appDir, trash);
+    }
+    removeContained(join(this.opts.dataDir, 'nexus', 'installed'), `${appId}.json`);
+    return { trash, retained };
+  }
+
   /** Put data set aside earlier back, once its installation passed the restore check. */
   restoreRetainedData(appId: string, installationId: string): void {
     const src = this.retainedDir(appId, installationId);
@@ -377,6 +405,33 @@ export class Installer {
   previousTree(record: InstallRecord): string | null {
     const dir = join(this.opts.dataDir, 'nexus', 'trash', `${record.id}-${Date.parse(record.updatedAt)}`);
     return existsSync(dir) ? dir : null;
+  }
+
+  /**
+   * Undo an update (Phase 6 stream M: `updateInstance` failed after the code
+   * switched): the tree `record`'s install moved aside goes back in place, the
+   * current runtime data moves with it (data an `onUpdate` already changed
+   * stays changed: the app's migration owns that), the new tree goes to trash,
+   * and the previous install record is restored. Throws when there is no
+   * rollback tree.
+   */
+  rollbackUpdate(record: InstallRecord, previous: InstallRecord | null): void {
+    const tree = this.previousTree(record);
+    if (!tree) throw new Error(`no rollback tree of ${record.id} (the install replaced nothing)`);
+    const targetDir = join(this.opts.appsDir, record.id);
+    const ts = Date.now();
+    const tmpDir = `${targetDir}.tmp.${ts}`;
+    moveOrCopy(tree, tmpDir);
+    if (existsSync(targetDir)) {
+      carryOverRuntimeData(targetDir, tmpDir, record.id);
+      const trashRoot = join(this.opts.dataDir, 'nexus', 'trash');
+      mkdirSync(trashRoot, { recursive: true });
+      moveOrCopy(targetDir, join(trashRoot, `${record.id}-${ts}`));
+    }
+    renameSync(tmpDir, targetDir);
+    const recordPath = join(this.opts.dataDir, 'nexus', 'installed', `${record.id}.json`);
+    if (previous) writeFileSync(recordPath, JSON.stringify(previous, null, 2));
+    else rmSync(recordPath, { force: true });
   }
 
   /** The newest trash entry of an app (the latest tree an install or uninstall moved aside), or null. */

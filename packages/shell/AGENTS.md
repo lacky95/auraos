@@ -5,12 +5,12 @@ The principles are in the root `AGENTS.md`. This package holds two layers outsid
 | Layer | Files | Role |
 |---|---|---|
 | **Server** | `src/pages/api/**` (192 route files), `src/middleware.ts`, `server/*.mjs` (App Host gateway, WS proxy, socket.io `/os-events`, SSE mux), `server.mjs`, `astro.config.mjs`, and the `src/lib/**` files they reach | transport, plus enforcement at the edge. It calls the kernel; it doesn't own kernel state |
-| **Web Shell** | `src/pages/*.astro` (desktop pages), `src/components/**`, `src/layouts/**`, `src/stores/**`, and the `src/lib/**` files only they reach | presentation; one client among several |
+| **Web Shell** | `src/desktop-pages/*.astro` (desktop pages, injected only in the `desktop` composition), `src/components/**`, `src/layouts/**`, `src/stores/**`, and the `src/lib/**` files only they reach | presentation; one client among several |
 
 ## Rules (enforced: `server-webshell`, `package-internals`, `agent-agnostic`)
 
 - **The server layer never imports Web Shell code** (components, layouts, stores, desktop pages) or UI libraries (React, `@aura/ui`, nanostores, `socket.io-client`).
-  - The one baselined exception: `astro.config.mjs` always loads `@astrojs/react`. Phase 6 W fixes it with `AURA_COMPOSITION=server`.
+  - The build config composes both (D76, Phase 6 W): `AURA_COMPOSITION=server|desktop`; only `desktop` loads `src/desktop-pages/integration.mjs` (React, the desktop pages), by one dynamic import (the one allowed seam).
 - **Use core only through `@aura/core` and its declared subpaths.** Never a relative path into `packages/core`, `src/` or `dist/`.
 - **Kernel decisions belong in core.** A route translates HTTP into a kernel call and back. It doesn't:
   - persist kernel state with `defaultKv()`;
@@ -18,11 +18,10 @@ The principles are in the root `AGENTS.md`. This package holds two layers outsid
   - hold lifecycle logic.
 
   **Existing debt, don't extend it:**
-  - `api/admin/apps/enabled.ts` and `api/apps/[id]/remove.ts` write `os:app-enabled` (Phase 6 K);
   - `api/os/lock.ts` and `unlock.ts` write `os:lockscreen` and emit `kv:changed`;
-  - `lib/appRestart.ts` emits `app:restart*`;
-  - `lib/desktopSession.ts` respawns PRoot instances (5b RS).
-- **Until Phase 6, `middleware.ts` is the kernel's init owner.** Phase 6 K moves init into core `bootSystem()`, and the middleware then waits for readiness. Don't add init steps here; register server-layer hooks instead (Phase 6, `lib/bootHooks.ts`).
+  - `lib/appRestart.ts` emits `app:restart*`.
+  (The PRoot respawn left `lib/desktopSession.ts` in 5b RS: the kernel does it; the desktop maps windows only.)
+- **The kernel boots eagerly in core `bootSystem()`** (Phase 6 K): `server.mjs` imports the build's `aura-boot.mjs` (`src/lib/bootHooks.ts`), `astro dev` the same file from the `aura-boot` plugin. The middleware only waits for readiness (503 `starting`). New boot work is a hook in `lib/bootHooks.ts` (`layer: 'server'` always, `'webshell'` only in the `desktop` composition), never a middleware step.
 - **No new `globalThis` or `Symbol.for()` state.** About 35 files already have it. Baselined: `aura.relay.sign` (5-main D89 B4; one key, `server/access-bridge.mjs` `RELAY_SIGNER_KEY`), which must exist from module load and in every access mode, unlike the `aura.access` bridge; Phase 5b folds it into one bridge set up at the composition point.
 - **Agent-agnostic server layer:** `src/lib` and `server/` never name an agent product in code; the Terminal app (or another adapter) owns product strings and hands the shell generic data. Baselined debt: the agent-hooks approval text and route notes (audit #1, 5b), onboarding probes and `terminalScreen.ts` banner scraping (#4, #6, Phase 6).
 - **The access policy for every `/api` route** lives in `src/lib/access` (see its `AGENTS.md`). A new route needs a manifest row, or it is denied.

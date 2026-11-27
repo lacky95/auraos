@@ -793,7 +793,7 @@ function wireInstall(parent: Command, opts: { hidden?: boolean } = {}): void {
 
       const res = await installWithChoices('/api/nexus/install', { ref, scope, ...(o.force ? { force: true } : {}) }, o, 'install');
       if (!res) { info('install cancelled'); return; }
-      if (!res.ok || !res.record) fail(res.error ?? 'install failed');
+      if (!res.ok || !res.record) fail(res.message ?? res.error ?? 'install failed');
       ok(`installed ${color.cyan(res.record!.id)} (${res.record!.version}) from ${res.record!.source} → scope:${res.record!.scope ?? scope}`);
       info(`  ref:    ${res.record!.ref}`);
       if (res.record!.digest) info(`  digest: ${res.record!.digest.slice(0, 16)}`);
@@ -966,7 +966,7 @@ function wireUpdate(parent: Command, opts: { hidden?: boolean } = {}): void {
         info(`updating ${i}...`);
         const res = await installWithChoices(`/api/nexus/update/${encodeURIComponent(i)}`, o.force ? { force: true } : {}, o, 'update');
         if (!res) { info(`  → ${i} skipped`); continue; }
-        if (!res.ok) info(`  → ${i} failed: ${res.error ?? '<unknown>'}`);
+        if (!res.ok) info(`  → ${i} failed: ${res.message ?? res.error ?? '<unknown>'}`);
         else        ok(`  → ${i} updated to ${res.record?.version ?? '<?>'}`);
       }
     });

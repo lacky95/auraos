@@ -290,8 +290,11 @@ test('planHomeTarget: App Homes for apps, Private Homes only for a verified user
   const d = '/data';
   assert.equal(planHomeTarget(d, { installationId: 'i1', environmentScope: 'global', executionContext: 'application' }).hostPath, '/data/aura/apphomes/i1/global');
   assert.equal(planHomeTarget(d, { installationId: 'i1', environmentScope: 'user', executionContext: 'sidecar', userId: 'default' }).hostPath, '/data/aura/apphomes/i1/users/default');
-  const t = planHomeTarget(d, { installationId: 'i1', environmentScope: 'global', executionContext: 'terminal-session', principal: { userId: 'default', role: 'owner' } });
-  assert.deepEqual({ kind: t.kind, hostPath: t.hostPath }, { kind: 'private', hostPath: '/data/aura/home/default' });
+  // D107 S2: `user-environment`, and `terminal-session` as its read alias, plan the same Private Home.
+  for (const executionContext of ['user-environment', 'terminal-session']) {
+    const t = planHomeTarget(d, { installationId: 'i1', environmentScope: 'global', executionContext, principal: { userId: 'default', role: 'owner' } });
+    assert.deepEqual({ kind: t.kind, hostPath: t.hostPath }, { kind: 'private', hostPath: '/data/aura/home/default' }, executionContext);
+  }
   const reason = (req) => { try { planHomeTarget(d, req); return null; } catch (e) { assert.ok(e instanceof HomeDeniedError); return e.reason; } };
   assert.equal(reason({ installationId: null, environmentScope: 'global', executionContext: 'application' }), 'installation-unresolved');
   assert.equal(reason({ installationId: 'i1', environmentScope: 'user', executionContext: 'application' }), 'user-required');
@@ -310,6 +313,9 @@ test('homePlan: today against the target, per instance', () => {
   assert.deepEqual(rep.rows.map((x) => [x.appId, x.change]), [['com.aura.terminal', 'same'], ['com.example.lost', 'denied'], ['com.example.notes', 'moves']]);
   assert.deepEqual(rep.summary, { same: 1, moves: 1, denied: 1 });
   assert.equal(rep.mode, 'report');
+  // D107 S1/S2: a user environment (isUserEnvironment) reports the generic context, never the alias.
+  assert.deepEqual(rep.rows.map((x) => [x.appId, x.executionContext]),
+    [['com.aura.terminal', 'user-environment'], ['com.example.lost', 'application'], ['com.example.notes', 'application']]);
 });
 
 // ── user records v2 (I.2) ───────────────────────────────────────────────────
@@ -502,7 +508,7 @@ test('GrantStore: a user holds app.use/app.jump only; nobody else holds them; id
 
 test('Authorizer: a user or an instance acting for it holds its app grants; absent grants deny; foreign principals are refused first (A1)', async () => {
   const grants = new GrantStore(r, now);
-  const authz = new Authorizer({ grants, declared: () => [], appScope: () => 'system', localSystemId: () => 'sys-local' });
+  const authz = new Authorizer({ grants, declared: () => [], appBinding: async () => ({ scope: 'system', installationId: 'inst-1' }), localSystemId: () => 'sys-local' });
   const perm = 'app.use:i1';
   await grants.grant({ kind: 'user', id: 'uaaaaaaaaaaaaaaa' }, perm, { by: operatorAttribution() });
   const member = { kind: 'user', userId: 'uaaaaaaaaaaaaaaa', role: 'member', sessionId: 's', verification: 'verified', systemId: 'sys-local' };
@@ -587,4 +593,23 @@ test('B1: disabling an account ends its screens', async () => {
   await users.setDisabled(bob.id, true, operatorAttribution());
   assert.equal(await screens.get(s.sid), null);
   assert.ok(await screens.get(o.sid));
+});
+
+test('a source tree handed to the owner keeps the dev caches: the report walk excludes .astro and node_modules (console: EACCES on .astro/types.d.ts)', async () => {
+  const { SOURCE_TREE_EXCLUDE, DEV_CACHE_DIRS } = await import('../dist/identity/appOwnership.js');
+  // Every dev cache is excluded by its first path segment, so the dev-cache rows (only from root) still find it root's.
+  for (const d of DEV_CACHE_DIRS) assert.ok(SOURCE_TREE_EXCLUDE.includes(d.split('/')[0]), d);
+  const root = fresh('srcx');
+  const app = join(root, 'ws', 'apps', 'org.a.x');
+  mkdirSync(join(app, '.astro'), { recursive: true });
+  writeFileSync(join(app, '.astro', 'types.d.ts'), 'x');
+  writeFileSync(join(app, 'index.ts'), 'abc');
+  const r = await buildOwnershipReport([
+    { section: 'plannedUserPaths', path: join(root, 'ws'), kind: 'developer-mode-tree', to: { uid: 1000, gid: 1000 }, recursive: true, exclude: [...SOURCE_TREE_EXCLUDE], only: 'when Developer Mode is on' },
+  ], { refuseRoots: [] });
+  // ws, apps, org.a.x, index.ts: the .astro directory and its file are not walked.
+  assert.equal(r.plannedUserPaths[0].entries, 4);
+  const shellSrc = readFileSync(new URL('../../shell/src/lib/identityReports.ts', import.meta.url), 'utf-8');
+  assert.equal((shellSrc.match(/SOURCE_TREE_EXCLUDE/g) ?? []).length, 3, 'Developer Mode tree, own app source and its hand-over');
+  assert.doesNotMatch(shellSrc, /\['node_modules'\]/);
 });

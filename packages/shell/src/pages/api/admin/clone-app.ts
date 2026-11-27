@@ -5,10 +5,14 @@ import {
 } from 'node:fs';
 import { join, resolve } from 'node:path';
 import {
-  getAppManager, rewriteAppIdentity,
+  getAppManager, getNexusManager, rewriteAppIdentity,
   type ManifestPatch, type ScopeDefinition, type ScopeId,
 } from '@aura/core';
 import { auditOwner, ownerAction } from '../../../lib/approvals/admin.ts';
+import {
+  changedSinceApproval, checkCreateInputs, createRequest, manifestFromDir, revalidationRefusal, treeDigest,
+} from '../../../lib/approvals/appCreate.ts';
+import { handOwnAppSourceToOwner } from '../../../lib/identityReports.ts';
 
 /**
  * Server-side app cloning — the engine behind `aura dev clone`.
@@ -58,6 +62,10 @@ interface CloneRequest {
   withData?:     boolean;
   force?:        boolean;
   dryRun?:       boolean;
+  /** D109 AF2: the requester's summary for the owner (Markdown, at most 8 KiB), bound by digest. */
+  summary?:      string;
+  /** D109: the creation plan (a JSON object), bound by digest; not interpreted yet. */
+  plan?:         unknown;
 }
 
 export const POST: APIRoute = async (ctx) => {
@@ -72,14 +80,20 @@ export const POST: APIRoute = async (ctx) => {
 
   for (const [field, value] of [['sourceAppId', sourceAppId], ['targetAppId', targetAppId]] as const) {
     if (!value || !APP_ID_RE.test(value)) {
-      return json({ error: 'invalid-app-id', field, message: `${field} must match reverse-domain notation (got ${JSON.stringify(value)}).` }, 400);
+      return json({
+        error: 'invalid-app-id', category: !value ? 'missing-input' : 'invalid-input', field,
+        message: `${field} must match reverse-domain notation (got ${JSON.stringify(value)}).`,
+        missing: [{ input: field, kind: 'field', expects: 'reverse-domain id, e.g. com.example.notes' }],
+      }, 400);
     }
   }
+  const inputs = checkCreateInputs(body.summary, body.plan);
+  if (inputs) return json(inputs.body, inputs.status);
   if (body.manifest?.version != null && !SEMVER_RE.test(body.manifest.version)) {
-    return json({ error: 'invalid-version', message: `version must be x.y.z (got ${JSON.stringify(body.manifest.version)}).` }, 400);
+    return json({ error: 'invalid-version', category: 'invalid-input', message: `version must be x.y.z (got ${JSON.stringify(body.manifest.version)}).` }, 400);
   }
   if (body.manifest?.icon != null && (body.manifest.icon.length < 1 || body.manifest.icon.length > 3)) {
-    return json({ error: 'invalid-icon', message: 'icon must be 1–3 characters.' }, 400);
+    return json({ error: 'invalid-icon', category: 'invalid-input', message: 'icon must be 1–3 characters.' }, 400);
   }
 
   let mgr: ReturnType<typeof getAppManager>;
@@ -140,20 +154,10 @@ export const POST: APIRoute = async (ctx) => {
   if (destExists && !body.force) {
     return json({ error: 'exists', message: `${dest} already exists. Pass force=true to overwrite.` }, 409);
   }
-  // Overwriting an EXISTING app replaces the code that runs under its id (and
-  // inherits its grants): the owner's decision (D50, lib/approvals/admin.ts).
-  // New clones — including same-id shadows in another scope, which don't
-  // inherit scope-pinned grants — need nothing.
-  if (destExists && body.force) {
-    const admin = await ownerAction(ctx, {
-      action: 'admin.change', level: 'session',
-      payload: { op: 'clone-app.overwrite', sourceAppId, sourceScope, targetAppId, scope: targetScopeId },
-      title: `Overwrite ${targetAppId} with a copy of ${sourceAppId}`,
-      details: [`Into scope: ${targetScopeId}`, `From scope: ${sourceScope}`, 'The code that runs under that app id is replaced.'],
-    });
-    if (admin instanceof Response) return admin;
-    await auditOwner(admin, 'app.clone-overwrite', { target: `app:${targetAppId}`, detail: { sourceAppId, scope: targetScopeId } });
-  }
+  // Creating the copy (D109 AF2 `app.create`) and overwriting an existing app
+  // (D50 `admin.change`: its grants are revoked, Hotfix 2 S1) are the owner's
+  // decision, asked once the copy is staged so the dialog shows the manifest
+  // that will land (below). A dry run writes nothing and asks nobody.
 
   // A clone that lands on an id already present in a LOWER-priority scope
   // masks it (AppRegistry picks the highest priority). That's a legitimate
@@ -222,6 +226,40 @@ export const POST: APIRoute = async (ctx) => {
       });
     }
 
+    // Owner decision 12: the owner decides on the validated, staged copy: its manifest's facts, bound to
+    // the digest of the tree that lands (its fresh originId left out) and the level derived from it.
+    const decision = (): ReturnType<typeof createRequest> | { status: number; body: Record<string, unknown> } => {
+      const parsed = manifestFromDir(staging, targetAppId);
+      if ('status' in parsed) return parsed;
+      const tree = treeDigest(staging);
+      return createRequest(parsed.manifest, {
+        via: 'clone', appId: targetAppId, scope: targetScopeId, dest, replaces: existsSync(dest),
+        files: { digest: tree.digest, count: tree.fileCount, bytes: tree.bytes },
+        source: { appId: sourceAppId, scope: sourceScope },
+        ...(body.withData ? { withData: true } : {}),
+        ...(body.summary !== undefined ? { summary: body.summary } : {}),
+        ...(body.plan !== undefined ? { plan: body.plan } : {}),
+      });
+    };
+    const asked = decision();
+    if ('status' in asked) return json(asked.body, asked.status);
+    if (existsSync(dest) !== destExists) return json(revalidationRefusal('the target appeared or went away').body, 409);
+    const admin = await ownerAction(ctx, asked);
+    if (admin instanceof Response) return admin;
+    // …and revalidate it in full right before it lands: the staged manifest, its level and tree, the target.
+    const again = decision();
+    const changed = 'status' in again ? `it fails now: ${String(again.body['error'])}` : changedSinceApproval(asked, again);
+    if (changed) {
+      await auditOwner(admin, destExists ? 'app.clone-overwrite' : 'app.create', {
+        target: `app:${targetAppId}`, outcome: 'denied', detail: { sourceAppId, scope: targetScopeId, via: 'clone', revalidation: changed },
+      });
+      const r = revalidationRefusal(changed);
+      return json(r.body, r.status);
+    }
+    await auditOwner(admin, destExists ? 'app.clone-overwrite' : 'app.create', {
+      target: `app:${targetAppId}`, detail: { sourceAppId, scope: targetScopeId, via: 'clone', filesDigest: (asked.payload as { filesDigest?: string }).filesDigest },
+    });
+
     // ─── Land it ───────────────────────────────────────────────────────────
     if (destExists) {
       // Stop instances first so lifecycle hooks can flush state to /data
@@ -229,16 +267,16 @@ export const POST: APIRoute = async (ctx) => {
       // the overwrite the caller explicitly asked for.
       try { await mgr.stopAll(targetAppId); }
       catch (err) { warnings.push(`stopAll(${targetAppId}) failed: ${(err as Error).message} — continuing with the overwrite.`); }
-      // Move aside rather than rm -rf, so there's an undo window. Same trash
-      // root Nexus uninstall uses.
-      const trash = join(targetDef.dataDir, 'nexus', 'trash', `${targetAppId}-${ts}`);
-      mkdirSync(join(targetDef.dataDir, 'nexus', 'trash'), { recursive: true });
-      moveOrCopy(dest, trash);
-      warnings.push(`previous ${targetAppId} moved to ${trash}`);
-      // A stale Nexus install record now describes a directory that no longer
-      // matches the ref it names.
-      const record = join(targetDef.dataDir, 'nexus', 'installed', `${targetAppId}.json`);
-      if (existsSync(record)) rmSync(record, { force: true });
+      // Grants revoked, the tree to trash (an undo window), its stale install
+      // record dropped, kept data set aside for its installation (Nexus
+      // `setAsideForOverwrite`, shared with `aura dev new --force`).
+      try {
+        const aside = await getNexusManager().setAsideForOverwrite(targetAppId, targetScopeId);
+        if (aside.trash) warnings.push(`previous ${targetAppId} moved to ${aside.trash}`);
+        if (aside.retained) warnings.push(`data kept from the uninstalled ${targetAppId} was set aside for that app, not handed to this one`);
+      } catch (err) {
+        return json({ error: 'overwrite-failed', message: `could not set ${targetAppId} aside: ${(err as Error).message}; nothing was written.` }, 500);
+      }
     }
 
     mkdirSync(targetDef.appsDir, { recursive: true });
@@ -272,12 +310,27 @@ export const POST: APIRoute = async (ctx) => {
       }
     }
 
+    // The owner's own copy is the owner's (P5-2), exactly as a scaffold is:
+    // the owner's Terminal runs as the owner's uid (stream T) and edits it.
+    if (targetScopeId === 'user') {
+      const ownership = await handOwnAppSourceToOwner(dest, targetAppId);
+      if (ownership) warnings.push(`${targetAppId}: ${ownership}`);
+    }
+
     // chokidar picks the new dir up on its own within ~100 ms, but a CLI that
-    // immediately runs `aura app start` would race it. Reload explicitly, the
-    // same way /api/admin/manifest-edit does after a direct file write.
-    // reloadManifest also rebuilds the manifest-derived projections (intents,
-    // keymaps, interfaces); reloadFromDisk alone would leave them stale.
-    try { mgr.reloadManifest(targetAppId); } catch { /* watcher will reconcile */ }
+    // immediately runs `aura app start` would race it. Register it explicitly
+    // the way a Nexus install does (`reloadScopedApp`: manifest-derived
+    // projections, mounts re-bound onto the new dir, `app:installed`), then
+    // wait for its installation and host (D20: a clone is a new installation).
+    // A silent `reloadManifest` here hid the app from the watcher's `add`, so
+    // `app:installed` never fired and the clone never got an installation.
+    try {
+      mgr.reloadScopedApp(targetAppId);
+      const hostError = await mgr.syncAppHost(targetAppId, targetScopeId);
+      if (hostError) warnings.push(`${targetAppId} has no installation record yet (${hostError}); a shell restart allocates it.`);
+    } catch (err) {
+      warnings.push(`registering ${targetAppId} failed: ${(err as Error).message}; the watcher and the next shell start reconcile it.`);
+    }
 
     return json({
       ok: true, sourceAppId, sourceScope, targetAppId, scope: targetScopeId,
@@ -334,21 +387,6 @@ function copyTree(src: string, dst: string, excludes: string[], rootExcludes: st
 }
 
 
-/** Move a directory, falling back to copy+delete when rename(2) can't (cross
- *  device, busy mount). Destination must not exist. */
-function moveOrCopy(src: string, dst: string): void {
-  try {
-    renameSync(src, dst);
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code === 'EXDEV' || code === 'EBUSY' || code === 'EPERM') {
-      cpSync(src, dst, { recursive: true });
-      rmSync(src, { recursive: true, force: true });
-    } else {
-      throw err;
-    }
-  }
-}
 
 
 function json(payload: unknown, status = 200): Response {

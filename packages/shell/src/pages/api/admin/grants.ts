@@ -21,7 +21,9 @@ import { ownerUiApp } from '../../../../server/gateway-identity.mjs';
  *   POST   {subjectKind:'app'|'apiKey'|'user', subjectId, permission} → grant
  *            (a `user` subject, I.2: a member's app.use:<installationId> or
  *            app.jump:<installationId> only; `aura admin user grant` on the host)
- *            (app grants are pinned to the app's current install scope)
+ *            (app grants are pinned to the app's current install scope and to its
+ *            installation, repaired when missing: a new app under the same id
+ *            inherits nothing, S1)
  *            `notifications.read` (phase 5) also needs `readScope`:
  *            "all" | "app:<id>,sender:<key>" | {apps:[…]} | {senders:[…]},
  *            plus `includeSecret` (default false). Re-granting replaces the scope.
@@ -113,11 +115,20 @@ export const POST: APIRoute = async (ctx) => {
   const { grants, apiKeys } = core.getAuthServices();
   const warnings: string[] = [];
   let appScope: string | undefined;
+  let installationId: string | undefined;
   if (a.kind === 'app') {
     const mgr = core.getAppManager();
     const m = mgr.registry.getById(a.id);
     if (!m) return jsonResponse({ error: `unknown app ${a.id}` }, 404);
     appScope = mgr.registry.getScopeId(a.id);
+    // S1: the grant is given to this installation of the app only.
+    try {
+      const ensured = await mgr.ensureInstallation(a.id);
+      if (!ensured.installation) return jsonResponse({ error: ensured.error }, 409);
+      installationId = ensured.installation.installationId;
+    } catch (err) {
+      return jsonResponse({ error: `${a.id}: its installation record can't be read (${(err as Error).message})` }, 503);
+    }
     if (core.CONTEXT_READ_PERMISSION_RE.test(a.permission)) {
       // Stream C: a Context key counts only while the app declares it in context[].
       const key = a.permission.slice('context.read:'.length);
@@ -141,18 +152,21 @@ export const POST: APIRoute = async (ctx) => {
     : undefined;
   const actor = await ownerAction(ctx, {
     action: 'admin.grant', level: grantLevel(a.permission),
-    payload: { subjectKind: a.kind, subjectId: a.id, permission: a.permission, ...(read ? { read } : {}) },
+    payload: { subjectKind: a.kind, subjectId: a.id, permission: a.permission, ...(installationId ? { installationId } : {}), ...(read ? { read } : {}) },
     title: `Grant ${a.id} ${a.permission}`,
     details: [
       `${a.kind === 'apiKey' ? 'API key' : 'App'}: ${a.id}${appScope ? ` (${appScope} scope)` : ''}`,
+      ...(installationId ? [`For this installation of it only (${installationId}): an app installed later under the same id must be granted again.`] : []),
       ...(read ? [`Reads: ${typeof read.scope === 'string' ? read.scope : JSON.stringify(read.scope)}${read.includeSecret ? ', secret items included' : ''}`] : []),
       ...warnings,
     ],
   });
   if (actor instanceof Response) return actor;
   try {
-    const r = await grants.grant({ kind: a.kind as 'app' | 'apiKey' | 'user', id: a.id }, a.permission, { by: actor.by, appScope, ...(read ? { read } : {}) });
-    await auditOwner(actor, 'grant', { target: `${a.kind}:${a.id}`, detail: { permission: a.permission, appScope: appScope ?? null, changed: r.changed, ...(r.record.read ? { read: core.GrantStore.describeRead(r.record) } : {}) } });
+    const r = await grants.grant({ kind: a.kind as 'app' | 'apiKey' | 'user', id: a.id }, a.permission, {
+      by: actor.by, appScope, ...(installationId ? { installationId } : {}), ...(read ? { read } : {}),
+    });
+    await auditOwner(actor, 'grant', { target: `${a.kind}:${a.id}`, detail: { permission: a.permission, appScope: appScope ?? null, installationId: installationId ?? null, changed: r.changed, ...(r.record.read ? { read: core.GrantStore.describeRead(r.record) } : {}) } });
     return jsonResponse({ ok: true, ...r, warnings });
   } catch (err) {
     return fail(err);

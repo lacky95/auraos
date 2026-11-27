@@ -87,7 +87,7 @@ export function liveContextReadDeps(store: Pick<ContextStore, 'get' | 'resolveEn
     },
     context: core.liveGrantedContextDeps({
       grants: svc.grants,
-      appScope: (appId) => { try { return core.getAppManager().registry.getScopeId(appId) ?? undefined; } catch { return undefined; } },
+      appBinding: async (appId) => { try { return await core.getAppManager().appGrantBinding(appId); } catch { return { scope: undefined, installationId: null }; } },
       store,
       vault: new core.CredentialVault(),
       audit: (entry) => svc.audit.record(entry),
@@ -140,9 +140,12 @@ export interface ContractReportApp {
   name: string;
   scope: string;
   dir: string;
-  sandbox: 'proot' | 'container';
+  /** The runtime id, as latched or named (5b G: reported as is). */
+  sandbox: string;
+  /** Its runtime gives instances their own mount namespace (capabilities). */
+  ownNamespace: boolean;
   manifest: AppManifest & { context?: string[] };
-  instances: Array<{ instanceId: string; container?: string }>;
+  instances: Array<{ instanceId: string; inspect?: boolean }>;
 }
 
 export interface ContractReportDeps {
@@ -175,7 +178,7 @@ export async function contractReport(deps: ContractReportDeps, opts: { dataDir?:
   const apps = deps.apps().sort((a, b) => a.appId.localeCompare(b.appId));
   const [keys, signals] = await Promise.all([deps.contextKeys().catch(() => []), deps.signals().catch(() => ({} as Record<string, number>))]);
   const dataDir = opts.dataDir && deps.dataDir
-    ? new Map((await deps.dataDir(apps.map((a) => ({ appId: a.appId, scope: a.scope, dir: a.dir, sandbox: a.sandbox, instances: a.instances })))).map((r) => [r.appId, r]))
+    ? new Map((await deps.dataDir(apps.map((a) => ({ appId: a.appId, scope: a.scope, dir: a.dir, sandbox: a.sandbox, ownNamespace: a.ownNamespace, instances: a.instances })))).map((r) => [r.appId, r]))
     : null;
   const rows = apps.map((a): ContractReportRow => {
     const source = core.scanContractSources(a.dir, a.manifest, keys);
@@ -203,7 +206,7 @@ export async function contractReport(deps: ContractReportDeps, opts: { dataDir?:
       apps: rows.length,
       onContract: count((r) => r.contract.status === 'current'),
       noContract: count((r) => r.contract.status === 'none'),
-      unknownContract: count((r) => r.contract.status === 'unknown'),
+      incompatible: count((r) => r.contract.status === 'incompatible'),
       readsRawContext: count((r) => r.readsRawContext),
       undeclaredUse: count((r) => r.findings.length > 0 || r.source.some((s) => s.code !== 'context-raw') || Object.keys(r.signals).some((s) => s.endsWith('undeclared'))),
       ...(dataDir ? { writesOutsideDataDir: count((r) => r.dataDir?.outside === true) } : {}),
@@ -215,15 +218,23 @@ export async function contractReport(deps: ContractReportDeps, opts: { dataDir?:
 export function liveContractReportDeps(): ContractReportDeps {
   const mgr = core.getAppManager();
   return {
-    apps: () => mgr.registry.getAll().map((m) => ({
-      appId: m.id, name: m.name, scope: String(m.scopeId), dir: m.appDir,
-      // The runtime a running instance latched; else the manifest's, else the default (container, Q18).
-      sandbox: (mgr.getAllInstances().find((i) => i.appId === m.id && i.sandbox)?.sandbox ?? m.sandbox ?? 'container') === 'container' ? 'container' : 'proot',
-      manifest: m as unknown as ContractReportApp['manifest'],
-      instances: mgr.getAllInstances()
-        .filter((i) => i.appId === m.id && !i.inPool)
-        .map((i) => ({ instanceId: i.instanceId, ...(i.sandbox === 'container' ? { container: `aura-${i.instanceId}` } : {}) })),
-    })),
+    apps: () => mgr.registry.getAll().map((m) => {
+      // The runtime a running instance latched; else the manifest's, else the built-in default (Q18).
+      const sandbox = mgr.getAllInstances().find((i) => i.appId === m.id && i.sandbox)?.sandbox ?? m.sandbox ?? 'container';
+      const caps = mgr.runtimes.get(sandbox)?.capabilities({});
+      const ownNamespace = !!caps && caps.isolation !== 'none' && caps.isolation !== 'ptrace';
+      return {
+        appId: m.id, name: m.name, scope: String(m.scopeId), dir: m.appDir, sandbox, ownNamespace,
+        manifest: m as unknown as ContractReportApp['manifest'],
+        instances: mgr.getAllInstances()
+          .filter((i) => i.appId === m.id && !i.inPool)
+          // A workload whose runtime reports its own writes (`diagnostics.inspectWrites`, 5b-2 D-R).
+          .map((i) => ({
+            instanceId: i.instanceId,
+            ...(mgr.runtimeDiagnosticsOf(i.instanceId)?.inspectWrites ? { inspect: true } : {}),
+          })),
+      };
+    }),
     contextKeys: async () => (await new core.ContextStore().list()).map((e) => e.key),
     signals: async () => {
       const { defaultRedis } = await import('@aura/kv-store');
@@ -242,6 +253,6 @@ export function liveContractReportDeps(): ContractReportDeps {
       for (const [k, n] of Object.entries(pending?.meta ?? {})) add(k, n);
       return out;
     },
-    dataDir: (apps) => core.dataDirReport(apps, core.liveDataDirDeps()),
+    dataDir: (apps) => core.dataDirReport(apps, core.liveDataDirDeps((id) => mgr.runtimeDiagnosticsOf(id))),
   };
 }

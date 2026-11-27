@@ -10,6 +10,7 @@
  * `permission.needed` and waits for the next `next()` call; only an
  * in-process caller can answer that with `{ approve: true }`.
  */
+import type { InstanceUpdater } from '../app-manager/maintenance.js';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve as resolvePath } from 'node:path';
@@ -22,6 +23,7 @@ type OsEventBus = typeof OsEventBusSingleton;
 import { CatalogAggregator } from './CatalogAggregator.js';
 import { Installer, removeContained } from './Installer.js';
 import { NexusValidationError, validateStagedDir } from './Validator.js';
+import { operationalBlock, OperationalBlockError } from '../contract/types.js';
 import { hostConflicts, type HostClaim } from '../app-hosts/index.js';
 import { isProtectedHostName } from '../types/hostRules.js';
 import type { AppHostLifecycle, AppIdentityFacts, AppRestoreCheck } from '../app-hosts/lifecycle.js';
@@ -50,6 +52,15 @@ import { ActivationBusyError, acquireActivation, activationHolder, appActivation
 import { injectFault } from '../release/index.js';
 import type { PatchBinding } from '../patches/types.js';
 import type { CatalogEntry } from './CatalogAggregator.js';
+
+/** A built-in system app cannot be deleted (D1): disable it, or fork it into user scope. */
+export class SystemAppRemovalError extends Error {
+  readonly code = 'system-app';
+  constructor(readonly appId: string) {
+    super(`${appId} is a built-in system app: it cannot be deleted, and its data stays. Disable it instead (aura disable app ${appId}).`);
+    this.name = 'SystemAppRemovalError';
+  }
+}
 
 /**
  * How a store entry relates to this installation — the one answer the store
@@ -105,6 +116,13 @@ export interface NexusManagerOpts {
    * install leaves provisioning to the first start.
    */
   provision?: (appId: string, onLine: (line: string) => void) => Promise<{ ok: boolean; ran: boolean; output: string }>;
+  /**
+   * The kernel's `InstanceUpdater` (Phase 6 stream M): an update of an
+   * installed app goes drain → switch → maintenance start → onUpdate → serve.
+   * Absent (tests, tools): the files are switched and running instances keep
+   * the old code until they restart, as before.
+   */
+  updater?: InstanceUpdater;
   /** App Host records follow the install lifecycle. Injected by the singleton. */
   hostLifecycle?: AppHostLifecycle;
   /**
@@ -158,6 +176,7 @@ export class NexusManager {
   /** Deterministic AppRegistry (re)registration hook. */
   private readonly onAppChanged?: (appId: string) => void;
   private readonly provision?: NexusManagerOpts['provision'];
+  private readonly updater?: InstanceUpdater;
   private readonly hostLifecycle?: AppHostLifecycle;
   /** App ids (and raw refs) currently mid-install. Exposed so the store UI can
    *  render/persist an "installing…" state that survives a page reload. */
@@ -197,6 +216,7 @@ export class NexusManager {
     this.bus           = opts.bus;
     this.onAppChanged  = opts.onAppChanged;
     this.provision     = opts.provision;
+    this.updater       = opts.updater;
     this.hostLifecycle = opts.hostLifecycle;
     this.prepare       = opts.prepare;
     this.sourcesConfig = opts.sourcesConfig ?? cloneDefaultSources();
@@ -500,6 +520,14 @@ export class NexusManager {
       // App host names are global: `{name}--{host}` must route to ONE app.
       keys.add(manifest.id); this.installing.add(manifest.id);
       yield { type: 'validate.done', manifest };
+      // The start gate (D48, D108 A1): an app this AuraOS would never start (a newer Aura contract,
+      // setup/profiles before the setup engine) is refused before anyone is asked (install, update, patch activation).
+      const blocked = operationalBlock(manifest);
+      if (blocked) {
+        unmark();
+        yield { type: 'error', code: blocked.error, message: blocked.message, body: blocked };
+        throw new OperationalBlockError(blocked);
+      }
 
       // ─── Identity: which installed app (if any) is this? ────────────────
       // `id` alone decides nothing: the same id can be an unrelated app, and
@@ -652,6 +680,7 @@ export class NexusManager {
         } catch { /* treat as fresh install */ }
       }
       const diff = computePermissionDiff(currentManifest, manifest);
+      const priorInstallation = await this.hostLifecycle?.installationOf(manifest.id, targetScope).catch(() => null) ?? null;
       const binding: InstallBinding = {
         action: opts.action ?? 'nexus.install',
         appId: manifest.id, name: manifest.name, version: manifest.version,
@@ -662,7 +691,7 @@ export class NexusManager {
         context: [...new Set(manifest.context ?? [])].sort(),
         replaceCheckout: replacesCheckout,
         // A root request (identity/execution.ts) is bound by its digest; `renew` compares with the installation's approval.
-        execution: executionBinding(manifest, await this.hostLifecycle?.installationOf(manifest.id, targetScope).catch(() => null)),
+        execution: executionBinding(manifest, priorInstallation),
         exposure: installExposure(manifest),
         ...(opts.patch ? { patch: opts.patch } : {}),
       };
@@ -688,12 +717,15 @@ export class NexusManager {
       }
 
       yield { type: 'install.start' };
-      let record: InstallRecord;
+      let record!: InstallRecord;
+      let installedNew: InstallRecord | null = null;
+      let provisionedInSwitch = false;
       let prepared: PreparedTree | null = null;
       // The activation itself, under the target's lock (Q23): no yield inside,
       // so the lock is always released (a caller may abandon this generator
       // at any yield). Build before the swap (owner decision 2), then the
-      // atomic switch (Installer), then the App Host records.
+      // code switch (Phase 6 M: drained, switched, onUpdate, served), whose
+      // atomic exchange is the Installer's (7a).
       const lock = acquireActivation(this.rootDataDir, lockTarget, { by: binding.action });
       try {
         if (this.prepare) {
@@ -702,6 +734,8 @@ export class NexusManager {
           });
           if (!prepared.ok) throw new InstallPrepareError(manifest.id, prepared.step ?? 'build', prepared.output);
         }
+      // The code switch: the files and record, the App Host record, the root approval, then the registry.
+      const applyInstall = async (): Promise<void> => {
         this.hostLifecycle?.beginInstall(manifest.id, targetScope);
         try {
           if (restore.kind === 'deny') {
@@ -717,6 +751,7 @@ export class NexusManager {
           record = await installer.install(stagingDir, manifest, resolved, link, {
             keepProvenance: opts.action === 'app.patch.activate', ...(patched ? { extra: { patched } } : {}),
           });
+          installedNew = record;
           // A patch activation keeps the release's provenance on the record: the
           // installation's source is that record's, as every later sync reads it.
           const landed: AppIdentityFacts = opts.action === 'app.patch.activate'
@@ -731,16 +766,51 @@ export class NexusManager {
           // The approved root request, on the installation, before the app can start (fail closed if it can't be).
           if (executionApproved) {
             try {
+              // A new record with no data from before may start as root at once; an app that ran as its
+              // app identity keeps data that uid owns: its flip goes through the run-as migration.
+              const restored = restore.kind === 'restore' || (restore.kind === 'confirm' && !!restore.installation);
               await this.hostLifecycle?.approveExecution(manifest.id, targetScope, {
                 runAs: 'root', digest: executionApproved.digest, approvedAt: Date.now(), via: binding.action,
-              });
+              }, { newRecord: !priorInstallation && !restored });
             } catch (err) {
-              console.warn(`[nexus] ${manifest.id}: its root approval could not be recorded (${(err as Error).message}); it does not start until you approve it again (aura admin apps run-as ${manifest.id} root)`);
+              console.warn(`[nexus] ${manifest.id}: its root approval could not be recorded (${(err as Error).message}); it does not start until you approve it again (aura admin apps run-as ${manifest.id} root: a dry run, then --apply <digest>)`);
             }
           }
         } finally {
           this.hostLifecycle?.endInstall(manifest.id, targetScope);
         }
+        this.onAppChanged?.(manifest.id);
+      };
+
+      // An update of an installed app (Phase 6 stream M, D108 A3): its running code is drained, the new code
+      // starts with no traffic, runs onUpdate, then serves; a failure puts the previous tree back.
+      if (this.updater && currentManifest && currentRecord) {
+        const outcome = await this.updater.updateInstance(manifest.id, {
+          fromVersion: currentManifest.version, toVersion: manifest.version,
+          // The new code's dependencies before it starts (the builder; progress on the bus, a failure is the start's).
+          switchCode: async () => {
+            await applyInstall();
+            const dir = join(installer.appsDir, manifest.id);
+            if (this.provision && needsProvisioning(dir, manifest.runtime)) {
+              provisionedInSwitch = true;
+              await this.provision(manifest.id, (line) => this.bus?.emit('nexus:install.progress', { id: manifest.id, line }))
+                .catch((err: unknown) => { console.warn(`[nexus] ${manifest.id}: dependency install failed (${(err as Error).message}); the entrypoint retries`); });
+            }
+          },
+          rollback: async () => {
+            if (!installedNew) return;
+            installer.rollbackUpdate(installedNew, currentRecord);
+            this.onAppChanged?.(manifest.id);
+          },
+        });
+        if (!outcome.ok) {
+          unmark();
+          throw Object.assign(new Error(`${outcome.error.message}${outcome.rolledBack ? ' (the previous version is back)' : ''}`),
+            { code: outcome.error.error, body: outcome.error, rolledBack: outcome.rolledBack });
+        }
+      } else {
+        await applyInstall();
+      }
       } finally {
         lock.release();
       }
@@ -757,7 +827,7 @@ export class NexusManager {
       //    left a window where the store said INSTALLED and launching 404'd.
       //    An app that is registered but not yet provisioned is fine — the
       //    entrypoint provisions it and the runner now waits for that.
-      this.onAppChanged?.(manifest.id);
+      //    (applyInstall registered it; an update's new code is already serving.)
 
       // Install the app's dependencies HERE, not on the launch path.
       //
@@ -775,7 +845,7 @@ export class NexusManager {
       // hangs up mid-install — costs a slow first launch, not a broken app.
       // The entrypoint still provisions as a fallback and the runners wait.
       const appDir = join(installer.appsDir, manifest.id);
-      if (this.provision && needsProvisioning(appDir, manifest.runtime)) {
+      if (this.provision && !provisionedInSwitch && needsProvisioning(appDir, manifest.runtime)) {
         yield { type: 'install.provision', message: 'installing dependencies (in the builder)…' };
         try {
           const prov = await this.provision(manifest.id, (line) => {
@@ -866,26 +936,38 @@ export class NexusManager {
   }
 
   /**
-   * Delete an app from one scope, store-installed or not. In a mutable scope
-   * the app's data lives in its dir, so this is "Delete app data". A system
-   * app's data is elsewhere and its code can return with the repo, so its
-   * installation is only reserved. Returns whether a directory was removed.
+   * Delete an app from one scope, store-installed or not: "Delete app data"
+   * (its data lives in its dir in a mutable scope). A built-in system app is
+   * never deleted this way (D1): its code is the AuraOS repo's and its data
+   * stays; disable it instead. Returns whether a directory was removed.
    */
   async removeFromScope(appId: string, scopeId: ScopeId): Promise<{ removed: boolean; dest: string }> {
     if (!APP_ID_PATTERN.test(appId)) throw new Error(`invalid app id: ${appId}`);
     const def = this.scopeDefs.find((s) => s.id === scopeId);
     if (!def) throw new Error(`unknown scope: ${scopeId}`);
+    if (def.immutable) throw new SystemAppRemovalError(appId);
     const dest = join(def.appsDir, appId);
     const removed = existsSync(dest);
-    if (def.immutable) {
-      await this.hostLifecycle?.reserveApp(appId, scopeId);
-      removeContained(def.appsDir, appId);
-    } else {
-      await this.hostLifecycle?.retireApp(appId, scopeId);
-      await this.installerFor(scopeId).uninstall(appId, { purge: true });
-    }
+    await this.hostLifecycle?.retireApp(appId, scopeId);
+    await this.installerFor(scopeId).uninstall(appId, { purge: true });
     this.onAppChanged?.(appId);
     return { removed, dest };
+  }
+
+  /**
+   * Make room in a mutable scope for a local copy that replaces whatever is
+   * under `appId` (`aura dev clone --force`, `aura dev new --force`): the
+   * grants given to that id there are revoked first (new code earns them
+   * again), data a keep-data uninstall left is set aside for its
+   * installation, the old tree goes to trash and its install record is
+   * dropped (Installer `setAsideForOverwrite`). The caller stopped its
+   * instances, and registers the new copy (`reloadScopedApp` + `syncAppHost`).
+   */
+  async setAsideForOverwrite(appId: string, scopeId: ScopeId): Promise<{ trash: string | null; retained: boolean }> {
+    const installer = this.installerFor(scopeId);
+    await this.hostLifecycle?.revokeGrants(appId, scopeId);
+    const bound = await this.hostLifecycle?.boundInstallation(appId, scopeId);
+    return installer.setAsideForOverwrite(appId, bound?.state === 'reserved' ? bound.installationId : null);
   }
 
   /**

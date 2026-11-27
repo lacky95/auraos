@@ -5,6 +5,7 @@ import net from 'node:net';
 import { EventEmitter } from 'node:events';
 import { syncBuiltinESMExports } from 'node:module';
 import { PortManager } from '../dist/app-manager/PortManager.js';
+import { containerEndpoints } from '../dist/runtimes/container/endpoints.js';
 
 const spec = { kind: 'host', sourceAppId: 'test.source', sourcePort: 5174, port: 15174, bindAddr: '192.0.2.10' };
 function fixture(t, failure) {
@@ -28,7 +29,9 @@ function fixture(t, failure) {
   });
   syncBuiltinESMExports();
   t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
-  const manager = new PortManager({ dataDir: '/unused', runner: { isRunning: () => true }, registry: {}, resolveRunningInstance: () => ({ instanceId: 'test.source' }) });
+  // The container module's endpoints (5b-2 D-P): the Docker mechanism the manager drives.
+  const endpoints = containerEndpoints(() => ({ image: 'aura-base', network: 'aura-net', rawSocketArgs: ['--cap-drop', 'NET_RAW'] }));
+  const manager = new PortManager({ dataDir: '/unused', runner: { isRunning: () => true }, endpoints, registry: {}, resolveRunningInstance: () => ({ instanceId: 'test.source' }) });
   return { manager, calls, probes: () => probes };
 }
 function dockerError(message) { return Object.assign(new Error('docker failed'), { stderr: Buffer.from(message) }); }

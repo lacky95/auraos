@@ -7,11 +7,8 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-/**
- * Canonical mount root inside a consumer container. Provisioned at spawn by
- * `ContainerRunner`, so only containers started since that change have it.
- */
-export const MOUNT_ROOT_PATH = '/mnt/aura';
+/** Canonical mount root inside a consumer container: one definition, the runtimes' spawn paths (a leaf). */
+export { MOUNT_ROOT_PATH } from '../runtimes/spawn/paths.js';
 /** Where `work` mounts appear under a consumer's mount root. */
 export const WORK_DIR_NAME = 'work';
 /** Where `patches` mounts appear under a consumer's mount root. */

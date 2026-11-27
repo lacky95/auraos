@@ -26,10 +26,11 @@
  * 'hardlink' mode (leaving it is exactly the leak this module removes).
  */
 import {
-  existsSync, linkSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync,
-  unlinkSync, writeFileSync,
+  chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync,
+  symlinkSync, unlinkSync, writeFileSync,
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join } from 'node:path';
+import { MY_TOOLS_PATH } from '../runtimes/spawn/paths.js';
 import { resolveToolBinaries, type SidecarMap } from '../capabilities/tool-allowlist.js';
 import {
   INSTANCE_LIB_DIR, libsForBinaries, materialiseLibs, readLibMap, toolchainLibFor,
@@ -38,8 +39,8 @@ import {
 
 /** Path the legacy ('symlink') mode binds the whole toolchain store at. */
 export const ALL_TOOLS_PATH = '/aura/all-tools';
-/** Path every sandbox gets its own allowlist dir at; prepended to PATH. */
-export const MY_TOOLS_PATH = '/aura/my-tools';
+/** Path every sandbox gets its own allowlist dir at; prepended to PATH (one definition: runtimes/spawn/paths.ts). */
+export { MY_TOOLS_PATH };
 
 /**
  * Where a sandbox finds the shared libraries of the tools it was granted.
@@ -238,6 +239,45 @@ export type ToolsMode = 'hardlink' | 'symlink';
  */
 export function toolchainMirrorBin(dataDir: string): string {
   return join(dataDir, 'aura', 'toolchain', 'bin');
+}
+
+/**
+ * OS infrastructure the shell image ships in `/usr/local/bin`, which the
+ * toolchain must hold whatever `capabilities.json` says: they are not
+ * optional capabilities. `docker` lets wildcard apps (the Terminal) drive
+ * sibling containers; `oras` is the OS install workflow's OCI retrieval
+ * (`aura sdk install` → `oras pull` of `@aura/*`, in the throwaway builder
+ * and in a non-system app's own start, see scopes/portability.ts
+ * AURA_RUNTIME_TOOLS and provisioning.ts BUILDER_TOOLS).
+ */
+export const IMAGE_TOOLS = ['docker', 'oras'] as const;
+/** Where the shell image installs {@link IMAGE_TOOLS}. */
+export const IMAGE_TOOL_BIN = '/usr/local/bin';
+
+/**
+ * Copy every {@link IMAGE_TOOLS} binary the toolchain lacks from the image.
+ * A container recreate starts from an image-layer `/os/toolchain`, which (in
+ * the development image) never held `oras`; the AppManager runs this at
+ * init, BEFORE `syncToolchainMirror()`, so the volume mirror every sandbox
+ * and the builder link from gets them too. Cheap and idempotent: an entry
+ * already present is left alone. Returns the names it copied.
+ */
+export function healImageTools(toolchainDir: string, imageBin: string = IMAGE_TOOL_BIN): string[] {
+  const healed: string[] = [];
+  for (const name of IMAGE_TOOLS) {
+    const dst = join(toolchainDir, 'bin', name);
+    const src = join(imageBin, name);
+    if (existsSync(dst) || !existsSync(src)) continue;
+    try {
+      mkdirSync(dirname(dst), { recursive: true });
+      copyFileSync(src, dst);
+      chmodSync(dst, 0o755);
+      healed.push(name);
+    } catch (err) {
+      console.warn(`[tools] could not heal ${name} into the toolchain: ${(err as Error).message}`);
+    }
+  }
+  return healed;
 }
 
 /** Binary names in a toolchain dir, ignoring dotfiles (probe/temp leftovers). */

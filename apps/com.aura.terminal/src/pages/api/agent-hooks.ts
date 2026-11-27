@@ -1,5 +1,6 @@
 import type { APIRoute } from 'astro';
-import { hookStatus, installHooks, uninstallHooks } from '../../agent-hooks';
+import { userFiles } from '../../user-files';
+import type { UserFileOp } from '../../user-file-ops';
 
 /**
  * Agent hooks in the shared home (agent-hooks.ts):
@@ -7,12 +8,13 @@ import { hookStatus, installHooks, uninstallHooks } from '../../agent-hooks';
  *   POST   → install (idempotent, backs up what it changes)
  *   DELETE → remove only our entries
  * Explicit by design: nothing installs these behind the user's back.
+ * As the session user (user-files.ts, stream T2): this server can't open the home.
  */
-const run = (fn: () => unknown): Response => {
-  try { return Response.json(fn()); }
+const run = async (op: UserFileOp): Promise<Response> => {
+  try { return Response.json(await userFiles(op)); }
   catch (err) { return Response.json({ error: 'hooks-failed', message: (err as Error).message }, { status: 500 }); }
 };
 
-export const GET: APIRoute    = () => run(() => hookStatus());
-export const POST: APIRoute   = () => run(() => installHooks());
-export const DELETE: APIRoute = () => run(() => uninstallHooks());
+export const GET: APIRoute    = () => run('hooks-status');
+export const POST: APIRoute   = () => run('hooks-install');
+export const DELETE: APIRoute = () => run('hooks-uninstall');

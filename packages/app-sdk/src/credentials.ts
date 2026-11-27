@@ -47,7 +47,13 @@ export interface CredentialRequest {
 
 export type CredentialResult =
   | { ok: true; handle: string; name: string }
-  | { ok: false; outcome: ApprovalOutcome };
+  /**
+   * D102: `feedback` is the owner's optional words with a denial; `on_hold`
+   * (only with `returnOnHold`) carries the `approvalId` to wait on later with
+   * `osClient.approvals.wait(approvalId)`, then ask again: asking again for
+   * the same name resumes the same request.
+   */
+  | { ok: false; outcome: ApprovalOutcome; approvalId?: string; feedback?: string; heldUntil?: number };
 
 export class CredentialsApi {
   private readonly approvals = new ApprovalsApi();
@@ -77,7 +83,13 @@ export class CredentialsApi {
     const created = await res.json().catch(() => ({})) as { id?: unknown };
     if (typeof created.id !== 'string') throw new OsError(res.status, 'invalid-response', 'credentials.request: no request id');
     const answer = await this.approvals.wait(created.id, opts);
-    if (!answer.approved) return { ok: false, outcome: answer.outcome };
+    if (!answer.approved) {
+      return {
+        ok: false, outcome: answer.outcome, approvalId: created.id,
+        ...(answer.feedback ? { feedback: answer.feedback } : {}),
+        ...(answer.heldUntil !== undefined ? { heldUntil: answer.heldUntil } : {}),
+      };
+    }
     const collectUrl = `${base}/api/credentials/requests/${encodeURIComponent(created.id)}`;
     const got = await fetch(collectUrl, {
       method: 'POST',

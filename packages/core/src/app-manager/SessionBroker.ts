@@ -33,8 +33,9 @@ import { promisify } from 'node:util';
 import type { Duplex } from 'node:stream';
 import { BASE_IMAGE } from './BaseImage.js';
 import type { EngineClient } from './DockerApi.js';
-import { ExecBridgeError, engineSession, type ExecSession, type SessionSpec } from './ExecBridge.js';
-import { DOCKER_SOCKET_PATH } from './spawn/socketArgs.js';
+import { ExecBridgeError, type ExecSession, type SessionSpec } from './ExecBridge.js';
+import { engineSession } from './DockerApi.js';
+import { DOCKER_SOCKET_PATH } from '../runtimes/spawn/socketArgs.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -68,6 +69,8 @@ export interface SessionTarget {
   containerId: string;
   /** The container's init in the host's PID namespace. */
   pid: number;
+  /** A System Terminal's own user uid (stream T2): its init is its root session launcher; only that user's session may enter it. */
+  sessionHostUid?: number;
 }
 
 /** `docker run` of the broker (golden-tested; nothing here comes from a request). */
@@ -103,6 +106,7 @@ export function enterSpec(spec: SessionSpec, target: SessionTarget, paths: { doc
     sid: spec.sessionId,
     container: target.containerId,
     pid: target.pid,
+    ...(target.sessionHostUid ? { sessionHostUid: target.sessionHostUid } : {}),
     kind: spec.kind,
     home: spec.home.mode,
     ...(spec.home.mode === 'private' ? { homePath: spec.home.hostPath } : {}),
@@ -188,22 +192,8 @@ export class SessionBroker {
   }
 
   /** Copies the helper onto the data volume under a content-addressed name (root, 0755 in a 0700 dir). */
-  private async stageHelper(): Promise<string> {
-    const src = await (this.deps.helperBinary ?? defaultHelperBinary.bind(null, this.deps.dataDir))();
-    const bytes = readFileSync(src);
-    const sha = createHash('sha256').update(bytes).digest('hex').slice(0, 16);
-    const dir = join(this.deps.dataDir, SESSION_BROKER_SUBPATH);
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
-    chmodSync(dir, 0o700);
-    const dest = join(dir, `aura-session-enter-${sha}`);
-    const current = existsSync(dest) ? createHash('sha256').update(readFileSync(dest)).digest('hex').slice(0, 16) : null;
-    if (current !== sha) {
-      const tmp = `${dest}.tmp-${process.pid}`;
-      copyFileSync(src, tmp);
-      chmodSync(tmp, 0o755);
-      renameSync(tmp, dest);
-    }
-    return dest;
+  private stageHelper(): Promise<string> {
+    return stageSessionEnter(this.deps.dataDir, this.deps.helperBinary);
   }
 
   /** One short command in the broker (end, reap); its stdout. */
@@ -243,8 +233,14 @@ export class SessionBroker {
     const id = await engine.execCreate(SESSION_BROKER_NAME, {
       Cmd: [helper, 'enter', JSON.stringify(input)], Tty: spec.tty, AttachStdin: true, User: '0',
     });
-    const sock: Duplex = await engine.execStart(id, spec.tty);
+    const sock: Duplex = await engine.execStart(id, spec.tty, { cols: spec.cols, rows: spec.rows });
     let launcherPid = 0;
+    // The session takes the stream at once, before the launcher's pid is read: a command that writes nothing
+    // ends its stream right away, and an `end`/`close` nobody listened to is lost (the session never ended).
+    const session = engineSession(engine, id, sock, spec, onOutput, {
+      // The caller went away (disconnect, End, timeout): end the launcher, so the session hangs up.
+      onEnd: () => { if (launcherPid) void this.brokerCommand([helper, 'end', String(launcherPid)]).catch(() => undefined); },
+    });
     for (let i = 0; i < 20 && !launcherPid; i++) {
       const r = await engine.execInspect(id).catch(() => null);
       launcherPid = r?.Pid ?? 0;
@@ -256,13 +252,32 @@ export class SessionBroker {
       kind: spec.kind, home: spec.home.mode, uid: spec.uid, launcherPid, startedAt: new Date().toISOString(),
     };
     if (launcherPid) this.open.set(spec.sessionId, record);
-    const session = engineSession(engine, id, sock, spec, onOutput, {
-      // The caller went away (disconnect, End, timeout): end the launcher, so the session hangs up.
-      onEnd: () => { if (launcherPid) void this.brokerCommand([helper, 'end', String(launcherPid)]).catch(() => undefined); },
-    });
     void session.exited.then(() => { this.open.delete(spec.sessionId); }, () => { this.open.delete(spec.sessionId); });
     return session;
   }
+}
+
+/**
+ * The launcher staged on the data volume under a content-addressed name (root,
+ * 0755 in a 0700 dir): the session broker runs it, and MountManager's helper
+ * runs its idmap subcommands (D80, 5b G). Returns the shell-side path.
+ */
+export async function stageSessionEnter(dataDir: string, helperBinary?: () => Promise<string>): Promise<string> {
+  const src = await (helperBinary ?? defaultHelperBinary.bind(null, dataDir))();
+  const bytes = readFileSync(src);
+  const sha = createHash('sha256').update(bytes).digest('hex').slice(0, 16);
+  const dir = join(dataDir, SESSION_BROKER_SUBPATH);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  chmodSync(dir, 0o700);
+  const dest = join(dir, `aura-session-enter-${sha}`);
+  const current = existsSync(dest) ? createHash('sha256').update(readFileSync(dest)).digest('hex').slice(0, 16) : null;
+  if (current !== sha) {
+    const tmp = `${dest}.tmp-${process.pid}`;
+    copyFileSync(src, tmp);
+    chmodSync(tmp, 0o755);
+    renameSync(tmp, dest);
+  }
+  return dest;
 }
 
 /** The image's helper, or one compiled from the checkout when the image predates stream J. */

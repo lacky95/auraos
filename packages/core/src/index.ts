@@ -29,6 +29,7 @@ export * from './permissions/index.js';
 export * from './content/index.js';
 export * from './interfaces/index.js';
 export * from './app-hosts/index.js';
+export type * from './errors/contracts.js';
 export * from './theme/index.js';
 export * from './layout/LayoutStrategyRegistry.js';
 export * from './keymap/index.js';
@@ -59,8 +60,14 @@ export * from './runtimes/registry.js';
 export * from './runtimes/settingsSchema.js';
 export * from './runtimes/settingsStore.js';
 export * from './runtimes/migrateLegacy.js';
-export * from './runtimes/builtins/container.js';
-export * from './runtimes/builtins/proot.js';
+export * from './runtimes/container/index.js';
+export { containerName, sidecarContainerName as sidecarWorkloadName } from './runtimes/container/names.js';
+export * from './runtimes/proot/index.js';
+export * from './runtimes/proot/chrootDevices.js';
+export { prootOwnerActions, PROOT_SOURCE, PROOT_REF, PROOT_LOCAL_BIN, type ProotActionHost } from './runtimes/proot/actions.js';
+export * from './runtimes/hostTools.js';
+export * from './runtimes/respawn.js';
+export * from './capabilities/apt.js';
 export * from './runtimes/builtins/index.js';
 export * from './security/SealedPolicyRecord.js';
 export * from './homes/types.js';
@@ -72,6 +79,8 @@ export * from './identity/passwd.js';
 export * from './identity/ownershipReport.js';
 export * from './identity/appOwnership.js';
 export * from './identity/ownershipApply.js';
+export { RUN_AS_MIGRATION_AUDIT_ACTIONS, runAsMigrationBlock, runAsOwnershipPaths, runAsOwnershipPlan } from './identity/runAsOwnership.js';
+export type { RunAsOwnershipApply, RunAsOwnershipInput, RunAsOwnershipPlan, RunAsTarget } from './identity/runAsOwnership.js';
 export * from './identity/privilegeReview.js';
 export * from './identity/appIdentityProvider.js';
 export {
@@ -81,7 +90,16 @@ export {
 export type {
   AppRootExecutionPolicy, ExecutionApproval, ExecutionApprovedVia, ExecutionBinding, ExecutionConfig, ExecutionDecision, ExecutionRequest,
 } from './identity/execution.js';
-export { renderIdentityFiles, identityFilesSubpath, isNonRootIdentity } from './app-manager/spawn/identityArgs.js';
+export { renderIdentityFiles, identityFilesSubpath, isNonRootIdentity } from './runtimes/spawn/identityArgs.js';
 export * from './homes/importReport.js';
 export * from './homes/importMarkers.js';
 export * from './homes/plan.js';
+// Phase 6 K: the composition root. Loading the barrel hands every factory and collaborator in.
+export { bootSystem, getSystem, restartKernel, shutdownSystem, compositionFromEnv, SHUTDOWN_BUDGET_MS, SHUTDOWN_HOOKS_MS } from './system/bootstrap.js';
+export { bootStatusFile, readBootStatus, BOOTSTRAP_VERSION } from './system/status.js';
+export type * from './system/types.js';
+import { composeKernel } from './system/compose.js';
+composeKernel();
+// Phase 6 Stage 1b (6B.0, D108 A3): the frozen maintenance-start / updateInstance contract (stream M implements it).
+export { MAINTENANCE_REASONS } from './app-manager/maintenance.js';
+export type * from './app-manager/maintenance.js';

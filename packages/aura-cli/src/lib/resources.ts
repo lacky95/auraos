@@ -12,6 +12,7 @@ import { color, stateColor, uptime } from './format.js';
 import { loadRegistry, loadState, type State } from './registry.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { sidecarWorkloadName } from '@aura/core';
 
 // ─── API shapes (one copy, shared by every resource) ────────────────────────
 
@@ -25,9 +26,24 @@ export interface InstanceDto {
   inPool?: boolean;
   /** A preview of a patch workspace (Track P, `aura dev patch preview`). */
   preview?: { workspace: string; startedAt: string };
-  sandbox?: 'proot' | 'container';
+  /** The runtime id it latched (display only: gate on `runtime.capabilities`). */
+  sandbox?: string;
+  /** Its runtime and effective capabilities (5b G); null before a start. */
+  runtime?: InstanceRuntimeDto | null;
   /** How the start passed the lifecycle checks (core `LifecycleStatus`); absent when not measured. */
   lifecycle?: { identity: string; guard: string };
+}
+
+/** The instance view's runtime (5b G, `/api/apps`): the capabilities are the effective ones. */
+export interface InstanceRuntimeDto { id: string; source?: string; capabilities: Record<string, unknown> }
+
+/**
+ * Can this instance take cross-app mounts? Its runtime's `mounts` capability
+ * (5b G), never its runtime id. An instance whose runtime is not known yet is
+ * left to the server, which refuses with `capability-missing`.
+ */
+export function canMount(i: { runtime?: InstanceRuntimeDto | null }): boolean {
+  return i.runtime?.capabilities['mounts'] !== false;
 }
 
 export interface ActivityDto {
@@ -54,6 +70,8 @@ export interface AppDto {
     auraContract?: number;
   };
   enabled?: boolean;
+  /** D48: the refusal message of an app built for a newer Aura contract (never started); null otherwise. */
+  incompatible?: string | null;
   instances: InstanceDto[];
   activities: ActivityDto[];
   /** How the app starts next time (`prod` / `dev: changed` …) — `GET /api/apps/serve`; only on `get apps`. */
@@ -124,7 +142,7 @@ export function sidecarId(s: SidecarDto): string {
 
 /** Does `token` name this sidecar? Accepts the ID, the container name, or `aura-<inst>--<token>`. */
 export function sidecarMatches(s: SidecarDto, token: string): boolean {
-  return s.service === token || s.id === token || s.id === `aura-${s.parentInstanceId}--${token}`;
+  return s.service === token || s.id === token || s.id === sidecarWorkloadName(s.parentInstanceId, token);
 }
 
 export async function fetchSidecars(instanceId: string): Promise<SidecarDto[]> {
@@ -196,7 +214,8 @@ const apps: ResourceDef<AppDto> = {
     { header: 'BG', value: (a) => (a.manifest.backgroundService ? 'yes' : '-'), wide: true },
     // The app contract the app was built for (D48): `-` before the contract.
     { header: 'CONTRACT', value: (a) => (a.manifest.auraContract ? String(a.manifest.auraContract) : '-'), wide: true },
-    { header: 'EN', value: (a) => (a.enabled === false ? color.red('off') : color.green('on')) },
+    // D48: an app built for a newer Aura contract is never started, whatever its enable flag.
+    { header: 'EN', value: (a) => (a.incompatible ? color.red('incompatible') : a.enabled === false ? color.red('off') : color.green('on')) },
   ],
 };
 
@@ -389,7 +408,7 @@ const mounts: ResourceDef<MountDto> = {
     else {
       const all = await fetchApps();
       ids = liveInstances(all)
-        .filter((i) => i.sandbox === 'container' && (!ctx.app || i.appId === ctx.app))
+        .filter((i) => canMount(i) && (!ctx.app || i.appId === ctx.app))
         .map((i) => i.instanceId);
     }
     const out: MountDto[] = [];

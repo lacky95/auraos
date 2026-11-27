@@ -1,7 +1,7 @@
 import { join } from 'node:path';
 import { getAppManager, lifecyclePath, RELAY_CLAIM_HEADER } from '@aura/core';
 import { relayClaimFor, type RelaySigner } from './access/relay.ts';
-import type { AppManifest, AppInstance } from '@aura/core';
+import type { AppManifest, AppInstance, AuraErrorBody } from '@aura/core';
 
 export interface AppHealth {
   /** Process is alive (kill -0 PID succeeds). null = no PID known. */
@@ -121,15 +121,22 @@ export async function buildAppDTO(appId: string): Promise<AppDTO | null> {
   const manifest = mgr.getManifest(appId);
   if (!manifest) return null;
   const instances = await Promise.all(
-    mgr.getInstancesByApp(appId).map((inst) => probeHealth(inst).then((health) => ({ instance: publicInstance(inst), health }))),
+    mgr.getInstancesByApp(appId).map((inst) => probeHealth(inst).then((health) => ({ instance: publicInstance(inst, mgr), health }))),
   );
   return { manifest, instances };
 }
 
-/** An instance for an API response. `owner` is server-side until Phase 3. */
-export function publicInstance(inst: AppInstance): Omit<AppInstance, 'owner'> {
+/** The runtime of an instance in the instance view (5b G): `{id, source, capabilities}`, its effective capabilities. */
+export type InstanceRuntimeView = ReturnType<ReturnType<typeof getAppManager>['instanceRuntime']>;
+
+/**
+ * An instance for an API response. `owner` is server-side until Phase 3.
+ * With `mgr`, it carries `runtime` (5b G): clients gate on
+ * `runtime.capabilities`, never on the runtime id.
+ */
+export function publicInstance(inst: AppInstance, mgr?: Pick<ReturnType<typeof getAppManager>, 'instanceRuntime'>): Omit<AppInstance, 'owner'> & { runtime?: InstanceRuntimeView } {
   const { owner: _owner, ...rest } = inst;
-  return rest;
+  return mgr ? { ...rest, runtime: mgr.instanceRuntime(inst.instanceId) } : rest;
 }
 
 export function jsonResponse(data: unknown, status = 200) {
@@ -139,6 +146,21 @@ export function jsonResponse(data: unknown, status = 200) {
   });
 }
 
-export function errorResponse(message: string, status = 500) {
-  return jsonResponse({ error: message }, status);
+/**
+ * An error answer. Two forms during the migration (error-messages review §4.3):
+ *   errorResponse(status, body)   the structured body (`AuraErrorBody`: `error`
+ *                                 is the code, `message` the sentence, plus
+ *                                 hint/docs/permission/… when they apply), no-store
+ *   errorResponse(message, status) the old form, `{error: message}`
+ */
+export function errorResponse(status: number, body: AuraErrorBody): Response;
+export function errorResponse(message: string, status?: number): Response;
+export function errorResponse(a: string | number, b?: number | AuraErrorBody): Response {
+  if (typeof a === 'number') {
+    return new Response(JSON.stringify(b), {
+      status: a,
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' },
+    });
+  }
+  return jsonResponse({ error: a }, typeof b === 'number' ? b : 500);
 }

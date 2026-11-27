@@ -42,7 +42,7 @@ import { installWithChoices } from './nexus.js';
 import type { RestartResult } from './app.js';
 import {
   ACTIVE_REF, apiOrBody, appFromArgOrCwd, bindWorkspace, cleanWorkspaces, detachWorkspace, findWorkspace, getAppSource, gitOut,
-  patchRepoOf, readWorkspaceMarker, refuseBuiltIn, reportSaved, upstreamBase, writeWorkspaceMarker, type AppSourceView, type WorkspaceMarker,
+  patchRepoOf, readWorkspaceMarker, refuseBuiltIn, reportSaved, requireInstallation, upstreamBase, writeWorkspaceMarker, type AppSourceView, type WorkspaceMarker,
 } from './dev-source.js';
 
 const GIT_ENV = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
@@ -88,6 +88,7 @@ export interface StartResult { path: string; n: number; created: boolean; marker
 export async function startWorkspace(app: string, opts: { base?: string; new?: boolean } = {}): Promise<StartResult> {
   const v = await getAppSource(app);
   refuseBuiltIn(v);
+  requireInstallation(v);
   const repo = await patchRepoOf(v);
   const series = seriesAt(repo);
   const upstream = upstreamBase(v);
@@ -368,6 +369,7 @@ function bindScratch(v: AppSourceView, repo: string, ws: Awaited<ReturnType<type
 
 /** `base` + the series' patches, built in the scratch workspace. The bound workspace is restored afterwards by the caller. */
 async function candidate(v: AppSourceView, base: SeriesBase, patches: Parameters<typeof applySeries>[1], rev: string | null) {
+  requireInstallation(v);
   const ws = await scratchWorkspace(v);
   let built: ReturnType<typeof buildTree>;
   try {

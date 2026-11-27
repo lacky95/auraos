@@ -36,7 +36,7 @@ function setup() {
     get: async (s: { kind: string; id: string }, p: string) => (held.has(`${s.kind}:${s.id}|${p}`) ? { permission: p } : null),
   } as unknown as GrantStore;
   const deps: DecideDeps = {
-    authorizer: new Authorizer({ grants, declared: () => [], appScope: () => 'system' }),
+    authorizer: new Authorizer({ grants, declared: () => [], appBinding: async () => ({ scope: 'system', installationId: 'inst-1' }) }),
     instanceOwner: (id) => INSTANCES[id] ?? null,
     installationOf: async (appId) => (appId === 'com.aura.terminal' ? 'inst-term' : null),
   };
@@ -114,7 +114,7 @@ test('D82: a member signs itself out and reads its own session; it reaches no ow
 
 test('D82: accounts are the host operator\'s alone, in every mode; not the owner\'s login, not an owner agent', async () => {
   const deps: DecideDeps = {
-    authorizer: new Authorizer({ grants: { get: async () => null } as unknown as GrantStore, declared: () => [], appScope: () => 'system' }),
+    authorizer: new Authorizer({ grants: { get: async () => null } as unknown as GrantStore, declared: () => [], appBinding: async () => ({ scope: 'system', installationId: 'inst-1' }) }),
     ownerAgent: () => true,
   };
   const d = createDecide(deps);
@@ -177,7 +177,7 @@ test('handler audit: one owner test; a member, a foreign owner and an app are no
 });
 
 test('D82 (C8): the desktop page lists only the signed-in user\'s windows; the handoff checks a member\'s instance and grant', () => {
-  const page = readFileSync(new URL('../src/pages/index.astro', import.meta.url), 'utf8');
+  const page = readFileSync(new URL('../src/desktop-pages/index.astro', import.meta.url), 'utf8');
   assert.match(page, /\(inst as \{ owner\?: string \}\)\.owner \?\? localOwnerId\(\)\) !== userId\) continue;/);
   const handoff = readFileSync(new URL('../src/pages/api/app-hosts/handoff.ts', import.meta.url), 'utf8');
   assert.match(handoff, /identity\.role !== 'owner' && !\(await memberMayOpen\(/);
@@ -191,7 +191,7 @@ test('owner decision (5-main): a member\'s Terminal acts with the member\'s own 
   const instances: Record<string, string | null> = { ...INSTANCES, 'io.ex.notes-1': 'default', 'io.ex.notes-2': MEMBER };
   const d = createDecide({
     // The Terminal app holds its declared app grants (the owner's); a member's Terminal must not inherit them.
-    authorizer: new Authorizer({ grants, declared: (id: string) => (id === 'com.aura.terminal' ? ['apps.mount'] : []), appScope: () => 'system' }),
+    authorizer: new Authorizer({ grants, declared: (id: string) => (id === 'com.aura.terminal' ? ['apps.mount'] : []), appBinding: async () => ({ scope: 'system', installationId: 'inst-1' }) }),
     instanceOwner: (id) => instances[id] ?? null,
     installationOf: async (appId) => ({ 'com.aura.terminal': 'inst-term', 'io.ex.notes': 'inst-notes' } as Record<string, string>)[appId] ?? null,
     ownerAgent: (p) => p.appId === 'com.aura.terminal' && INSTANCES[p.instanceId] === 'default',
@@ -230,7 +230,7 @@ test('5-main integration (I.2 + D69): a member\'s app.use reaches its own Termin
   const held = new Set<string>(['user:' + MEMBER + '|app.use:inst-term', 'user:' + MEMBER + '|app.use:inst-shelld']);
   const grants = { get: async (s: { kind: string; id: string }, p: string) => (held.has(`${s.kind}:${s.id}|${p}`) ? { permission: p } : null) } as unknown as GrantStore;
   const d = createDecide({
-    authorizer: new Authorizer({ grants, declared: () => [], appScope: () => 'system' }),
+    authorizer: new Authorizer({ grants, declared: () => [], appBinding: async () => ({ scope: 'system', installationId: 'inst-1' }) }),
     instanceOwner: (id) => INSTANCES[id] ?? null,
     installationOf: async (appId) => ({ 'com.aura.terminal': 'inst-term', 'com.aura.aurashelld': 'inst-shelld' } as Record<string, string>)[appId] ?? null,
   });
@@ -241,4 +241,16 @@ test('5-main integration (I.2 + D69): a member\'s app.use reaches its own Termin
   assert.equal((await d(input(member, proxy, { appId: 'com.aura.aurashelld' }))).outcome, 'deny');
   // Another app's instance token with an app-permission grant still never reaches a Terminal upstream (D89 B6).
   assert.equal((await d(input(inst('io.ex.app', { userId: MEMBER }), proxy, { appId: 'com.aura.terminal', instanceId: 'com.aura.terminal-2' }, 'instance-token'))).outcome, 'deny');
+});
+
+test("5-main (VM finding): a member may be granted its own Terminal; the owner UIs stay the owner's", async () => {
+  const { ownerUiApp } = await import("../server/gateway-identity.mjs");
+  const { SESSION_HOST_APPS } = await import("../server/session-hosts.mjs");
+  // The grant route refuses an owner UI unless it is the session host (lib/usersAdmin.ts changeUserGrant).
+  const refused = (appId: string) => !!ownerUiApp(appId) && !SESSION_HOST_APPS.has(appId);
+  assert.equal(refused("com.aura.terminal"), false, "a member's own Terminal (D82)");
+  assert.equal(refused("com.aura.settings"), true);
+  assert.equal(refused("com.aura.nexus"), true);
+  const src = readFileSync(new URL("../src/lib/usersAdmin.ts", import.meta.url), "utf8");
+  assert.match(src, /ownerUiApp\(appId\) && !SESSION_HOST_APPS\.has\(appId\)/);
 });

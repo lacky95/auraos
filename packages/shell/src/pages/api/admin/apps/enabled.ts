@@ -1,6 +1,5 @@
 import type { APIRoute } from 'astro';
 import { APP_ID_PATTERN, getAppManager } from '@aura/core';
-import { defaultKv } from '@aura/kv-store';
 
 /**
  * Per-app enable/disable state.
@@ -9,14 +8,9 @@ import { defaultKv } from '@aura/kv-store';
  *   POST → `{ appId, enabled }` flips one app. On disable AppManager.stop()s
  *          every running instance + clears the warm pool (matches the
  *          Android "force stop on disable" semantics the user picked).
- *          The new map is persisted to KV under `os/app-enabled` so the
- *          choice survives shell restarts (hydrated in middleware.ts before
- *          AppManager.init() so autoStart/warmPool/service-spawn loops skip
- *          disabled apps from the very first tick).
+ *          The kernel persists the map (AppManager owns `os/app-enabled`)
+ *          and hydrates it at the start of its init (Phase 6 K).
  */
-
-const KV_NS  = 'os';
-const KV_KEY = 'app-enabled';
 
 export const GET: APIRoute = () => {
   const mgr = getAppManager();
@@ -44,29 +38,15 @@ export const POST: APIRoute = async ({ request }) => {
   if (!enabled && manifest.critical) {
     return json({ error: 'critical', message: `App ${appId} is marked critical and cannot be disabled. Use \`aura stop app ${appId}\` for a one-shot stop instead.` }, 409);
   }
+  let persisted: boolean;
   try {
-    await mgr.setEnabled(appId, enabled);
+    ({ persisted } = await mgr.setEnabled(appId, enabled));
   } catch (err) {
     return json({ error: 'failed', message: (err as Error).message }, 500);
   }
-
-  // Persist the WHOLE enabled map (cheap — ~5 entries), not just the delta.
-  // Simpler than maintaining a diff and idempotent if the KV ever gets out
-  // of sync with AppManager's in-memory copy.
-  try {
-    const kv = defaultKv();
-    try {
-      await kv.set(KV_NS, KV_KEY, mgr.getEnabledState());
-    } finally {
-      await kv.close().catch(() => undefined);
-    }
-  } catch (err) {
-    // Don't roll back the in-memory change — the user already saw the toggle
-    // take effect. Log so an operator can investigate the KV side.
-    console.warn(`[apps/enabled] persist failed: ${(err as Error).message}`);
-    return json({ ok: true, persisted: false, warning: 'KV persist failed; change will be lost on shell restart.' });
-  }
-
+  // The kernel persisted the map (AppManager owns `os/app-enabled`); a failed write
+  // keeps the in-memory change the owner already saw.
+  if (!persisted) return json({ ok: true, persisted: false, warning: 'KV persist failed; change will be lost on shell restart.' });
   return json({ ok: true, persisted: true, appId, enabled });
 };
 

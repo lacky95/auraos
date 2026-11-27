@@ -2,6 +2,13 @@
  * Cross-app filesystem mounting — attach another app's directory into an
  * ALREADY-RUNNING app container, with no restart.
  *
+ * This manager is the policy: kinds, nesting, closed sources, the D80
+ * cross-uid plan, declarations and their persistence, fan-out into sidecars,
+ * reconcile. The mechanism (the helper bind and unbind, the consumer's
+ * mount-table verify, the mount-root inspect) is the runtime's `mounts`
+ * group: on the container runtime `runtimes/container/mounts.ts` (Phase 6
+ * D-M). How it works there:
+ *
  * ## How it works
  *
  * Docker cannot add a mount to a running container, so we go under it and use
@@ -62,6 +69,22 @@
  * can bind anything itself. Until Phase 5 removes the socket (D30),
  * read-only here is a guardrail for agents, not a boundary.
  *
+ * ## Between different uids (D80, 5b G)
+ *
+ * Since per-installation app uids, a writable `source` or `data` mount into a
+ * consumer that runs as another uid than the files' on-disk owner would be
+ * writable in name only. Such a mount is an idmapped bind (the session
+ * launcher's `idmap-bind`, run in the helper): the owner shows as the
+ * consumer inside the bind only, writes land as the owner on disk, and the
+ * bind is nosuid,nodev. It needs the runtime's `idmappedMounts` (a boot
+ * probe) and is refused with `capability-missing: idmappedMounts` otherwise,
+ * never made read-only or broader. A source tree (root-owned) needs
+ * Developer Mode on top of being open; a root-owned data tree is never
+ * mapped. Switching Developer Mode off makes such source mounts read-only
+ * again (`revokeWritable`); revoking `apps.mount` detaches every cross-app
+ * mount of the consumer (`revokeConsumer`). A patch workspace (`work`) is the
+ * consumer's own dir: no idmap, no Developer Mode. Read-only mounts are unchanged.
+ *
  * ## The AuraOS checkout (`workspace` kind, Developer Mode)
  *
  * `aura mount workspace` binds `/workspace`, the live AuraOS source,
@@ -71,22 +94,26 @@
  * when Developer Mode is switched off), never mirrored into sidecars and
  * never made into a sidecar.
  */
-import { execFileSync, execSync } from 'node:child_process';
-import { mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chownSync, existsSync, lchownSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { AppRegistry } from './AppRegistry.js';
 import type { ScopeRegistry } from '../scopes/ScopeRegistry.js';
-import type { ContainerRunner } from './ContainerRunner.js';
-import { BASE_IMAGE } from './BaseImage.js';
-import { SYSTEM_APP_LATER, SYSTEM_APP_LATER_MESSAGE } from './contracts.js';
+import type { RuntimeMounts } from '../runtimes/ari.js';
+import { RuntimeCapabilityError } from '../runtimes/types.js';
+import { MOUNT_ROOT_PATH, PATCHES_DIR_NAME, SYSTEM_APP_LATER, SYSTEM_APP_LATER_MESSAGE, SYSTEM_WORK_TARGET, SYSTEM_WORKSPACE_SUBPATH, WORK_DIR_NAME } from './contracts.js';
 
-const HELPER_IMAGE = BASE_IMAGE;
-/**
- * Canonical mount root inside a consumer container. Provisioned at spawn by
- * `ContainerRunner`, so only containers started since that change have it.
- */
-export { MOUNT_ROOT_PATH, PATCHES_DIR_NAME, SYSTEM_WORK_TARGET, WORK_DIR_NAME } from './contracts.js';
-import { MOUNT_ROOT_PATH, PATCHES_DIR_NAME, SYSTEM_WORK_TARGET, SYSTEM_WORKSPACE_SUBPATH, WORK_DIR_NAME } from './contracts.js';
+/** Gives a tree to  (lchown, symlinks never followed, nothing outside the tree). */
+function chownOwnTree(top: string, who: { uid: number; gid: number }): void {
+  const walk = (p: string): void => {
+    const st = lstatSync(p);
+    if (st.uid !== who.uid || st.gid !== who.gid) lchownSync(p, who.uid, who.gid);
+    if (st.isDirectory() && !st.isSymbolicLink()) for (const n of readdirSync(p)) walk(join(p, n));
+  };
+  walk(top);
+}
+
+/** Canonical mount root inside a consumer container (one definition: runtimes/spawn/paths.ts, via contracts.ts). */
+export { MOUNT_ROOT_PATH, PATCHES_DIR_NAME, SYSTEM_WORK_TARGET, WORK_DIR_NAME };
 /**
  * Legacy root, relative to the consumer's own `/data`. Every container has a
  * `/data` volume mount regardless of age, and docker leaves it a slave of the
@@ -172,11 +199,6 @@ export interface FanoutTarget {
   forceRo: boolean;
 }
 
-/** Mirrors ContainerRunner.containerName — same sanitisation rule. */
-function containerNameFor(instanceId: string): string {
-  return `aura-${instanceId.replace(/[^a-zA-Z0-9_.-]/g, '_')}`;
-}
-
 export interface AuraMount {
   /** `<targetAppId>` for a source mount, `<targetAppId>:data` for a data mount, `workspace` for the checkout. */
   id: string;
@@ -203,6 +225,12 @@ export interface AuraMount {
   workspace?: string;
   /** `patches` mounts: the patch repository dir, relative to the root dataDir. */
   patches?: string;
+  /**
+   * D80: a writable mount between different uids, through an idmapped bind:
+   * the on-disk owner (`from`, `uid:gid`) shows as the consumer (`to`) inside
+   * the bind only.
+   */
+  idmap?: { from: string; to: string };
 }
 
 export interface AddMountSpec {
@@ -229,7 +257,21 @@ interface MountManagerOpts {
   dataDir: string;
   registry: AppRegistry;
   scopeRegistry: ScopeRegistry;
-  runner: ContainerRunner;
+  /** The runtime that realises the binds (its `mounts` group, Phase 6 D-M); absent: none can. */
+  mounts?: RuntimeMounts;
+  /**
+   * D80: the `uid:gid` a consumer's processes run as (a non-root app uid or
+   * a session host's user, P5-2/P5-3/stream T); null for a root consumer that
+   * keeps its capabilities (it writes anywhere). Absent: no cross-uid handling
+   * (tests, a host without app identities). Also the owner of a `work` or
+   * `patches` source this manager creates for that consumer, so its
+   * always-rw mount is writable by the process that uses it.
+   */
+  consumerIdentity?(consumer: string): { uid: number; gid: number } | null;
+  /** D80: Developer Mode is on (a writable source mount into another uid needs it). Absent: off. */
+  developerMode?(): boolean;
+  /** The consumer's runtime id, for a capability refusal. */
+  runtimeOf?(consumer: string): string | undefined;
   /** Resolve a consumer instanceId → its shell-side data dir. */
   instanceDataDir(instanceId: string): string | null;
   /**
@@ -248,6 +290,12 @@ export class MountManager {
   private fanout: Promise<void> = Promise.resolve();
 
   constructor(private readonly opts: MountManagerOpts) {}
+
+  /** The runtime's `mounts` group; refused explicitly without one (never a silent no-op). */
+  private rt(): RuntimeMounts {
+    if (!this.opts.mounts) throw new Error('capability-missing: mounts (no installed runtime makes live mounts)');
+    return this.opts.mounts;
+  }
 
   // ─── Declarations ──────────────────────────────────────────────────────
   //
@@ -311,7 +359,7 @@ export class MountManager {
    */
   private pruneStale(instanceId: string): void {
     const current = new Set(this.list(instanceId).map((m) => this.dirName(m.targetAppId, m.kind)));
-    const roots = [this.opts.runner.mountRootDir(instanceId)];
+    const roots = [this.rt().rootDir(instanceId)];
     // A sidecar key resolves to its PARENT's data dir — whose legacy root
     // holds the parent's mounts, not the sidecar's. Never prune it from here.
     const dataDir = isSidecarConsumer(instanceId) ? null : this.opts.instanceDataDir(instanceId);
@@ -384,11 +432,27 @@ export class MountManager {
 
   /** Whether this host supports propagation at all. */
   capable(): { ok: boolean; reason?: string } {
-    return this.opts.runner.canPropagateMounts();
+    return this.opts.mounts?.capable() ?? { ok: false, reason: 'no installed runtime makes live mounts' };
   }
 
   list(instanceId: string): AuraMount[] {
     return [...(this.mounts.get(instanceId)?.values() ?? [])];
+  }
+
+  /**
+   * The instances that have `targetAppId`'s data mounted (a sidecar counts as
+   * its instance), the target's own instances left out: what a change of its
+   * data's ownership affects (the run-as migration, identity/runAsOwnership.ts).
+   */
+  dataConsumers(targetAppId: string): string[] {
+    const out = new Set<string>();
+    for (const [consumer, set] of this.mounts) {
+      for (const m of set.values()) {
+        if (m.kind !== 'data' || m.targetAppId !== targetAppId) continue;
+        out.add(consumer.split(SIDECAR_SEP)[0]!);
+      }
+    }
+    return [...out].sort();
   }
 
   /** The live binds of a patch workspace (`work` mounts of `subpath`), in every consumer. */
@@ -471,14 +535,9 @@ export class MountManager {
    * Returns the shell-side root dir and the path it appears at inside.
    */
   private rootFor(instanceId: string, consumerDataDir: string): { shellDir: string; containerDir: string } {
-    const container = containerNameFor(instanceId);
-    try {
-      const out = execSync(`docker inspect -f '{{range .Mounts}}{{.Destination}}{{"\\n"}}{{end}}' ${container}`,
-        { stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000, encoding: 'utf-8' });
-      if (out.split('\n').some((d) => d.trim() === MOUNT_ROOT_PATH)) {
-        return { shellDir: this.opts.runner.mountRootDir(instanceId), containerDir: MOUNT_ROOT_PATH };
-      }
-    } catch { /* not inspectable — fall through to the legacy root */ }
+    if (this.rt().rootOf(instanceId) === 'canonical') {
+      return { shellDir: this.rt().rootDir(instanceId), containerDir: MOUNT_ROOT_PATH };
+    }
     if (isSidecarConsumer(instanceId)) {
       throw new Error(`sidecar ${instanceId} has no mount root at ${MOUNT_ROOT_PATH} — spawn it with mounts.own or inheritMounts`);
     }
@@ -532,6 +591,48 @@ export class MountManager {
   }
 
   /**
+   * D80: how a writable `source` or `data` mount reaches a consumer that runs
+   * as another uid than the files' on-disk owner. Null: no idmap needed (a
+   * read-only mount, the same uid, a root consumer with its capabilities, or
+   * a kind the consumer owns itself). `ro`: a declaration or re-bind that may
+   * no longer be writable (Developer Mode is off, a root-owned data tree)
+   * comes back read-only, like a closed source. Otherwise the idmap, or a
+   * refusal: never a plain bind that is writable in name only, never broader.
+   */
+  private crossUid(
+    consumer: string, kind: MountKind, srcShell: string, requested: boolean,
+  ): { from: { uid: number; gid: number }; to: { uid: number; gid: number } } | 'ro' | null {
+    if (kind !== 'source' && kind !== 'data') return null;
+    const to = this.opts.consumerIdentity?.(consumer);
+    if (!to) return null;
+    let st: { uid: number; gid: number };
+    try { st = statSync(srcShell); } catch { return null; }   // absent: bind() reports it
+    if (st.uid === to.uid) return null;
+    const who = `${consumer} runs as ${to.uid}:${to.gid} and the files are owned by ${st.uid}:${st.gid}`;
+    const refuse = (why: string): 'ro' => {
+      if (requested) throw new Error(`refusing a writable mount: ${who}; ${why}`);
+      console.warn(`[MountManager] ${who}; ${why}: mounting it read-only`);
+      return 'ro';
+    };
+    // Owner answer 4: writable source of another uid only in Developer Mode (closed sources were refused above).
+    if (kind === 'source' && !this.opts.developerMode?.()) {
+      return refuse('a writable source mount into another app\'s uid needs Developer Mode (or patch it in a workspace: aura dev patch start)');
+    }
+    // An idmap of uid 0 would let the consumer create root-owned files on disk.
+    if (kind === 'data' && st.uid === 0) {
+      return refuse('the data is root-owned, and uid 0 is never mapped to another uid: it must be owned by the app\'s identity first '
+        + '(the app runs as its own uid and its ownership was applied: aura admin apps run-as, aura admin homes ownership)');
+    }
+    const probe = this.rt().idmapProbe();
+    if (!probe.ok) {
+      const runtime = this.opts.runtimeOf?.(consumer) ?? 'container';
+      throw new RuntimeCapabilityError(runtime, ['idmappedMounts'],
+        `refusing a writable mount: ${who}, and runtime ${runtime} has no idmapped mounts (${probe.reason ?? 'unavailable'}); never mounted weaker or broader`);
+    }
+    return { from: { uid: st.uid, gid: st.gid }, to };
+  }
+
+  /**
    * Bind the AuraOS checkout read-write into one consumer (`aura mount
    * workspace`, D60). The caller has checked Developer Mode and that the
    * consumer is the asking System Terminal. Never declared, never mirrored.
@@ -545,6 +646,62 @@ export class MountManager {
     }, { persist: false });
   }
 
+  /**
+   * Revokes writable access (owner answer 4 on D80): every live writable
+   * `source`/`data` mount that `match` selects is made read-only again, and
+   * so is its declaration. Called when Developer Mode is switched off (the
+   * idmapped source mounts) and when a consumer loses `apps.mount`. A mount
+   * that can't be re-made read-only stays detached, declared read-only.
+   * Never throws; returns the revoked `<consumer>:<mountId>`.
+   */
+  async revokeWritable(match: (m: AuraMount) => boolean): Promise<string[]> {
+    const revoked: string[] = [];
+    for (const [consumer, set] of [...this.mounts]) {
+      for (const m of [...set.values()]) {
+        if (m.mode !== 'rw' || (m.kind !== 'source' && m.kind !== 'data') || m.origin === 'inherited' || !match(m)) continue;
+        try { this.rt().detach(consumer, m.hostDest); }
+        catch (err) { console.warn(`[MountManager] revoke ${m.id} in ${consumer}: ${(err as Error).message}`); continue; }
+        set.delete(m.id);
+        revoked.push(`${consumer}:${m.id}`);
+        // The inheriting sidecars drop their writable copy first; the read-only re-add mirrors again.
+        if (!isSidecarConsumer(consumer) && KIND_POLICY[m.kind].fanout) this.queueFanout(() => this.fanoutRemove(consumer, m.id));
+        const ro: AddMountSpec = { targetAppId: m.targetAppId, mode: 'ro', data: m.kind === 'data', declaredAt: m.declaredAt };
+        try {
+          await this.add(consumer, ro, { origin: m.origin });
+        } catch (err) {
+          console.warn(`[MountManager] ${m.id} in ${consumer} stays detached: ${(err as Error).message}`);
+          this.writeDeclFile(consumer, [...this.readDecls(consumer).filter((d) => !(d.targetAppId === m.targetAppId && !!d.data === (m.kind === 'data'))), ro]);
+        }
+      }
+      if (set.size === 0) this.mounts.delete(consumer);
+    }
+    await this.settled();
+    return revoked;
+  }
+
+  /**
+   * Revokes every cross-app mount of an instance and of its OS sidecars, read-only and writable, with their
+   * declarations, so no later spawn restores them (owner answer 4 on D80: losing `apps.mount` revokes the
+   * access, including existing mounts). A bind that can't be unmounted stays listed (reconcile reaps it).
+   * Never throws; returns the revoked `<consumer>:<mountId>`.
+   */
+  revokeConsumer(instanceId: string): string[] {
+    const revoked: string[] = [];
+    for (const key of [instanceId, ...(isSidecarConsumer(instanceId) ? [] : this.sidecarKeysOf(instanceId))]) {
+      const set = this.mounts.get(key);
+      for (const m of [...(set?.values() ?? [])]) {
+        try { this.rt().detach(key, m.hostDest); }
+        catch (err) { console.warn(`[MountManager] revoke ${m.id} in ${key}: ${(err as Error).message}`); continue; }
+        set!.delete(m.id);
+        revoked.push(`${key}:${m.id}`);
+      }
+      if (set && set.size === 0) this.mounts.delete(key);
+      this.writeDeclFile(key, []);
+      this.pruneStale(key);
+    }
+    return revoked;
+  }
+
   /** Every live mount of the AuraOS checkout, in every consumer. */
   workspaceMounts(): AuraMount[] {
     return [...this.mounts.values()].flatMap((set) => [...set.values()].filter((m) => m.kind === 'workspace'));
@@ -555,7 +712,7 @@ export class MountManager {
     spec: { targetAppId: string; kind: MountKind; mode: MountMode; id: string; declaredAt?: string; workspace?: string; patches?: string },
     opts: { persist?: boolean; origin?: MountOrigin },
   ): Promise<AuraMount> {
-    const { kind, mode, id } = spec;
+    const { kind, id } = spec;
 
     if (this.mounts.get(instanceId)?.has(id)) {
       throw new Error(`${id} is already mounted into ${instanceId}`);
@@ -567,7 +724,27 @@ export class MountManager {
     const srcShell = this.resolveSource(spec.targetAppId, kind, kind === 'patches' ? spec.patches : spec.workspace);
     // A data dir only appears once the target has spawned — create it so a
     // data mount of a fresh target binds an empty dir instead of failing.
-    if (KIND_POLICY[kind].createsSource) { try { mkdirSync(srcShell, { recursive: true }); } catch { /* mount will report */ } }
+    if (KIND_POLICY[kind].createsSource) {
+      try {
+        const existed = existsSync(srcShell);
+        const first = mkdirSync(srcShell, { recursive: true });
+        // A fresh `work`/`patches` dir belongs to the consumer that writes it (never an existing one, never `data`).
+        const who = !existed && first && (kind === 'work' || kind === 'patches') ? this.opts.consumerIdentity?.(parentOfConsumer(instanceId)) ?? null : null;
+        // Only the consumer's own levels: `workspaces/<user>/<installation>/<n>`, `patches/<installation>`; the
+        // shared roots (`aura/workspaces`, `aura/patches`) stay the shell's even when this call created them.
+        const top = kind === 'work' ? dirname(dirname(srcShell)) : srcShell;
+        if (who && first) {
+          const stop = first.length > top.length ? first : top;
+          for (let d = srcShell; d.length >= stop.length; d = dirname(d)) chownSync(d, who.uid, who.gid);
+        }
+      } catch { /* mount will report */ }
+    }
+    // A system patch workspace (7b) is cloned by the kernel before it is bound: it becomes the consumer's
+    // own tree, like a fresh app workspace (D69/D80: no idmap, no Developer Mode; symlinks are not followed).
+    if (kind === 'work' && spec.targetAppId === SYSTEM_WORK_TARGET) {
+      const who = this.opts.consumerIdentity?.(parentOfConsumer(instanceId)) ?? null;
+      if (who) chownOwnTree(srcShell, who);
+    }
     const dirName  = this.dirName(spec.targetAppId, kind);
     const root     = this.rootFor(instanceId, consumerDataDir);
     if (KIND_POLICY[kind].needsMountRoot && root.containerDir !== MOUNT_ROOT_PATH) {
@@ -581,9 +758,15 @@ export class MountManager {
       throw new Error(`refusing to mount ${spec.targetAppId} into itself (would nest)`);
     }
 
-    const hostSource = this.opts.runner.toDaemonHostPath(srcShell);
-    const hostDest   = this.opts.runner.toDaemonHostPath(dstShell);
+    const hostSource = this.rt().hostPath(srcShell);
+    const hostDest   = this.rt().hostPath(dstShell);
     const containerPath = `${root.containerDir}/${dirName}`;
+
+    let mode = spec.mode;
+    const plan = mode === 'rw' ? this.crossUid(instanceId, kind, srcShell, (opts.origin ?? 'added') === 'added' && opts.persist !== false) : null;
+    if (plan === 'ro') mode = 'ro';
+    const idmap = plan && plan !== 'ro'
+      ? { from: `${plan.from.uid}:${plan.from.gid}`, to: `${plan.to.uid}:${plan.to.gid}` } : undefined;
 
     // A bind may already exist at the destination — a survivor from a previous
     // shell generation (binds live in the host kernel, not in this process).
@@ -591,18 +774,8 @@ export class MountManager {
     // single layer and the mount "comes back". Adopt the survivor instead, with
     // its ACTUAL mode — verify() below still enforces what was promised.
     const preExisting = this.liveMountPaths().includes(dstShell);
-    if (!preExisting) {
-      this.runHelper(instanceId, [
-        // The SOURCE carries the ro/rw decision — see the module header.
-        '-v', `${hostSource}:/src${mode === 'ro' ? ':ro' : ''}`,
-        // `/` is a shared mount, so binds made under /host propagate to the host
-        // peer group and thence into every slave (i.e. the app containers).
-        '-v', '/:/host:rshared',
-        // On bind failure, remove the dir mkdir just made (rmdir: empty only,
-        // so a pre-existing dir with content survives) — a failed mount must
-        // not leave a phantom entry under the consumer's mount root.
-      ], 'mkdir -p "/host$1" && { mount --bind /src "/host$1" || { rmdir "/host$1" 2>/dev/null || true; exit 1; }; }', hostDest);
-    }
+    // The runtime binds (a D80 idmapped bind, or a plain one whose SOURCE carries the ro/rw decision).
+    if (!preExisting) this.rt().attach(instanceId, { source: hostSource, dest: hostDest, mode, ...(idmap ? { idmap } : {}) });
 
     const mount: AuraMount = {
       id, instanceId, targetAppId: spec.targetAppId, kind,
@@ -612,13 +785,14 @@ export class MountManager {
       declaredAt: spec.declaredAt ?? new Date().toISOString(),
       ...(kind === 'work' ? { workspace: spec.workspace! } : {}),
       ...(kind === 'patches' ? { patches: spec.patches! } : {}),
+      ...(idmap && !preExisting ? { idmap } : {}),
     };
 
     try {
       this.verify(instanceId, mount);
     } catch (err) {
       // Never leave a mount weaker than advertised. Roll back and surface it.
-      try { this.unmountHost(instanceId, hostDest); } catch { /* best effort */ }
+      try { this.rt().detach(instanceId, hostDest); } catch { /* best effort */ }
       throw err;
     }
 
@@ -638,7 +812,7 @@ export class MountManager {
     if (mount.origin === 'inherited') {
       throw new Error(`${mountId} is inherited from ${mount.inheritedFrom ?? parentOfConsumer(instanceId)} — detach it there, or respawn the sidecar with it in mounts.inherit.exclude`);
     }
-    this.unmountHost(instanceId, mount.hostDest);
+    this.rt().detach(instanceId, mount.hostDest);
     this.mounts.get(instanceId)!.delete(mountId);
     this.writeDecls(instanceId);   // an explicit detach is a change of intent
     if (this.mounts.get(instanceId)!.size === 0) this.mounts.delete(instanceId);
@@ -653,7 +827,7 @@ export class MountManager {
    */
   removeAll(instanceId: string): void {
     for (const mount of this.list(instanceId)) {
-      try { this.unmountHost(instanceId, mount.hostDest); }
+      try { this.rt().detach(instanceId, mount.hostDest); }
       catch (err) { console.warn(`[MountManager] unmount ${mount.id} failed: ${(err as Error).message}`); }
     }
     this.mounts.delete(instanceId);
@@ -704,7 +878,7 @@ export class MountManager {
         // replaced their inherited copy.
         if (set.get(old.id) !== old) continue;
         try {
-          this.unmountHost(consumer, old.hostDest);
+          this.rt().detach(consumer, old.hostDest);
           set.delete(old.id);
           const now = await this.add(consumer, {
             targetAppId, mode: old.mode, data: old.kind === 'data', declaredAt: old.declaredAt,
@@ -740,7 +914,7 @@ export class MountManager {
       }
     } catch { /* no declarations dir */ }
     try {
-      for (const n of readdirSync(dirname(this.opts.runner.mountRootDir(prefix)))) {
+      for (const n of readdirSync(dirname(this.rt().rootDir(prefix)))) {
         if (n.startsWith(prefix)) keys.add(n);
       }
     } catch { /* no mounts dir */ }
@@ -750,7 +924,7 @@ export class MountManager {
   /**
    * Bring a freshly started OS sidecar's mounts up: its own declarations, then
    * (with `inherit`) the parent's current mounts minus `exclude`, capped at
-   * read-only with `forceRo`. Called by SidecarManager after `docker start` —
+   * read-only with `forceRo`. Called by SidecarManager once its runtime started it —
    * a container created later never sees binds that already existed.
    * Best-effort per mount; never throws.
    */
@@ -796,7 +970,7 @@ export class MountManager {
     this.removeAll(consumer);
     this.writeDeclFile(consumer, []);
     this.pruneStale(consumer);
-    try { rmdirSync(this.opts.runner.mountRootDir(consumer)); } catch { /* busy, non-empty or absent */ }
+    try { rmdirSync(this.rt().rootDir(consumer)); } catch { /* busy, non-empty or absent */ }
   }
 
   /** Resolves once all queued fan-out work has finished. */
@@ -832,7 +1006,7 @@ export class MountManager {
       const m = this.mounts.get(t.consumer)?.get(mountId);
       if (!m || m.origin !== 'inherited') continue;
       try {
-        this.unmountHost(t.consumer, m.hostDest);
+        this.rt().detach(t.consumer, m.hostDest);
         this.mounts.get(t.consumer)!.delete(mountId);
         if (this.mounts.get(t.consumer)!.size === 0) this.mounts.delete(t.consumer);
         this.pruneStale(t.consumer);
@@ -864,10 +1038,10 @@ export class MountManager {
     // One mountinfo read per instance, cached across the loop. `null` marks a
     // consumer we could not inspect — those mounts are left untouched rather
     // than guessed at.
-    const containerInfo = new Map<string, string | null>();
-    const infoFor = (instanceId: string): string | null => {
+    const containerInfo = new Map<string, Array<{ destination: string }> | null>();
+    const infoFor = (instanceId: string): Array<{ destination: string }> | null => {
       if (!containerInfo.has(instanceId)) {
-        containerInfo.set(instanceId, this.readMountinfo(instanceId));
+        containerInfo.set(instanceId, this.rt().table(instanceId));
       }
       return containerInfo.get(instanceId)!;
     };
@@ -879,7 +1053,7 @@ export class MountManager {
 
       if (!liveInstanceIds.has(instanceId)) {
         try {
-          this.unmountHost(instanceId, this.opts.runner.toDaemonHostPath(path));
+          this.rt().detach(instanceId, this.rt().hostPath(path));
           reaped++;
           console.log(`[MountManager] reaped orphan mount ${dirName} (dead instance ${instanceId})`);
         } catch (err) {
@@ -899,9 +1073,9 @@ export class MountManager {
         : `${MOUNT_ROOT_PATH}/${dirName}`;
       const info = infoFor(instanceId);
       if (info === null) continue;   // can't inspect the consumer — leave it
-      if (!info.split('\n').some((l) => l.split(' ')[4] === candidatePath)) {
+      if (!info.some((e) => e.destination === candidatePath)) {
         try {
-          this.unmountHost(instanceId, this.opts.runner.toDaemonHostPath(path));
+          this.rt().detach(instanceId, this.rt().hostPath(path));
           reaped++;
           console.log(`[MountManager] reaped leaked mount ${dirName} (previous life of ${instanceId})`);
         } catch (err) {
@@ -928,7 +1102,7 @@ export class MountManager {
           ? `/data/${MOUNT_DIR_NAME}/${dirName}`
           : `${MOUNT_ROOT_PATH}/${dirName}`,
         hostSource: '(adopted — source unknown)',
-        hostDest: this.opts.runner.toDaemonHostPath(path),
+        hostDest: this.rt().hostPath(path),
         createdAt: new Date().toISOString(),
         origin: 'adopted',
         declaredAt: decl?.declaredAt ?? new Date().toISOString(),
@@ -1018,58 +1192,7 @@ export class MountManager {
     } catch { return 'rw'; }
   }
 
-  // ─── Helper container ──────────────────────────────────────────────────
-
-  /**
-   * Run a privileged throwaway container to do the (un)mount. The shell has no
-   * CAP_SYS_ADMIN and its own mounts are slave-only, so it cannot mount itself.
-   * Mirrors the helper pattern in @aura/app-sdk's sidecars.
-   *
-   * Path arguments are passed as positional argv, never interpolated into the
-   * shell string — they come from `docker volume inspect`, not a literal.
-   */
-  private runHelper(instanceId: string, mounts: string[], script: string, ...args: string[]): void {
-    execFileSync('docker', [
-      'run', '--rm', '--privileged',
-      '--label', 'aura.mount=1',
-      '--label', `aura.parent=${parentOfConsumer(instanceId)}`,
-      ...mounts,
-      HELPER_IMAGE,
-      '/bin/sh', '-euc', script, '_', ...args,
-    ], { stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 });
-  }
-
-  private unmountHost(instanceId: string, hostDest: string): void {
-    // Loop: binds can be STACKED (one per shell generation, before add()
-    // learned to adopt survivors) and one umount peels one layer. Lazy
-    // fallback so a shell sitting inside the mount can't block detach;
-    // a lazy detach still propagates.
-    this.runHelper(instanceId, ['-v', '/:/host:rshared'],
-      'while umount "/host$1" 2>/dev/null; do :; done; umount -l "/host$1" 2>/dev/null || true; rmdir "/host$1" 2>/dev/null || true',
-      hostDest);
-  }
-
   // ─── Verification ──────────────────────────────────────────────────────
-
-  /**
-   * The consumer container's own mount table, or null when it can't be read.
-   * App containers run aura-base (has `cat`). A sidecar may run an image
-   * without one (distroless, scratch), so for sidecars fall back to a helper
-   * that joins its PID namespace and reads PID 1's view — unprivileged.
-   */
-  private readMountinfo(consumer: string): string | null {
-    const container = containerNameFor(consumer);
-    try {
-      return execFileSync('docker', ['exec', container, 'cat', '/proc/self/mountinfo'],
-        { stdio: ['ignore', 'pipe', 'pipe'], timeout: 15_000, encoding: 'utf-8' });
-    } catch { /* no container, or no `cat` in it */ }
-    if (!isSidecarConsumer(consumer)) return null;
-    try {
-      return execFileSync('docker', ['run', '--rm', '--label', 'aura.mount=1', '--label', `aura.parent=${parentOfConsumer(consumer)}`,
-        `--pid=container:${container}`, HELPER_IMAGE, 'cat', '/proc/1/mountinfo'],
-        { stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000, encoding: 'utf-8' });
-    } catch { return null; }
-  }
 
   /**
    * Confirm the mount actually landed in the target container with the mode we
@@ -1078,8 +1201,8 @@ export class MountManager {
    * and a "read-only" mount that is really read-write.
    */
   private verify(instanceId: string, mount: AuraMount): void {
-    const info = this.readMountinfo(instanceId);
-    if (info === null) {
+    const check = this.rt().verify(instanceId, { path: mount.containerPath, mode: mount.mode, idmap: !!mount.idmap });
+    if (check === 'unreadable') {
       // A sidecar runs a foreign image: an unverifiable read-only promise is
       // exactly the silent downgrade this check exists to prevent.
       if (isSidecarConsumer(instanceId) && mount.mode === 'ro') {
@@ -1090,16 +1213,17 @@ export class MountManager {
       console.warn(`[MountManager] could not verify ${mount.id} in ${instanceId} (not a running container)`);
       return;
     }
-    const line = info.split('\n').find((l) => l.split(' ')[4] === mount.containerPath);
-    if (!line) {
+    if (check === 'missing') {
       throw new Error(`mount did not propagate into ${instanceId} at ${mount.containerPath}`);
     }
-    const opts = line.split(' ')[5] ?? '';
-    const isRo = opts.split(',').includes('ro');
-    if (mount.mode === 'ro' && !isRo) {
+    if (check === 'writable') {
       throw new Error(
         `refusing mount: requested read-only but ${mount.containerPath} is read-write in ${instanceId}`,
       );
+    }
+    // D80: a cross-uid writable mount that arrived without its idmapping would be writable in name only.
+    if (check === 'not-idmapped') {
+      throw new Error(`refusing mount: ${mount.containerPath} arrived in ${instanceId} without its idmapping`);
     }
   }
 }

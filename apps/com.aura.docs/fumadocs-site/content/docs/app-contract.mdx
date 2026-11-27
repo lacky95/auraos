@@ -41,9 +41,20 @@ key).
 - AuraOS reports per app which contract it was built for:
   `aura get apps -o wide` (column `CONTRACT`, `-` before the contract) and
   `aura admin contract-report`.
-- From Phase 6, AuraOS refuses to start an app built for an unknown major
-  version, with a message. A future break means contract 2 and a migration
-  guide, never a silent change.
+- AuraOS refuses an app built for a newer major than it implements, with
+  one message: "<app> is built for Aura contract N; this AuraOS implements 1.
+  Update AuraOS or install a version built for contract 1." Installing,
+  updating or activating a patch of it answers 422 `contract-unsupported`; an
+  app already on disk is listed `incompatible` (`aura get apps`, Settings →
+  Apps) and never started; `aura dev validate` reports it as an error. An
+  app without `auraContract` still installs and runs. A future break means
+  contract 2 and a migration guide, never a silent change.
+- The manifest keys `setup` and `profiles` are reserved for app setup and
+  operating profiles (D108), which a later AuraOS adds. Until then an app that
+  declares either is refused the same way, with the error
+  `setup-unsupported` (category `unsupported-feature`, a `hint`, and
+  `manifestField` naming the key): it never runs unconfigured. Apps without
+  them are not affected and start directly, as before.
 
 **Checklist**
 

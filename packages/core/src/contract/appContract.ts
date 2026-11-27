@@ -16,22 +16,26 @@
  *   sidecars.privileged  when a sidecar needs privileged, capabilities, devices or publish
  *   auraContract  the contract version it was built for
  *
- * Reporting only: nothing here refuses an app. From Phase 6 the shell
- * refuses an unknown major `auraContract` with a clear message.
+ * Phase 6 (D48): an unknown major `auraContract` is refused (contract/types.ts
+ * `refuseUnknownMajor`, shared with the ARI): at install and patch
+ * activation, at registry load (listed `incompatible`, never started) and by
+ * `aura dev validate` (an error). Everything else here is reported only.
  */
 import type { AppManifest } from '../types/manifest.js';
 import { toolsGrant } from '../capabilities/tool-allowlist.js';
+import { AURA_CONTRACT, contractRefusal, declaredSetupKeys, operationalBlock, type ContractStatus } from './types.js';
 
-/** The contract this AuraOS implements. The SDK exports the same value (`AURA_CONTRACT`). */
-export const AURA_CONTRACT = 1;
+export {
+  AURA_CONTRACT, CONTRACT_AUDIT_ACTIONS, CONTRACT_UNSUPPORTED, contractRefusal, declaredSetupKeys, operationalBlock,
+  OperationalBlockError, operationalBlockOf, refuseUnknownMajor, RESERVED_SETUP_KEYS,
+} from './types.js';
+export type { ContractKind, ContractStatus, MajorRefusal, OperationalBlock, OperationalState, ReservedSetupKey } from './types.js';
 
-export type ContractStatus = 'current' | 'none' | 'unknown';
-
-/** Which contract an app was built for: `none` before the contract, `unknown` for a newer major. */
+/** Which contract an app was built for: `none` before the contract, `incompatible` for a newer major. */
 export function contractStatus(manifest: Pick<AppManifest, 'auraContract'>): { version: number | null; status: ContractStatus } {
   const v = manifest.auraContract ?? null;
   if (v === null) return { version: null, status: 'none' };
-  return { version: v, status: v <= AURA_CONTRACT ? 'current' : 'unknown' };
+  return { version: v, status: contractRefusal({ id: '', auraContract: v }) ? 'incompatible' : 'current' };
 }
 
 /** Everything a manifest declares that the contract covers, in one flat view. */
@@ -45,7 +49,7 @@ export interface ContractDeclarations {
   privileged: boolean;
 }
 
-type ContractManifest = Pick<AppManifest, 'auraContract' | 'permissions' | 'tools' | 'services' | 'consumes'> & { context?: string[] };
+type ContractManifest = Pick<AppManifest, 'auraContract' | 'permissions' | 'tools' | 'services' | 'consumes'> & { context?: string[]; setup?: unknown; profiles?: unknown };
 
 const PRIVILEGED_SIDECAR = (s: AppManifest['services'][number]): boolean =>
   s.privileged === true || (s.capabilities?.length ?? 0) > 0 || (s.devices?.length ?? 0) > 0 || (s.publish?.length ?? 0) > 0;
@@ -63,7 +67,7 @@ export function contractDeclarations(m: ContractManifest): ContractDeclarations 
 }
 
 export interface ContractFinding {
-  severity: 'warn' | 'info';
+  severity: 'error' | 'warn' | 'info';
   code: string;
   /** Dotted manifest path the finding is about. */
   path: string;
@@ -79,13 +83,19 @@ export interface ContractFinding {
 export function contractFindings(m: ContractManifest): ContractFinding[] {
   const out: ContractFinding[] = [];
   const d = contractDeclarations(m);
-  const { status, version } = contractStatus(m);
+  const { status } = contractStatus(m);
+  const refused = contractRefusal({ id: (m as { id?: string }).id ?? 'this app', auraContract: m.auraContract ?? null });
   if (status === 'none') {
     out.push({ severity: 'warn', code: 'contract-missing', path: 'auraContract',
       message: `no auraContract: add "auraContract": ${AURA_CONTRACT} once the app follows the app contract (docs: The Aura app contract)` });
-  } else if (status === 'unknown') {
-    out.push({ severity: 'warn', code: 'contract-unknown', path: 'auraContract',
-      message: `auraContract ${version} is newer than this AuraOS (${AURA_CONTRACT}); from Phase 6 it refuses to start the app` });
+  } else if (refused) {
+    // An error: AuraOS refuses to install or start the app (D48).
+    out.push({ severity: 'error', code: refused.code, path: 'auraContract', message: refused.message });
+  }
+  // D108 A1: reserved until the setup engine exists; AuraOS refuses to install or start the app.
+  if (declaredSetupKeys(m).length > 0) {
+    const block = operationalBlock({ id: (m as { id?: string }).id ?? 'this app', setup: m.setup, profiles: m.profiles })!;
+    out.push({ severity: 'error', code: block.error, path: block.manifestField, message: `${block.message} (${block.hint})` });
   }
   (m.services ?? []).forEach((s, i) => {
     if (PRIVILEGED_SIDECAR(s) && !d.privileged && !d.docker) {

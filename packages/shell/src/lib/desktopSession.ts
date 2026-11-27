@@ -16,10 +16,11 @@
  *     the same instance ids) every saved activity is reopened: on the adopted
  *     instance with its old id when possible, else on a freshly started
  *     instance of its app. The app gets `restore: { previousActivityId,
- *     state }` in onActivityCreate. PRoot instances die with the shell
- *     process, so a running one is started again even without a window, also
- *     when the activities are not restored (a container app survives either
- *     way). Workspace members, layout data and the
+ *     state }` in onActivityCreate. Instances on a runtime that does not
+ *     survive a restart (PRoot) are started again by the kernel at init
+ *     (5b RS, core runtimes/respawn.ts), with or without a desktop; a
+ *     window maps to the respawned instance (`respawnedInstance`), so
+ *     nothing is started twice. Workspace members, layout data and the
  *     shell's per-activity state are remapped to the new ids
  *     (lib/workspaceRemap.ts); members that no longer exist are pruned.
  *   • Auto-save starts only after the restore: the empty desktop of a fresh
@@ -75,8 +76,6 @@ export interface SessionInstance {
   appId:      string;
   /** The instance itself is an activity (activityMode != 'multi') on a workspace. */
   view:       boolean;
-  /** A PRoot instance: it dies with the shell, so the restore starts it again. */
-  respawn?:   true;
 }
 export interface DesktopSnapshot {
   schema:     1;
@@ -122,9 +121,7 @@ const g = (): SessionGlobal => ((globalThis as { [G_KEY]?: SessionGlobal })[G_KE
 });
 // A state made by an older module copy has no `users` yet.
 const writtenUsers = (): Set<string> => (g().users ??= new Set());
-// server.mjs reaches the signal shutdown through this (it loads the build, not this module).
-const SHUTDOWN_HOOK = Symbol.for('aura.shellShutdown');
-(globalThis as { [SHUTDOWN_HOOK]?: () => Promise<void> })[SHUTDOWN_HOOK] = () => shutdownForSignal();
+// A stop runs `shutdownForSignal` as the kernel shutdown's Web Shell hook (lib/bootHooks.ts, Phase 6 K).
 
 async function withKv<T>(fn: (kv: ReturnType<typeof defaultKv>) => Promise<T>): Promise<T> {
   const kv = defaultKv();
@@ -191,12 +188,9 @@ async function writeSnapshots(reason: DesktopSnapshot['reason']): Promise<Deskto
   return merged;
 }
 
-/** Instance states a respawn (a runtime that does not survive a shell restart, e.g. PRoot) brings back: running ones, never one that had crashed or stopped (M5). */
-const RESPAWN_STATES = new Set(['resumed', 'started', 'paused']);
-
-/** The instances a snapshot keeps: shown on a workspace, parent of a window, or a running PRoot one. */
+/** The instances a snapshot keeps: shown on a workspace, or parent of a window (the kernel respawns PRoot ones itself, 5b RS). */
 export function sessionInstances(
-  mgr: Pick<Mgr, 'getAllInstances' | 'getManifest' | 'runtimeCapabilitiesOf'>, members: Set<string>, withWindows: Set<string>, userId?: string,
+  mgr: Pick<Mgr, 'getAllInstances' | 'getManifest'>, members: Set<string>, withWindows: Set<string>, userId?: string,
 ): SessionInstance[] {
   const instances: SessionInstance[] = [];
   for (const inst of mgr.getAllInstances()) {
@@ -208,10 +202,8 @@ export function sessionInstances(
     const m = mgr.getManifest(inst.appId);
     if (!m || m.componentType === 'service') continue;
     const view = m.activityMode !== 'multi' && members.has(inst.instanceId);
-    // A runtime whose instances end with the shell (PRoot) is respawned; one that survives is re-adopted.
-    const respawn = mgr.runtimeCapabilitiesOf(inst.instanceId)?.survivesShellRestart === false && RESPAWN_STATES.has(inst.state);
-    if (!view && !respawn && !withWindows.has(inst.instanceId)) continue;
-    instances.push({ instanceId: inst.instanceId, appId: inst.appId, view, ...(respawn ? { respawn: true as const } : {}) });
+    if (!view && !withWindows.has(inst.instanceId)) continue;
+    instances.push({ instanceId: inst.instanceId, appId: inst.appId, view });
   }
   return instances;
 }
@@ -295,8 +287,6 @@ export function unfreeze(): void {
 export interface RestoreReport {
   skipped?:  'disabled' | 'one-shot' | 'no-snapshot';
   restored:  number;
-  /** PRoot instances back without a window of their own (started again, or already running). */
-  respawned: number;
   failed:    Array<{ viewId: string; appId: string; error: string }>;
   idMap:     Record<string, string>;
   pruned:    number;
@@ -332,7 +322,7 @@ export async function waitForRestore(timeoutMs: number): Promise<void> {
 }
 
 async function doRestore(): Promise<RestoreReport> {
-  const report: RestoreReport = { restored: 0, respawned: 0, failed: [], idMap: {}, pruned: 0 };
+  const report: RestoreReport = { restored: 0, failed: [], idMap: {}, pruned: 0 };
   const mgr = core.getAppManager();
 
   const users = await restoreUsers();
@@ -365,7 +355,6 @@ async function doRestore(): Promise<RestoreReport> {
   const summary = (report.skipped
     ? `skipped (${report.skipped})`
     : `${report.restored} activities restored`)
-    + (report.respawned ? `, ${report.respawned} PRoot instance(s) back` : '')
     + (report.failed.length ? `, ${report.failed.length} failed` : '');
   console.log(`[desktop-session] restore: ${summary}${report.pruned ? `, ${report.pruned} stale member(s) pruned` : ''}`);
   core.OsEventBus.emit('session:restored', { restored: report.restored, failed: report.failed, idMap: report.idMap, bootId: g().bootId });
@@ -391,11 +380,11 @@ function alive(mgr: Pick<Mgr, 'getInstance'>, instanceId: string, appId: string)
 }
 
 /**
- * Bring the snapshot back: its windows when `windows` (the restore is on), and
- * every PRoot instance that was running, which died with the shell.
+ * Bring the snapshot's windows back when `windows` (the restore is on). An
+ * instance the kernel respawned (5b RS) keeps its windows on the new id.
  */
 export async function reopenActivities(
-  mgr: Pick<Mgr, 'getInstance' | 'getManifest' | 'isEnabled' | 'start' | 'openActivity'>,
+  mgr: Pick<Mgr, 'getInstance' | 'getManifest' | 'isEnabled' | 'start' | 'openActivity' | 'respawnedInstance'>,
   snap: DesktopSnapshot, report: RestoreReport, windows = true, userId?: string,
 ): Promise<void> {
   const as = userId ? { userId } : {};
@@ -406,7 +395,11 @@ export async function reopenActivities(
     if (known) return known;
     try {
       let id: string;
-      if (alive(mgr, oldId, appId)) {
+      // Respawned by the kernel (a runtime that does not survive a restart): its new instance, never a second one.
+      const respawned = await mgr.respawnedInstance(oldId);
+      if (respawned && alive(mgr, respawned, appId)) {
+        id = respawned;
+      } else if (alive(mgr, oldId, appId)) {
         id = oldId;                            // re-adopted container: same instance
       } else {
         if (!mgr.getManifest(appId)) throw new Error('app is no longer installed');
@@ -458,19 +451,6 @@ export async function reopenActivities(
       report.restored++;
     } catch (err) {
       report.failed.push({ viewId: a.activityId, appId: a.appId, error: (err as Error).message });
-    }
-  }
-
-  // PRoot instances not brought back by a window above (instMap dedupes), only
-  // when the desktop is being restored: restore off or a restart without
-  // restoring brings nothing back, as before (M5, D57).
-  for (const si of windows ? snap.instances.filter((i) => i.respawn) : []) {
-    if (instMap.has(si.instanceId)) continue;
-    try {
-      report.idMap[si.instanceId] = await instanceFor(si.instanceId, si.appId);
-      report.respawned++;
-    } catch (err) {
-      report.failed.push({ viewId: si.instanceId, appId: si.appId, error: (err as Error).message });
     }
   }
 }

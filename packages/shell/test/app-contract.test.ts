@@ -95,7 +95,7 @@ test('permissions.check: the app behind the call, as a rule decides; the owner h
   const authorizer = new core.Authorizer({
     grants: { get: async () => null } as never,
     declared: (id: string) => (id === 'com.ex.notes' ? ['sidecars.spawn', 'notifications.popup'] : undefined),
-    appScope: () => 'user',
+    appBinding: async () => ({ scope: 'user', installationId: 'inst-1' }),
   });
   const held = (p: core.Principal, n: string) => permissionHeld({ authorizer }, p, n, true);
   const call = (resolved: ResolvedPrincipal, q: string) => checkPermissions(req(`/api/user/me/permissions?${q}`), { resolve: async () => resolved, held });
@@ -145,8 +145,8 @@ test('contract report: version, declarations, findings, source scan, signals', a
   const off = core.AppManifestSchema.parse({ id: 'com.ex.off', name: 'Off', version: '1.0.0' });
   const r = await contractReport({
     apps: () => [
-      { appId: 'com.ex.on', name: 'On', scope: 'user', dir: join(dir, 'none'), sandbox: 'container', manifest: on, instances: [] },
-      { appId: 'com.ex.off', name: 'Off', scope: 'user', dir, sandbox: 'proot', manifest: off, instances: [] },
+      { appId: 'com.ex.on', name: 'On', scope: 'user', dir: join(dir, 'none'), sandbox: 'container', ownNamespace: true, manifest: on, instances: [] },
+      { appId: 'com.ex.off', name: 'Off', scope: 'user', dir, sandbox: 'proot', ownNamespace: false, manifest: off, instances: [] },
     ],
     contextKeys: async () => ['OPENAI_API_KEY'],
     signals: async () => ({ 'contract|context-undeclared|com.ex.off': 3, 'contract|context-get|com.ex.on': 5 }),
@@ -160,7 +160,7 @@ test('contract report: version, declarations, findings, source scan, signals', a
   assert.deepEqual(offRow.signals, { 'context-undeclared': 3 });
   assert.deepEqual(r.apps[1]!.signals, { 'context-get': 5 });
   assert.deepEqual(r.apps[1]!.declares.context, ['OPENAI_API_KEY']);
-  assert.deepEqual(r.summary, { apps: 2, onContract: 1, noContract: 1, unknownContract: 0, readsRawContext: 1, undeclaredUse: 1, writesOutsideDataDir: 1 });
+  assert.deepEqual(r.summary, { apps: 2, onContract: 1, noContract: 1, incompatible: 0, readsRawContext: 1, undeclaredUse: 1, writesOutsideDataDir: 1 });
   const lean = await contractReport({ apps: () => [], contextKeys: async () => { throw new Error('down'); }, signals: async () => ({}) });
-  assert.deepEqual(lean.summary, { apps: 0, onContract: 0, noContract: 0, unknownContract: 0, readsRawContext: 0, undeclaredUse: 0 });
+  assert.deepEqual(lean.summary, { apps: 0, onContract: 0, noContract: 0, incompatible: 0, readsRawContext: 0, undeclaredUse: 0 });
 });

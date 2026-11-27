@@ -48,7 +48,7 @@ const operator: AccessPrincipal = { kind: 'operator', verification: 'verified' }
 const authorizer = (declared: Record<string, string[]> = {}) => new Authorizer({
   grants: { get: async () => null } as never,
   declared: (id: string) => declared[id],
-  appScope: () => 'user',
+  appBinding: async () => ({ scope: 'user', installationId: 'inst-1' }),
 });
 
 const input = (principal: AccessPrincipal, rule: AccessRule | null, resource: Partial<DecideInput['resource']> = {}): DecideInput => ({
@@ -139,7 +139,8 @@ test('decide: the operator and the owner satisfy owner, and anonymous does not',
   assert.deepEqual(await d(input({ kind: 'user', userId: 'default', role: 'owner', sessionId: 's', verification: 'verified' }, rule)), { outcome: 'allow', reason: 'owner' });
   assert.equal((await d(input({ kind: 'admin', credential: 'shared', sessionId: 'a', verification: 'verified' } as never, rule))).outcome, 'deny', 'a retired admin look-alike is nobody');
   assert.deepEqual(await d(input(anon, rule)), { outcome: 'deny', reason: 'unauthenticated' });
-  assert.deepEqual(await d(input(inst('com.a.app'), rule)), { outcome: 'deny', reason: 'wrong-principal' });
+  // Same decision; the refusal also says it is the owner's only (refusalText.ts).
+  assert.deepEqual(await d(input(inst('com.a.app'), rule)), { outcome: 'deny', reason: 'wrong-principal', facts: { ownerOnly: true } });
 });
 
 test('decide: unclassified, empty and public rules', async () => {

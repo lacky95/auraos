@@ -664,7 +664,7 @@ async function scaffoldFromConfig(cfg: ScaffoldConfig): Promise<void> {
   try {
     const res = await api.post<{
       ok: boolean; dest?: string; error?: string; message?: string; installed?: boolean; installError?: string;
-      git?: { commit: string | null; error?: string };
+      git?: { commit: string | null; error?: string }; warnings?: string[];
     }>(
       '/api/admin/scaffold',
       { appId: cfg.appId, force: true, files, scope: cfg.scope },
@@ -676,6 +676,7 @@ async function scaffoldFromConfig(cfg: ScaffoldConfig): Promise<void> {
     installError = res.installError;
     gitCommit = res.git?.commit ?? null;
     gitError = res.git ? res.git.error : 'the shell did not report a git step (older shell)';
+    for (const w of res.warnings ?? []) warn(w);
   } catch (err) {
     // Shell isn't running (or we hit a network error). Fall back to a local
     // write — useful for `aura dev new` on the host with no aura-os up.
@@ -858,8 +859,9 @@ Besides the schema, the App Host checks (warnings unless noted) report with file
   - notes: on('upgrade') handlers with no path check, hmr: false
 Release builds (Phase 6): build.release cwd and command exist (errors), a command without outputs (warning),
   apps the release builder would not build without build.release (note).
-The app contract checks (D48, warnings: report only):
-  - auraContract missing, or newer than this AuraOS (${AURA_CONTRACT})
+The app contract checks (D48, warnings: report only, except the first error):
+  - auraContract newer than this AuraOS (${AURA_CONTRACT}): an error, AuraOS refuses to install or start it
+  - auraContract missing
   - context.get('KEY') of a key not in context[]; reads of the raw Context (/run/context)
   - SDK calls whose permission is missing (user.confirm, storage, osSidecars, notifications)
   - services[] without sidecars.spawn or docker; privileged sidecars without sidecars.privileged
@@ -1151,7 +1153,11 @@ function registerDevCheckout(dev: Command): void {
 // ─── dev origin ─────────────────────────────────────────────────────────────
 
 interface OriginRow { appId: string; originId: string | null; scope: ScopeId; mutable: boolean; active: boolean }
-interface OriginResult { appId: string; scope: ScopeId; originId: string | null; previous: string | null; changed: boolean; skipped?: string }
+interface OriginResult {
+  appId: string; scope: ScopeId; originId: string | null; previous: string | null; changed: boolean; skipped?: string;
+  /** The installation after the change, and what it means (a new one on reassign). */
+  installationId?: string | null; note?: string;
+}
 
 /**
  * `aura dev origin` — show and set app originIds (the UUID that says which
@@ -1201,7 +1207,7 @@ function registerDevOrigin(dev: Command): void {
         if (o.json) { console.log(JSON.stringify(res, null, 2)); return; }
         let n = 0;
         for (const r of res.results) {
-          if (r.changed) { n++; ok(`${r.appId} ${color.dim(`(${r.scope})`)} → ${r.originId}`); }
+          if (r.changed) { n++; ok(`${r.appId} ${color.dim(`(${r.scope})`)} → ${r.originId}`); if (r.note) info(`  ${r.note}`); }
           else if (r.skipped) warn(`${r.appId} ${color.dim(`(${r.scope})`)}: ${r.skipped}`);
         }
         info(n ? `assigned ${n} originId(s); existing ones were left alone` : 'every app already has an originId');
@@ -1224,6 +1230,7 @@ function registerDevOrigin(dev: Command): void {
       const r = res.results[0];
       if (!r || r.skipped) fail(`${appId}: ${r?.skipped ?? 'not changed'}`);
       ok(`${r!.appId} ${color.dim(`(${r!.scope})`)}: ${r!.previous ?? color.dim('(none)')} → ${r!.originId}`);
+      if (r!.note) warn(r!.note);
     });
 }
 

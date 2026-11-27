@@ -22,7 +22,7 @@
  */
 import * as core from '@aura/core';
 import type { APIContext } from 'astro';
-import type { AccessPrincipal, ApprovalAction, ApprovalLevel, ApprovalRisk, ChangeAttribution } from '@aura/core';
+import type { AccessPrincipal, ApprovalAction, ApprovalExplanation, ApprovalLevel, ApprovalRisk, ChangeAttribution } from '@aura/core';
 import { authenticate } from '../auth.ts';
 import { bearerToken, type CallerPrincipal } from '../access/identify.ts';
 import { shellOwner } from '../appHostHandoff.ts';
@@ -31,8 +31,8 @@ import {
   actionGate, json, liveApprovalDeps, presentedApproval, requesterSummary, type ApprovalServiceDeps,
 } from './service.ts';
 
-/** The owner's management actions, opening an app's source (Track P) and activating system patches (7b): same flow. */
-export type AdminApprovalAction = Extract<ApprovalAction, `admin.${string}` | 'app.source.open' | 'system.patch.activate'>;
+/** The owner's management actions, opening an app's source (Track P), creating an app (D109 AF2, appCreate.ts) and activating system patches (7b): same flow. */
+export type AdminApprovalAction = Extract<ApprovalAction, `admin.${string}` | 'app.source.open' | 'app.create' | 'system.patch.activate'>;
 
 /** One owner-management request, as its route validated it. */
 export interface AdminRequest {
@@ -49,6 +49,8 @@ export interface AdminRequest {
   reason?: string;
   /** The exact change approved, as a unified diff (a system patch activation, D68 "exact diff review"). */
   diff?: string;
+  /** D109 AF2: the requester's summary (Markdown, display.ts `requesterExplanation`), shown apart from the facts. */
+  explanation?: ApprovalExplanation;
   /**
    * The owner's desktop session alone is not enough: the change is confirmed
    * in the shell's approval dialog (Settings) or by the host operator.
@@ -136,6 +138,7 @@ async function approvedRequest(
       ...(req.highRisk?.length ? { highRisk: [...req.highRisk] } : {}),
       ...(req.reason ? { reason: req.reason } : {}),
       ...(req.diff ? { diff: req.diff } : {}),
+      ...(req.explanation ? { explanation: req.explanation } : {}),
     }),
   });
 }

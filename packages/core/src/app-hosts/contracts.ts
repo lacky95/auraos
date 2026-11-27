@@ -42,8 +42,27 @@ export interface AppInstallation {
    * migration state, never an approved root.
    */
   execution?: ExecutionApproval;
+  /**
+   * A run-as migration in progress (identity/runAsOwnership.ts): set before
+   * its first ownership change, removed with its flip. While set, the app
+   * does not start; `aura admin apps run-as <app> --recover` restores the
+   * journal (a bare name in the ownership journal directory) exactly.
+   */
+  runAsMigration?: AppRunAsMigration;
+  /** The journal of the run-as migration that set the current `runAs`: the flip back restores it. */
+  runAsJournal?: string;
   createdAt: number;
   updatedAt: number;
+}
+
+/** A pending run-as migration on an installation record. */
+export interface AppRunAsMigration {
+  to: 'root' | 'app';
+  /** The approved plan's digest. */
+  digest: string;
+  /** Its journal's bare name. */
+  journal: string;
+  startedAt: number;
 }
 
 /** Who shares a running instance (D19). `shared` is model-only in the alpha. */

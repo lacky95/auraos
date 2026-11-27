@@ -12,7 +12,7 @@
  * default.
  */
 import { Option, type Command } from 'commander';
-import { api, type ShellError } from '../lib/client.js';
+import { api, exitCodeOf, shellErrorText } from '../lib/client.js';
 import { color, fail, ok, table } from '../lib/format.js';
 
 // ─── API shapes ──────────────────────────────────────────────────────────────
@@ -43,18 +43,6 @@ interface AppDto {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /** Pull the shell's own error message out of a failed request, verbatim. */
-function apiError(err: unknown): string {
-  const e = err as ShellError;
-  if (typeof e?.body === 'string' && e.body.length > 0) {
-    try {
-      const parsed = JSON.parse(e.body) as { error?: string; message?: string };
-      const msg = parsed.error ?? parsed.message;
-      if (msg) return e.status ? `${msg} ${color.dim(`(HTTP ${e.status})`)}` : msg;
-    } catch { /* not JSON */ }
-    return e.status ? `HTTP ${e.status}: ${e.body}` : e.body;
-  }
-  return e instanceof Error ? e.message : String(err);
-}
 
 async function fetchApps(): Promise<AppDto[]> {
   return api.get<AppDto[]>('/api/apps');
@@ -115,7 +103,7 @@ async function exposeCmd(sourceSpec: string, opts: ExposeOpts): Promise<void> {
       });
       const e = res.port;
       ok(`${sourceApp}:${sourcePort} → ${opts.into} localhost:${e.port}  ${color.dim(`(${e.id}${e.sticky ? ', sticky' : ''})`)}`);
-    } catch (err) { fail(apiError(err)); }
+    } catch (err) { fail(shellErrorText(err), exitCodeOf(err)); }
     return;
   }
 
@@ -132,7 +120,7 @@ async function exposeCmd(sourceSpec: string, opts: ExposeOpts): Promise<void> {
     });
     const e = res.port;
     ok(`${sourceApp}:${sourcePort} → host ${e.bindAddr}:${e.port}  ${color.dim(`(${e.id}${e.sticky ? ', sticky' : ''})`)}`);
-  } catch (err) { fail(apiError(err)); }
+  } catch (err) { fail(shellErrorText(err), exitCodeOf(err)); }
 }
 
 async function lsCmd(appFilter?: string): Promise<void> {
@@ -166,7 +154,7 @@ async function rmCmd(ownerApp: string, portId: string): Promise<void> {
   try {
     await api.del(`/api/instances/${encodeURIComponent(ownerInstance)}/ports/${encodeURIComponent(portId)}`);
     ok(`removed ${portId} from ${ownerApp}`);
-  } catch (err) { fail(apiError(err)); }
+  } catch (err) { fail(shellErrorText(err), exitCodeOf(err)); }
 }
 
 // ─── Registration ────────────────────────────────────────────────────────────

@@ -15,7 +15,7 @@ import type { ApprovalClaim, ApprovalDecider, ApprovalRecord, ApprovalRequest, A
 import { ownerAction, type OwnerActionDeps } from '../src/lib/approvals/admin.ts';
 import type { CallerPrincipal } from '../src/lib/access/identify.ts';
 import {
-  deleteOverride, getRuntimes, postCheck, postEnabled, postMigrate, putDefault, putSettings, type RuntimesDeps,
+  deleteOverride, getMigration, getRuntimes, postCheck, postEnabled, postMigrate, putDefault, putOverride, putSettings, type RuntimesDeps,
 } from '../src/lib/runtimes.ts';
 import { ROUTE_ACCESS_MANIFEST } from '../src/lib/access/routeManifest.ts';
 
@@ -62,15 +62,16 @@ const OPERATOR: CallerPrincipal = { kind: 'operator', verification: 'verified' }
 const FRESH_OWNER: ApprovalDecider = { kind: 'user', userId: 'default', sessionId: 'sess-desk-0001', fresh: true };
 
 const TMP = mkdtempSync(join(tmpdir(), 'runtimes-route-'));
+const REPORT_DIR = mkdtempSync(join(TMP, 'report-'));
 const ROOTFS = join(TMP, 'rootfs');
 mkdirSync(ROOTFS);
 const CONTAINER_CAPS: core.RuntimeCapabilities = {
   isolation: 'namespace', network: 'bridge', appHome: true, privateHomeSession: false, sessionExec: false, identity: 'none',
   readOnlyBinds: true, hostFilesystem: true, mounts: true, idmappedMounts: false, portExpose: true, sidecars: true,
-  warmPool: true, survivesShellRestart: true, usage: true, gpu: false,
+  warmPool: true, survivesShellRestart: true, usage: true, gpu: false, userNamespaces: false,
 };
 const PROOT_CAPS: core.RuntimeCapabilities = {
-  ...CONTAINER_CAPS, isolation: 'ptrace', readOnlyBinds: false, mounts: false, portExpose: false, sidecars: false, survivesShellRestart: false,
+  ...CONTAINER_CAPS, isolation: 'ptrace', readOnlyBinds: false, mounts: false, portExpose: false, sidecars: false, survivesShellRestart: false, usage: false,
 };
 
 const parse = (m: Record<string, unknown>) => core.AppManifestSchema.parse({ name: 'A', version: '1.0.0', ...m });
@@ -128,7 +129,10 @@ beforeEach(() => {
     runtimeApps: async () => apps,
     getAllInstances: () => instances as never,
     stop: async (id: string) => { stopped.push(id); },
-  } as RuntimesDeps['mgr'];
+    runtimeMigrationReport: async () => core.migrationReport(apps, {
+      registry: runtimes, record: await settings.get(), env: { useProotEnv: 'true', rootfsPresent: true }, dataDir: REPORT_DIR,
+    }),
+  } as unknown as RuntimesDeps['mgr'];
 });
 
 async function migrate(): Promise<void> {
@@ -154,7 +158,7 @@ test('GET: every runtime with its schema, capabilities and health; each installa
   const proot = body.runtimes.find((r: any) => r.id === 'proot');
   assert.deepEqual(proot.settingsSchema.properties.placement.enum, ['master', 'pool']);
   assert.deepEqual([proot.settings, proot.enabled, proot.health.status, proot.capabilities.readOnlyBinds], [{ placement: 'master' }, true, 'ok', false]);
-  assert.deepEqual(proot.instances, [{ instanceId: 'io.ex.kept-1', appId: 'io.ex.kept', state: 'resumed', source: 'migration' }]);
+  assert.deepEqual(proot.instances, [{ instanceId: 'io.ex.kept-1', appId: 'io.ex.kept', state: 'resumed', source: 'migration', restartToApply: false }]);
   const by = Object.fromEntries(body.installations.map((i: any) => [i.appId, i]));
   assert.deepEqual([by['io.ex.kept'].runtime, by['io.ex.kept'].source], ['proot', 'migration']);
   assert.deepEqual([by['io.ex.box'].runtime, by['io.ex.box'].source], ['container', 'manifest']);
@@ -248,8 +252,73 @@ test('route manifest: the runtimes routes are implemented rows, no longer reserv
   for (const p of Object.keys(reserved)) assert.doesNotMatch(p, /^\/api\/admin\/runtimes/, `${p} is implemented`);
   assert.deepEqual(routes['/api/admin/runtimes']!.methods!['GET']!.allow, ['owner']);
   assert.deepEqual(routes['/api/admin/runtimes/check']!.methods!['POST']!.allow, ['owner']);
+  assert.deepEqual(routes['/api/admin/runtimes/migration']!.methods!['GET']!.allow, ['owner']);
   for (const [p, m] of [['/api/admin/runtimes/default', 'PUT'], ['/api/admin/runtimes/[id]/settings', 'PUT'], ['/api/admin/runtimes/[id]/enable', 'POST'],
-    ['/api/admin/runtimes/[id]/disable', 'POST'], ['/api/admin/runtimes/overrides/[installationId]', 'DELETE'], ['/api/admin/runtimes/migrate', 'POST']] as const) {
+    ['/api/admin/runtimes/[id]/disable', 'POST'], ['/api/admin/runtimes/overrides/[installationId]', 'DELETE'],
+    ['/api/admin/runtimes/overrides/[installationId]', 'PUT'], ['/api/admin/runtimes/migrate', 'POST']] as const) {
     assert.equal(routes[p]!.methods![m]!.systemApp, 'com.aura.terminal', `${m} ${p} is owner-managed`);
   }
+});
+
+test('override set (ARI-3): dry-run refusal with missing and suggest before any prompt; fresh from Settings; audited; applies to the next start', async () => {
+  caller = SETTINGS;
+  const refused = await read(await putOverride(req('PUT', { runtime: 'proot' }), 'i-box', deps()));
+  assert.deepEqual([refused.status, refused.body.error, refused.body.category, refused.body.missing, refused.body.suggest],
+    [409, 'capability-missing', 'unsupported-feature', ['readOnlyBinds'], ['container']]);
+  assert.equal(approvals.records.size, 0, 'a refusal needs no password');
+  const first = await read(await putOverride(req('PUT', { runtime: 'proot' }), 'i-new', deps()));
+  assert.equal(first.status, 409, 'io.ex.new is closed too');
+  // An open app: io.ex.kept (after the migration it has a migration override to proot).
+  await migrate();
+  caller = SETTINGS;
+  const ask = await read(await putOverride(req('PUT', { runtime: 'container' }), 'i-kept', deps()));
+  assert.equal(ask.status, 202);
+  const rec = approvals.records.get(ask.body.approvalId)!;
+  assert.equal(rec.level, 'fresh');
+  await approvals.approve(rec.id, FRESH_OWNER);
+  const again = (body: unknown) => ({ request: new Request('http://shell.test/x', {
+    method: 'PUT', headers: { 'content-type': 'application/json', 'x-aura-approval': rec.id }, body: JSON.stringify(body),
+  }), cookies: {} as never });
+  const done = await read(await putOverride(again({ runtime: 'container' }), 'i-kept', deps()));
+  assert.deepEqual([done.status, done.body.override.runtime, done.body.override.source], [200, 'container', 'override']);
+  assert.deepEqual(audits.map((a) => [a.action, a.opts.detail.from]), [['runtime.override-set', { runtime: 'proot', source: 'migration' }]]);
+  const after = await read(await getRuntimes(req('GET'), deps()));
+  const kept = after.body.installations.find((i: any) => i.appId === 'io.ex.kept');
+  assert.deepEqual([kept.runtime, kept.source, kept.override], ['container', 'override', true]);
+  // The running PRoot instance now runs on a runtime its installation no longer resolves to.
+  const proot = after.body.runtimes.find((r: any) => r.id === 'proot');
+  assert.deepEqual([proot.restartToApply, proot.instances[0].restartToApply], [1, true]);
+});
+
+test('override set: the operator acts directly; a stale `expected`, an unknown installation and bad input are refused', async () => {
+  const stale = await read(await putOverride(req('PUT', { runtime: 'container', expected: 'proot' }), 'i-box', deps()));
+  assert.deepEqual([stale.status, stale.body.error], [409, 'conflict']);
+  assert.equal((await putOverride(req('PUT', { runtime: 'container' }), 'i-nope', deps())).status, 404);
+  assert.equal((await putOverride(req('PUT', { runtime: 'gvisor' }), 'i-box', deps())).status, 404);
+  assert.equal((await putOverride(req('PUT', { runtime: 'container', settings: [] }), 'i-box', deps())).status, 400);
+  const ok = await read(await putOverride(req('PUT', { runtime: 'container', expected: null }), 'i-box', deps()));
+  assert.deepEqual([ok.status, ok.body.changed], [200, true]);
+  const same = await read(await putOverride(req('PUT', { runtime: 'container' }), 'i-box', deps()));
+  assert.equal(same.body.changed, false);
+  assert.equal(audits.length, 1, 'an unchanged override is not audited again');
+  // An open D75 decision is decided by migrate first.
+  await migrate();
+  const open = await read(await putOverride(req('PUT', { runtime: 'container' }), 'i-direct', deps()));
+  assert.deepEqual([open.status, open.body.error, open.body.category], [409, 'decision-open', 'conflict']);
+});
+
+test('migration report: read-only (no record write), the dry-run rows with the recorded state and the current resolution', async () => {
+  await migrate();
+  const before = (await settings.read()).stored;
+  const one = await read(await getMigration(req('GET'), deps()));
+  const two = await read(await getMigration(req('GET'), deps()));
+  assert.equal(one.status, 200);
+  assert.deepEqual(one.body, two.body);
+  assert.equal((await settings.read()).stored, before);
+  const by = Object.fromEntries(one.body.installations.map((r: any) => [r.appId, r]));
+  assert.deepEqual([by['io.ex.kept'].decision, by['io.ex.kept'].current.source], ['override', 'migration']);
+  assert.equal(by['io.ex.direct'].pending.reason, 'master-direct');
+  assert.equal(by['io.ex.direct'].current.error.category, 'conflict', 'a decision is needed: not a failure of the runtime');
+  assert.ok(Array.isArray(one.body.features.proot) && one.body.features.proot.some((f: any) => f.id === 'mount.attach'), 'the feature view of the runtimes in use');
+  assert.equal(audits.length, 0);
 });

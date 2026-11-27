@@ -41,15 +41,26 @@ override, else `manifest.sandbox`, else the Runtime Settings default
 or a missing capability (a closed app on PRoot, sidecars on PRoot) fails
 the start with a clear error; nothing falls back to another runtime. The
 resolved id is latched on the instance as `sandbox`, and every later call
-reaches the runner through it:
+reaches the runner through it (with `runtimeSource` and the revision of
+its effective settings, `runtimeSettingsRev`, so Settings can count the
+instances that need a restart to apply a change). Overrides, the
+capability table and the runtime migration are described in
+[Runtimes](/docs/runtimes); an owner override is checked when it is set and
+again at every start, like any other source:
 
 ```ts
 const runtime = await this.resolveRuntime(appId, manifest);   // throws, never falls back
 const pid = await runtime.module.runner.spawn(instanceId, appId, port, manifest, ctx);
 ```
 
-`ContainerRunner.listOrphanRecords()` is how containers survive a shell
-restart: sibling containers tagged `aura-*` get re-adopted at boot.
+Instances survive a shell restart through their runtime's `adoption`
+group (ARI, Phase 5b): at boot the kernel asks every runtime that has one
+for its survivors and adopts them (for `container`: sibling containers
+tagged `aura-*`). A survivor without a workload token is not kept: it is
+stopped through its lifecycle and starts fresh. PRoot instances end with
+the shell; the kernel records the running ones and starts them again at
+boot, with no browser or sign-in needed, and a restored window maps to
+the new instance.
 
 ## The synthesised entrypoint
 
@@ -140,7 +151,11 @@ installed on the host.
 chokidar fires, AND the AppManager calls `provisionToolsDir(instanceId, manifest)`
 again — re-running the symlink loop. The running child sees the new
 binding within a tick without a respawn, because `/aura/my-tools/` is
-the same bound directory.
+the same bound directory. The runtime reports per instance what it
+applied: `aura cap grant` prints `applied (enforced)`, or `advisory` in
+the legacy symlink tool mode (every tool stays reachable by absolute
+path there, so it is never an enforced boundary), `failed` or
+`unsupported`.
 
 ### Identity gate at spawn (`waitHealthy`)
 
@@ -213,10 +228,22 @@ start in it work as before.
 Every Terminal instance belongs to one user from its spawn on, and is that
 user's session host:
 
-- **It runs as the user's uid/gid** (the owner 1000, members from 100000),
-  with `--cap-drop ALL` and `no-new-privileges`. Its generated `/etc/passwd`
-  names the user (`pw_dir=/home/aura`), so `id`, git and ssh agree. Root comes
-  only from a root tab (`aura root`).
+- **Its sessions run as the user's uid/gid** (the owner 1000, members from
+  100000), with no capability and `no-new-privileges`. Its generated
+  `/etc/passwd` names the user (`pw_dir=/home/aura`), so `id`, git and ssh
+  agree. Root comes only from a root tab (`aura root`).
+- **Its server runs as its own service uid** (`aura-terminal`, 990: a fixed,
+  non-login OS service account outside every user, app and principal range),
+  never as the user. The server holds the instance's lifecycle token, the
+  shell's relay key and the session hook key; the sessions run under another
+  uid, so they can't read its `/proc/<pid>` (environment, descriptors, maps,
+  memory), attach a debugger to it or signal it. The container starts as uid 0
+  with only `SETUID` and `SETGID` for its session launcher
+  (`aura-term-launch`, aura-base), which starts the server as the service uid
+  and runs every session command (tmux, the shells, the user-file helper for
+  agent hooks and quick commands) as the user, for the server only (its peer
+  uid is checked); nothing else runs as root. A `docker exec` into it runs as
+  the user.
 - **It mounts only that user's Private Home** at `/home/aura` (the Home
   Resolver's `terminal-session` context). The Terminal service never holds
   another user's home.
@@ -225,7 +252,9 @@ user's session host:
   server's own (`AURA_LIFECYCLE_TOKEN`, listen settings, `NODE_ENV`), with
   `HOME=/home/aura`.
 - **tmux listens on an explicit socket per uid**,
-  `/run/aura-term/<uid>/tmux.sock`, in a tmpfs owned by that uid (0700).
+  `/run/aura-term/<uid>/tmux.sock`, in a tmpfs owned by that uid (0700). The
+  tmux server and every tmux client run as the user; the server never talks to
+  tmux as itself.
 - **Each session has its own agent-hook token** (`AURA_TERM_HOOK_TOKEN`, in
   that session's env only). The hook script sends it; the Terminal refuses an
   agent event without it.
@@ -245,12 +274,11 @@ user's session host:
   start. The build output stays root's and read-only for the session users.
   The owner develops the Terminal in a Preview (its own instance, workspace
   and caches), which never touches other users' sessions.
-- **Its server is sealed from its own sessions:** it runs from an
-  execute-only `node-sealed` (aura-base), so the kernel makes it non-dumpable
-  and the sessions (same uid) can't read its `/proc/<pid>` (environ, memory,
-  descriptors) or ptrace it. Its lifecycle token is never in its environment:
-  the runtime hands it over as a one-time file that the server reads and
-  removes at start.
+- **Its lifecycle token is never in its environment:** the runtime hands it
+  over as a one-time file of the service uid (0400 in a 0700 directory) that
+  the server reads and removes at start; the user can't read it at any time.
+  The instance's data directory (scrollback, saved directories) is the
+  service uid's, with the user's group.
 - **Before the ownership apply** (`aura admin homes ownership --apply`), the
   owner's Private Home is still root's and the owner's Terminal does not start
   (no root fallback). Only inside the 5-main deploy's migration window (the

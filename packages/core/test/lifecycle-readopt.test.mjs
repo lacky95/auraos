@@ -78,12 +78,14 @@ test('without a bound address the token is never sent', async () => {
 
 test('AppManager records the adopted instance\'s status', async () => {
   const inst = { instanceId: ID, appId: APP };
+  // 5b CR: through the instance's runtime module (`adoption.measure`), never the container runner.
+  const adoption = { measure: async () => ({ identity: 'match', guard: '401' }) };
   const fake = {
     instances: new Map([[ID, inst]]),
-    container: { measureAdopted: async () => ({ identity: 'match', guard: '401' }) },
+    moduleOf: () => ({ adoption }),
   };
   await AppManager.prototype.measureAdopted.call(fake, ID);
   assert.deepEqual(inst.lifecycle, { identity: 'match', guard: '401' });
-  fake.container.measureAdopted = async () => { throw new Error('boom'); };
+  adoption.measure = async () => { throw new Error('boom'); };
   await AppManager.prototype.measureAdopted.call(fake, ID); // never throws
 });

@@ -58,6 +58,7 @@ const sortedKeys = (needs: Partial<RuntimeCapabilities>): RuntimeCapability[] =>
 /**
  * The derivation table (one row per rule):
  *   services[]                       sidecars
+ *   services[].userNamespaces        userNamespaces (a nested sandbox, D107)
  *   ports.exposes                    portExpose
  *   warmPool > 0                     warmPool
  *   permission apps.mount            mounts (cross-app mounts)
@@ -74,6 +75,8 @@ export function requirementsOf(m: RequirementsManifest, installation?: Requireme
   const mounts = (m.permissions ?? []).includes('apps.mount');
   const needs: Partial<RuntimeCapabilities> = {};
   if (services.length) needs.sidecars = true;
+  // D107: a sidecar that runs a nested sandbox needs the runtime's userNamespaces (never by weakening it).
+  if (services.some((s) => s.userNamespaces)) needs.userNamespaces = true;
   if (exposes.length) needs.portExpose = true;
   if ((m.warmPool ?? 0) > 0) needs.warmPool = true;
   if (mounts) needs.mounts = true;
@@ -121,17 +124,20 @@ export function requirementsOf(m: RequirementsManifest, installation?: Requireme
  *                                          ephemeral) Home: an isolated session
  *                                          inside the instance (D67, D74)
  *   home-app                               a session as the app (D79)
- *   terminal-session                       a user's session host: a namespace
- *                                          boundary at least (D65 §11)
+ *   user-environment                       an instance that is its user's
+ *                                          environment: a namespace boundary at
+ *                                          least (D65 §11, D107 S2);
+ *                                          `terminal-session` is its read alias
+ *                                          for one release
  *   application, sidecar                   an app process: nothing extra
  *   mount, idmap-mount                     a cross-app mount; a writable one
  *                                          between different app uids (D80)
  *   closed, sidecars, port-expose,         the manifest rows by name
- *   host-filesystem
+ *   host-filesystem, user-namespaces
  */
 export const REQUEST_KINDS = [
-  'jump', 'home-private', 'home-ephemeral', 'home-app', 'terminal-session', 'application', 'sidecar',
-  'mount', 'idmap-mount', 'closed', 'sidecars', 'port-expose', 'host-filesystem',
+  'jump', 'home-private', 'home-ephemeral', 'home-app', 'user-environment', 'terminal-session', 'application', 'sidecar',
+  'mount', 'idmap-mount', 'closed', 'sidecars', 'port-expose', 'host-filesystem', 'user-namespaces',
 ] as const;
 export type RequestKind = (typeof REQUEST_KINDS)[number];
 
@@ -144,6 +150,7 @@ export function requestNeeds(kind: RequestKind | ExecutionContext, opts: { jumpH
     case 'home-private':
     case 'home-ephemeral': return { sessionExec: true, privateHomeSession: true };
     case 'home-app': return { sessionExec: true };
+    case 'user-environment':
     case 'terminal-session': return { isolation: 'namespace' };
     case 'application':
     case 'sidecar': return {};
@@ -153,5 +160,25 @@ export function requestNeeds(kind: RequestKind | ExecutionContext, opts: { jumpH
     case 'sidecars': return { sidecars: true };
     case 'port-expose': return { portExpose: true };
     case 'host-filesystem': return { hostFilesystem: true };
+    case 'user-namespaces': return { userNamespaces: true };
   }
+}
+
+/** The installation facts an instance latched at its start (AppInstance `runAs`). */
+export interface InstanceFacts {
+  /** `user`: a Terminal instance runs as its user's uid (D69). Absent: root (a record from before 5-apps). */
+  runAs?: 'app' | 'root' | 'user';
+}
+
+/**
+ * An instance's effective capabilities (5b G): its runtime's, narrowed by
+ * the installation facts. A root instance (legacy or an approved root
+ * request) runs everything as uid 0 whatever the runtime enforces, so for
+ * its sessions `identity` is `none` and there is no Private Home boundary
+ * (J.5; the runtime flag `identity: enforced` is static, P-2). Never widens a
+ * capability. The gates read this, never a runtime id (ARI §9.5).
+ */
+export function instanceCapabilities(runtime: RuntimeCapabilities, facts: InstanceFacts): RuntimeCapabilities {
+  if (facts.runAs === 'app' || facts.runAs === 'user') return { ...runtime };
+  return { ...runtime, identity: 'none', privateHomeSession: false };
 }

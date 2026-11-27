@@ -147,11 +147,12 @@ export const SECURITY_OPTIONS: readonly SecurityOption[] = Object.freeze([
   {
     id: 'system-mode',
     title: 'System mode',
-    description: 'developer (default until Phase 6): AuraOS runs from its /workspace checkout, `aura mount workspace` and '
+    description: 'developer: AuraOS runs from its /workspace checkout, `aura mount workspace` and '
       + '`aura dev rebuild|restart` work, and the desktop shows the "Developer mode" badge. normal: those are refused '
-      + '(recorded and shown; the locked release comes with Phase 6). Turning it on needs the password; turning it off '
-      + 'lists what differs from the release first. Settings → System, or `aura mode`.',
-    type: 'enum', values: ['normal', 'developer'], default: 'developer', source: 'file', file: 'aura/system-mode',
+      + '(the locked release comes with Phase 6). Turning it on needs the password; turning it off '
+      + 'lists what differs from the release first. Settings → System, or `aura mode`. Default normal (Phase 6): '
+      + 'an install whose /workspace is a git checkout gets developer written at boot, so existing installs keep it (D60).',
+    type: 'enum', values: ['normal', 'developer'], default: 'normal', source: 'file', file: 'aura/system-mode',
     env: 'AURA_SYSTEM_MODE', restartRequired: false, change: 'fresh', since: '2026-11-25', phase: '4 (D60)',
   },
   {
@@ -162,6 +163,15 @@ export const SECURITY_OPTIONS: readonly SecurityOption[] = Object.freeze([
       + 'one approval click (D57).',
     type: 'enum', values: ['dev', 'prod'], default: 'dev', source: 'file', file: 'aura/shell-mode',
     env: 'AURA_SHELL_MODE', restartRequired: true, change: 'session', since: '2026-10-30', phase: 'early',
+  },
+  {
+    id: 'composition',
+    title: 'Build composition',
+    description: 'desktop (default): the server layer plus the Web Shell (desktop pages, client bundle). server: the same '
+      + 'kernel, API, App Hosts and WS proxy with no Web Shell (Headless, D76); Web Shell boot hooks (desktop session '
+      + 'restore, free-flight windows) do not run. The env wins over the file; read by os/boot.sh at build and at boot (a prod build of the other composition is rebuilt); shown in /data/aura/boot/status.json.',
+    type: 'enum', values: ['server', 'desktop'], default: 'desktop', source: 'file', file: 'aura/composition',
+    env: 'AURA_COMPOSITION', restartRequired: true, change: 'fresh', since: '2026-11-27', phase: '6 (D76)',
   },
   {
     id: 'runtimes',

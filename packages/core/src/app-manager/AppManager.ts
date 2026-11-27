@@ -1,4 +1,7 @@
-import { effectiveSourceMode, type SourceModeInfo } from './contracts.js';
+import { effectiveSourceMode, installRecordPath, type SourceModeInfo } from './contracts.js';
+import { resolvePullCredential, type InstallOrigin } from '../nexus/RegistryAuth.js';
+import type { PullCredential } from '../nexus/types.js';
+import { loadSourcesConfig } from '../nexus/SourcesConfig.js';
 import { DEFAULT_OWNER_ID, type UserSessionsEnded } from '../auth/identityContracts.js';
 import { adoptedInstanceOwner } from './instanceOwner.js';
 
@@ -11,24 +14,25 @@ function hookUser(instances: ReadonlyMap<string, { owner?: string }>, instanceId
 }
 import { mkdirSync, readdirSync, readFileSync, lstatSync, writeFileSync, chmodSync, copyFileSync, cpSync, renameSync, rmSync, unlinkSync, existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { BASE_IMAGE } from './BaseImage.js';
 import { join, dirname, basename } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import { lifecyclePath } from '../types/manifest.js';
 import type { AppLifecycleState } from '../types/lifecycle.js';
 import type { AppInstance, ResourceUsage, SidecarInfo } from '../types/instance.js';
-import type { AppActivity, ActivityRestoreSeed, FlightPatch, FlightNotice, FlightState, FlightRect, FlightBadge, FlightAction, FlightEdge, FlightEdgeSize, FlightMode } from '../types/activity.js';
+import type { AppActivity, ActivityCloseResult, ActivityRestoreSeed, FlightPatch, FlightNotice, FlightState, FlightRect, FlightBadge, FlightAction, FlightEdge, FlightEdgeSize, FlightMode } from '../types/activity.js';
 import { cleanNotice, patchOpensFlight, noticeClearsOnOpen } from './flight-notice.js';
 import { ACTIVITY_STATE_MAX_BYTES, FLIGHT_MODES } from '../types/activity.js';
 import { OsEventBus } from '../ipc/OsEventBus.js';
 import { AppRegistry } from './AppRegistry.js';
 import { toolsTrackInstalledCaps } from '../capabilities/tool-allowlist.js';
-import { SHARED_HOME_PATH, toolchainMirrorBin } from './tool-provision.js';
-import { readLibMap, replaceLibFile, restoreLibsFromStore, toolchainLibFor, toolchainMirrorLib } from './tool-libs.js';
+import { SHARED_HOME_PATH, currentToolsMode, healImageTools, toolchainMirrorBin } from './tool-provision.js';
+import { INSTANCE_LIB_DIR, readLibMap, replaceLibFile, restoreLibsFromStore, toolchainLibFor, toolchainMirrorLib } from './tool-libs.js';
 import { legacySharedHomeDir, masterHomeDir, userHomeDir } from '../scopes/home.js';
 import { PortAllocator } from './PortAllocator.js';
 import { LifecycleStateMachine } from './LifecycleStateMachine.js';
 import { ProotRunner, killProcessGroup } from './ProotRunner.js';
+import { BASE_IMAGE } from './BaseImage.js';
+import { buildSpawnSpec, runnerContextOf } from '../runtimes/spawnSpec.js';
 import { ContainerRunner } from './ContainerRunner.js';
 import { appFingerprint, buildFailureReason, discardBuildStaging, installBuild, prepareBuildStaging, prodCapability, sdkFingerprint, serveState, writeBuildStamp, type ServeState } from './appBuild.js';
 import { needsProvisioning, refreshAuraPackages } from './provisioning.js';
@@ -36,36 +40,49 @@ import { MountManager } from './MountManager.js';
 import { PortManager, type ExposeSpec } from './PortManager.js';
 import { InstanceTokens } from './InstanceTokens.js';
 import { SidecarManager } from './SidecarManager.js';
-import { parentOfConsumer } from './MountManager.js';
+import { isSidecarConsumer, parentOfConsumer } from './MountManager.js';
+import { instanceCapabilities as effectiveCapabilities } from '../runtimes/requirements.js';
 import type { InstanceSpawnContext, SandboxExecOpts, SandboxRunner } from './SandboxRunner.js';
 import type { RuntimeCapabilities } from '../runtimes/types.js';
 import { RuntimeRegistry, type ResolvedRuntime, type RuntimeModule } from '../runtimes/registry.js';
+import {
+  RESPAWN_FREEZE_MS, readRespawnRecord, respawnEntries, writeRespawnRecord, type RespawnEntry,
+} from '../runtimes/respawn.js';
+import { DEFAULT_BUILD_LIMITS } from '../runtimes/container/limits.js';
+import { moduleFeatures, operationResult, requireLimits, requireNetworkIsolation, type ResourceLimits, type RuntimeFeature, type RuntimeOperationResult, type RuntimeBuild, type RuntimeDiagnostics, type RuntimeEndpoints, type RuntimeOrphanProcess, type RuntimeSessionInfo, type RuntimeToolsStatus } from '../runtimes/ari.js';
 import { BUILTIN_RUNTIMES } from '../runtimes/builtins/index.js';
-import { RUNTIME_AUDIT_ACTIONS, RuntimeSettingsStore } from '../runtimes/settingsStore.js';
-import { migrateLegacyRuntimes, processLegacyEnv, type MigrationApp } from '../runtimes/migrateLegacy.js';
+import { RUNTIME_AUDIT_ACTIONS, RuntimeSettingsStore, runtimeSettingsRevision } from '../runtimes/settingsStore.js';
+import { migrateLegacyRuntimes, migrationReport, processLegacyEnv, type MigrationApp, type MigrationReport } from '../runtimes/migrateLegacy.js';
 import { defaultRedis } from '@aura/kv-store';
 import { AdminAudit } from '../auth/AdminAudit.js';
+import { CONTRACT_AUDIT_ACTIONS, operationalBlock, OperationalBlockError, operationalBlockOf, type OperationalBlock } from '../contract/types.js';
 import type { AuthServices } from '../auth/services.js';
 import { defaultIdentityKeyFile } from '../auth/identityKey.js';
 import { HomeDeniedError, type HomeResolver, type ResolvedHome } from '../homes/types.js';
 import { kernelHomeResolver } from '../homes/HomeResolver.js';
-import { TERMINAL_SESSION_APPS } from '../homes/plan.js';
+import { isUserEnvironment, TERMINAL_APP_ID } from '../system/systemApps.js';
+import { requirePrivateHomeIsolation } from './privateHomeNetwork.js';
 import { appJumpPermission } from '../auth/GrantStore.js';
 import {
   APP_ROOT_EXECUTION_OPTION, RootExecutionError, executionConfigOf, executionDecision, type AppRootExecutionPolicy, type ExecutionApproval,
 } from '../identity/execution.js';
 import { securityPolicyValue } from '../security/options.js';
-import { LINUX_ID_RANGES, ROOT_SPAWN_IDENTITY, linuxIdRangeOf, type AppRunAs, type SpawnIdentity, type SpawnIdentityProvider } from '../identity/types.js';
+import { LINUX_ID_RANGES, ROOT_SPAWN_IDENTITY, TERMINAL_SERVICE_UID, linuxIdRangeOf, type AppRunAs, type SpawnIdentity, type SpawnIdentityProvider } from '../identity/types.js';
 import { appIdentityProvider, sessionHostIdentityProvider } from '../identity/appIdentityProvider.js';
 import { grantedContextEnv, liveGrantedContextDeps, type GrantedContextDeps } from '../context/grantedContext.js';
 import { ContextStore } from '../context/ContextStore.js';
 import { CredentialVault } from '../context/CredentialVault.js';
 import { migratePhase5Context } from '../context/migratePhase5.js';
-import type { ContextMigrationDeps } from '../context/migratePhase5.js';
+import type { ContextMigrationApp, ContextMigrationDeps } from '../context/migratePhase5.js';
 import { defaultKv } from '@aura/kv-store';
 import { appOwnershipSpecs, applyAppOwnership } from '../identity/appOwnership.js';
-import { RuntimeCapabilityError, RuntimeModuleError } from '../runtimes/types.js';
-import { BASE_GROUP, BASE_PASSWD, identityAccountName, isNonRootIdentity, isSessionIdentity } from './spawn/identityArgs.js';
+import { ownershipJournalPath } from '../identity/ownershipApply.js';
+import { runAsMigrationBlock, type RunAsOwnershipInput } from '../identity/runAsOwnership.js';
+import { installationAppHomes } from '../homes/appHomeAdmin.js';
+import type { AppInstallation, AppRunAsMigration } from '../app-hosts/contracts.js';
+import type { AppGrantBinding } from '../auth/types.js';
+import { RuntimeCapabilityError, RuntimeModuleError, runtimeErrorBody, runtimeRefusal } from '../runtimes/types.js';
+import { BASE_GROUP, BASE_PASSWD, identityAccountName, isNonRootIdentity, isSessionIdentity } from '../runtimes/spawn/identityArgs.js';
 import { renderGroup, renderPasswd, type PasswdEntry } from '../identity/passwd.js';
 import type { SessionCaller, SessionContext } from './ExecBridge.js';
 import type { JumpHomeMode } from '../homes/types.js';
@@ -83,14 +100,20 @@ import type { InterfaceView } from '../interfaces/InterfaceRegistry.js';
 import { keymapRegistry } from '../keymap/KeymapRegistry.js';
 import { ScopeRegistry } from '../scopes/ScopeRegistry.js';
 import type { ScopeDefinition, ScopeId } from '../scopes/types.js';
-import { getAppHostServices } from '../app-hosts/services.js';
-import { appSourceFingerprint } from '../app-hosts/lifecycle.js';
+import { readOriginId } from './AppIdentity.js';
+import { getAppHostServices, type AppHostServices } from '../app-hosts/services.js';
+import { appSourceFingerprint } from '../app-hosts/sourceFingerprint.js';
 import { seedHomeAs } from './homeSeed.js';
 import { PREVIEW_IDLE_MS, previewTitle } from './preview.js';
+import type {
+  MaintenanceReason, MaintenanceRefusal, MaintenanceSession, MaintenanceStartOptions, MaintenanceStartResult, StopReason,
+  UpdateInstanceOptions, UpdateInstanceOutcome,
+} from './maintenance.js';
+import { UPDATE_HOOK_TIMEOUT_MS, runInstanceUpdate } from './instanceUpdate.js';
+import type { AuraErrorBody } from '../errors/contracts.js';
 import { MOUNT_DIR_NAME } from './MountManager.js';
 import { ExecBridge } from './ExecBridge.js';
 import { RootGrants } from './rootTabs.js';
-import { DockerApi } from './DockerApi.js';
 
 const RECONCILE_INTERVAL_MS = 5_000;
 const ERROR_GRACE_MS        = 30_000;
@@ -113,21 +136,24 @@ export function ownerHomeAwaitsOwnership(
  * Stream T: a System Terminal instance's data dir (scrollback, saved
  * directories, launch commands) belongs to the one user whose sessions it
  * held. Instance ids are reused (D85 A7), so when the dir was left by another
- * user's uid it is moved aside, root-only, and the new user starts empty:
- * nothing of one user's sessions is replayed, restored or run in another's.
- * Ownership is the dir's own uid (chowned at each non-root start), which a
- * capability-less user can't forge; root-owned dirs predate stream T and
- * were the owner's.
+ * user it is moved aside, root-only, and the new user starts empty: nothing
+ * of one user's sessions is replayed, restored or run in another's.
+ * Whose it is: the dir's group when the Terminal service account owns it
+ * (stream T2: `aura-terminal:<user gid>`, chowned at each start), else its own
+ * uid (stream T: the user's); neither can a capability-less user forge.
+ * Root-owned dirs predate stream T and were the owner's.
  */
-export function retireForeignSessionData(dir: string, uid: number, now = Date.now()): string | null {
+export function retireForeignSessionData(dir: string, id: { uid: number; gid: number }, now = Date.now()): string | null {
   let st;
   try { st = lstatSync(dir); } catch { return null; }
-  if (!st.isDirectory() || st.isSymbolicLink() || st.uid === 0 || st.uid === uid) return null;
-  const aside = join(dirname(dir), `.${basename(dir)}.retired-${st.uid}-${now}`);
+  if (!st.isDirectory() || st.isSymbolicLink() || st.uid === 0 || st.uid === id.uid) return null;
+  if (st.uid === TERMINAL_SERVICE_UID && st.gid === id.gid) return null;
+  const was = st.uid === TERMINAL_SERVICE_UID ? `g${st.gid}` : String(st.uid);
+  const aside = join(dirname(dir), `.${basename(dir)}.retired-${was}-${now}`);
   renameSync(dir, aside);
   chmodSync(aside, 0o700);
   mkdirSync(dir, { recursive: true });
-  console.log(`[AppManager] ${basename(dir)}: its data was another user's (uid ${st.uid}); moved aside, starting empty`);
+  console.log(`[AppManager] ${basename(dir)}: its data was another user's (${st.uid === TERMINAL_SERVICE_UID ? `gid ${st.gid}` : `uid ${st.uid}`}); moved aside, starting empty`);
   return aside;
 }
 
@@ -186,7 +212,13 @@ export class AppManager {
   readonly runtimes: RuntimeRegistry;
   /** The Runtime Settings record (`user:policy:runtimes`, ARI §9.7). */
   readonly runtimeSettings: RuntimeSettingsStore;
-  /** The container runtime's runner: what only it backs (adoption, builds, mounts, ports, sidecars). */
+  /**
+   * The container runtime's runner, for what is not behind ARI yet: app
+   * builds and provisioning (the kernel build service; 5b-2 D-B) and the
+   * mount, port and sidecar managers (5b G retypes them; D-M, D-P, D-S).
+   * Adoption, sessions, workloads, tools and usage go through the runtime
+   * modules' capability groups (5b CR, D77), never through this field.
+   */
   private readonly container: ContainerRunner;
   /** Phase 5 spawn seams, used only by `spawnContext`. */
   private readonly homes: HomeResolver;
@@ -198,12 +230,15 @@ export class AppManager {
    * cycle is gone). Absent (unit tests): any use is a clear error.
    */
   private readonly auth: () => KernelAuthServices;
+  private readonly appHosts: () => AppHostServices;
   /** Stream C: which Context keys a start gets (declared AND granted, context/grantedContext.ts). */
   private readonly context: GrantedContextDeps;
   /** Phase 7a: install recovery at boot, from the composition point (opts.installRecovery). */
   private readonly installRecovery: (() => Array<{ scope: string; appId: string; outcome: string; detail?: string }>) | null;
   /** Stream C: the Context migration's app-source scanner, from the composition point (opts.contractScan). */
   private readonly contractScan: NonNullable<ConstructorParameters<typeof AppManager>[0]['contractScan']> | null;
+  /** 5b G: probe idmapped binds at init (opts.probeIdmappedMounts, the composition point only). */
+  private readonly probeIdmap: boolean;
   /** The D64 switch `app-root-execution` (identity/execution.ts); a read failure throws (the start fails closed). */
   private readonly rootExecutionPolicy: () => Promise<AppRootExecutionPolicy>;
   private instances = new Map<string, AppInstance>();
@@ -240,8 +275,10 @@ export class AppManager {
    * Until a reconciler pass adopts them, nothing is reaped as an orphan.
    */
   private adoptionPending = false;
+  /** The adoption retry under way (one at a time: the reconciler's and a spawn's share it). */
+  private adoptionRetry: Promise<void> | null = null;
   /** Last known sidecars per backend, refreshed by `syncSidecars` (reconciler cadence). */
-  private sidecars: Array<{ runner: SandboxRunner; info: SidecarInfo }> = [];
+  private sidecars: Array<{ module: RuntimeModule; info: SidecarInfo }> = [];
   /** Consecutive syncs each sidecar's parent was absent — see selectOrphanSidecars. */
   private sidecarAbsence = new Map<string, number>();
   /** Sidecars kept running across a restart/crash of their instance (sidecarParking.ts). */
@@ -255,7 +292,7 @@ export class AppManager {
    * Per-app enable/disable state. Stores ONLY the explicit `false` flags —
    * absence means "enabled" (the default). That way a newly scaffolded app
    * is implicitly enabled and we don't have to migrate this map on every
-   * `chokidar add`. Hydrated from KV at boot via `setEnabledState()`;
+   * `chokidar add`. Hydrated from KV at the start of `init()` (`hydrateEnabledState`);
    * mutated via `setEnabled()` (which also stops running instances on disable).
    */
   private disabled = new Set<string>();
@@ -295,11 +332,28 @@ export class AppManager {
     /** The D64 switch `app-root-execution`; default: the owner's security policy record. */
     rootExecutionPolicy?: () => Promise<AppRootExecutionPolicy>;
     /**
+     * 5b G (D80): Developer Mode is on (the shell owns the system mode). A
+     * writable cross-app source mount into another uid needs it. Absent: off.
+     */
+    developerMode?: () => boolean;
+    /**
+     * 5b G (D80): probe idmapped binds at init (a privileged mount helper).
+     * Only the composition point sets it; absent, `idmappedMounts` stays
+     * false and cross-uid writable mounts are refused (fail closed).
+     */
+    probeIdmappedMounts?: boolean;
+    /**
      * The identity, user, grant and audit services (`getAuthServices` from the
      * composition point). Passed in, never imported: auth/services builds its
      * services from AppManager (D97, 5b K).
      */
     auth?: () => KernelAuthServices;
+    /**
+     * The App Host registry, lifecycle and guard (`getAppHostServices` from the
+     * composition root, Phase 6 K). Default: the accessor, a contract file
+     * that imports nothing at runtime (D97: no app-manager <-> app-hosts cycle).
+     */
+    appHosts?: () => AppHostServices;
     /** More runtimes next to the built-in ones (ARI; tests register a fake one). */
     runtimes?: RuntimeModule[];
     /** The Runtime Settings store; default: the sealed record in Valkey. */
@@ -307,10 +361,18 @@ export class AppManager {
   }) {
     this.dataDir = opts.dataDir;
     this.auth = opts.auth ?? (() => { throw new Error('AppManager: no auth services were handed in (initAppManager opts.auth)'); });
+    this.appHosts = opts.appHosts ?? getAppHostServices;
     this.toolchainDir = opts.toolchainDir;
     this.baseRootfs = opts.baseRootfs;
     this.scopeRegistry = new ScopeRegistry({ systemAppsDir: opts.appsDir, dataDir: opts.dataDir });
-    this.registry = new AppRegistry(this.scopeRegistry.getAll());
+    this.registry = new AppRegistry(this.scopeRegistry.getAll(), {
+      // The start gate (D48, D108): the same audit style as a refused runtime module (`runtime.module-refused`).
+      onBlocked: (b) => {
+        void new AdminAudit(() => defaultRedis()).record({
+          by: { kind: 'system' }, action: CONTRACT_AUDIT_ACTIONS.refused, target: `app:${b.target}`, outcome: 'failed', detail: { code: b.error, reason: b.message },
+        }).catch(() => undefined);
+      },
+    });
     this.ports = new PortAllocator(opts.portStart ?? 4001, opts.portEnd ?? 4999);
     this.fsm = new LifecycleStateMachine();
     // Both runners share the same opts. ContainerRunner rewrites osApiBase
@@ -341,7 +403,20 @@ export class AppManager {
         runtimeAudit(RUNTIME_AUDIT_ACTIONS.settingsInvalid, runtime, { reason });
       },
     });
-    const builtinDeps = { container: this.container, proot: new ProotRunner(runnerOpts), baseRootfs: opts.baseRootfs };
+    const builtinDeps = {
+      container: this.container, proot: new ProotRunner(runnerOpts), baseRootfs: opts.baseRootfs,
+      toolsMode: () => currentToolsMode(opts.dataDir),
+      baseImage: BASE_IMAGE,
+      // One read of the store per status: the mirror the allowlists link from and its library map.
+      toolStore: () => {
+        const mirrorBin = toolchainMirrorBin(opts.dataDir);
+        const libs = readLibMap(mirrorBin);
+        return {
+          mirrorBin, libDirName: INSTANCE_LIB_DIR,
+          neededLibs: (tool: string) => (libs[tool] ?? []).filter((d) => d.kind === 'staged').map((d) => d.soname),
+        };
+      },
+    };
     for (const module of [...BUILTIN_RUNTIMES.map((b) => b.create(builtinDeps)), ...(opts.runtimes ?? [])]) {
       try { this.runtimes.register(module); } catch (err) {
         // A refused module is not loaded: an app naming it gets the Q17 `runtime-not-installed` error.
@@ -369,11 +444,11 @@ export class AppManager {
         .get({ kind: 'user', id: p.userId }, appJumpPermission(installationId))),
     });
     // The installation's runAs decides (P5-3): root as today, or its app identity from the one registry.
-    // A System Terminal instance is its user's session host instead (stream T, D69): that user's uid.
+    // A user environment (the System Terminal's instances) is its user's session host instead (stream T, D69; D107 S1): that user's uid.
     this.identities = opts.identities ?? sessionHostIdentityProvider(
       appIdentityProvider(async () => this.auth().identity),
       {
-        sessionApps: TERMINAL_SESSION_APPS,
+        isUserEnvironment,
         ownerId: DEFAULT_OWNER_ID,
         account: async (userId) => this.auth().users.getUser(userId),
         identity: async (userId) => this.auth().identity.ensureUser(userId),
@@ -385,12 +460,13 @@ export class AppManager {
     });
     // Stream C (Q7): only declared AND granted Context keys reach an app; personal keys from its user's vault (D56).
     this.contractScan = opts.contractScan ?? null;
+    this.probeIdmap = opts.probeIdmappedMounts === true;
     this.installRecovery = opts.installRecovery ?? null;
     this.context = opts.context ?? (() => {
       const auth = async () => this.auth();
       return liveGrantedContextDeps({
         grants: { get: async (...a) => (await auth()).grants.get(...a) },
-        appScope: (appId) => this.registry.getScopeId(appId) ?? undefined,
+        appBinding: (appId) => this.appGrantBinding(appId),
         store: new ContextStore(opts.dataDir),
         vault: new CredentialVault({ dataDir: opts.dataDir }),
         audit: (entry) => new AdminAudit(() => defaultRedis()).record(entry),
@@ -404,12 +480,19 @@ export class AppManager {
     // replaces instance objects on every transition, so a held reference
     // would go stale immediately.
     this.interfaces  = new InterfaceRegistry((id) => this.instances.get(id));
+    const liveMounts = this.runtimes.list().find((m) => m.mounts)?.mounts;
     this.mounts      = new MountManager({
       dataDir:       opts.dataDir,
       registry:      this.registry,
       scopeRegistry: this.scopeRegistry,
-      runner:        this.container,
+      // The runtime that realises the binds (D-M): the one with the `mounts` group (the container module).
+      ...(liveMounts ? { mounts: liveMounts } : {}),
       sourceMode:    (appId) => this.sourceModeOf(appId)?.mode ?? 'closed',
+      // D80 and the work/patches owner: the consumer's process identity (its latched identity;
+      // an OS sidecar: as before, no cross-uid handling).
+      consumerIdentity: (consumer) => (isSidecarConsumer(consumer) ? null : this.processIdentityOf(consumer)),
+      developerMode:   () => opts.developerMode?.() ?? false,
+      runtimeOf:       (consumer) => this.instances.get(parentOfConsumer(consumer))?.sandbox,
       // Mirrors spawnInstance's own derivation so a mount lands in exactly the
       // dir the instance has bound at /data. A sidecar consumer key
       // (`<inst>--<sc>`) resolves to its instance's dir.
@@ -430,6 +513,8 @@ export class AppManager {
       dataDir:  opts.dataDir,
       registry: this.registry,
       runner:   this.container,
+      // The runtime that realises exposures (D-P): the one with the `endpoints` group (the container module).
+      endpoints: this.runtimes.list().find((m) => m.endpoints)?.endpoints ?? NO_ENDPOINTS,
       resolveRunningInstance: (appId) => {
         const inst = this.getInstancesByApp(appId).find(
           (i) => i.state === 'resumed' || i.state === 'resuming' || i.state === 'started',
@@ -438,14 +523,23 @@ export class AppManager {
       },
     });
     this.execBridge  = new ExecBridge({
-      engine:   new DockerApi(),
       instance: (id) => this.instances.get(id),
       runner:   (id) => this.runnerOf(id),
+      logs:     (id) => this.moduleOf(id).logs,
+      workloads: (id) => this.moduleOf(id).workloads,
       sidecars: (id) => this.getSidecars(id),
       sessionContext: (id, req) => this.sessionContext(id, req),
     });
+    // The runtime that realises OS sidecars (D-S): the one with the `workloads` group (the container module).
+    const sidecarWorkloads = this.runtimes.list().find((m) => m.workloads)?.workloads;
     this.osSidecars  = new SidecarManager({
       runner:      this.container,
+      ...(sidecarWorkloads ? { workloads: sidecarWorkloads } : {}),
+      // D107: isolated sidecars only on a runtime that enforces it (the one that runs them), else refused.
+      requireNetwork: (level) => {
+        const m = this.runtimes.list().find((x) => x.workloads);
+        if (m) requireNetworkIsolation(m, {}, level, this.runtimes.list());
+      },
       registry:    this.registry,
       permissions: this.permissions,
       tokens:      this.tokens,
@@ -458,6 +552,8 @@ export class AppManager {
         return {
           appId: inst.appId, instanceDataDir: join(scope.dataDir, 'apps', inst.appId, instanceId),
           ...(inst.owner ? { owner: inst.owner } : {}),
+          // D107 / D9: an instance with a Private Home gets no sidecar on the shared network.
+          ...(this.instanceHomes.get(instanceId)?.kind === 'private' ? { privateHome: true, runtime: inst.sandbox } : {}),
           // P5-3: its latched identity, for the aura-base inheritHome sidecar policy.
           ...(inst.runAs === 'app' && inst.uid && inst.gid ? { identity: { uid: inst.uid, gid: inst.gid, range: 'app' as const } } : {}),
           // An approved root request: uid 0 without capabilities, the same for its aura-base inheritHome sidecar.
@@ -467,6 +563,8 @@ export class AppManager {
       appHome: (instanceId) => this.appHomeOf(instanceId),
       context: (instanceId) => this.instanceContext(instanceId),
       changed: () => { void this.syncSidecars(2).catch(() => undefined); },
+      // Private images: only the login of the app's own install source (pullCredentialFor).
+      pullCredential: (appId, image) => this.pullCredentialFor(appId, image),
     });
     // services[].prePull: fetch template images as soon as an app is
     // installed (init() covers the apps already loaded at boot).
@@ -484,7 +582,7 @@ export class AppManager {
   /** Before the first manifest scan: load which protected hosts are accepted. */
   private async prepareAppHostGuard(): Promise<void> {
     try {
-      const hosts = getAppHostServices();
+      const hosts = this.appHosts();
       hosts.manifestHostNames = () => this.registry.getAll().flatMap((m) => m.hosts.map((h) => h.name));
       hosts.guard.setKnown(await hosts.registry.getKnownManifestHosts());
       this.registry.setHostGuard(hosts.guard);
@@ -496,7 +594,7 @@ export class AppManager {
   /** After adoption: installation + host for every app, dead slots freed, adopted instances' slots kept. */
   private async migrateAppHosts(): Promise<void> {
     try {
-      const { lifecycle } = getAppHostServices();
+      const { lifecycle } = this.appHosts();
       const { apps, failed } = await lifecycle.migrate(this.getScopeDefinitions());
       for (const f of failed) console.warn(`[AppManager] app host migration failed for ${f}`);
       for (const m of this.registry.getAll()) await this.blockForeignHosts(m.id);
@@ -517,7 +615,7 @@ export class AppManager {
    * unknown then, and the reconciler calls this once it adopted them.
    */
   private async settleAdoptedSlots(
-    lifecycle: Pick<ReturnType<typeof getAppHostServices>['lifecycle'], 'releaseDeadSlots'> = getAppHostServices().lifecycle,
+    lifecycle: Pick<AppHostServices['lifecycle'], 'releaseDeadSlots'> = this.appHosts().lifecycle,
   ): Promise<void> {
     if (this.adoptionPending) return;
     for (const m of this.registry.getAll()) {
@@ -530,28 +628,68 @@ export class AppManager {
     }
   }
 
-  /** An app discovered by clone, scaffold or a copied directory. */
-  private async syncAppHost(appId: string): Promise<void> {
-    if (!this.appHostsReady) return;
+  /**
+   * An app discovered by clone, scaffold or a copied directory: its
+   * installation and host. The `app:installed` listener runs it; the clone,
+   * scaffold and origin routes await it, so they answer with the installation
+   * in place. `scope`: the scope the app landed in (default: the registry's
+   * winner); a copy shadowed by a higher scope is synced from its own
+   * manifest. Idempotent, and safe to run twice at once (the registry's writes
+   * are guarded). Resolves to why it failed, or null.
+   */
+  async syncAppHost(
+    appId: string,
+    scope?: ScopeId,
+    lifecycle: Pick<ReturnType<typeof getAppHostServices>['lifecycle'], 'syncDiscovered'> = this.appHosts().lifecycle,
+  ): Promise<string | null> {
+    // Before the boot migration ran, or when it failed: nothing has synced
+    // since, so say so (the migration covers it at the next shell start).
+    if (!this.appHostsReady) return 'app hosts are not ready (the boot migration has not completed)';
     const m = this.registry.getById(appId);
-    if (!m) return;
+    const at = scope ?? m?.scopeId;
+    if (!at) return null;
     try {
-      const { lifecycle } = getAppHostServices();
-      const scope = this.scopeRegistry.getById(m.scopeId);
-      await lifecycle.syncDiscovered({
-        appId, originId: m.originId ?? null, scope: m.scopeId, source: appSourceFingerprint(scope, appId),
-      });
-      await this.blockForeignHosts(appId);
+      const def = this.scopeRegistry.getById(at);
+      const manifestPath = join(def.appsDir, appId, 'app.manifest.json');
+      if (m?.scopeId !== at && !existsSync(manifestPath)) return null;
+      const originId = m?.scopeId === at ? m.originId ?? null : readOriginId(manifestPath);
+      await lifecycle.syncDiscovered({ appId, originId, scope: at, source: appSourceFingerprint(def, appId) });
+      if (m?.scopeId === at) await this.blockForeignHosts(appId);
+      return null;
     } catch (err) {
       console.warn(`[AppManager] app host sync for ${appId} failed: ${(err as Error).message}`);
+      return (err as Error).message;
     }
+  }
+
+  /**
+   * The app's installation in the scope it resolves to, repaired when it is
+   * missing: found, else this app's boot-migration sync (`syncAppHost`),
+   * then found again. The one repair for every caller that needs the
+   * installation (a start, `aura dev` patching, run-as, App Home deletion,
+   * the identity reports), so a missing record is never a silent no-op.
+   * A record that can't be read throws; no record after the repair answers why.
+   */
+  async ensureInstallation(
+    appId: string,
+    hosts: Pick<ReturnType<typeof getAppHostServices>, 'registry' | 'lifecycle'> = this.appHosts(),
+  ): Promise<{ installation: AppInstallation } | { installation: null; error: string }> {
+    const scope = this.registry.getScopeId(appId);
+    if (!scope) return { installation: null, error: `${appId} is not installed` };
+    const found = await hosts.registry.findInstallation(appId, scope);
+    if (found) return { installation: found };
+    // Says why when it can't (also: the boot migration has not completed).
+    const why = await this.syncAppHost(appId, scope, hosts.lifecycle);
+    const repaired = await hosts.registry.findInstallation(appId, scope);
+    return repaired ? { installation: repaired }
+      : { installation: null, error: `${appId} has no installation record and it could not be created${why ? ` (${why})` : ''}` };
   }
 
   /** A manifest host equal to another app's generated label stops routing. */
   private async blockForeignHosts(appId: string): Promise<void> {
     const m = this.registry.getById(appId);
     if (!m || m.scopeId === 'system' || m.hosts.length === 0) return;
-    const { lifecycle, guard } = getAppHostServices();
+    const { lifecycle, guard } = this.appHosts();
     let blocked = false;
     for (const h of m.hosts) {
       if (await lifecycle.isForeignLabel(appId, h.name)) { guard.block(appId, h.name); blocked = true; }
@@ -559,10 +697,94 @@ export class AppManager {
     if (blocked) this.reloadManifest(appId);
   }
 
-  /** Record an adopted instance's lifecycle status (ContainerRunner `measureAdopted`). Never throws. */
+  // ─── 5b RS: the kernel respawn of non-surviving runtimes (runtimes/respawn.ts) ──
+
+  /** Former instance id → the respawn of it (resolves to the new id, or null when it failed or was not one). */
+  private readonly respawns = new Map<string, Promise<string | null>>();
+  /** Writes start once init has read the previous record and started the respawns. */
+  private respawnArmed = false;
+  private respawnFrozenUntil = 0;
+  private respawnQueued = false;
+  private respawnLast = '';
+  private readonly respawnInstallations = new Map<string, string | null>();
+
+  /**
+   * The instance a former one was respawned as, once its respawn has run
+   * (the desktop restore maps windows with it); null when it was not
+   * respawned or the start failed.
+   */
+  respawnedInstance(formerInstanceId: string): Promise<string | null> {
+    return this.respawns.get(formerInstanceId) ?? Promise.resolve(null);
+  }
+
+  /** Started again through the normal resolve, one after another, in the background; failures fail closed (logged). */
+  private respawnFromRecord(entries: readonly RespawnEntry[]): void {
+    const settle = new Map<string, (id: string | null) => void>();
+    for (const e of entries) this.respawns.set(e.formerInstanceId, new Promise((r) => settle.set(e.formerInstanceId, r)));
+    this.respawnArmed = true;
+    OsEventBus.on('os:shuttingDown', () => { this.respawnFrozenUntil = Date.now() + RESPAWN_FREEZE_MS; });
+    void (async () => {
+      for (const e of entries) {
+        let to: string | null = null;
+        try {
+          to = await this.respawnOne(e);
+          if (to) {
+            console.log(`[AppManager] respawned ${e.formerInstanceId} as ${to} (${e.appId})`);
+            OsEventBus.emit('app:respawned', { from: e.formerInstanceId, to, appId: e.appId });
+          }
+        } catch (err) {
+          console.warn(`[AppManager] respawn of ${e.formerInstanceId} (${e.appId}) failed: ${(err as Error).message}`);
+        }
+        settle.get(e.formerInstanceId)?.(to);
+      }
+      this.noteRespawn();
+    })();
+  }
+
+  private async respawnOne(e: RespawnEntry): Promise<string | null> {
+    const manifest = this.registry.getById(e.appId);
+    if (!manifest || !this.isEnabled(e.appId) || this.skipBlocked(manifest, 'respawn')) return null;
+    if (manifest.componentType === 'service' || manifest.autoStart) return null; // started by init anyway
+    if (e.installationId && (await this.installationIdOf(e.appId)) !== e.installationId) return null; // reinstalled
+    return this.start(e.appId, e.owner ? { userId: e.owner } : {});
+  }
+
+  /** Rewrite the record after a lifecycle change (coalesced; frozen during a shutdown). */
+  private noteRespawn(): void {
+    if (!this.respawnArmed || this.respawnQueued) return;
+    this.respawnQueued = true;
+    queueMicrotask(() => {
+      this.respawnQueued = false;
+      if (Date.now() < this.respawnFrozenUntil) return;
+      void this.writeRespawn().catch((err) => console.warn(`[AppManager] respawn record: ${(err as Error).message}`));
+    });
+  }
+
+  private async writeRespawn(): Promise<void> {
+    const cands = [...this.instances.values()].map((i) => {
+      const m = this.registry.getById(i.appId);
+      const module = i.sandbox ? this.runtimes.get(i.sandbox) : undefined;
+      return {
+        instanceId: i.instanceId, appId: i.appId, state: i.state, ...(i.owner ? { owner: i.owner } : {}),
+        inPool: i.inPool, preview: i.preview,
+        survives: module ? module.capabilities({}).survivesShellRestart : null,
+        startedByKernel: !m || m.componentType === 'service' || !!m.autoStart,
+      };
+    });
+    for (const c of cands) {
+      if (c.survives === false && !this.respawnInstallations.has(c.appId)) this.respawnInstallations.set(c.appId, await this.installationIdOf(c.appId));
+    }
+    const record = { v: 1 as const, entries: respawnEntries(cands, (appId) => this.respawnInstallations.get(appId) ?? null) };
+    const text = JSON.stringify(record);
+    if (text === this.respawnLast || Date.now() < this.respawnFrozenUntil) return;
+    if (writeRespawnRecord(this.dataDir, record)) this.respawnLast = text;
+    else console.warn('[AppManager] respawn record: cannot write it');
+  }
+
+  /** Record an adopted instance's lifecycle status (its runtime's `adoption.measure`). Never throws. */
   private async measureAdopted(instanceId: string): Promise<void> {
     try {
-      const status = await this.container.measureAdopted?.(instanceId);
+      const status = await this.moduleOf(instanceId).adoption?.measure(instanceId);
       const inst = this.instances.get(instanceId);
       if (status && inst) inst.lifecycle = status;
     } catch (err) {
@@ -574,7 +796,7 @@ export class AppManager {
   async claimHostSlot(appId: string, instanceId: string): Promise<void> {
     const scope: ScopeId | undefined = this.registry.getScopeId(appId);
     if (!scope) return;
-    try { await getAppHostServices().lifecycle.claimSlot(appId, scope, instanceId); }
+    try { await this.appHosts().lifecycle.claimSlot(appId, scope, instanceId); }
     catch (err) { console.warn(`[AppManager] app host slot for ${instanceId} failed: ${(err as Error).message}`); }
   }
 
@@ -582,7 +804,7 @@ export class AppManager {
     const scope = this.registry.getScopeId(appId);
     if (!scope) return;
     try {
-      void getAppHostServices().lifecycle.releaseSlot(appId, scope, instanceId)
+      void this.appHosts().lifecycle.releaseSlot(appId, scope, instanceId)
         .catch((err) => console.warn(`[AppManager] app host slot release for ${instanceId} failed: ${(err as Error).message}`));
     } catch { /* no Valkey: the boot migration frees it */ }
   }
@@ -593,9 +815,31 @@ export class AppManager {
    * nothing falls back to another runner (Q17).
    */
   private runnerOf(instanceId: string): SandboxRunner {
+    return this.moduleOf(instanceId).runner;
+  }
+
+  /** The runtime module of an instance (its latched `sandbox`); same errors as `runnerOf`. */
+  private moduleOf(instanceId: string): RuntimeModule {
     const sandbox = this.instances.get(instanceId)?.sandbox;
     if (!sandbox) throw new Error(`${instanceId} has no runtime: it is not a spawned instance`);
-    return this.runtimes.runner(sandbox);
+    return this.runtimes.require(sandbox);
+  }
+
+  /** Every runtime module that has the capability group (D100: groups, never a concrete runner). */
+  private modulesWith<G extends 'adoption' | 'sessions' | 'workloads' | 'usage'>(group: G): Array<RuntimeModule & Required<Pick<RuntimeModule, G>>> {
+    return this.runtimes.list().filter((m) => m[group] !== undefined) as Array<RuntimeModule & Required<Pick<RuntimeModule, G>>>;
+  }
+
+  /** An instance's provisioned tools through its runtime's `tools.status` (5b-2 D-C); null: unknown instance or no tools group. */
+  toolsStatusOf(instanceId: string): RuntimeToolsStatus | null {
+    const sandbox = this.instances.get(instanceId)?.sandbox;
+    return (sandbox ? this.runtimes.get(sandbox)?.tools?.status(instanceId) : undefined) ?? null;
+  }
+
+  /** An instance's runtime diagnostics (5b-2 D-R); null: unknown instance or a runtime without them. */
+  runtimeDiagnosticsOf(instanceId: string): RuntimeDiagnostics | null {
+    const sandbox = this.instances.get(instanceId)?.sandbox;
+    return (sandbox ? this.runtimes.get(sandbox)?.diagnostics : undefined) ?? null;
   }
 
   /** The capabilities of an instance's runtime (ARI §9.5), or null for an unknown instance. */
@@ -606,22 +850,101 @@ export class AppManager {
   }
 
   /**
-   * Liveness through the runtime's capability, not its id (ARI dup #11): a
-   * runtime whose instances outlive the shell tracks them itself (their pids
-   * are host pids, invisible here); otherwise the pid is the shell's own child.
+   * An instance's effective capabilities (5b G): its runtime's, narrowed by
+   * the installation facts it latched (core `instanceCapabilities`). Null for
+   * an instance with no runtime yet. The one input of every per-instance
+   * gate in the shell and the CLI: none compares a runtime id.
+   */
+  instanceCapabilities(instanceId: string): RuntimeCapabilities | null {
+    const inst = this.instances.get(instanceId);
+    const caps = this.runtimeCapabilitiesOf(instanceId);
+    return inst && caps ? effectiveCapabilities(caps, { ...(inst.runAs ? { runAs: inst.runAs } : {}) }) : null;
+  }
+
+  /** The instance view's runtime (5b G): `{id, source, capabilities}`, the effective capabilities. Null before a start. */
+  instanceRuntime(instanceId: string): { id: string; source?: string; capabilities: RuntimeCapabilities } | null {
+    const inst = this.instances.get(instanceId);
+    const capabilities = this.instanceCapabilities(instanceId);
+    if (!inst?.sandbox || !capabilities) return null;
+    return { id: inst.sandbox, ...(inst.runtimeSource ? { source: inst.runtimeSource } : {}), capabilities };
+  }
+
+  /**
+   * The uid:gid an instance's processes run as (D80 cross-uid mounts): null
+   * for a legacy root instance, which keeps its capabilities and writes
+   * anywhere; an approved root request is uid 0 without them.
+   */
+  private processIdentityOf(instanceId: string): { uid: number; gid: number } | null {
+    const inst = this.instances.get(instanceId);
+    if (!inst) return null;
+    if (inst.uid) return { uid: inst.uid, gid: inst.gid ?? inst.uid };
+    return inst.approvedRoot ? { uid: 0, gid: 0 } : null;
+  }
+
+  /**
+   * Where an instance runs, as the kernel knows it (D100 §7, `aura info`): its
+   * runtime, how it was chosen, and that runtime's features. Null for an
+   * unknown instance. Technical feasibility only, never an authorization.
+   */
+  runtimeViewOf(instanceId: string): { runtime: string; source?: string; features: RuntimeFeature[] } | null {
+    const inst = this.instances.get(instanceId);
+    const module = inst?.sandbox ? this.runtimes.get(inst.sandbox) : undefined;
+    if (!inst?.sandbox || !module) return null;
+    return {
+      runtime: inst.sandbox,
+      ...(inst.runtimeSource ? { source: inst.runtimeSource } : {}),
+      features: moduleFeatures(module, {}),
+    };
+  }
+
+  /**
+   * Liveness through the runtime only (ARI dup #11, 5b-2): every runtime
+   * tracks its own workloads (a container's pid is a host pid, invisible
+   * here; PRoot probes its own child's pid), so the kernel never probes a pid.
    */
   private instanceAlive(inst: AppInstance): boolean {
-    if (this.runtimeCapabilitiesOf(inst.instanceId)?.survivesShellRestart) return this.runnerOf(inst.instanceId).isRunning(inst.instanceId);
-    if (inst.pid == null) return false;
-    try { process.kill(inst.pid, 0); return true; } catch { return false; }
+    return this.runnerOf(inst.instanceId).isRunning(inst.instanceId);
+  }
+
+  /**
+   * App processes no tracked process reaches (D-#11), from every runtime that
+   * scans its process space (`orphans`). Tracked: the instance records' pids
+   * plus every runner's in-flight ones — during spawn(), waitHealthy can poll
+   * for up to 30s before the instance entry's `pid` is set, and a running
+   * build's client is no instance at all. The caller decides the kill.
+   */
+  orphanScan(): { trackedPids: number[]; all: RuntimeOrphanProcess[]; squatters: RuntimeOrphanProcess[] } {
+    const trackedPids = new Set<number>();
+    for (const t of this.instances.values()) if (t.pid != null) trackedPids.add(t.pid);
+    for (const { runner: r } of this.runtimes.list()) {
+      for (const pid of r.getActivePids()) trackedPids.add(pid);
+    }
+    const all: RuntimeOrphanProcess[] = [];
+    const squatters: RuntimeOrphanProcess[] = [];
+    for (const m of this.runtimes.list()) {
+      const r = m.orphans?.scan(trackedPids);
+      if (r) { all.push(...r.all); squatters.push(...r.squatters); }
+    }
+    return { trackedPids: [...trackedPids], all, squatters };
   }
 
   /** The app's current installation (App Host registry), or null when it cannot be read. */
-  async installationIdOf(appId: string): Promise<string | null> {
-    const scope = this.registry.getScopeId(appId);
+  async installationIdOf(appId: string, scope: string | undefined = this.registry.getScopeId(appId)): Promise<string | null> {
     if (!scope) return null;
-    try { return (await getAppHostServices().registry.findInstallation(appId, scope))?.installationId ?? null; }
+    try { return (await this.appHosts().registry.findInstallation(appId, scope))?.installationId ?? null; }
     catch { return null; }
+  }
+
+  /**
+   * What an app grant of `appId` counts for now (S1, auth/GrantStore.ts
+   * `appGrantCounts`): the install scope it resolves to (or `scope`, for a
+   * grant given to a copy in that scope) and that scope's installation.
+   * Read-only; an unreadable record is no installation, so the grant does
+   * not count (fail closed).
+   */
+  async appGrantBinding(appId: string, scope?: string): Promise<AppGrantBinding> {
+    const s = scope ?? this.registry.getScopeId(appId);
+    return { scope: s, installationId: await this.installationIdOf(appId, s) };
   }
 
   /**
@@ -646,6 +969,18 @@ export class AppManager {
       out.push({ appId: m.id, manifest: m, installationId: await this.installationIdOf(m.id), sourceMode: this.sourceModeOf(m.id)?.mode ?? 'closed' });
     }
     return out;
+  }
+
+  /**
+   * The D75 migration report (5b M, `aura runtime migrate --report`): a dry
+   * run of the classification over today's installations, their recorded
+   * overrides and decisions, what a start would do now, and the recorded
+   * report files. Read-only (runtimes/migrateLegacy.ts `migrationReport`).
+   */
+  async runtimeMigrationReport(): Promise<MigrationReport> {
+    return migrationReport(await this.runtimeApps(), {
+      registry: this.runtimes, record: await this.runtimeSettings.get(), env: processLegacyEnv(this.baseRootfs), dataDir: this.dataDir,
+    });
   }
 
   /**
@@ -679,6 +1014,47 @@ export class AppManager {
   }
 
   /**
+   * S1 (5-main), in kernel init after the App Host migration: every app
+   * grant from before 5-main is pinned to the installation it was given to
+   * (the app id's installation in the grant's `appScope`; GrantStore
+   * `attachInstallations`), audited `grant.migrated`. A grant whose app has
+   * no installation is pinned to none: it never counts and no future
+   * installation under that id inherits it (grant it again). Idempotent;
+   * never fatal: until it ran, those grants do not count (fail closed), and
+   * the next boot retries. Waits for the App Host migration.
+   */
+  private async migrateGrantInstallations(): Promise<void> {
+    if (!this.appHostsReady) {
+      console.warn('[AppManager] grant installation migration waits for the App Host migration: app grants from before 5-main do not count until it ran');
+      return;
+    }
+    try {
+      const auth = this.auth();
+      const hosts = this.appHosts().registry;
+      const pinned = await auth.grants.attachInstallations(async (appId, appScope) => {
+        const scope = appScope ?? this.registry.getScopeId(appId);
+        // Throws on a read error: nothing is pinned to none by a Valkey hiccup.
+        return scope ? (await hosts.findInstallation(appId, scope))?.installationId ?? null : null;
+      });
+      for (const p of pinned) {
+        const message = p.installationId
+          ? `pinned grant ${p.permission} of app ${p.subject.id} to installation ${p.installationId}`
+          : `grant ${p.permission} of app ${p.subject.id} has no installation${p.appScope ? ` in scope ${p.appScope}` : ''}: it no longer counts; grant it again`;
+        console.log(`[AppManager] ${message}`);
+        await auth.audit.record({
+          by: { kind: 'system' }, action: 'grant.migrated', target: `app:${p.subject.id}`, ...(p.installationId ? {} : { outcome: 'failed' }),
+          detail: {
+            subject: `app:${p.subject.id}`, permission: p.permission, scope: p.scope.kind === 'os' ? 'os' : `${p.scope.kind}:${p.scope.id}`,
+            appScope: p.appScope ?? null, installationId: p.installationId, message,
+          },
+        }).catch(() => undefined);
+      }
+    } catch (err) {
+      console.warn(`[AppManager] grant installation migration failed: ${(err as Error).message}`);
+    }
+  }
+
+  /**
    * Stream C (Q7), in kernel init after the runtime migration (D78): the
    * Context migration (context/migratePhase5.ts: continuity grants, owner
    * keys to the owner's vault, a report). Idempotent; never fatal: on an
@@ -694,15 +1070,20 @@ export class AppManager {
     }
     try {
       const auth = this.auth();
+      const apps: ContextMigrationApp[] = [];
+      for (const m of this.registry.getAll()) {
+        apps.push({
+          appId: m.id, scope: String(this.registry.getScopeId(m.id) ?? m.scopeId), dir: m.appDir, context: m.context ?? [],
+          installationId: await this.installationIdOf(m.id),
+        });
+      }
       const r = await migratePhase5Context({
         dataDir: this.dataDir,
         kv: () => defaultKv() as never,
         store: new ContextStore(this.dataDir),
         vault: new CredentialVault({ dataDir: this.dataDir }),
         grants: auth.grants,
-        apps: () => this.registry.getAll().map((m) => ({
-          appId: m.id, scope: String(this.registry.getScopeId(m.id) ?? m.scopeId), dir: m.appDir, context: m.context ?? [],
-        })),
+        apps: () => apps,
         scan: (app, keys) => {
           const m = this.registry.getById(app.appId);
           return m ? contractScan(app.dir, m, keys) : [];
@@ -817,40 +1198,13 @@ export class AppManager {
       }
     }
 
-    // Make sure the host docker CLI is present in /os/toolchain/bin/docker so
-    // wildcard-cap apps (terminal: tools[] = ['*']) get it linked into their
-    // /aura/my-tools allowlist on next cap refresh — required for `aura jump`
-    // into container-mode apps from inside the terminal proot (the host's
-    // docker socket is bind-mounted alongside this; see ProotRunner). Cheap
-    // idempotent copy: skips if the toolchain entry already exists.
-    const dockerToolchain = join(this.toolchainDir, 'bin', 'docker');
-    if (!existsSync(dockerToolchain) && existsSync('/usr/local/bin/docker')) {
-      try {
-        mkdirSync(dirname(dockerToolchain), { recursive: true });
-        copyFileSync('/usr/local/bin/docker', dockerToolchain);
-        chmodSync(dockerToolchain, 0o755);
-        console.log(`[AppManager] healed docker → ${dockerToolchain}`);
-      } catch (err) {
-        console.warn(`[AppManager] could not heal docker into toolchain: ${(err as Error).message}`);
-      }
-    }
-
-    // Same as docker above, but for oras — needed by user-scope apps' synth
-    // entrypoint which calls `aura sdk install` → `oras pull` to fetch
-    // @aura/* packages from the local OCI registry. Without oras in the
-    // toolchain volume, granting `oras` to an app's tools[] would resolve to
-    // nothing — provisionAllowlist reports it as `missing` and the app's
-    // entrypoint fails on the first `oras pull`.
-    const orasToolchain = join(this.toolchainDir, 'bin', 'oras');
-    if (!existsSync(orasToolchain) && existsSync('/usr/local/bin/oras')) {
-      try {
-        mkdirSync(dirname(orasToolchain), { recursive: true });
-        copyFileSync('/usr/local/bin/oras', orasToolchain);
-        chmodSync(orasToolchain, 0o755);
-        console.log(`[AppManager] healed oras → ${orasToolchain}`);
-      } catch (err) {
-        console.warn(`[AppManager] could not heal oras into toolchain: ${(err as Error).message}`);
-      }
+    // The image's infrastructure tools (docker, oras) into /os/toolchain/bin,
+    // so syncToolchainMirror below takes them into the volume mirror: wildcard
+    // apps (the Terminal) need docker for `aura jump`, and the OS install
+    // workflow needs oras (tool-provision.ts IMAGE_TOOLS). Never gated by
+    // capabilities.json: these are not optional capabilities.
+    for (const name of healImageTools(this.toolchainDir)) {
+      console.log(`[AppManager] healed ${name} → ${join(this.toolchainDir, 'bin', name)}`);
     }
 
     // Pre-create the master's home (the OS's own, see scopes/home.ts). Private
@@ -1130,21 +1484,37 @@ export class AppManager {
    * that want to confirm what was refreshed).
    */
   refreshInstanceTools(appId: string): string[] {
+    return this.applyInstanceTools(appId).filter((r) => r.state === 'applied').map((r) => r.target.instanceId);
+  }
+
+  /**
+   * The app's tool grant applied to every running instance through its
+   * runtime's `tools` group (D100 §5): per instance, what the provider
+   * confirmed (`applied`, with `enforcement: enforced|advisory`), `failed`
+   * or `unsupported`. `aura cap grant|revoke` prints it.
+   */
+  applyInstanceTools(appId: string): RuntimeOperationResult[] {
     const manifest = this.registry.getById(appId);
     if (!manifest) return [];
-    const refreshed: string[] = [];
+    const results: RuntimeOperationResult[] = [];
     for (const inst of this.getInstancesByApp(appId)) {
+      const target = { instanceId: inst.instanceId };
+      let r: RuntimeOperationResult;
       try {
-        this.runnerOf(inst.instanceId).provisionToolsDir(inst.instanceId, manifest);
+        const tools = this.moduleOf(inst.instanceId).tools;
+        r = tools
+          ? tools.apply(inst.instanceId, { tools: manifest.tools })
+          : operationResult('tools.liveGrant', target, 'unsupported', { error: { code: 'feature-unsupported', message: `runtime ${inst.sandbox} provisions no tools` } });
         // OS sidecars with tools of their own hold (theirs ∩ the app's): a
         // grant/revoke on the app, or a template edit, changes them too.
-        this.osSidecars.refreshTools(inst.instanceId);
-        refreshed.push(inst.instanceId);
+        if (r.state === 'applied') this.osSidecars.refreshTools(inst.instanceId);
       } catch (err) {
-        console.warn(`[AppManager] refresh tools failed for ${inst.instanceId}: ${(err as Error).message}`);
+        r = operationResult('tools.liveGrant', target, 'failed', { error: { code: 'provisioning-failed', message: (err as Error).message } });
       }
+      if (r.state !== 'applied') console.warn(`[AppManager] refresh tools for ${inst.instanceId}: ${r.state}${r.error ? `: ${r.error.message}` : ''}`);
+      results.push(r);
     }
-    return refreshed;
+    return results;
   }
 
   /**
@@ -1169,9 +1539,8 @@ export class AppManager {
   // ─── Enable / disable apps ────────────────────────────────────────────────
   // Android-style component enable state. Default is "enabled"; storing only
   // the disabled set means a freshly-scaffolded app is live without any
-  // migration. The shell hydrates this from KV (`os/app-enabled`) before
-  // calling `init()` and persists every mutation through the corresponding
-  // /api/admin/apps/enabled endpoint.
+  // migration. AppManager owns `os/app-enabled` (Phase 6 K): `init()`
+  // hydrates it and `setEnabled` / `forgetEnabledState` persist it.
 
   // ── Production builds (appBuild.ts) ──────────────────────────────────────
 
@@ -1179,6 +1548,24 @@ export class AppManager {
   serveStateOf(appId: string): ServeState | null {
     const manifest = this.registry.getById(appId);
     return manifest ? serveState(manifest.appDir, manifest) : null;
+  }
+
+  /**
+   * The runtime app builds and provisioning run on (5b-2 D-B, D100 owner
+   * decision 2): the first installed runtime with the `build` group (the
+   * container module today, as before). None: builds fail closed, never in
+   * the kernel or the app.
+   */
+  /**
+   * The runtime that runs build workloads, checked to enforce every limit of
+   * `limits` (D106: mandatory; refused with `feature-unsupported` naming the
+   * missing limits, never run without them).
+   */
+  private builder(limits: ResourceLimits = DEFAULT_BUILD_LIMITS): RuntimeBuild {
+    const m = this.runtimes.list().find((x) => x.build);
+    if (!m?.build) throw new Error('capability-missing: build.execute (no installed runtime builds apps)');
+    requireLimits(m, {}, limits, this.runtimes.list());
+    return m.build;
   }
 
   /** One app build at a time (each is a capped container, still heavy). */
@@ -1215,7 +1602,7 @@ export class AppManager {
       let res: { ok: boolean; output: string };
       try {
         prepareBuildStaging(manifest.appDir);
-        res = await this.container.buildApp(appId, manifest.appDir);
+        res = await this.builder(DEFAULT_BUILD_LIMITS).build({ appId, appDir: manifest.appDir, limits: DEFAULT_BUILD_LIMITS });
         if (res.ok) {
           installBuild(manifest.appDir, { prune: this.getInstancesByApp(appId).length === 0 });
           writeBuildStamp(manifest.appDir, fingerprint);
@@ -1273,7 +1660,7 @@ export class AppManager {
     if (running) return running;
     const run = (async () => {
       console.log(`[AppManager] provision: ${appId} in the builder …`);
-      const res = await this.container.provisionApp(appId, appDir, runtime, { ...(opts.onLine ? { onLine: opts.onLine } : {}) });
+      const res = await this.builder(DEFAULT_BUILD_LIMITS).provision({ appId, appDir, runtime, limits: DEFAULT_BUILD_LIMITS, ...(opts.onLine ? { onLine: opts.onLine } : {}) });
       const ok = res.ok && !needsProvisioning(appDir, runtime);
       console.log(`[AppManager] provision: ${appId} ${ok ? 'ok' : 'FAILED'}`);
       return { ok, ran: true, output: res.output };
@@ -1286,7 +1673,7 @@ export class AppManager {
    * Validate a staged tree before it is installed (Phase 7a, Q23 "validate
    * before the swap", owner decision 2): its dependencies installed and, when
    * it can run from a build, `astro build` run and stamped, all in the
-   * throwaway builder (no socket, no home, no secrets), in `dir` itself. The
+   * throwaway builder through the runtime build group (5b-2 D-B, D106 limits; no socket, no home, no secrets), in `dir` itself. The
    * built tree is then installed as is, so the first start finds its build
    * current (one build). The app need not be registered.
    */
@@ -1304,7 +1691,7 @@ export class AppManager {
     const base = { lockfileHash, builderImage: BASE_IMAGE };
     let provisioned = false;
     if (needsProvisioning(dir, runtime)) {
-      const res = await this.container.provisionApp(appId, dir, runtime, { ...(opts.onLine ? { onLine: opts.onLine } : {}) });
+      const res = await this.builder(DEFAULT_BUILD_LIMITS).provision({ appId, appDir: dir, runtime, limits: DEFAULT_BUILD_LIMITS, ...(opts.onLine ? { onLine: opts.onLine } : {}) });
       if (!res.ok || needsProvisioning(dir, runtime)) return { ok: false, step: 'provision', output: res.output, provisioned: false, built: false, ...base };
       provisioned = true;
     }
@@ -1314,7 +1701,7 @@ export class AppManager {
       const fingerprint = appFingerprint(dir, manifest.build?.ignore ?? []);
       try {
         prepareBuildStaging(dir);
-        const res = await this.container.buildApp(appId, dir);
+        const res = await this.builder(DEFAULT_BUILD_LIMITS).build({ appId, appDir: dir, limits: DEFAULT_BUILD_LIMITS });
         if (!res.ok) return { ok: false, step: 'build' as const, output: res.output, provisioned, built: false, ...base };
         installBuild(dir, { prune: true });
         writeBuildStamp(dir, fingerprint);
@@ -1353,9 +1740,52 @@ export class AppManager {
     return out;
   }
 
-  /** Bulk seed at boot. Accepts `{ appId → boolean }` from KV. */
+  /** Bulk seed (tests; `init()` hydrates from the KV). Accepts `{ appId → boolean }`. */
   setEnabledState(state: Record<string, boolean>): void {
     this.disabled = new Set(Object.entries(state).filter(([, v]) => v === false).map(([k]) => k));
+  }
+
+  /**
+   * The kernel owns `os:app-enabled` (D97, Phase 6 K). Hydrated at the start
+   * of `init()`, so its autoStart / warmPool / service loops skip disabled
+   * apps from the first tick; missing keys mean enabled. Never throws.
+   */
+  private async hydrateEnabledState(): Promise<void> {
+    try {
+      const kv = defaultKv();
+      try {
+        const state = await kv.getValue<Record<string, boolean>>(ENABLED_KEY.ns, ENABLED_KEY.key);
+        if (state) this.setEnabledState(state);
+      } finally { await kv.close().catch(() => undefined); }
+    } catch (err) {
+      console.warn(`[AppManager] could not hydrate the enabled state: ${(err as Error).message}`);
+    }
+  }
+
+  /** Persist the whole map (idempotent if the KV ever drifted). False when the KV write failed. */
+  private async persistEnabledState(mutate?: (map: Record<string, boolean>) => void): Promise<boolean> {
+    try {
+      const kv = defaultKv();
+      try {
+        if (mutate) {
+          const map = (await kv.getValue<Record<string, boolean>>(ENABLED_KEY.ns, ENABLED_KEY.key)) ?? {};
+          mutate(map);
+          await kv.set(ENABLED_KEY.ns, ENABLED_KEY.key, map);
+        } else {
+          await kv.set(ENABLED_KEY.ns, ENABLED_KEY.key, this.getEnabledState());
+        }
+      } finally { await kv.close().catch(() => undefined); }
+      return true;
+    } catch (err) {
+      console.warn(`[AppManager] could not persist the enabled state: ${(err as Error).message}`);
+      return false;
+    }
+  }
+
+  /** A removed app leaves the persisted enabled map (its next install starts enabled). */
+  async forgetEnabledState(appId: string): Promise<void> {
+    this.disabled.delete(appId);
+    await this.persistEnabledState((map) => { delete map[appId]; });
   }
 
   /**
@@ -1364,7 +1794,7 @@ export class AppManager {
    * user asked for). Enabling re-arms autoStart / warmPool by re-running
    * the same init() side-effects, scoped to this app.
    */
-  async setEnabled(appId: string, enabled: boolean): Promise<void> {
+  async setEnabled(appId: string, enabled: boolean): Promise<{ persisted: boolean }> {
     if (!this.registry.has(appId)) throw new Error(`Unknown app: ${appId}`);
     // Critical OS-infrastructure apps (e.g. com.aura.registry) refuse the
     // disable path. They can still be stopped/restarted via the normal
@@ -1380,12 +1810,12 @@ export class AppManager {
       }
     }
     const wasEnabled = !this.disabled.has(appId);
-    if (enabled === wasEnabled) return;
+    if (enabled === wasEnabled) return { persisted: await this.persistEnabledState() };
     if (enabled) {
       this.disabled.delete(appId);
       // Re-arm: same code paths init() runs at boot, just for this app.
       const m = this.registry.getById(appId);
-      if (m) {
+      if (m && !this.skipBlocked(m, 'enable')) {
         if (m.componentType === 'service') {
           this.startService(appId).catch((err) =>
             console.error(`[AppManager] enable: service ${appId} failed: ${(err as Error).message}`),
@@ -1408,12 +1838,20 @@ export class AppManager {
         catch (err) { console.warn(`[AppManager] disable: stop ${inst.instanceId} failed: ${(err as Error).message}`); }
       }
     }
+    // Persisted before the event, so a listener reading the KV sees the new state.
+    const persisted = await this.persistEnabledState();
     OsEventBus.emit('app:enabledChanged', { appId, enabled });
+    return { persisted };
   }
 
   async init(): Promise<void> {
     mkdirSync(join(this.dataDir, 'apps'), { recursive: true });
+    await this.hydrateEnabledState();
+    // 5b RS: what ran on a non-surviving runtime when the previous kernel ended, read before anything changes it.
+    const respawn = readRespawnRecord(this.dataDir).entries;
     this.healToolchainShims();
+    // D80: probe idmapped binds in the background (never holds boot); false until it passes.
+    if (this.probeIdmap) void this.container.probeIdmappedMounts().catch(() => undefined);
     await this.prepareAppHostGuard();
     // Before the scan: an install a crash interrupted is finished or undone (Phase 7a).
     if (this.installRecovery) {
@@ -1439,6 +1877,8 @@ export class AppManager {
       console.error('[AppManager] orphan adoption failed at boot; the reconciler retries it');
     }
     if (!this.adoptionPending) await this.reconcileSurvivors();
+    // Before any start, so an autoStart app or a service comes back fresh, with a token.
+    await this.stopTokenlessSurvivors();
     // Sidecars likewise outlive this process: a docker daemon restart removes
     // the `--rm` app containers but revives their `unless-stopped` sidecars,
     // which nothing would ever reap. Same ordering constraint as mounts. At
@@ -1447,10 +1887,14 @@ export class AppManager {
       console.warn(`[AppManager] sidecar reconcile failed: ${(err as Error).message}`);
     });
     await this.migrateAppHosts();
+    // S1: app grants pinned to their installation, before the Context migration grants more.
+    await this.migrateGrantInstallations();
     // D75: before any pool fill or service start, so every start resolves on the recorded runtimes.
     await this.migrateRuntimes();
     // Stream C (Q7): before any start, so the first spawn already gets only granted keys.
     await this.migrateContext();
+    // 5b RS (D73, D77): after the D75 migration and the Context migration, so a respawn resolves like any start.
+    this.respawnFromRecord(respawn);
     this.startReconciler();
     // Background, missing images only — never delays boot.
     for (const m of this.registry.getAll()) {
@@ -1472,6 +1916,7 @@ export class AppManager {
     for (const m of this.registry.getAll()) {
       if (m.componentType !== 'service') continue;
       if (!this.isEnabled(m.id)) { console.log(`[AppManager] skipping disabled service ${m.id}`); continue; }
+      if (this.skipBlocked(m, 'service')) continue;
       console.log(`[AppManager] starting service ${m.id}`);
       this.startService(m.id).catch((err) => {
         console.error(`[AppManager] service ${m.id} failed to start: ${(err as Error).message}`);
@@ -1485,6 +1930,7 @@ export class AppManager {
       if (m.componentType === 'service') continue; // already handled above
       if (!m.autoStart) continue;
       if (!this.isEnabled(m.id)) { console.log(`[AppManager] skipping disabled autoStart ${m.id}`); continue; }
+      if (this.skipBlocked(m, 'autoStart')) continue;
       console.log(`[AppManager] auto-starting ${m.id}`);
       this.start(m.id).catch((err) => {
         console.error(`[AppManager] autoStart ${m.id} failed: ${(err as Error).message}`);
@@ -1510,44 +1956,59 @@ export class AppManager {
    * False when the scan failed (the survivors are unknown); never throws.
    */
   private async adoptOrphans(): Promise<boolean> {
+    // D77: every runtime whose instances outlive the kernel has the `adoption` group; none is hard-wired.
+    let complete = true;
+    for (const module of this.modulesWith('adoption')) {
+      if (!(await this.adoptFrom(module))) complete = false;
+    }
+    return complete;
+  }
+
+  /** Adopt one runtime's survivors. False when its scan failed (the survivors are unknown); never throws. */
+  private async adoptFrom(module: RuntimeModule & Required<Pick<RuntimeModule, 'adoption'>>): Promise<boolean> {
+    const runtime = module.descriptor.id;
     try {
-      const runner = this.container;
-      const orphans = runner.listOrphanRecords ? await runner.listOrphanRecords() : [];
-      if (!orphans) return false;
+      const survivors = await module.adoption.list();
+      if (!survivors) return false;
       // Idle warm-pool members stay pool members: adopted as ordinary
       // instances, every restart left one more window-less container behind
       // while the pool spawned a fresh one.
       const pooled = this.loadPoolIds();
       this.loadPoolHomes();
-      for (const o of orphans) {
+      for (const o of survivors) {
         // Known already, or still the runner's (a late pass: mid-stop).
-        if (this.instances.has(o.instanceId) || runner.isRunning(o.instanceId)) continue;
+        if (this.instances.has(o.instanceId) || module.runner.isRunning(o.instanceId)) continue;
         const inst: AppInstance = {
           instanceId:        o.instanceId,
           appId:             o.appId,
           state:             'resumed',
           port:              o.port,
-          pid:               o.pid,
+          pid:               null,
           startedAt:         new Date(),
           lastTransitionAt:  new Date(),
           restartCount:      0,
           inPool:            pooled.has(o.instanceId),
-          sandbox:           'container',
-          owner:             adoptedInstanceOwner(o.ownerLabel, pooled.has(o.instanceId)),
-          // D77: the identity it was started with, as the container says (never re-chowned).
+          sandbox:           runtime,
+          owner:             adoptedInstanceOwner(o.owner, pooled.has(o.instanceId)),
+          // D77: the identity it was started with, as the runtime says (never re-chowned).
           ...adoptedIdentity(o.user),
           // A preview survives as one: never a provider or interface, reaped when idle.
           ...(o.preview ? { preview: { workspace: o.preview, startedAt: new Date().toISOString() } } : {}),
         };
         this.instances.set(o.instanceId, inst);
         // Its port stays its own: the allocator starts empty with this shell.
-        if (o.port) this.ports.reserve(o.port);
+        if (o.port) {
+          const sharer = [...this.instances.values()].find((i) => i.instanceId !== o.instanceId && i.port === o.port);
+          if (sharer) console.warn(`[AppManager] adopted ${o.instanceId} on port ${o.port}, which ${sharer.instanceId} holds too (a restart of either gives it its own port)`);
+          this.ports.reserve(o.port);
+        }
         // The FSM must agree with the record: left at its default
         // ('installed'), every lifecycle call on an adopted instance failed —
         // `stop` answered "Invalid lifecycle transition: installed → pausing".
         this.fsm.set(o.instanceId, 'resumed');
-        // Containers from before instance tokens carry no nonce: they keep
-        // working, but the token-gated routes answer 401 until they restart.
+        // D89 (owner answer 5): the workload token is mandatory, so a survivor from before tokens
+        // is never adopted as a running instance: it is stopped through its lifecycle below and
+        // started fresh (with a token) by whatever starts it next.
         if (o.tokenNonce) this.tokens.register(o.instanceId, o.tokenNonce);
         // Bump nextInstanceNum so future spawns don't collide with this
         // adopted name. Instance IDs are "<appId>-<n>" or "<appId>" (single).
@@ -1559,13 +2020,13 @@ export class AppManager {
         }
         const manifest = this.registry.getById(o.appId);
         if (manifest) {
-          this.container.registerAdopted?.(o);
-          // Wire the crash handler so a dying adopted container is detected
-          // (registerAdopted starts the `docker wait` watcher that fires this).
+          inst.pid = module.adoption.adopt(o.instanceId).pid;
+          // Wire the crash handler so a dying adopted instance is detected
+          // (`adopt` starts the runtime's exit watch that fires this).
           // Without it the instance would stick in `resumed` forever and be
           // unrecoverable via `start`/`restart`.
-          this.container.onExit(o.instanceId, (code) => this.handleUnexpectedExit(o.instanceId, o.appId, code));
-          if (!inst.preview) {
+          module.runner.onExit(o.instanceId, (code) => this.handleUnexpectedExit(o.instanceId, o.appId, code));
+          if (!inst.preview && o.tokenNonce) {
             this.providers.registerInstance(inst, manifest);
             this.interfaces.registerInstance(inst, manifest);
           }
@@ -1575,19 +2036,63 @@ export class AppManager {
           // reconciler will tear the container down on the next pass anyway.
           console.warn(`[AppManager] skipping orphan adoption for ${o.instanceId}: manifest for ${o.appId} not found`);
         }
-        console.log(`[AppManager] adopted orphan container ${o.instanceId} (appId=${o.appId}, port=${o.port})`);
+        if (manifest && !o.tokenNonce) {
+          console.warn(`[AppManager] ${o.instanceId} predates workload tokens (D89): stopping it through its lifecycle; it starts fresh`);
+          this.tokenlessSurvivors.add(o.instanceId);
+          continue;
+        }
+        console.log(`[AppManager] adopted orphan ${runtime} instance ${o.instanceId} (appId=${o.appId}, port=${o.port})`);
         // The lifecycle checks a fresh start makes, again (F0a): the status
         // `aura get inst -o wide` shows. In the background: never holds boot.
         if (manifest) void this.measureAdopted(o.instanceId);
       }
     } catch (err) {
-      console.warn(`[AppManager] orphan adoption failed: ${(err as Error).message}`);
+      console.warn(`[AppManager] orphan adoption (${runtime}) failed: ${(err as Error).message}`);
       return false;
     }
     return true;
   }
 
+  /**
+   * D89 (owner answer 5): survivors without a workload token, stopped through
+   * their lifecycle (never kept as adopted instances); the next start of the
+   * app (a window, autoStart, a service, the pool) spawns them fresh with a
+   * token. Reported once each, in the boot log. Never throws.
+   */
+  private readonly tokenlessSurvivors = new Set<string>();
+  private async stopTokenlessSurvivors(): Promise<void> {
+    for (const instanceId of [...this.tokenlessSurvivors]) {
+      this.tokenlessSurvivors.delete(instanceId);
+      try { await this.stop(instanceId); }
+      catch (err) {
+        console.warn(`[AppManager] stopping tokenless survivor ${instanceId} failed (${(err as Error).message}); killing it`);
+        try { this.forceKill(instanceId); } catch { /* the reconciler reaps it */ }
+      }
+    }
+  }
+
   /** After adoption: drop the mounts, port forwards and OS sidecars of instances that did not survive. */
+  /**
+   * The boot scan failed (`adoptionPending`): scan again and adopt. The
+   * reconciler calls it each pass, and a spawn first (spawnInstance): a spawn
+   * while the survivors are unknown would take a survivor's port or name.
+   */
+  private retryAdoption(): Promise<void> {
+    this.adoptionRetry ??= (async () => {
+      try {
+        if (!this.adoptionPending || !(await this.adoptOrphans())) return;
+        this.adoptionPending = false;
+        console.log('[AppManager] reconcile: surviving containers adopted');
+        await this.reconcileSurvivors();
+        await this.stopTokenlessSurvivors();
+        if (this.appHostsReady) {
+          await this.settleAdoptedSlots().catch((err) => console.warn(`[AppManager] app host slots after adoption: ${(err as Error).message}`));
+        }
+      } finally { this.adoptionRetry = null; }
+    })();
+    return this.adoptionRetry;
+  }
+
   private async reconcileSurvivors(): Promise<void> {
     // Cross-app mounts live in the HOST kernel, so they outlive this process
     // entirely. Run AFTER orphan adoption so the live-instance set is complete
@@ -1632,9 +2137,129 @@ export class AppManager {
    * (the OS itself: autostart, restore), the local owner.
    */
   async start(appId: string, opts: LaunchUser = {}): Promise<string> {
+    // An app in maintenance (an update, D108 A3) starts once it is over: never next to its new code.
+    const busy = this.maintenanceBusy.get(appId);
+    if (busy) await busy.catch(() => undefined);
+    const pending = this.pendingUpdates.get(appId);
+    if (pending && !this.liveUserInstances(appId).length) return this.startPendingUpdate(appId, pending, opts.userId);
+    return this.startDirect(appId, opts);
+  }
+
+  /** A start with no maintenance wait (the update's own restarts). */
+  private async startDirect(appId: string, opts: LaunchUser = {}): Promise<string> {
     const instanceId = await this.launch(appId, opts.userId);
     await this.claimHostSlot(appId, instanceId);
     return instanceId;
+  }
+
+  // ─── Maintenance starts and updates (Phase 6 stream M, D108 A3; contract maintenance.ts) ──────
+
+  /** Apps in a maintenance start or an update: their pool does not refill, a start waits. */
+  private readonly maintenanceBusy = new Map<string, Promise<unknown>>();
+  /** Updates switched on disk while the app kept running (or did not run): `onUpdate` at its next start. */
+  private readonly pendingUpdates = new Map<string, { fromVersion: string; toVersion: string }>();
+
+  /** The app's live, user-owned instances (no pool member, no preview). */
+  private liveUserInstances(appId: string): AppInstance[] {
+    return this.getInstancesByApp(appId).filter((i) => !i.inPool && !i.preview && i.state !== 'destroyed' && i.state !== 'error');
+  }
+
+  /**
+   * The `MaintenanceStarter` port: the app's new code up and healthy, with no
+   * traffic routed (no proxy, App Host, intents or activity claim) and no
+   * start hooks, through the one start gate (spawnContext). Reason `setup` is
+   * refused until the setup engine enables it (Phase 7c P3). A refusal is the
+   * D105 body.
+   */
+  async startMaintenance(appId: string, opts: MaintenanceStartOptions): Promise<MaintenanceStartResult> {
+    const refuse = (error: AuraErrorBody): MaintenanceRefusal => ({ ok: false, error });
+    if (opts.reason !== 'update') {
+      return refuse({ error: 'maintenance-unavailable', category: 'unsupported-operation',
+        message: `a '${String(opts.reason)}' maintenance start arrives with the setup engine (D108, Phase 7c); only 'update' runs now` });
+    }
+    const manifest = this.registry.getById(appId);
+    if (!manifest) return refuse({ error: 'not-found', category: 'not-found', message: `App not found: ${appId}` });
+    if (this.liveUserInstances(appId).length) {
+      return refuse({ error: 'app-running', category: 'conflict', target: appId,
+        message: `${appId} runs: a maintenance start needs it stopped first (an update drains it)` });
+    }
+    let instanceId: string;
+    try {
+      instanceId = await this.spawnInstance(appId, { inPool: false, ...(opts.userId ? { userId: opts.userId } : {}), maintenance: opts.reason });
+    } catch (err) {
+      const blocked = operationalBlockOf(err);
+      if (blocked) return refuse(blocked);
+      const r = runtimeRefusal(err);
+      if (r) return refuse(runtimeErrorBody(r));
+      return refuse({ error: 'maintenance-start-failed', category: 'provisioning-failed', target: appId,
+        message: `${appId}: the new code did not start: ${(err as Error).message}`, hint: `see aura logs app ${appId}` });
+    }
+    const timeoutMs = opts.hookTimeoutMs ?? UPDATE_HOOK_TIMEOUT_MS;
+    const reason = opts.reason;
+    let finished = false;
+    const session: MaintenanceSession = {
+      instanceId, appId, reason, startedAt: Date.now(),
+      callHook: (hook, body) => this.runnerOf(instanceId).callMaintenanceHook(instanceId, hook, body ?? {}, { timeoutMs, reason }),
+      finish: async (outcome) => {
+        if (finished) return;
+        finished = true;
+        if (outcome === 'stop') { await this.stop(instanceId, { reason: reason === 'update' ? 'update' : 'user' }); return; }
+        await this.serveInstance(instanceId, appId, manifest, { inPool: false, preview: false });
+        const inst = this.instances.get(instanceId);
+        if (inst) { delete inst.maintenance; this.instances.set(instanceId, inst); }
+        await this.claimHostSlot(appId, instanceId);
+      },
+    };
+    return { ok: true, session };
+  }
+
+  /**
+   * The `InstanceUpdater` port: drain → switchCode → maintenance start
+   * `update` → `onUpdate` (120 s; skipped when the versions are equal) →
+   * serve; rolled back on a failure (instanceUpdate.ts). An app with live
+   * sessions (`keepRunningOnBuild`, a user's session host, D35) is not
+   * drained: its next start runs `onUpdate` (the owner restarts it).
+   */
+  async updateInstance(appId: string, opts: UpdateInstanceOptions): Promise<UpdateInstanceOutcome> {
+    const prior = this.maintenanceBusy.get(appId);
+    if (prior) await prior.catch(() => undefined);
+    const run = runInstanceUpdate({
+      running: (id) => this.liveUserInstances(id).map((i) => ({ instanceId: i.instanceId, ...(i.owner ? { owner: i.owner } : {}) })),
+      keepsRunning: (id) => this.registry.getById(id)?.keepRunningOnBuild === true || isUserEnvironment({ appId: id }),
+      drain: (id) => this.stopAll(id, { reason: 'update' }),
+      startMaintenance: (id, o) => this.startMaintenance(id, o),
+      start: (id, userId) => this.startDirect(id, userId ? { userId } : {}),
+      markPending: (id, fromVersion, toVersion) => { this.pendingUpdates.set(id, { fromVersion, toVersion }); },
+      log: (line) => console.log(`[AppManager] update: ${line}`),
+    }, appId, opts);
+    this.maintenanceBusy.set(appId, run);
+    try {
+      const out = await run;
+      if (out.ok && out.hookCalled) this.pendingUpdates.delete(appId);
+      return out;
+    } finally {
+      if (this.maintenanceBusy.get(appId) === run) this.maintenanceBusy.delete(appId);
+    }
+  }
+
+  /** A start after an update that did not drain the app: maintenance `update`, `onUpdate`, serve. Fails closed. */
+  private async startPendingUpdate(appId: string, pending: { fromVersion: string; toVersion: string }, userId?: string): Promise<string> {
+    const run = (async () => {
+      const started = await this.startMaintenance(appId, { reason: 'update', ...pending, ...(userId ? { userId } : {}) });
+      if (!started.ok) throw Object.assign(new Error(started.error.message), { code: started.error.error, body: started.error });
+      try {
+        await started.session.callHook('onUpdate', pending);
+      } catch (err) {
+        await started.session.finish('stop').catch(() => undefined);
+        throw Object.assign(new Error(`${appId}: onUpdate (${pending.fromVersion} → ${pending.toVersion}) failed: ${(err as Error).message}; not started`),
+          { code: 'update-hook-failed' });
+      }
+      this.pendingUpdates.delete(appId);
+      await started.session.finish('serve');
+      return started.session.instanceId;
+    })();
+    this.maintenanceBusy.set(appId, run);
+    try { return await run; } finally { if (this.maintenanceBusy.get(appId) === run) this.maintenanceBusy.delete(appId); }
   }
 
   /**
@@ -1806,6 +2431,7 @@ export class AppManager {
     | { kind: 'rejected'; appId: string; instanceId: string; code: string; message: string; hint?: string; status: number }
     | { kind: 'disambiguation'; candidates: IntentMatch[] }
     | { kind: 'noHandler' }
+    | { kind: 'setup-required'; appId: string; state: OperationalBlock['details']['state']; error: OperationalBlock }
   > {
     let chosen: { appId: string };
     if (intent.appId !== undefined) {
@@ -1824,6 +2450,9 @@ export class AppManager {
     }
     const manifest = this.registry.getById(chosen.appId);
     if (!manifest) return { kind: 'noHandler' };
+    // D108 A2: an app that may not start is an answer (show its setup or why), not a failed spawn.
+    const blocked = operationalBlock(manifest);
+    if (blocked) return { kind: 'setup-required', appId: chosen.appId, state: blocked.details.state, error: blocked };
 
     // Snapshot the app's instances first so the handler can tell a cold
     // start (Android onCreate + intent) from a re-delivery (onNewIntent).
@@ -2002,13 +2631,20 @@ export class AppManager {
     appId: string, instanceId: string,
     opts: {
       manifest: AppManifest; runtime: ResolvedRuntime; owner?: string; inPool?: boolean; preview?: boolean;
-      installation: { installationId: string; runAs?: AppRunAs; execution?: ExecutionApproval } | null;
+      installation: { installationId: string; runAs?: AppRunAs; execution?: ExecutionApproval; runAsMigration?: AppRunAsMigration } | null;
     },
   ): Promise<Pick<InstanceSpawnContext, 'home' | 'identity' | 'contextEnv'>> {
     // instanceId: a runtime handle only, for the log line below and the vault audit row; never a durable reference (D85 A7).
     if (!opts.installation) {
       throw new HomeDeniedError('installation-unresolved', `${appId}: its installation identity is unavailable, so it has no App Home; not started`);
     }
+    // A run-as migration that did not finish: its storage may be half handed over (identity/runAsOwnership.ts).
+    const migrating = runAsMigrationBlock(appId, opts.installation);
+    if (migrating) throw new HomeDeniedError('ownership-pending', migrating);
+    // The start gate (D108 A2, D48): every spawn passes here (start, intents, services, autostart, the pool,
+    // respawn, previews). A blocked app never starts; its D105 body travels with the error.
+    const blocked = operationalBlock(opts.manifest);
+    if (blocked) throw new OperationalBlockError(blocked);
     // The user it is for: its owner, or the user a pool member is warmed for (D78; stream T keys the pool per user).
     const user = opts.owner ?? (opts.inPool ? this.poolHomeUser(appId, opts.manifest) : undefined);
     // Owner decision 5-main item 3 (identity/execution.ts): a root request runs only with the owner's
@@ -2037,7 +2673,7 @@ export class AppManager {
         `${appId} runs as its app identity, and runtime ${opts.runtime.runtime} can't enforce one: not started (no root fallback)`);
     }
     const home = await this.homes.resolve(this.homeRequest(appId, opts.manifest, opts.installation.installationId, identity, opts.runtime.capabilities, user, !!opts.preview));
-    if (TERMINAL_SESSION_APPS.has(appId) && isNonRootIdentity(identity)
+    if (isUserEnvironment({ appId }) && isNonRootIdentity(identity)
       && ownerHomeAwaitsOwnership(home, identity.userId)) {
       // The owner's Private Home is still root's (D70: only the owner-approved
       // ownership apply hands it to uid 1000). As uid 1000 the Terminal could
@@ -2054,6 +2690,9 @@ export class AppManager {
         + 'so this Terminal starts as root until the ownership apply (terminal-root-transition, stream T)');
       identity = { ...ROOT_SPAWN_IDENTITY, userId: identity.userId! };
     }
+    // D107 / D9: a Private Home only where network isolation is guaranteed: no sidecar on the shared
+    // network, and a runtime that isolates workloads per instance (privateHomeNetwork.ts). Fail closed.
+    if (home?.kind === 'private') requirePrivateHomeIsolation(appId, opts.manifest, opts.runtime.module, this.runtimes.list());
     // Stream C (Q7): the declared AND granted Context keys, the user's vault first.
     // A pool member is warmed for the user it is claimed by (poolHomeUser), like its home.
     const { env: contextEnv } = await grantedContextEnv({
@@ -2087,13 +2726,13 @@ export class AppManager {
     appId: string, manifest: AppManifest, installationId: string, identity: { uid: number; gid: number } | undefined,
     runtime: ResolvedRuntime['capabilities'], user: string | undefined, preview = false,
   ): Parameters<HomeResolver['resolve']>[0] {
-    const terminal = TERMINAL_SESSION_APPS.has(appId);
+    const userEnv = isUserEnvironment({ appId });
     return {
       installationId, environmentScope: manifest.environmentScope ?? 'global',
-      executionContext: terminal ? 'terminal-session' : 'application',
+      executionContext: userEnv ? 'user-environment' : 'application',
       ...(user ? { userId: user } : {}),
-      // D69: the Terminal's session user is its owner; the role does not choose the home.
-      ...(terminal && user ? { principal: { userId: user, role: user === DEFAULT_OWNER_ID ? 'owner' as const : 'member' as const } } : {}),
+      // D69: a user environment's session user is its owner; the role does not choose the home.
+      ...(userEnv && user ? { principal: { userId: user, role: user === DEFAULT_OWNER_ID ? 'owner' as const : 'member' as const } } : {}),
       appIdentity: identity ? { uid: identity.uid, gid: identity.gid } : null,
       runtime,
       ...(preview ? { preview: true } : {}),
@@ -2108,7 +2747,7 @@ export class AppManager {
    * needs no user.
    */
   private poolHomeUser(appId: string, manifest: AppManifest): string | undefined {
-    return TERMINAL_SESSION_APPS.has(appId) || manifest.environmentScope === 'user' ? DEFAULT_OWNER_ID : undefined;
+    return isUserEnvironment({ appId }) || manifest.environmentScope === 'user' ? DEFAULT_OWNER_ID : undefined;
   }
 
   /**
@@ -2119,7 +2758,7 @@ export class AppManager {
   async resolveAppHome(appId: string, opts: { userId?: string } = {}): Promise<{ installationId: string; home: ResolvedHome; running: string[] }> {
     const manifest = this.registry.getById(appId);
     if (!manifest) throw new Error(`unknown app: ${appId}`);
-    if (TERMINAL_SESSION_APPS.has(appId)) throw new HomeDeniedError('private-home-not-allowed', `${appId} has no App Home: its instances are user sessions (D69)`);
+    if (isUserEnvironment({ appId })) throw new HomeDeniedError('private-home-not-allowed', `${appId} has no App Home: its instances are user sessions (D69)`);
     const installation = await this.installationRunAs(appId);
     if (!installation) throw new HomeDeniedError('installation-unresolved', `${appId} has no recorded installation`);
     const identity = await this.identities.identityFor({ appId, installationId: installation.installationId, runAs: installation.runAs ?? 'root' });
@@ -2191,15 +2830,15 @@ export class AppManager {
 
     // A Terminal instance is its owner's session host (D69, P5-4): nobody else enters it, in any mode,
     // whatever app.jump they hold (another user's sessions and Private Home live there).
-    if (TERMINAL_SESSION_APPS.has(inst.appId) && inst.owner !== user.userId) {
+    if (isUserEnvironment(inst) && inst.owner !== user.userId) {
       throw new HomeDeniedError('not-authorized', 'a Terminal instance is entered only by its own user');
     }
     if (req.caller.root) {
       // J.6: only into the user's own Terminal instance, its session context (P5-4).
-      if (!TERMINAL_SESSION_APPS.has(inst.appId) || inst.owner !== user.userId || inst.inPool) {
+      if (!isUserEnvironment(inst) || inst.owner !== user.userId || inst.inPool) {
         throw new HomeDeniedError('not-authorized', 'a root tab opens only in your own Terminal instance');
       }
-      const home = await this.homes.resolve({ ...homeReq, executionContext: 'terminal-session' });
+      const home = await this.homes.resolve({ ...homeReq, executionContext: 'user-environment' });
       return {
         kind: 'root', home: { mode: 'private', hostPath: home.hostPath }, uid: 0, gid: 0, groups: [],
         env: { ...base, USER: 'root', LOGNAME: 'root', AURA_ROOT_SESSION: '1' }, dockerSocket: true, userId: user.userId,
@@ -2242,17 +2881,26 @@ export class AppManager {
     return { uid: r.uid, gid: r.gid, ...(account?.username ? { account: account.username } : {}) };
   }
 
-  /** The open in-environment sessions (stream J; never persisted). */
-  openSessions(): ReturnType<ContainerRunner['openSessions']> {
-    return this.container.openSessions();
+  /** The open in-environment sessions of every runtime with the `sessions` group (stream J; never persisted). */
+  openSessions(): RuntimeSessionInfo[] {
+    return this.modulesWith('sessions').flatMap((m) => m.sessions.list());
+  }
+
+  /** Ends one open session through the runtime that holds it. */
+  private async endSession(sessionId: string): Promise<boolean> {
+    for (const m of this.modulesWith('sessions')) {
+      if (!m.sessions.list().some((r) => r.sessionId === sessionId)) continue;
+      return m.sessions.end(sessionId).catch(() => false);
+    }
+    return false;
   }
 
   /** Ends the open root tabs of an instance (or every one): `aura root end`, Settings End. */
   async endRootSessions(instanceId?: string): Promise<string[]> {
     const ended: string[] = [];
-    for (const r of this.container.openSessions()) {
+    for (const r of this.openSessions()) {
       if (r.kind !== 'root' || (instanceId && r.instanceId !== instanceId)) continue;
-      if (await this.container.endSession(r.sessionId).catch(() => false)) ended.push(r.sessionId);
+      if (await this.endSession(r.sessionId)) ended.push(r.sessionId);
     }
     return ended;
   }
@@ -2298,23 +2946,60 @@ export class AppManager {
    * start too: an `app` installation must never start as root because Valkey
    * hiccuped.
    */
-  async installationRunAs(appId: string): Promise<{ installationId: string; runAs?: AppRunAs; execution?: ExecutionApproval } | null> {
-    const scope = this.registry.getScopeId(appId);
-    if (!scope) return null;
+  async installationRunAs(appId: string): Promise<{
+    installationId: string; runAs?: AppRunAs; execution?: ExecutionApproval; runAsMigration?: AppRunAsMigration; runAsJournal?: string;
+  } | null> {
+    // An app discovered moments ago (scaffold, clone) gets its record from the
+    // background sync; `ensureInstallation` records it now rather than fail the first start (D65).
     let inst;
-    try { inst = await getAppHostServices().registry.findInstallation(appId, scope); }
+    try { inst = (await this.ensureInstallation(appId)).installation; }
     catch (err) {
       throw new Error(`${appId}: its installation record can't be read (${(err as Error).message}); not started, since how it runs is unknown`);
     }
-    if (!inst && this.appHostsReady) {
-      // An app discovered moments ago (scaffold, clone) gets its record from the
-      // background sync; record it now rather than fail the first start (D65).
-      await this.syncAppHost(appId);
-      try { inst = await getAppHostServices().registry.findInstallation(appId, scope); } catch { inst = null; }
-    }
     return inst ? {
       installationId: inst.installationId, ...(inst.runAs ? { runAs: inst.runAs } : {}), ...(inst.execution ? { execution: inst.execution } : {}),
+      ...(inst.runAsMigration ? { runAsMigration: inst.runAsMigration } : {}), ...(inst.runAsJournal ? { runAsJournal: inst.runAsJournal } : {}),
     } : null;
+  }
+
+  /**
+   * The inputs of the run-as migration of an installed app to `runAs`
+   * (identity/runAsOwnership.ts; owner decision 5-main, run-as reversible):
+   * its managed storage (instance data dirs, App Homes, dev caches) and both
+   * identities. The flip to `app` allocates the app identity, as its first
+   * app start would. A System Terminal is refused: its instances run as
+   * their user (stream T), never by runAs.
+   */
+  /**
+   * The instances that mount `appId`'s data (a sidecar consumer counts as its
+   * instance), the app's own instances left out: what a change of its data's
+   * ownership affects (the run-as migration). The kernel's answer, so callers
+   * never reach the mount backend (ARI coverage, 5b).
+   */
+  dataConsumersOf(appId: string): string[] {
+    return this.mounts.dataConsumers(appId);
+  }
+
+  async runAsOwnershipInput(appId: string, runAs: AppRunAs): Promise<RunAsOwnershipInput & { runAsMigration?: AppRunAsMigration }> {
+    const manifest = this.registry.getById(appId);
+    if (!manifest) throw new Error(`unknown app: ${appId}`);
+    if (isUserEnvironment({ appId })) throw new Error(`${appId}: its instances run as their user (stream T); run-as does not apply`);
+    const installation = await this.installationRunAs(appId);
+    if (!installation) throw new HomeDeniedError('installation-unresolved', `${appId} has no recorded installation`);
+    const current = installation.runAs ?? 'root';
+    const appIdentity = await this.identities.identityFor({ appId, installationId: installation.installationId, runAs: 'app' });
+    const root = { uid: 0, gid: 0 };
+    const app = { uid: appIdentity.uid, gid: appIdentity.gid };
+    const previous = installation.runAsJournal ? ownershipJournalPath(this.dataDir, installation.runAsJournal) : null;
+    return {
+      appId, installationId: installation.installationId, runAs,
+      appDataRoot: join(this.scopeRegistry.getById(manifest.scopeId).dataDir, 'apps', appId), appDir: manifest.appDir,
+      devServed: manifest.runtime !== 'raw' && serveState(manifest.appDir, manifest).mode !== 'prod',
+      appHomes: installationAppHomes(this.dataDir, installation.installationId),
+      from: current === 'app' ? app : root, to: runAs === 'app' ? app : root,
+      previousJournal: previous,
+      ...(installation.runAsMigration ? { runAsMigration: installation.runAsMigration } : {}),
+    };
   }
 
   /** The last start of each app under `runAs: app` (the privilege review), since this shell started. */
@@ -2340,23 +3025,36 @@ export class AppManager {
     home: ResolvedHome | undefined,
   ): Promise<void> {
     await this.provisionInBuilder(appId, manifest, appDir);
+    // The System Terminal's data is its server's (stream T2, a Terminal refinement of the user environment):
+    // the Terminal service uid, the user's gid (whose it is).
+    const owner = appId === TERMINAL_APP_ID && isSessionIdentity(identity)
+      ? { uid: TERMINAL_SERVICE_UID, gid: identity.gid } : { uid: identity.uid, gid: identity.gid };
     const rows = appOwnershipSpecs({
       appId, installationId, appDataRoot: dirname(instanceDataDir), instanceDirs: [basename(instanceDataDir)], appDir,
       devServed: manifest.runtime !== 'raw' && serveState(appDir, manifest).mode !== 'prod',
-      identity: { uid: identity.uid, gid: identity.gid },
+      identity: owner,
       ...(home?.hostPath && home.kind !== 'private' ? { appHomes: [home.hostPath] } : {}),
     });
-    const r = applyAppOwnership(rows, identity);
-    if (r.changed || r.created.length) console.log(`[AppManager] ${appId}: ownership for uid ${identity.uid}: ${r.changed} changed, ${r.created.length} created`);
+    const r = applyAppOwnership(rows, owner);
+    if (r.changed || r.created.length) console.log(`[AppManager] ${appId}: ownership for uid ${owner.uid}: ${r.changed} changed, ${r.created.length} created`);
     for (const x of r.skipped) console.warn(`[AppManager] ${appId}: ownership: ${x}`);
   }
 
   private async spawnInstance(
-    appId: string, opts: { inPool: boolean; userId?: string; preview?: { appDir: string; workspace: string; owner: string; dataFrom: string | null } },
+    appId: string, opts: {
+      inPool: boolean; userId?: string; preview?: { appDir: string; workspace: string; owner: string; dataFrom: string | null };
+      /** D108 A3: a maintenance start: up and healthy, no traffic, no start hooks until it serves (`serveInstance`). */
+      maintenance?: MaintenanceReason;
+    },
   ): Promise<string> {
     const manifest = this.registry.getById(appId);
     if (!manifest) throw new Error(`App not found: ${appId}`);
-
+    // Survivors unknown (the boot scan failed): adopt them first, so this
+    // spawn's port and instance name are not a survivor's.
+    if (this.adoptionPending) {
+      await this.retryAdoption();
+      if (this.adoptionPending) console.warn(`[AppManager] ${appId}: starting while the survivors of the last shell are unknown (adoption scan failed): its port may be a survivor's`);
+    }
     const scope = this.scopeRegistry.getById(manifest.scopeId);
     // A preview is one more instance of the app (`<appId>-<n>`), whatever its instanceMode.
     const instanceId = this.allocateInstanceId(appId, opts.preview ? 'multi' : manifest.instanceMode);
@@ -2378,7 +3076,7 @@ export class AppManager {
       this.transition(instanceId, appId, 'error', null, err instanceof Error ? err.message : String(err));
       throw err;
     }
-    this.upsertInstance(instanceId, appId, { sandbox: runtime.runtime, runtimeSource: runtime.source });
+    this.upsertInstance(instanceId, appId, { sandbox: runtime.runtime, runtimeSource: runtime.source, runtimeSettingsRev: runtimeSettingsRevision(runtime.settings) });
     this.transition(instanceId, appId, 'creating', null);
     // Honor manifest.serverPort when present (currently used by
     // com.aura.registry to pin :4090 so RegistryConfig URLs stay stable).
@@ -2397,8 +3095,10 @@ export class AppManager {
       const appDir = opts.preview?.appDir ?? manifest.appDir;
       // A session host's data is its user's: never another user's (stream T).
       // (A Terminal as root is only ever the owner's, before the ownership apply: the owner's uid then.)
-      const sessionUid = isNonRootIdentity(spawnCtx.identity) ? spawnCtx.identity.uid : LINUX_ID_RANGES.owner.first;
-      if (TERMINAL_SESSION_APPS.has(appId) && retireForeignSessionData(instanceDataDir, sessionUid)) {
+      const sessionId = isNonRootIdentity(spawnCtx.identity)
+        ? { uid: spawnCtx.identity.uid, gid: spawnCtx.identity.gid }
+        : { uid: LINUX_ID_RANGES.owner.first, gid: LINUX_ID_RANGES.owner.first };
+      if (isUserEnvironment({ appId }) && retireForeignSessionData(instanceDataDir, sessionId)) {
         this.mounts.forget(instanceId);   // nor its cross-app mounts (normally forgotten at its stop already)
       }
       if (spawnCtx.identity?.approvedRoot) {
@@ -2412,13 +3112,14 @@ export class AppManager {
       // A user's session host runs from its current production build only (owner, 2026-11-26): built
       // here when it is not, through the one build path; never a dev server, Developer Mode or not.
       // The owner's explicit dev run of the Terminal is a Preview (its own workspace, its own caches).
-      if (TERMINAL_SESSION_APPS.has(appId) && !opts.preview) await this.ensureProductionBuild(appId, manifest);
+      if (isUserEnvironment({ appId }) && !opts.preview) await this.ensureProductionBuild(appId, manifest);
       const ident = spawnCtx.identity ?? { uid: 0, gid: 0 };
       this.upsertInstance(instanceId, appId, {
         runAs: isSessionIdentity(nonRoot) ? 'user' : nonRoot ? 'app' : 'root', uid: ident.uid, gid: ident.gid,
         approvedRoot: spawnCtx.identity?.approvedRoot === true ? true : undefined,
       });
-      const pid = await runner.spawn(instanceId, appId, port, manifest, {
+      // The one spec of this start (5b-2 D `buildSpawnSpec`): A4 strips host paths for a runtime without hostFilesystem.
+      const spec = buildSpawnSpec({ instanceId, appId, port, manifest, context: {
         ...spawnCtx,
         ...(installation ? { installationId: installation.installationId } : {}),
         appDir,
@@ -2432,10 +3133,11 @@ export class AppManager {
         // A preview runs the user's own workspace, not the installed source.
         sourceMode,
         ...(opts.preview ? { preview: opts.preview.workspace } : {}),
-      });
+      } }, runtime.capabilities);
+      const pid = await runner.spawn(spec.instanceId, spec.appId, spec.port, spec.manifest, runnerContextOf(spec));
       const lifecycle = runner.lifecycleStatus(instanceId) ?? undefined;
       this.upsertInstance(instanceId, appId, {
-        pid, port, startedAt: new Date(), inPool: opts.inPool, owner, lifecycle,
+        pid, port, startedAt: new Date(), inPool: opts.inPool, owner, lifecycle, version: manifest.version,
         ...(opts.preview ? { preview: { workspace: opts.preview.workspace, startedAt: new Date().toISOString() } } : {}),
       });
       if (opts.inPool) this.savePoolIds();
@@ -2453,44 +3155,13 @@ export class AppManager {
         console.warn(`[AppManager] port reapply failed for ${instanceId}: ${(err as Error).message}`);
       });
 
-      await this.runnerOf(instanceId).callLifecycle(instanceId, 'onCreate');
-      this.transition(instanceId, appId, 'starting', port);
-
-      await this.runnerOf(instanceId).callLifecycle(instanceId, 'onStart');
-      this.transition(instanceId, appId, 'started', port);
-
-      await this.runnerOf(instanceId).callLifecycle(instanceId, 'onResume');
-      this.transition(instanceId, appId, 'resuming', port);
-      this.transition(instanceId, appId, 'resumed', port);
-
-      const spawned = this.instances.get(instanceId);
-      // Called unconditionally: InterfaceRegistry applies the warm-pool rule
-      // itself, so it is stated once instead of repeated at all four of its
-      // register call sites.
-      if (spawned && !opts.preview) this.interfaces.registerInstance(spawned, manifest);
-      // Register content providers ONLY for user-owned instances. If pool
-      // members claimed /api/data/<authority>/* routes, multiple pool entries
-      // would compete and the route would point at an instance the user
-      // doesn't own. Pool claim registers providers after the hand-off.
-      if (!opts.inPool) {
-        if (spawned && !opts.preview) this.providers.registerInstance(spawned, manifest);
-      } else {
-        // Pool warm-up: pre-compile the iframe entry point (`/`) so the user's
-        // FIRST iframe load after claim doesn't trigger Vite's on-demand compile
-        // + bundle path. waitHealthy only touched /api/lifecycle/health, leaving
-        // the index.astro module cold. Warming `/` also primes the bundled
-        // page modules it references (e.g. the terminal's xterm bundle, now an
-        // npm dep pulled in via the page's <script> rather than a static vendor
-        // file). Fire-and-forget; never blocks the spawn.
-        const warmups = ['/'];
-        const host = this.runnerOf(instanceId).getHost(instanceId) ?? '127.0.0.1';
-        for (const path of warmups) {
-          fetch(`http://${host}:${port}${path}`, { signal: AbortSignal.timeout(5000), headers: this.ownRelayHeaders(appId, instanceId, 'GET', path) })
-            .then((r) => r.body?.cancel()).catch(() => undefined);
-        }
+      // D108 A3: a maintenance start stops here: healthy, no hooks, nothing registered, no traffic.
+      if (opts.maintenance) {
+        this.upsertInstance(instanceId, appId, { maintenance: opts.maintenance });
+        this.runnerOf(instanceId).onExit(instanceId, (code) => this.handleUnexpectedExit(instanceId, appId, code));
+        return instanceId;
       }
-
-      this.runnerOf(instanceId).onExit(instanceId, (code) => this.handleUnexpectedExit(instanceId, appId, code));
+      await this.serveInstance(instanceId, appId, manifest, { inPool: opts.inPool, preview: !!opts.preview });
       if (nonRoot) this.appStarts.set(appId, { at: new Date().toISOString(), ok: true });
       return instanceId;
     } catch (err) {
@@ -2503,6 +3174,54 @@ export class AppManager {
       this.transition(instanceId, appId, 'error', null, String(err));
       throw err;
     }
+  }
+
+  /**
+   * The rest of a start once its process is healthy: the start hooks, the
+   * registrations (interfaces, content providers) and the exit watch. A
+   * direct start runs it at once; a maintenance start when it serves.
+   */
+  private async serveInstance(instanceId: string, appId: string, manifest: AppManifest, opts: { inPool: boolean; preview: boolean }): Promise<void> {
+    const port = this.instances.get(instanceId)?.port ?? null;
+    await this.runnerOf(instanceId).callLifecycle(instanceId, 'onCreate');
+    this.transition(instanceId, appId, 'starting', port);
+
+    await this.runnerOf(instanceId).callLifecycle(instanceId, 'onStart');
+    this.transition(instanceId, appId, 'started', port);
+
+    await this.runnerOf(instanceId).callLifecycle(instanceId, 'onResume');
+    this.transition(instanceId, appId, 'resuming', port);
+    this.transition(instanceId, appId, 'resumed', port);
+
+    const spawned = this.instances.get(instanceId);
+    // Called unconditionally: InterfaceRegistry applies the warm-pool rule
+    // itself, so it is stated once instead of repeated at all four of its
+    // register call sites.
+    if (spawned && !opts.preview) this.interfaces.registerInstance(spawned, manifest);
+    // Register content providers ONLY for user-owned instances. If pool
+    // members claimed /api/data/<authority>/* routes, multiple pool entries
+    // would compete and the route would point at an instance the user
+    // doesn't own. Pool claim registers providers after the hand-off.
+    if (!opts.inPool) {
+      if (spawned && !opts.preview) this.providers.registerInstance(spawned, manifest);
+    } else {
+      // Pool warm-up: pre-compile the iframe entry point (`/`) so the user's
+      // FIRST iframe load after claim doesn't trigger Vite's on-demand compile
+      // + bundle path. waitHealthy only touched /api/lifecycle/health, leaving
+      // the index.astro module cold. Warming `/` also primes the bundled
+      // page modules it references (e.g. the terminal's xterm bundle, now an
+      // npm dep pulled in via the page's <script> rather than a static vendor
+      // file). Fire-and-forget; never blocks the spawn.
+      const warmups = ['/'];
+      const host = this.runnerOf(instanceId).getHost(instanceId) ?? '127.0.0.1';
+      for (const path of warmups) {
+        fetch(`http://${host}:${port}${path}`, { signal: AbortSignal.timeout(5000), headers: this.ownRelayHeaders(appId, instanceId, 'GET', path) })
+          .then((r) => r.body?.cancel()).catch(() => undefined);
+      }
+    }
+
+    // A maintenance start already watches the exit (spawnInstance).
+    if (!this.instances.get(instanceId)?.maintenance) this.runnerOf(instanceId).onExit(instanceId, (code) => this.handleUnexpectedExit(instanceId, appId, code));
   }
 
   /**
@@ -2554,6 +3273,7 @@ export class AppManager {
       // newly visible instance (it filters by !inPool, so this is effectively
       // an "appeared" event for that view).
       OsEventBus.emit('app:stateChanged', { instanceId: inst.instanceId, appId, state: inst.state, port: inst.port });
+      this.noteRespawn();
       console.log(`[AppManager] pool: claimed ${inst.instanceId} for user`);
       return inst;
     }
@@ -2566,12 +3286,22 @@ export class AppManager {
    * over-spawning when many slots open simultaneously (init, rapid claims).
    * Fire-and-forget — never blocks the caller.
    */
+  /**
+   * The supervisor loops (boot services, autoStart, warm pools, enable, respawn) skip an app the
+   * start gate refuses, instead of spawning it to fail (D108 A2). The gate itself is in `spawnContext`.
+   */
+  private skipBlocked(manifest: AppManifest, loop: string): boolean {
+    const blocked = operationalBlock(manifest);
+    if (blocked) console.log(`[AppManager] ${loop}: skipping ${manifest.id} (${blocked.error}): ${blocked.message}`);
+    return blocked !== null;
+  }
+
   private scheduleRefill(appId: string): void {
     // Never top up the warm pool for an app that is being uninstalled — else
     // the reconciler respawns instances after we've killed them all.
-    if (this.uninstalling.has(appId)) return;
+    if (this.uninstalling.has(appId) || this.maintenanceBusy.has(appId)) return;
     const manifest = this.registry.getById(appId);
-    if (!manifest || manifest.warmPool <= 0 || manifest.instanceMode !== 'multi') return;
+    if (!manifest || manifest.warmPool <= 0 || manifest.instanceMode !== 'multi' || this.skipBlocked(manifest, 'pool refill')) return;
     const target   = manifest.warmPool;
     const inPool   = this.countPool(appId);
     const inFlight = this.refillInFlight.get(appId) ?? 0;
@@ -2652,7 +3382,7 @@ export class AppManager {
    * `UserSessionEnders` (auth/identityContracts.ts).
    */
   async endUserSessions(userId: string): Promise<UserSessionsEnded> {
-    const terminals = [...this.instances.values()].filter((i) => TERMINAL_SESSION_APPS.has(i.appId)
+    const terminals = [...this.instances.values()].filter((i) => isUserEnvironment(i)
       && (i.owner === userId || (i.inPool && this.poolHomes.get(i.instanceId) === userId)));
     let stopped = 0;
     for (const inst of terminals) {
@@ -2674,20 +3404,21 @@ export class AppManager {
    */
   private async endJumpSessionsOf(userId: string): Promise<number | null> {
     let ended = 0;
-    for (const r of this.container.openSessions()) {
+    for (const r of this.openSessions()) {
       if (r.userId !== userId) continue;
-      if (await this.container.endSession(r.sessionId).catch(() => false)) ended++;
+      if (await this.endSession(r.sessionId)) ended++;
       else console.warn(`[AppManager] could not end jump session ${r.sessionId} of a disabled user`);
     }
     return ended;
   }
 
   /**
-   * Stop an instance. `reason: 'restart'` (appRestart) keeps the sibling
+   * Stop an instance (`reason` reaches the app's stop hooks as `x-aura-stop-reason`;
+   * `update` is the drain before an update, stream M). `reason: 'restart'` (appRestart) keeps the sibling
    * containers that opted in (`aura.keep-restart=1`) running and parks them
    * until the instance is back; any other stop removes them all.
    */
-  async stop(instanceId: string, opts: { reason?: 'user' | 'restart' } = {}): Promise<void> {
+  async stop(instanceId: string, opts: { reason?: StopReason } = {}): Promise<void> {
     const inst = this.instances.get(instanceId);
     if (!inst?.sandbox || !this.runnerOf(instanceId).isRunning(instanceId)) return;
     const reason = opts.reason ?? 'user';
@@ -2727,7 +3458,7 @@ export class AppManager {
 
     // Clear instance after destroy
     this.runnerOf(instanceId).clearToolsDir(instanceId);
-    this.container.clearMountRoot?.(instanceId);
+    this.runnerOf(instanceId).clearMountRoot?.(instanceId);
     this.releaseHostSlot(appId, instanceId);
     this.instances.delete(instanceId);
     this.instanceHomes.delete(instanceId);
@@ -2736,7 +3467,7 @@ export class AppManager {
   }
 
   /** Stop ALL instances of an app. */
-  async stopAll(appId: string, opts: { reason?: 'user' | 'restart' } = {}): Promise<void> {
+  async stopAll(appId: string, opts: { reason?: StopReason } = {}): Promise<void> {
     const instances = this.getInstancesByApp(appId);
     await Promise.all(instances.map((i) => this.stop(i.instanceId, opts)));
   }
@@ -2764,8 +3495,10 @@ export class AppManager {
     }
     // 3. Belt-and-braces: remove any container the host still has for this app
     //    (untracked survivors — adoption-skipped, lost across restarts, etc.).
-    try { await this.container.killAllForApp?.(appId); }
-    catch (err) { console.warn(`[AppManager] container sweep for ${appId} failed: ${(err as Error).message}`); }
+    for (const m of this.modulesWith('adoption')) {
+      try { await m.adoption.removeAllOf(appId); }
+      catch (err) { console.warn(`[AppManager] ${m.descriptor.id} sweep for ${appId} failed: ${(err as Error).message}`); }
+    }
   }
 
   /**
@@ -2799,14 +3532,16 @@ export class AppManager {
     if (killed) {
       this.fsm.set(instanceId, 'destroyed');
       OsEventBus.emit('app:stateChanged', { instanceId, appId, state: 'destroyed', port: null });
+      this.noteRespawn();
     }
     this.runnerOf(instanceId).clearToolsDir(instanceId);
-    this.container.clearMountRoot?.(instanceId);
+    this.runnerOf(instanceId).clearMountRoot?.(instanceId);
     this.releaseHostSlot(appId, instanceId);
     this.instances.delete(instanceId);
     this.instanceHomes.delete(instanceId);
     this.fsm.delete(instanceId);
     this.nextActivityNum.delete(instanceId);
+    this.noteRespawn();
   }
 
   async pause(instanceId: string): Promise<void> {
@@ -2835,11 +3570,6 @@ export class AppManager {
   }
 
   /** Filesystem root where every app lives. Forwarded from AppRegistry. */
-  /** The data volume's name (the release builder mounts subpaths of it; Phase 7b system patches). */
-  dataVolumeName(): string {
-    return this.container.sidecarRuntime().appDataVolume;
-  }
-
   getAppsDir(): string {
     return this.registry.getAppsDir();
   }
@@ -2853,6 +3583,29 @@ export class AppManager {
     const manifest = this.registry.getById(appId);
     if (!manifest) return null;
     return effectiveSourceMode(this.scopeRegistry.getById(manifest.scopeId), manifest);
+  }
+
+  /** Where the active copy of an app came from (its scope's install record); null for a copy Nexus did not install. */
+  installOriginOf(appId: string): InstallOrigin | null {
+    const manifest = this.registry.getById(appId);
+    if (!manifest) return null;
+    try {
+      const r = JSON.parse(readFileSync(installRecordPath(this.scopeRegistry.getById(manifest.scopeId).dataDir, appId), 'utf-8')) as Record<string, unknown>;
+      const str = (k: string) => (typeof r[k] === 'string' && r[k] ? { [k]: r[k] as string } : {});
+      return { id: appId, ...str('source'), ...str('ref'), ...str('sourceName'), ...str('remoteId') };
+    } catch { return null; }
+  }
+
+  /**
+   * The registry credential to pull `image` with on behalf of an installed
+   * app, as an opaque short-lived handle (nexus resolvePullCredential), for
+   * whichever runtime pulls it (SidecarManager today). Null: pull anonymously.
+   */
+  pullCredentialFor(appId: string, image: string): Promise<PullCredential | null> {
+    return resolvePullCredential(this.installOriginOf(appId), image, {
+      sources: loadSourcesConfig,
+      secret:  (key) => new ContextStore(this.dataDir).get(key),
+    });
   }
 
   getScopeDefinitions(): ScopeDefinition[] {
@@ -2913,7 +3666,7 @@ export class AppManager {
    * every other app.
    */
   private ownRelayHeaders(appId: string, instanceId: string, method: string, path: string): Record<string, string> {
-    if (!TERMINAL_SESSION_APPS.has(appId)) return {};
+    if (!isUserEnvironment({ appId })) return {};
     const claim = this.relayClaim(instanceId, { method, path, caller: 'system' });
     return claim ? { [RELAY_CLAIM_HEADER]: claim } : {};
   }
@@ -3026,6 +3779,7 @@ export class AppManager {
       this.providers.registerInstance(inst, manifest);
       this.interfaces.registerInstance(inst, manifest);
       OsEventBus.emit('app:stateChanged', { instanceId: inst.instanceId, appId: inst.appId, state: inst.state, port: inst.port });
+      this.noteRespawn();
       console.log(`[AppManager] pool: auto-claimed ${inst.instanceId} (activity open on pool member)`);
       this.scheduleRefill(inst.appId);
       await this.notifyAssigned(inst);
@@ -3433,11 +4187,15 @@ export class AppManager {
   /**
    * Close a single activity. If it was the last activity of its parent
    * AND the manifest does not declare `backgroundService`, the parent instance
-   * is also stopped (Auto-Stop).
+   * is also stopped (Auto-Stop). The result says whether it was the last one
+   * and whether the instance keeps running: for a background process the
+   * shell may then ask the user whether to stop it (D101).
    */
-  async closeActivity(activityId: string): Promise<void> {
+  async closeActivity(activityId: string): Promise<ActivityCloseResult> {
     const activity = this.activities.get(activityId);
-    if (!activity) return;
+    if (!activity) {
+      return { closed: false, activityId, parentInstanceId: null, appId: null, lastOfInstance: false, instanceStopped: false, instanceRunning: false };
+    }
     const { parentInstanceId, appId } = activity;
 
     await this.runnerOf(parentInstanceId).callOptionalLifecycle(parentInstanceId, `onActivityDestroy/${encodeURIComponent(activityId)}`);
@@ -3447,14 +4205,21 @@ export class AppManager {
 
     // Auto-Stop: last activity closed and instance is not a background service
     const manifest = this.registry.getById(appId);
+    const lastOfInstance = this.getActivitiesByInstance(parentInstanceId).length === 0;
+    let instanceStopped = false;
     if (
       manifest &&
       !manifest.backgroundService &&
-      this.getActivitiesByInstance(parentInstanceId).length === 0 &&
+      lastOfInstance &&
       this.runnerOf(parentInstanceId).isRunning(parentInstanceId)
     ) {
       await this.stop(parentInstanceId);
+      instanceStopped = true;
     }
+    return {
+      closed: true, activityId, parentInstanceId, appId, lastOfInstance, instanceStopped,
+      instanceRunning: !instanceStopped && this.runnerOf(parentInstanceId).isRunning(parentInstanceId),
+    };
   }
 
   /**
@@ -3582,7 +4347,10 @@ export class AppManager {
   /**
    * Re-read ONE app's manifest from disk and rebuild every projection derived
    * from it. Emits nothing — for callers that changed a manifest in place (a
-   * cap grant, a clone) and have no business claiming the app was installed.
+   * cap grant, an origin) and have no business claiming the app was installed.
+   * Never for a directory that just landed (use `reloadScopedApp`): the app
+   * would be registered silently, the watcher's later `add` would no longer
+   * count as new, and `app:installed` (its installation) would never come.
    */
   reloadManifest(appId: string): void {
     this.registry.reloadFromDisk(appId);
@@ -3659,6 +4427,7 @@ export class AppManager {
       state,
       port: this.instances.get(instanceId)?.port ?? null,
     });
+    this.noteRespawn();
   }
 
   private upsertInstance(instanceId: string, appId: string, patch: Partial<AppInstance>): void {
@@ -3700,14 +4469,7 @@ export class AppManager {
   private async reconcileOnce(): Promise<void> {
     // 0) The boot scan for surviving containers failed: retry it. Until it
     //    succeeds, syncSidecars and reconcileSurvivors reap nothing.
-    if (this.adoptionPending && await this.adoptOrphans()) {
-      this.adoptionPending = false;
-      console.log('[AppManager] reconcile: surviving containers adopted');
-      await this.reconcileSurvivors();
-      if (this.appHostsReady) {
-        await this.settleAdoptedSlots().catch((err) => console.warn(`[AppManager] app host slots after adoption: ${(err as Error).message}`));
-      }
-    }
+    if (this.adoptionPending) await this.retryAdoption();
     await this.reapIdlePreviews().catch((err: unknown) => console.warn(`[AppManager] preview reaper failed: ${(err as Error).message}`));
     // 1) Tracked-instance liveness: any pid we believe is alive but isn't
     //    must be flagged error, port released, view dropped.
@@ -3740,6 +4502,7 @@ export class AppManager {
           // whole group — preferable to leaving a squatter behind.
           try { this.runnerOf(inst.instanceId).forceKill(inst.instanceId); } catch { /* runner may already have evicted it */ }
           OsEventBus.emit('app:stateChanged', { instanceId: inst.instanceId, appId: inst.appId, state: 'error', port: null });
+          this.noteRespawn();
           OsEventBus.emit('app:crashed',      { instanceId: inst.instanceId, appId: inst.appId, error: 'reconciled: backing process disappeared' });
         }
       }
@@ -3782,15 +4545,7 @@ export class AppManager {
     //    waitHealthy can poll for up to 30s before the instance entry's `pid`
     //    field gets set — but the runner already has the live ChildProcess.
     //    Without the runner's view, the reaper would kill mid-spawn instances.
-    const trackedPids = new Set<number>();
-    for (const t of this.instances.values()) if (t.pid != null) trackedPids.add(t.pid);
-    // Union pids from both runners so the reconciler doesn't mistake an
-    // in-flight container-spawn for a dead PRoot (or vice versa).
-    for (const { runner: r } of this.runtimes.list()) {
-      for (const pid of r.getActivePids()) trackedPids.add(pid);
-    }
-    const squatters = listAppOrphans(trackedPids);
-    for (const orphan of squatters) {
+    for (const orphan of this.orphanScan().squatters) {
       console.warn(`[AppManager] reconcile: SIGKILL orphan pid=${orphan.pid} app=${orphan.appId} cmd=${orphan.cmdline.slice(0, 120)}`);
       killProcessGroup(orphan.pid, 'SIGKILL');
     }
@@ -3843,7 +4598,7 @@ export class AppManager {
     //    cap so calling it slack-times is safe.
     for (const m of this.registry.getAll()) {
       if (m.warmPool <= 0 || m.instanceMode !== 'multi') continue;
-      if (this.uninstalling.has(m.id)) continue;   // don't respawn mid-uninstall
+      if (this.uninstalling.has(m.id) || this.maintenanceBusy.has(m.id)) continue;   // don't respawn mid-uninstall or mid-update
       const inPool   = this.countPool(m.id);
       const inFlight = this.refillInFlight.get(m.id) ?? 0;
       const slack = m.warmPool - (inPool + inFlight);
@@ -3875,7 +4630,7 @@ export class AppManager {
     for (const instanceId of this.sidecarParking.takeExpired()) {
       if (this.instances.has(instanceId)) continue; // back (and adopted) after all
       console.warn(`[AppManager] ${instanceId} did not come back — reaping its parked sidecars`);
-      this.container.reapSiblingsOf?.(instanceId);
+      for (const m of this.modulesWith('workloads')) m.workloads.removeOf(instanceId);
     }
     await this.syncSidecars(2);
   }
@@ -3888,12 +4643,11 @@ export class AppManager {
   private async syncSidecars(graceTicks: number): Promise<void> {
     // Survivors unknown: their sidecars must not look orphaned.
     if (this.adoptionPending) return;
-    const fresh: Array<{ runner: SandboxRunner; info: SidecarInfo }> = [];
-    for (const runner of new Set(this.runtimes.list().map((m) => m.runner))) {
-      if (!runner.listSidecars) continue;
-      const list = await runner.listSidecars();
+    const fresh: Array<{ module: RuntimeModule; info: SidecarInfo }> = [];
+    for (const module of this.modulesWith('workloads')) {
+      const list = await module.workloads.list();
       if (!list) return;
-      for (const info of list) fresh.push({ runner, info });
+      for (const info of list) fresh.push({ module, info });
     }
     // Snapshot live instances AFTER listing: an instance always exists before
     // it can create a sidecar, so this order can't misclassify a new one.
@@ -3902,9 +4656,9 @@ export class AppManager {
     const orphans = selectOrphanSidecars(fresh.map((s) => s.info), live, this.sidecarAbsence, graceTicks);
     if (orphans.length > 0) {
       const orphanIds = new Set(orphans.map((o) => o.id));
-      for (const runner of new Set(fresh.map((s) => s.runner))) {
-        const ids = fresh.filter((s) => s.runner === runner && orphanIds.has(s.info.id)).map((s) => s.info.id);
-        if (ids.length > 0) runner.removeSidecars?.(ids);
+      for (const module of new Set(fresh.map((s) => s.module))) {
+        const ids = fresh.filter((s) => s.module === module && orphanIds.has(s.info.id)).map((s) => s.info.id);
+        if (ids.length > 0) module.workloads?.remove(ids);
       }
       for (const o of orphans) {
         console.warn(`[AppManager] reaped orphan sidecar ${o.id} (parent ${o.parentInstanceId} is gone)`);
@@ -3942,16 +4696,16 @@ export class AppManager {
     instance: ResourceUsage | null;
     sidecars: Array<SidecarInfo & { usage: ResourceUsage | null }>;
   }> {
-    const own = this.runnerOf(instanceId);
+    const own = this.moduleOf(instanceId);
     const attached = this.sidecars.filter((s) => s.info.parentInstanceId === instanceId);
-    const byRunner = new Map<SandboxRunner, string[]>();
-    for (const s of attached) byRunner.set(s.runner, [...(byRunner.get(s.runner) ?? []), s.info.id]);
-    if (!byRunner.has(own)) byRunner.set(own, []);
+    const byModule = new Map<RuntimeModule, string[]>();
+    for (const s of attached) byModule.set(s.module, [...(byModule.get(s.module) ?? []), s.info.id]);
+    if (!byModule.has(own)) byModule.set(own, []);
     const usage = new Map<string, ResourceUsage>();
-    for (const [runner, sidecarIds] of byRunner) {
-      if (!runner.usage) continue;
-      const res = await runner.usage({ instanceIds: runner === own ? [instanceId] : [], sidecarIds });
-      for (const [k, v] of res) usage.set(k, v);
+    for (const [module, sidecarIds] of byModule) {
+      if (!module.usage) continue;
+      const res = await module.usage({ instanceIds: module === own ? [instanceId] : [], sidecarIds });
+      for (const [k, v] of Object.entries(res)) usage.set(k, v);
     }
     return {
       instance: usage.get(instanceId) ?? null,
@@ -3985,7 +4739,7 @@ export class AppManager {
     // Sidecars that opted in (aura.keep-restart=1) are parked instead, so a
     // respawn adopts them; they are reaped if it doesn't come back in time.
     this.sidecarParking.park(instanceId);
-    this.runnerOf(instanceId).reapSiblingsOf?.(instanceId, { keep: { services: keepServicesOf(this.registry.getById(appId)) } });
+    this.moduleOf(instanceId).workloads?.removeOf(instanceId, { keepServices: keepServicesOf(this.registry.getById(appId)) });
     // Same reasoning for cross-app mounts: a crash skips onDestroy, and a bind
     // left under the dead instance's data dir pins the source filesystem.
     this.mounts.removeAll(instanceId);
@@ -3999,65 +4753,27 @@ export class AppManager {
       inst.error = `Process exited with code ${code}`;
     }
     OsEventBus.emit('app:stateChanged', { instanceId, appId, state: 'error', port: null });
+    this.noteRespawn();
     OsEventBus.emit('app:crashed',      { instanceId, appId, error: `Process exited with code ${code}` });
     console.error(`[AppManager] ${instanceId} crashed (exit code ${code})`);
   }
 }
 
-interface AppOrphan { pid: number; appId: string; cmdline: string; }
-
-/**
- * Walk /proc and return every process whose cmdline matches an Aura app dir
- * but whose ancestor chain does NOT reach any of the trackedPids. Those are
- * squatters — processes the AppManager doesn't know about that are running
- * under an app identity (likely holding ports we think are free).
- *
- * Same logic as /api/admin/reap-orphans, kept here so the reconciler doesn't
- * depend on the shell package.
- */
-function listAppOrphans(trackedPids: Set<number>): AppOrphan[] {
-  let pids: string[];
-  try { pids = readdirSync('/proc').filter((n) => /^\d+$/.test(n)); }
-  catch { return []; }
-
-  const getPPid = (pid: number): number | null => {
-    try {
-      const status = readFileSync(`/proc/${pid}/status`, 'utf-8');
-      const m = status.match(/^PPid:\s+(\d+)/m);
-      return m ? Number(m[1]) : null;
-    } catch { return null; }
-  };
-  const reachesTracked = (pid: number): boolean => {
-    let cur: number | null = pid;
-    const seen = new Set<number>();
-    while (cur != null && !seen.has(cur)) {
-      if (trackedPids.has(cur)) return true;
-      seen.add(cur);
-      cur = getPPid(cur);
-    }
-    return false;
-  };
-
-  const orphans: AppOrphan[] = [];
-  for (const pidStr of pids) {
-    let cmdline = '';
-    try { cmdline = readFileSync(`/proc/${pidStr}/cmdline`, 'utf-8').replace(/\0/g, ' ').trim(); }
-    catch { continue; }
-    const m = cmdline.match(/apps\/(com\.aura\.[a-z.]+(?:-\d+)?)/);
-    if (!m) continue;
-    const pid = Number(pidStr);
-    if (reachesTracked(pid)) continue;
-    const appId = (m[1] ?? '').replace(/-\d+$/, '');
-    orphans.push({ pid, appId, cmdline });
-  }
-  return orphans;
-}
+/** No runtime exposes ports: nothing is live, and an expose fails explicitly (D100: never a silent no-op). */
+const NO_ENDPOINTS: RuntimeEndpoints = {
+  list: () => [],
+  expose: async () => { throw new Error('capability-missing: portExpose (no installed runtime exposes ports)'); },
+  remove: () => { throw new Error('capability-missing: portExpose (no installed runtime exposes ports)'); },
+};
 
 /**
  * Singleton stored on globalThis so it survives Vite 7's Environments API,
  * where different module graphs (SSR vs plugin context) would otherwise see
  * separate module-scoped instances.
  */
+/** `os:app-enabled`: owned by AppManager (D97, Phase 6 K). */
+const ENABLED_KEY = { ns: 'os', key: 'app-enabled' } as const;
+
 const GLOBAL_KEY = '__aura_app_manager__';
 type GlobalWithAura = typeof globalThis & { [GLOBAL_KEY]?: AppManager };
 

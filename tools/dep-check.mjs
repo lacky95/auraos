@@ -38,9 +38,10 @@ const RULES = {
   'package-internals': 'A package reaches another workspace package only through its declared entry points (package.json `exports`), never by a relative path, `src/` or `dist/`.',
   'sdk-core': '@aura/app-sdk imports @aura/core only through its declared entry points and only for types or the declared leaf subpaths (never the kernel root at runtime).',
   'server-webshell': 'The server layer of @aura/shell (API routes, middleware, server/, and the lib modules they reach) never imports Web Shell code (components, layouts, stores, desktop pages) or UI libraries.',
-  'foundation-leaf': 'Foundation modules of @aura/core (sector map in packages/core/AGENTS.md) import no other sector at runtime, except the barrel (src/index.ts) and the composition root (src/system/bootstrap.ts).',
+  'foundation-leaf': 'Foundation modules of @aura/core (sector map in packages/core/AGENTS.md) import no other sector at runtime, except the barrel (src/index.ts) and the composition root (src/system/bootstrap.ts and src/system/compose.ts).',
   'kernel-presentation': 'Kernel sectors never import presentation-contract modules (theme, layout, keymap) at runtime.',
-  'contract-leaf': 'Declared contract leaf files of @aura/core (the ARI contract, runtimes/ari.ts, types.ts and requirements.ts; the system app ids) import no other core module at runtime, so any module may depend on them without a cycle (D97, 5b).',
+  'contract-leaf': 'Declared contract leaf files of @aura/core (the ARI contract, runtimes/ari.ts, types.ts and requirements.ts; the system app ids; the contract majors, contract/types.ts) import no other core module at runtime except another declared leaf, so any module may depend on them without a cycle (D97, 5b).',
+  'runtime-no-bus': 'Runtime provider code (core/src/runtimes/** and the runners and engine files behind them) never imports the event bus (ipc/OsEventBus) at runtime: a runtime reports exits through onExit and the kernel emits app:* (D93 G1, 5b-2 D).',
   'agent-agnostic': 'Agent-aware but agent-agnostic (owner, philosophy audit): no product-specific agent knowledge (claude, codex, anthropic, openai, .claude/.codex paths, CLAUDE_CONFIG_DIR, CODEX_HOME, config.toml) in the code of @aura/core src or the shell server infrastructure (src/lib, server/); it belongs in apps, adapters, the home seed, docs and tests. Comments and the AGENTS.md/CLAUDE.md file convention do not count.',
   'core-deep-import': 'A cross-module import inside @aura/core targets the other module\'s declared contract: its index.ts, a leaf contract file (types.ts, contracts.ts, keys.ts, ari.ts) or a declared contract leaf; Foundation is imported directly (D97 A1, Phase 7).',
   'event-owner': 'A kernel bus event is emitted (a literal `emit(\'<event>\'`) only by its owning module, as declared in the dep-check:event-owners block of core/src/ipc/OsEventBus.ts (D97 A2, Phase 7).',
@@ -237,12 +238,12 @@ for (const f of files.values()) {
   f.lines = raw.split('\n').length;
   for (const im of parseImports(code)) {
     const res = resolveSpec(f.rel, im.spec);
-    edges.push({ from: f.rel, to: res.kind === 'file' || (res.kind === 'workspace' && res.target) ? res.target : null, ext: res.kind === 'external' ? res.target : null, spec: im.spec, type: im.type, line: im.line, res });
+    edges.push({ from: f.rel, to: res.kind === 'file' || (res.kind === 'workspace' && res.target) ? res.target : null, ext: res.kind === 'external' ? res.target : null, spec: im.spec, type: im.type, kind: im.kind, line: im.line, res });
   }
 }
 
 // shell layers: server = reachable from server entries, webshell = UI dirs and desktop pages
-const isWebshellFile = (r) => /^shell\/src\/(components|layouts|stores|styles)\//.test(r) || (/^shell\/src\/pages\//.test(r) && !/^shell\/src\/pages\/api\//.test(r)) || /\.(astro|tsx)$/.test(r) && r.startsWith('shell/');
+const isWebshellFile = (r) => /^shell\/src\/(components|layouts|stores|styles|desktop-pages)\//.test(r) || (/^shell\/src\/pages\//.test(r) && !/^shell\/src\/pages\/api\//.test(r)) || /\.(astro|tsx)$/.test(r) && r.startsWith('shell/');
 const isServerEntry = (r) => /^shell\/(src\/pages\/api\/|src\/middleware\.ts$|server\/|server\.mjs$|astro\.config\.mjs$)/.test(r);
 const out = new Map();
 for (const e of edges) if (e.to && files.has(e.to)) { if (!out.has(e.from)) out.set(e.from, []); out.get(e.from).push(e); }
@@ -299,7 +300,11 @@ function modulesReachable(f) {
   return mods;
 }
 const modCycleEdges = new Map();
+// The composition root (Phase 6 K) imports every module by design; nothing but the barrel imports it
+// (checked below as foundation-leaf), so its edges cannot close a real chain.
+const COMPOSITION_ROOT = new Set(['core/src/system/bootstrap.ts', 'core/src/system/compose.ts']);
 for (const e of coreRuntime) {
+  if (COMPOSITION_ROOT.has(e.from)) continue;
   const a = files.get(e.from).module, b = files.get(e.to)?.module;
   if (!b || a === b) continue;
   if (modulesReachable(e.to).has(a)) { const k = `${a} -> ${b}`; if (!modCycleEdges.has(k)) modCycleEdges.set(k, e); }
@@ -322,14 +327,17 @@ for (const e of edges) {
   if (from.pkg === 'app-sdk' && e.res.kind === 'workspace' && e.res.pkg === 'core' && !e.type && e.res.sub === '.') add('sdk-core', `${e.from} -> @aura/core`, { from: e.from, line: e.line, detail: 'runtime import of the kernel root' });
   if (from.pkg === 'shell' && (from.layer === 'server' || from.layer === 'shared') && !e.type) {
     const toWeb = e.to && files.get(e.to)?.layer === 'webshell' && isWebshellFile(e.to);
-    if (toWeb || (e.ext && UI_PACKAGES.test(e.spec))) add('server-webshell', where, { from: e.from, line: e.line, detail: e.spec });
+    // D76 (Phase 6 W): the build config composes the Web Shell for `desktop` only, by one dynamic import.
+    const composes = e.from === 'shell/astro.config.mjs' && e.kind === 'dynamic' && e.to === 'shell/src/desktop-pages/integration.mjs';
+    if (!composes && (toWeb || (e.ext && UI_PACKAGES.test(e.spec)))) add('server-webshell', where, { from: e.from, line: e.line, detail: e.spec });
   }
 }
 
 // ── docs alignment and sector rules (D97 addendum) ─────────────────────────
 
 const KERNEL_SECTORS = new Set(['foundation', 'execution', 'identity-security', 'resource', 'communication', 'system-management']);
-const COMPOSITION_EXEMPT = new Set(['core/src/index.ts', 'core/src/system/bootstrap.ts']);
+// The composition root: its order half (bootstrap.ts) and its construction half (compose.ts), Phase 6 K.
+const COMPOSITION_EXEMPT = new Set(['core/src/index.ts', 'core/src/system/bootstrap.ts', 'core/src/system/compose.ts']);
 function listAgentsDocs() {
   const git = spawnSync('git', ['-C', ROOT, 'ls-files', '-z', '--cached', '--others', '--exclude-standard'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   const all = git.status === 0 ? git.stdout.split('\0').filter(Boolean) : [];
@@ -378,22 +386,37 @@ if (existsSync(kernelDoc)) {
   }
 }
 
+// The composition root is the top of the graph: only the barrel and the root itself import it.
+for (const e of coreRuntime) {
+  if (COMPOSITION_ROOT.has(e.to) && !COMPOSITION_EXEMPT.has(e.from)) add('foundation-leaf', `${e.from} -> ${e.to}`, { from: e.from, line: e.line, detail: 'only the barrel imports the composition root' });
+}
+
 // ── contract-leaf (D97 §4.2, 5b K): declared contract files stay leaves ───────
-// Type-only imports are free; a runtime import inside the same module is allowed.
+// Type-only imports are free; a runtime import inside the same module, of another declared leaf, or of a keys.ts is allowed.
 const CONTRACT_LEAVES = new Set([
-  'core/src/runtimes/ari.ts', 'core/src/runtimes/types.ts', 'core/src/runtimes/requirements.ts', 'core/src/runtimes/workloadEnv.ts', 'core/src/system/systemApps.ts',
+  'core/src/app-manager/maintenance.ts', 'core/src/runtimes/ari.ts', 'core/src/runtimes/types.ts', 'core/src/runtimes/requirements.ts', 'core/src/runtimes/workloadEnv.ts',
+  'core/src/runtimes/spawn/paths.ts', 'core/src/system/systemApps.ts', 'core/src/contract/types.ts',
   // Phase 7 (D97 A1): the contracts other modules import.
   'core/src/patches/types.ts', 'core/src/app-manager/contracts.ts', 'core/src/app-manager/provisioning.ts', 'core/src/release/lock.ts', 'core/src/release/faults.ts',
   'core/src/auth/identityKey.ts', 'core/src/app-hosts/relayClaim.ts', 'core/src/capabilities/tool-allowlist.ts', 'core/src/identity/execution.ts',
-  'core/src/security/options.ts',
+  'core/src/security/options.ts', 'core/src/system/privateDir.ts',
 ]);
 // Every module's keys.ts is a leaf (D97 A3); a leaf may import another module's keys.ts.
 const isKeysFile = (r) => /^core\/src\/[^/]+\/keys\.ts$/.test(r);
 for (const f of coreFiles) if (isKeysFile(f)) CONTRACT_LEAVES.add(f);
 for (const e of coreRuntime) {
-  if (!CONTRACT_LEAVES.has(e.from) || isKeysFile(e.to)) continue;
+  if (!CONTRACT_LEAVES.has(e.from) || CONTRACT_LEAVES.has(e.to) || isKeysFile(e.to)) continue;
   const a = files.get(e.from).module, b = files.get(e.to).module;
   if (a !== b) add('contract-leaf', `${e.from} -> ${e.to}`, { from: e.from, line: e.line, detail: `${e.from} is a contract leaf; it imports ${b} at runtime` });
+}
+
+// ── runtime-no-bus (D93 G1; 5b-2 D, the import half of the ARI boundary) ─────────
+const RUNTIME_FILE = (r) => /^core\/src\/runtimes\//.test(r)
+  || /^core\/src\/app-manager\/(ContainerRunner|ProotRunner|SessionBroker|DockerApi)\.ts$/.test(r) || /^core\/src\/app-manager\/spawn\//.test(r);
+for (const e of coreRuntime) {
+  if (RUNTIME_FILE(e.from) && e.to === 'core/src/ipc/OsEventBus.ts') {
+    add('runtime-no-bus', `${e.from} -> ${e.to}`, { from: e.from, line: e.line, detail: `${e.from} is runtime provider code; it imports the event bus` });
+  }
 }
 
 // ── core-deep-import (D97 A1, Phase 7): modules meet at their contracts ──────

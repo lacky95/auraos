@@ -56,7 +56,6 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { defaultRedis, type Redis } from '@aura/kv-store';
 import { OsEventBus } from '../ipc/OsEventBus.js';
-import { getAuthServices } from '../auth/services.js';
 import type { ZodError } from 'zod';
 import {
   AnswerSchema, ClearFilterSchema, CreateInputSchema, InteractionInputSchema, ListQuerySchema, UpdatePatchSchema,
@@ -145,6 +144,19 @@ export const POPUP_PERMISSION = 'notifications.popup';
 export const SYSTEM_MODAL_PERMISSION = 'notifications.systemModal';
 
 /** An app (not AuraOS) dialogue that blocks the whole shell. */
+/**
+ * D102: a context of kind `approval` points the shell's Review at a held
+ * owner approval. Only AuraOS itself (SYSTEM_CALLER) sets one; from anyone
+ * else it is dropped with a warning, so no app can dress a notification up
+ * as an approval request.
+ */
+export function approvalContextAllowed(caller: NotificationPrincipal, context: { kind: string }, warnings: NotificationWarning[]): boolean {
+  if (context.kind !== 'approval') return true;
+  if (caller.kind === 'system' && isSystemCaller(caller)) return true;
+  warnings.push({ code: 'ignored-field', field: 'context', message: "context kind 'approval' is reserved for AuraOS" });
+  return false;
+}
+
 export function isAppSystemModal(n: Pick<Notification, 'type' | 'scope' | 'blocking' | 'state'> & { caller?: NotificationCaller }): boolean {
   return n.type === 'dialogue' && n.state === 'active' && n.scope === 'system' && n.blocking === true
     && !(n.caller && isSystemCaller(n.caller)) && (n as { senderKey?: string }).senderKey !== 'auraos';
@@ -917,7 +929,7 @@ export class NotificationService {
       scope: fields.scope,
       ...(maximized ? { maximized: true } : {}),
       ...(p.components ? { components: p.components } : {}),
-      ...(p.context ? { context: p.context } : {}),
+      ...(p.context && approvalContextAllowed(caller, p.context, warnings) ? { context: p.context } : {}),
       caller: storedCallerOf(caller),
       sender: deriveSender(caller, p.sender),
       senderKey: senderKeyFor(caller),
@@ -968,7 +980,7 @@ export class NotificationService {
       setOpt('pinned', p.pinned);
       setOpt('popupDurationMs', p.popupDurationMs);
       setOpt('components', p.components);
-      setOpt('context', p.context);
+      setOpt('context', p.context && !approvalContextAllowed(caller, p.context, warnings) ? undefined : p.context);
       // (A kept app system dialog keeps popup true: it always opens at once.)
       if (p.popup !== undefined && !(rec.type === 'dialogue' && rec.scope === 'system' && !isSystemCaller(caller))) {
         const f = { popup: p.popup };
@@ -1633,14 +1645,14 @@ export function getNotificationService(): NotificationService {
   // Phase 2: the central Authorizer + the default create rate limit. Its
   // `Principal` also holds `user` (the owner), which the shell hands over as
   // it resolved it (lib/notificationCaller.ts).
-  svc.setAuthorizer(getAuthServices().authorizer as NotificationAuthorizer);
+  if (deps) svc.setAuthorizer(deps.authorizer());
   if (!svc.rateLimitConfigured) svc.setCreateRateLimit(DEFAULT_CREATES_PER_MINUTE);
   // Phase 4: forced pop-up limit + window ownership through the AppManager.
   svc.setPopupLimit({ max: DEFAULT_POPUPS_PER_WINDOW, windowMs: DEFAULT_POPUP_WINDOW_MS });
   // Phase 6: blocking system modals per sender, and releasing them on revoke / disable / uninstall.
   // (the blocking system-modal limit comes from `os/notifications.systemModal`, default 5 / 10 min)
   attachSystemModalRelease();
-  svc.setWindowOwnerResolver(appManagerWindowOwner);
+  if (deps) svc.setWindowOwnerResolver(deps.windowOwner);
   // Phase 5: the user's lock-screen + retention settings from the OS KV.
   svc.setSettingsProvider(kvNotificationSettings);
   return svc;
@@ -1716,18 +1728,16 @@ export async function kvNotificationSettings(): Promise<NotificationSettings> {
 }
 
 /**
- * Window ownership from the AppManager singleton. Looked up on globalThis
- * (the key `initAppManager` uses) instead of importing AppManager.ts, which
- * would pull the whole runtime into every notifications consumer.
+ * The collaborators the composition root hands in (D97, Phase 6 K): the
+ * central authorizer and the window-owner lookup of the kernel's activity
+ * model. This platform service imports neither the auth services nor
+ * AppManager.
  */
-const APP_MANAGER_KEY = '__aura_app_manager__';
-interface OwnerLookup {
-  getActivity(id: string): { appId: string } | undefined;
-  getInstance(id: string): { appId: string } | undefined;
+export interface NotificationDeps {
+  authorizer: () => NotificationAuthorizer;
+  windowOwner: WindowOwnerResolver;
 }
-export function appManagerWindowOwner(context: { kind: 'activity' | 'instance'; id: string }): string | null {
-  const mgr = (globalThis as Record<string, unknown>)[APP_MANAGER_KEY] as OwnerLookup | undefined;
-  if (!mgr) return null;
-  if (context.kind === 'activity') return mgr.getActivity(context.id)?.appId ?? null;
-  return mgr.getInstance(context.id)?.appId ?? null;
+let deps: NotificationDeps | null = null;
+export function installNotificationDeps(d: NotificationDeps): void {
+  deps = d;
 }

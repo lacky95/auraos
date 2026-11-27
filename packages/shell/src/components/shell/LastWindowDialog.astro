@@ -1,0 +1,70 @@
+---
+/**
+ * D101: the last window of an app with a background process was closed.
+ * The shell asks whether to stop the process or keep it running, in its own
+ * document; the app never sees, opens or answers this dialog. Esc is Keep
+ * running. The behaviour, keyboard included, is lib/lastWindowDialog.ts; the
+ * decision (which apps, which closes, the remembered choice and the Settings
+ * switch) is lib/lastWindow.ts.
+ *
+ * A native modal `<dialog>` sits in the browser's top layer, above every app
+ * frame. The global reset's `margin: 0` would pin it to the top left, so it
+ * centres itself like the owner dialog.
+ */
+---
+<dialog id="aura-last-window" role="dialog" aria-modal="true" aria-labelledby="aura-last-window-title" aria-describedby="aura-last-window-text">
+  <div id="aura-last-window-title">LAST WINDOW CLOSED</div>
+  <p id="aura-last-window-text">This was the last window of <strong id="aura-last-window-app"></strong>. Stop the process or keep it running?</p>
+  <label class="aura-last-window-remember">
+    <input id="aura-last-window-remember" type="checkbox" />
+    <span>Remember for this app</span>
+  </label>
+  <p class="aura-last-window-hint">Change it any time in Settings → Apps → Activities &amp; processes.</p>
+  <div class="aura-last-window-actions">
+    <button type="button" id="aura-last-window-keep">KEEP RUNNING</button>
+    <button type="button" id="aura-last-window-stop">STOP</button>
+  </div>
+</dialog>
+
+<style is:global>
+  #aura-last-window {
+    position: fixed;
+    inset: 0;
+    margin: auto;
+    width: min(440px, calc(100vw - 32px));
+    height: fit-content;
+    max-height: calc(100vh - 32px);
+    max-height: calc(100dvh - 32px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    box-sizing: border-box;
+    padding: 16px;
+    background: var(--aura-color-surface);
+    color: var(--aura-color-text);
+    border: 1px solid var(--aura-color-primary);
+    font-family: var(--aura-font-mono);
+    font-size: 0.8rem;
+  }
+  #aura-last-window::backdrop { background: color-mix(in srgb, var(--aura-color-bg) 80%, transparent); }
+  #aura-last-window-title { color: var(--aura-color-primary); font-weight: 700; letter-spacing: 0.08em; }
+  #aura-last-window-text { margin: 8px 0; line-height: 1.5; }
+  #aura-last-window-app { overflow-wrap: anywhere; }
+  .aura-last-window-remember { display: inline-flex; align-items: center; gap: 8px; margin-top: 4px; cursor: pointer; }
+  .aura-last-window-remember input { accent-color: var(--aura-color-primary); margin: 0; }
+  .aura-last-window-hint { margin-top: 6px; opacity: 0.7; font-size: 0.7rem; }
+  .aura-last-window-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+  .aura-last-window-actions button {
+    padding: 4px 12px;
+    background: transparent;
+    color: var(--aura-color-primary);
+    border: var(--aura-border);
+    font: inherit;
+    cursor: pointer;
+  }
+  #aura-last-window-stop { color: var(--aura-color-danger, #ff4a4a); }
+  #aura-last-window:focus { outline: none; }
+  #aura-last-window :is(button, input):focus {
+    outline: 2px solid var(--aura-color-primary);
+    outline-offset: 2px;
+  }
+</style>

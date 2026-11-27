@@ -94,6 +94,8 @@ test('the throwaway build containers get no socket, no home, no /data beyond sta
     assert.match(l, /target=\/workspace,volume-subpath=releases\/\.staging-/);
     assert.match(l, /target=\/pnpm-store,volume-subpath=aura\/pnpm-store/);
     assert.equal((l.match(/--mount/g) ?? []).length, 2, 'only staging and the store');
+    // D106: the release limits profile through limits.mjs (= core limitArgs), no swap beyond memory
+    assert.match(l, new RegExp(`--cpus=2 --memory=${6 * 1024 ** 3} --memory-swap=${6 * 1024 ** 3} --pids-limit=2048 `));
   }
   assert.match(runs[0], /--network none .* deps --offline$/);
   assert.match(runs[1], /--network bridge .* deps$/);

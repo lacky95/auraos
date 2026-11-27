@@ -205,14 +205,14 @@ test('cap-refresh refuses a caller without credentials (401) and changes nothing
     // An invalid body is refused before anyone is asked.
     assert.equal((await capDoctorPost(post('/api/admin/cap-doctor', { names: ['$(id)'] })) as Response).status, 400);
   });
-  assert.deepEqual(touched.filter((n) => /refresh|stage|getAllInstances|syncToolchainMirror/.test(n)), [], 'no manager change ran');
+  assert.deepEqual(touched.filter((n) => /refresh|applyInstanceTools|stage|getAllInstances|syncToolchainMirror/.test(n)), [], 'no manager change ran');
 });
 
 test('each route calls ownerAction before its first change', () => {
   const dir = new URL('../src/pages/api/admin/', import.meta.url);
   const firstChange: Record<string, RegExp> = {
     'cap-doctor.ts': /stageLibs\(list|syncToolchainMirror\(/,
-    'cap-refresh.ts': /refreshInstanceTools\(/,
+    'cap-refresh.ts': /applyInstanceTools\(/,
     'reap-orphans.ts': /process\.kill\(s\.pid|getAllInstances\(/,
     'install-aura-shim.ts': /unlinkSync\(|writeFileSync\(path/,
   };

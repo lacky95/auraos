@@ -7,6 +7,7 @@
  * back to another runtime (Q17). The registry, the settings store and the
  * resolver (stream R) are built on these types: registry.ts, settingsStore.ts.
  */
+import type { AuraErrorBody, ErrorCategory } from '../errors/contracts.js';
 
 /** A runtime id, and so a manifest `sandbox` value (ARI §2.1). */
 export const RUNTIME_ID_PATTERN = /^[a-z][a-z0-9-]{1,31}$/;
@@ -57,6 +58,14 @@ export interface RuntimeCapabilities {
   usage: boolean;
   /** Reserved: `false` everywhere until a runtime offers it. */
   gpu: boolean;
+  /**
+   * Workloads may create user namespaces (a nested sandbox: bwrap, the
+   * Codex Linux sandbox) under the runtime's own confinement. D107: never
+   * by weakening it (no automatic --privileged, seccomp=unconfined or a
+   * disabled AppArmor profile); a runtime that can't offer it that way
+   * declares `false`, and a workload that needs it is refused.
+   */
+  userNamespaces: boolean;
 }
 
 export type RuntimeNetwork = 'shell-netns' | 'bridge' | 'remote';
@@ -70,7 +79,7 @@ export type RuntimeCapability = keyof RuntimeCapabilities;
 const CAPABILITY_ORDER: Record<RuntimeCapability, number> = {
   isolation: 0, network: 1, appHome: 2, privateHomeSession: 3, sessionExec: 4, identity: 5, readOnlyBinds: 6,
   hostFilesystem: 7, mounts: 8, idmappedMounts: 9, portExpose: 10, sidecars: 11, warmPool: 12,
-  survivesShellRestart: 13, usage: 14, gpu: 15,
+  survivesShellRestart: 13, usage: 14, gpu: 15, userNamespaces: 16,
 };
 export const RUNTIME_CAPABILITY_KEYS: readonly RuntimeCapability[] = Object.freeze(
   (Object.keys(CAPABILITY_ORDER) as RuntimeCapability[]).sort((a, b) => CAPABILITY_ORDER[a] - CAPABILITY_ORDER[b]),
@@ -105,6 +114,21 @@ export class RuntimeCapabilityError extends Error {
   readonly code = 'capability-missing' as const;
   constructor(readonly runtime: string, readonly missing: RuntimeCapability[], message?: string, readonly suggest?: string[]) {
     super(message ?? `runtime ${runtime} cannot do this: missing ${missing.join(', ')}`);
+  }
+}
+
+/**
+ * A feature, or a part of one, the runtime can't enforce for this request
+ * (D100 §17; D106 mandatory resource limits): refused, never silently
+ * ignored, dropped or downgraded. `missing` names the parts
+ * (`resources.limits.memoryBytes`), `suggest` the runtimes that enforce
+ * them, `hint` what the owner can do (D105 shape).
+ */
+export class RuntimeFeatureError extends Error {
+  override readonly name = 'RuntimeFeatureError';
+  readonly code = 'feature-unsupported' as const;
+  constructor(readonly runtime: string, readonly missing: string[], message: string, readonly suggest?: string[], readonly hint?: string) {
+    super(message);
   }
 }
 
@@ -162,21 +186,95 @@ export function requireCapabilities(runtime: string, caps: RuntimeCapabilities, 
  * provider would send. Null for anything that is not a runtime refusal.
  */
 export interface RuntimeRefusal {
-  code: RuntimeUnavailableCode | 'capability-missing' | RuntimeResolutionCode | RuntimeModuleRefusalCode;
+  code: RuntimeRefusalCode;
+  /** D100 §17: what a client may do about it. Clients read this, never the message text. */
+  category: RuntimeErrorCategory;
   message: string;
   runtime?: string;
   appId?: string;
-  missing?: RuntimeCapability[];
+  /** Capabilities (`capability-missing`) or feature parts (`feature-unsupported`, e.g. `resources.limits.pids`). */
+  missing?: Array<RuntimeCapability | string>;
   suggest?: string[];
+  /** What the owner can do about it (D105). */
+  hint?: string;
+}
+
+/**
+ * A runtime refusal as the one error body (D105, errors/contracts.ts): `error`
+ * the code, `message`, `category`, `missing`, `suggest`, `hint`; the runtime
+ * id and the app go in `details` (the contract names no runtime field). Plain
+ * data: what the shell answers, the SDK decodes and the CLI prints.
+ */
+export function runtimeErrorBody(r: RuntimeRefusal, hint?: string): AuraErrorBody {
+  const h = r.hint ?? hint;
+  return {
+    error: r.code, message: r.message, category: r.category,
+    ...(r.missing?.length ? { missing: [...r.missing] } : {}),
+    ...(r.suggest ? { suggest: [...r.suggest] } : {}),
+    ...(h ? { hint: h } : {}),
+    ...(r.runtime || r.appId ? { details: { ...(r.runtime ? { runtime: r.runtime } : {}), ...(r.appId ? { appId: r.appId } : {}) } } : {}),
+  };
 }
 
 export function runtimeRefusal(err: unknown): RuntimeRefusal | null {
   if (err instanceof RuntimeCapabilityError) {
-    return { code: err.code, message: err.message, runtime: err.runtime, missing: err.missing, ...(err.suggest ? { suggest: err.suggest } : {}) };
+    return { code: err.code, category: CATEGORY_OF_CODE[err.code], message: err.message, runtime: err.runtime, missing: err.missing, ...(err.suggest ? { suggest: err.suggest } : {}) };
   }
-  if (err instanceof RuntimeUnavailableError || err instanceof RuntimeModuleError) return { code: err.code, message: err.message, runtime: err.runtime };
-  if (err instanceof RuntimeResolutionError) return { code: err.code, message: err.message, appId: err.appId };
+  if (err instanceof RuntimeFeatureError) {
+    return { code: err.code, category: CATEGORY_OF_CODE[err.code], message: err.message, runtime: err.runtime, missing: [...err.missing],
+      ...(err.suggest ? { suggest: [...err.suggest] } : {}), ...(err.hint ? { hint: err.hint } : {}) };
+  }
+  if (err instanceof RuntimeUnavailableError || err instanceof RuntimeModuleError) {
+    return { code: err.code, category: CATEGORY_OF_CODE[err.code], message: err.message, runtime: err.runtime };
+  }
+  if (err instanceof RuntimeResolutionError) return { code: err.code, category: CATEGORY_OF_CODE[err.code], message: err.message, appId: err.appId };
   return null;
+}
+
+/**
+ * The standard error categories (D100 §17), so a client tells "not
+ * authorized", "not supported", "temporary", "restart needed", "needs more
+ * infrastructure" and "not applied yet" apart without parsing messages.
+ */
+export type RuntimeErrorCategory = Extract<ErrorCategory,
+  | 'unsupported-operation' | 'unsupported-feature' | 'permission-denied' | 'runtime-unavailable'
+  | 'instance-not-found' | 'resource-exhausted' | 'restart-required' | 'recreate-required'
+  | 'provisioning-failed' | 'enforcement-failed' | 'operation-timeout' | 'operation-cancelled' | 'conflict'>;
+
+/** Every code a runtime refusal or a failed operation carries. */
+export type RuntimeRefusalCode =
+  | RuntimeUnavailableCode | 'capability-missing' | RuntimeResolutionCode | RuntimeModuleRefusalCode
+  | 'feature-unsupported' | 'instance-not-found' | 'provisioning-failed' | 'enforcement-failed' | 'restart-required' | 'operation-timeout';
+
+/** The one table from a code to its category (a `Record`: exhaustive at compile time). */
+export const CATEGORY_OF_CODE: Readonly<Record<RuntimeRefusalCode, RuntimeErrorCategory>> = Object.freeze({
+  'capability-missing': 'unsupported-feature',
+  'feature-unsupported': 'unsupported-feature',
+  'runtime-not-installed': 'runtime-unavailable',
+  'runtime-disabled': 'runtime-unavailable',
+  'runtime-unresolved': 'runtime-unavailable',
+  'runtime-decision-needed': 'conflict',
+  'ari-unsupported': 'unsupported-operation',
+  'invalid-runtime-id': 'unsupported-operation',
+  'invalid-descriptor': 'unsupported-operation',
+  'runtime-duplicate': 'conflict',
+  'instance-not-found': 'instance-not-found',
+  'provisioning-failed': 'provisioning-failed',
+  'enforcement-failed': 'enforcement-failed',
+  'restart-required': 'restart-required',
+  'operation-timeout': 'operation-timeout',
+});
+
+/**
+ * A process a runtime could not start or read in a workload (exec, logs;
+ * 5b-2 D-X), by code: `not-found` (no such workload), `not-running`,
+ * `engine` (the runtime's execution engine failed). The exec bridge maps the
+ * code to its HTTP answer; callers read `code`, not the message.
+ */
+export type RuntimeExecErrorCode = 'not-found' | 'not-running' | 'engine';
+export class RuntimeExecError extends Error {
+  override readonly name: string = 'RuntimeExecError';
+  constructor(readonly code: RuntimeExecErrorCode, message: string) { super(message); }
 }
 
 /** Where an installation's runtime came from (§11.2). */

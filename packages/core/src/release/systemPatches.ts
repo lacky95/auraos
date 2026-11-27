@@ -26,7 +26,7 @@ import {
   applySeries, exportPatches, sha256Hex, gitError, loadSeries, patchBinding, readSeries, safeDirectoryArgs, saveSeries, seriesDigest,
   validatePatch, type ApplyResult, type ExportedPatch, type PatchBinding, type Series,
 } from '../patches/index.js';
-import { SESSION_HOST_APP_IDS } from '../system/systemApps.js';
+import { isUserEnvironment } from '../system/systemApps.js';
 
 export const SYSTEM_STORE_DIR = 'patches/system';
 /** The installation slot of system workspaces in the per-user workspace layout (`aura/workspaces/<userId>/system/<n>`). */
@@ -344,9 +344,9 @@ export function systemPatchBinding(input: { dataDir: string; rev: string; valida
   };
 }
 
-/** D35: the activation ends sessions when it touches a session host (from the system-app constant) or the images. */
+/** D35: the activation ends sessions when it touches an app hosting user environments (systemApps isUserEnvironment, D107) or the images. */
 export function endsSessions(b: Pick<SystemPatchBinding, 'components' | 'rebuildsImage'>): string[] {
-  const out = b.components.filter((c) => SESSION_HOST_APP_IDS.has(c.component)).map((c) => c.component);
+  const out = b.components.filter((c) => isUserEnvironment({ appId: c.component })).map((c) => c.component);
   return b.rebuildsImage ? [...out, 'the AuraOS images'] : out;
 }
 

@@ -150,11 +150,14 @@ test('inheritHome: resolves when set; absent otherwise, so existing spec hashes 
 test('tools: ownTools only when the template declares them; the list is not in the hash', () => {
   const tpl = { name: 'worker', image: 'alpine:3', command: ['sleep', 'infinity'], env: {}, volumes: [], inheritIdentity: true, inheritMounts: true, inheritHome: true };
   const c = (svc) => ctx({ manifest: { services: [svc], tools: ['jq'] }, can: (p) => p === 'sidecars.tools' });
-  const plain = resolveSidecarSpec({ template: 'worker' }, c(tpl));
+  const plain = resolveSidecarSpec({ template: 'worker' }, c({ ...tpl, network: 'shared' }));
   assert.equal('ownTools' in plain, false);
   // Snapshot taken with the code BEFORE `tools` existed: templates without
-  // it keep their hash, so no running OS sidecar is recreated.
+  // it keep their hash, so no running OS sidecar is recreated (D107: a
+  // `shared` sidecar keeps it; an inheritHome one moves to its instance network once).
   assert.equal(specHash(plain), '181fb1c6937b8d58');
+  assert.equal(resolveSidecarSpec({ template: 'worker' }, c(tpl)).network, 'instance', 'D107: inheritHome defaults to the instance network');
+  assert.notEqual(specHash(resolveSidecarSpec({ template: 'worker' }, c(tpl))), '181fb1c6937b8d58');
   const own = resolveSidecarSpec({ template: 'worker' }, c({ ...tpl, tools: ['jq'] }));
   assert.equal(own.ownTools, true);
   assert.notEqual(specHash(own), '181fb1c6937b8d58');
@@ -172,8 +175,8 @@ test('tools: own tools need sidecars.tools; spawn-time tools are validated, need
   rejects(() => resolveSidecarSpec({ template: 'worker' }, c({ ...tpl, tools: ['jq'] })), 403, /aura grant perms io\.test\.app sidecars\.tools/);
   // inheritTools is unchanged: no permission needed.
   assert.equal(resolveSidecarSpec({ template: 'worker' }, c({ ...tpl, inheritTools: true })).inheritTools, true);
-  // A plain template keeps working without the permission — and keeps its hash.
-  assert.equal(specHash(resolveSidecarSpec({ template: 'worker' }, c(tpl))), '181fb1c6937b8d58');
+  // A plain template keeps working without the permission — and keeps its hash (on the shared network, D107).
+  assert.equal(specHash(resolveSidecarSpec({ template: 'worker' }, c({ ...tpl, network: 'shared' }))), '181fb1c6937b8d58');
 
   assert.deepEqual(parseSpawnRequest({ template: 'worker', tools: ['git', '*'] }).tools, ['git', '*']);
   rejects(() => parseSpawnRequest({ template: 'worker', tools: 'git' }), 400, /tools must be an array of strings/);
@@ -181,4 +184,15 @@ test('tools: own tools need sidecars.tools; spawn-time tools are validated, need
   const own = { ...tpl, tools: ['jq'] };
   assert.equal(specHash(resolveSidecarSpec({ template: 'worker', tools: ['git', 'node'] }, c(own, yes))),
     specHash(resolveSidecarSpec({ template: 'worker' }, c(own, yes))), 'spawn-time tools are not part of the spec');
+});
+
+test('D107: services[].network: instance only when asked, or by default for an inheritHome sidecar; shared keeps the hash', () => {
+  const base = { name: 'db', image: 'redis:7', command: [], env: {}, volumes: [] };
+  const r = (svc) => resolveSidecarSpec({ template: 'db' }, ctx({ manifest: { services: [svc], tools: [] }, can: () => false }));
+  assert.equal('network' in r(base), false, 'shared: absent, so the hash of every existing shared sidecar is unchanged');
+  assert.equal(specHash(r(base)), specHash(r({ ...base, network: 'shared' })));
+  assert.equal(r({ ...base, network: 'instance' }).network, 'instance');
+  assert.notEqual(specHash(r({ ...base, network: 'instance' })), specHash(r(base)));
+  assert.equal(r({ ...base, inheritHome: true }).network, 'instance');
+  assert.equal('network' in r({ ...base, inheritHome: true, network: 'shared' }), false);
 });

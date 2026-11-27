@@ -60,6 +60,10 @@ class MemoryStore {
   async approve(id: string, by: ApprovalDecider) { return this.apply(id, { type: 'approve', by }); }
   async deny(id: string, by: ApprovalDecider) { return this.apply(id, { type: 'deny', by }); }
   async consume(id: string, claim: ApprovalClaim) { return this.apply(id, { type: 'consume', claim }); }
+  // D102 (not used here; approval-hold.test.ts covers them).
+  async hold(id: string, by: ApprovalDecider) { return this.apply(id, { type: 'hold', by }); }
+  async cancel(id: string, by: core.ApprovalCanceller) { return this.apply(id, { type: 'cancel', by }); }
+  async setNotice(id: string, notice: string | null) { return this.apply(id, { type: 'notice', notice }); }
   async isBlocked(appId: string) { return this.blocked.has(appId); }
   async block(appId: string, by: string) { this.blocked.set(appId, { at: this.now, by }); }
   async unblock(appId: string) { return this.blocked.delete(appId); }
@@ -420,11 +424,35 @@ test('install without an approval answers needs-approval with the exact diff; wi
   assert.equal((await install(TERMINAL, { 'x-aura-approval': id })).status, 202, 'single use');
 });
 
+test('the start gate (D48, D108): core refusing an app is 422 with its D105 body, as given', async () => {
+  for (const body of [
+    core.operationalBlock({ id: 'com.example.notes', auraContract: 2 })!,
+    core.operationalBlock({ id: 'com.example.notes', setup: { fields: [] } })!,
+  ]) {
+    async function* refused(): AsyncGenerator<NexusProgressEvent, null, unknown> {
+      yield { type: 'error', code: body.error, message: body.message, body };
+      throw new Error(body.message);
+    }
+    const gate = installGate(deps(), TERMINAL, new Request('http://shell.test/api/nexus/install', { method: 'POST' }), undefined);
+    const r = await read(await runInstall(refused(), gate));
+    assert.equal(r.status, 422);
+    assert.deepEqual(r.body, JSON.parse(JSON.stringify(body)));
+  }
+  assert.equal(core.operationalBlock({ id: 'com.example.notes', auraContract: 2 })!.message,
+    'com.example.notes is built for Aura contract 2; this AuraOS implements 1. Update AuraOS or install a version built for contract 1.');
+});
+
 test('stream C: an approved install grants the Context keys it names, attributed to the approver', async () => {
-  const granted: Array<{ id: string; permission: string; appScope?: string; by: unknown }> = [];
+  const granted: Array<{ id: string; permission: string; appScope?: string; installationId?: string; by: unknown }> = [];
   const fakeGrants = () => ({
-    grants: { grant: async (s: { id: string }, permission: string, o: { by: unknown; appScope?: string }) => { granted.push({ id: s.id, permission, appScope: o.appScope, by: o.by }); return { record: {}, changed: true }; } },
+    grants: {
+      grant: async (s: { id: string }, permission: string, o: { by: unknown; appScope?: string; installationId?: string }) => {
+        granted.push({ id: s.id, permission, appScope: o.appScope, installationId: o.installationId, by: o.by });
+        return { record: {}, changed: true };
+      },
+    },
     audit: { record: async () => '' },
+    installationOf: async (appId: string, scope: string) => `inst-${scope}-${appId}`,
   }) as never;
   const binding = { ...BINDING, context: ['OPENAI_API_KEY'] };
   const run = async (headers: Record<string, string> = {}) => {
@@ -438,7 +466,8 @@ test('stream C: an approved install grants the Context keys it names, attributed
   await decide(first.body.approvalId, 'approve', { password: PASSWORD });
   const done = await run({ 'x-aura-approval': first.body.approvalId });
   assert.equal(done.body.ok, true);
-  assert.deepEqual(granted.map((g) => [g.id, g.permission, g.appScope]), [['com.example.notes', 'context.read:OPENAI_API_KEY', 'user']]);
+  assert.deepEqual(granted.map((g) => [g.id, g.permission, g.appScope, g.installationId]),
+    [['com.example.notes', 'context.read:OPENAI_API_KEY', 'user', 'inst-user-com.example.notes']], 'to the installation it landed as (S1)');
   assert.equal((granted[0]!.by as { kind: string }).kind, 'user');
 });
 

@@ -19,22 +19,25 @@
  * `migrations.d75`, and a second run changes nothing. The capability check
  * still runs at every start, whatever the source (no grandfathering).
  */
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
 import type { RuntimeRegistry } from './registry.js';
 import { requirementsOf } from './requirements.js';
-import { RuntimeChangeError, type RuntimeChange, type RuntimeSettingsStore } from './settingsStore.js';
+import { RuntimeChangeError, runtimeSettingsRevision, type RuntimeChange, type RuntimeSettingsStore } from './settingsStore.js';
 import {
-  missingCapabilities, type LegacyRuntime, type RuntimeMigrationPending, type RuntimeOverride, type RuntimeSettingsRecord,
+  missingCapabilities, runtimeRefusal, suggestText, type LegacyRuntime, type RuntimeCapability, type RuntimeMigrationPending, type RuntimeOverride,
+  type RuntimeErrorCategory, type RuntimeSettingsRecord, type RuntimeSource,
 } from './types.js';
+import { moduleFeatures, type RuntimeFeature } from './ari.js';
 
 /** What an omitted `sandbox` meant before the runtime release. */
 const LEGACY_OMITTED_SANDBOX = 'proot';
 
 export interface MigrationApp {
   appId: string;
-  manifest: Pick<AppManifest, 'id' | 'sandbox' | 'useProot' | 'services' | 'ports' | 'warmPool'>;
+  manifest: Pick<AppManifest, 'id' | 'sandbox' | 'useProot' | 'services' | 'ports' | 'warmPool'>
+    & Partial<Pick<AppManifest, 'permissions' | 'tools' | 'context' | 'consumes'>>;
   installationId: string | null;
   sourceMode: 'open' | 'closed';
 }
@@ -156,10 +159,13 @@ export function decideMigration(
     const module = registry.get(runtime);
     if (!module) throw new RuntimeChangeError('unknown-runtime', `runtime ${runtime} is not installed`);
     if (!registry.isEnabled(runtime, cur)) throw new RuntimeChangeError('not-enabled', `runtime ${runtime} is disabled`);
-    const missing = missingCapabilities(registry.capabilitiesOf(runtime, cur), requirementsOf(app.manifest, { sourceMode: app.sourceMode }).needs);
+    const { needs } = requirementsOf(app.manifest, { sourceMode: app.sourceMode });
+    const missing = missingCapabilities(registry.capabilitiesOf(runtime, cur), needs);
     if (missing.length) {
+      // D73: name the runtimes that could run it; the owner decides, nothing is picked.
+      const suggest = registry.suggest(needs, cur, runtime);
       throw new RuntimeChangeError('invalid-decision', `${app.appId} cannot run on ${runtime}: missing ${missing.join(', ')}`
-        + (missing.includes('readOnlyBinds') ? ' (closed apps need enforced read-only binds, ARI-4)' : ''));
+        + (missing.includes('readOnlyBinds') ? ' (closed apps need enforced read-only binds, ARI-4)' : '') + suggestText(suggest), missing, suggest);
     }
     const rest = { ...cur.pending };
     delete rest[app.installationId];
@@ -178,6 +184,117 @@ export function decideMigration(
     if (Object.keys(rest).length) next.pending = rest; else delete next.pending;
     return { next, result: { runtime, pending } };
   });
+}
+
+/**
+ * One installation's resolution as a start would see it now, without
+ * starting anything: the runtime, its source and the revision of its
+ * effective settings, or the refusal (with its `code`, and `missing` and
+ * `suggest` for a capability miss) plus what was chosen before the check.
+ * The Runtimes API, the migration report and the Apps page read this.
+ */
+export interface InstallationResolution {
+  runtime: string | null;
+  source: RuntimeSource | null;
+  settingsRev?: string;
+  error?: { code: string; category?: RuntimeErrorCategory; message: string; missing?: Array<RuntimeCapability | string>; suggest?: string[] };
+}
+
+export function resolutionOf(registry: RuntimeRegistry, app: MigrationApp, record: RuntimeSettingsRecord | null): InstallationResolution {
+  try {
+    const r = registry.resolve({ manifest: app.manifest, installationId: app.installationId, sourceMode: app.sourceMode, record });
+    return { runtime: r.runtime, source: r.source, settingsRev: runtimeSettingsRevision(r.settings) };
+  } catch (err) {
+    let chosen: { runtime: string; source: RuntimeSource } | null = null;
+    try { chosen = registry.choose({ manifest: app.manifest, installationId: app.installationId, record }); } catch { /* the error says why */ }
+    const refusal = runtimeRefusal(err);
+    const e = err as Error & { code?: string };
+    return {
+      runtime: chosen?.runtime ?? null, source: chosen?.source ?? null,
+      error: refusal
+        ? { code: refusal.code, category: refusal.category, message: refusal.message, ...(refusal.missing ? { missing: refusal.missing } : {}), ...(refusal.suggest ? { suggest: refusal.suggest } : {}) }
+        : { code: e.code ?? 'error', message: e.message },
+    };
+  }
+}
+
+/** A recorded D75 report file (`/data/aura/runtime-migration/*.json`), summarised. */
+export interface RecordedMigrationReport {
+  file: string;
+  recordedAt: string | null;
+  installations: number;
+  counts: Record<MigrationRow['decision'], number>;
+  /** The file could not be read or parsed: listed, never fixed. */
+  error?: string;
+}
+
+/** `aura runtime migrate --report`: see `migrationReport`. */
+export interface MigrationReport {
+  /** When the D75 migration was recorded (`migrations.d75`), or null. */
+  d75: string | null;
+  env: LegacyEnv;
+  installations: Array<MigrationRow & {
+    /** The recorded state for the installation: its override and its open decision. */
+    override: RuntimeOverride | null;
+    pending: RuntimeMigrationPending | null;
+    /** What a start would do now. */
+    current: InstallationResolution;
+  }>;
+  reports: RecordedMigrationReport[];
+  /** D100 §12: the feature view of every runtime an installation resolves to now (feasibility; capabilities still decide). */
+  features: Record<string, RuntimeFeature[]>;
+}
+
+function recordedReports(dataDir: string): RecordedMigrationReport[] {
+  const dir = join(dataDir, 'aura', 'runtime-migration');
+  let names: string[];
+  try { names = readdirSync(dir).filter((n) => n.endsWith('.json')).sort(); } catch { return []; }
+  return names.map((name) => {
+    const file = join(dir, name);
+    const counts = { unchanged: 0, override: 0, incompatible: 0 };
+    try {
+      const raw = JSON.parse(readFileSync(file, 'utf8')) as { recordedAt?: unknown; installations?: unknown };
+      const rows = Array.isArray(raw.installations) ? raw.installations as Array<{ decision?: unknown }> : [];
+      for (const r of rows) if (r && (r.decision === 'unchanged' || r.decision === 'override' || r.decision === 'incompatible')) counts[r.decision]++;
+      return { file, recordedAt: typeof raw.recordedAt === 'string' ? raw.recordedAt : null, installations: rows.length, counts };
+    } catch (err) {
+      return { file, recordedAt: null, installations: 0, counts, error: (err as Error).message };
+    }
+  });
+}
+
+/**
+ * The D75 migration report (5b M), read-only: it reruns the classification
+ * of every installed app as a dry run (`classify`, what an omitted `sandbox`
+ * meant before the release, under today's manifest and environment), shows
+ * the recorded override and open decision of each, what a start would do
+ * now (`resolutionOf`, with the source), and lists the recorded report
+ * files. It writes nothing: no record, no file, no audit row; two runs over
+ * the same state give the same report.
+ */
+export function migrationReport(
+  apps: MigrationApp[], deps: { registry: RuntimeRegistry; record: RuntimeSettingsRecord | null; env: LegacyEnv; dataDir: string },
+): MigrationReport {
+  const { record } = deps;
+  const installations = apps.map((a) => ({
+    ...classify(a, deps.env),
+    override: (a.installationId && record?.overrides[a.installationId]) || null,
+    pending: (a.installationId && record?.pending?.[a.installationId]) || null,
+    current: resolutionOf(deps.registry, a, record),
+  })).sort((x, y) => x.appId.localeCompare(y.appId));
+  const features: Record<string, RuntimeFeature[]> = {};
+  for (const id of new Set(installations.map((i) => i.current.runtime).filter((x): x is string => Boolean(x)))) {
+    const m = deps.registry.get(id);
+    const st = m ? deps.registry.settingsState(id, record) : null;
+    if (m && st?.ok) features[id] = moduleFeatures(m, st.settings);
+  }
+  return {
+    d75: record?.migrations?.d75 ?? null,
+    env: deps.env,
+    installations,
+    reports: recordedReports(deps.dataDir),
+    features,
+  };
 }
 
 /** For the kernel: the legacy environment of this process. */

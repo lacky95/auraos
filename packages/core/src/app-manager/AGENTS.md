@@ -11,8 +11,13 @@ The sector rules are in `packages/core/AGENTS.md`. This module is the kernel's l
   - activities and navigation;
   - window flight (presentation, debt);
   - manifests, interfaces, sidecars and usage.
-- **Runners:** `ContainerRunner.ts` and `ProotRunner.ts` implement `SandboxRunner.ts`. From 5b CR/PR they sit behind ARI modules in `core/src/runtimes/<id>/`.
-- **Resource managers:** `SidecarManager`, `MountManager`, `PortManager`. From 5b G they are typed to runtime backends.
+- **Runners:** `ContainerRunner.ts` and `ProotRunner.ts` implement `SandboxRunner.ts`. From 5b CR/PR they sit behind ARI modules in `core/src/runtimes/<id>/`. Both call one lifecycle client and health loop (`lifecycleClient.ts`, Phase 6: required hooks throw, optional ones answer JSON or null); a runner only names its destination and its proof of binding, and its differences are data (`LifecycleTraits`).
+- **Resource managers:** `SidecarManager`, `MountManager`, `PortManager` keep the policy and drive the runtime's groups (`workloads`, `mounts`, `endpoints`), never `ContainerRunner`. A writable cross-uid mount is an idmapped bind or refused (`idmappedMounts`, D80).
+  - **5b-2 D:** `PortManager` keeps the policy and drives the runtime's `endpoints` group; `ExecBridge` holds no engine (sidecar exec/logs through `workloads`, instance logs through the module's `logs`); builds and provisioning go through the `build` group (`AppManager.builder()`); the orphan scan is the runtimes' `orphans`, liveness is `isRunning` only; the one `SpawnSpec` comes from `runtimes/spawnSpec.ts`. **Phase 6 D-S:** `SidecarManager` keeps the policy (who may act, the limit, tokens, tool grants, mounts, seed markers, readiness) and drives the runtime's `workloads` group (`runtimes/container/sidecars.ts`; golden `test/golden-workload-args.test.mjs`); without one it refuses (`capability-missing: sidecars`). **Phase 6 D-M:** `MountManager` keeps kinds, nesting, the D80 plan, declarations, fan-out and reconcile, and drives the `mounts` group (`runtimes/container/mounts.ts`). Spawn arg helpers: `runtimes/spawn/`.
+  - **D106:** builds pass `DEFAULT_BUILD_LIMITS`; `builder()` refuses a runtime that doesn't enforce every limit (`requireLimits`).
+  - **D107:** `services[].network: 'instance'` (default with `inheritHome`): the instance's own network only, mandatory (`requireNetworkIsolation`). `services[].userNamespaces` needs capability `userNamespaces`.
+  - **Stream M:** `startMaintenance()` (no traffic until `serveInstance`), `updateInstance()` (`instanceUpdate.ts`); contract `maintenance.ts`.
+  - **Engine helpers** (`engineSession`, `engineExec`, `engineLogs`) live in `DockerApi.ts` inside the boundary; an engine refusal is a neutral `RuntimeExecError` (`runtimes/types.ts`).
 - **System Management parts that still live here:** `AppRegistry`, `appBuild`, `BaseImage`, `tool-provision`, `provisioning`. They move out in the Phase 8 decomposition.
 
 ## Rules
@@ -21,7 +26,7 @@ The sector rules are in `packages/core/AGENTS.md`. This module is the kernel's l
   - New lifecycle behaviour goes in a focused file with its own contract, which AppManager calls.
   - New presentation behaviour doesn't belong in the kernel.
   - Phase 8 decomposes AppManager behind a facade. Code you add now should already have that shape.
-- **Don't add a kind check** (`sandbox === 'container'` or `'proot'`) outside the runtime modules. Ask the runtime's capabilities instead (ARI, 5b G).
+- **Don't add a kind check** (`sandbox === 'container'` or `'proot'`) outside the runtime modules. Ask `AppManager.instanceCapabilities()` (effective: the runtime's, narrowed by the installation) instead (ARI, 5b G; `ari-coverage.test.mjs` fails on a new one).
 - **Runners don't import `OsEventBus`.** They report exits through `onExit`; the kernel emits `app:*` (G1).
 - **Keep the `SandboxRunner` and ARI arguments plain data.** The spawn context carries no functions and no live objects.
 - **Collaborators are passed in.** Don't fetch them from `globalThis` or import a sibling module's `services.ts`. The auth services arrive as `opts.auth` from the composition point (5b K removed the `AppManager ↔ auth/services` cycle).

@@ -365,7 +365,9 @@ export function liveSystemPatchDeps(base: { authenticate: SystemPatchDeps['authe
     authenticate: base.authenticate,
     owner: base.owner,
     engine: core.systemPatches,
-    dataVolume: () => core.getAppManager().dataVolumeName(),
+    // The data volume by name, as the container runtime resolves it (runtimes/container: AURA_APP_DATA_VOLUME, else
+    // the compose default); verify after 6 L: the release compose sets it.
+    dataVolume: () => process.env['AURA_APP_DATA_VOLUME'] ?? 'aura_aura-app-data',
     mounts: {
       list: (i) => core.getAppManager().mounts.list(i),
       add: (i, s) => core.getAppManager().mounts.add(i, s),

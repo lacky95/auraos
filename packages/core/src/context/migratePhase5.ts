@@ -27,14 +27,13 @@ import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AuditInput } from '../auth/AdminAudit.js';
 import type { GrantStore } from '../auth/GrantStore.js';
-import { contextReadPermission, credentialReadPermission, userScope } from '../auth/GrantStore.js';
+import { appGrantCounts, contextReadPermission, credentialReadPermission, userScope } from '../auth/GrantStore.js';
 import { OS_SCOPE } from '../auth/types.js';
 import { DEFAULT_OWNER_ID } from '../auth/identityContracts.js';
 import type { ContractSourceFinding } from '../contract/sourceScan.js';
 import type { ContextEntry, ContextKind, InjectTarget } from './ContextStore.js';
 import type { CredentialVault, VaultKv } from './CredentialVault.js';
 import { credentialNamespace } from './CredentialVault.js';
-import { appGrantCounts } from './grantedContext.js';
 
 /** This release's decisions for the live install (Q7, plan stream C "Migration"). */
 export const PHASE5_CONTEXT_MIGRATION = Object.freeze({
@@ -51,6 +50,8 @@ export interface ContextMigrationApp {
   appId: string;
   /** The app's install scope (system|global|user). */
   scope: string;
+  /** Its installation in that scope (S1: a grant is given to it); null: none, so nothing is granted. */
+  installationId: string | null;
   dir: string;
   context: readonly string[];
 }
@@ -108,7 +109,10 @@ export async function migratePhase5Context(deps: ContextMigrationDeps): Promise<
   const owner = deps.ownerId ?? DEFAULT_OWNER_ID;
   const plan = PHASE5_CONTEXT_MIGRATION;
   const apps = deps.apps();
-  const appScope = (appId: string) => apps.find((a) => a.appId === appId)?.scope;
+  const installed = (appId: string) => {
+    const a = apps.find((x) => x.appId === appId);
+    return a?.installationId ? { appScope: a.scope, installationId: a.installationId } : null;
+  };
 
   // ── backup first: the stored rows, sealed as they are ────────────────────
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -140,9 +144,9 @@ export async function migratePhase5Context(deps: ContextMigrationDeps): Promise<
     if (!row) continue;
     const granted: string[] = [];
     for (const appId of c.apps) {
-      const scope = appScope(appId);
-      if (!scope) continue;
-      await deps.grants.grant({ kind: 'app', id: appId }, contextReadPermission(c.key), { by, appScope: scope });
+      const pin = installed(appId);
+      if (!pin) continue;
+      await deps.grants.grant({ kind: 'app', id: appId }, contextReadPermission(c.key), { by, ...pin });
       granted.push(appId);
     }
     row.action = 'continuity-grant';
@@ -151,7 +155,7 @@ export async function migratePhase5Context(deps: ContextMigrationDeps): Promise<
 
   // 2. owner keys to the owner's vault, with the consumer's raw-read grant
   for (const v of plan.ownerVault) {
-    const scope = appScope(v.consumer);
+    const pin = installed(v.consumer);
     for (const key of v.keys) {
       const row = rows.get(key);
       const entry = byKey.get(key);
@@ -165,8 +169,8 @@ export async function migratePhase5Context(deps: ContextMigrationDeps): Promise<
       } else {
         row.detail = `${owner}'s vault already holds it: kept`;
       }
-      if (scope) {
-        await deps.grants.grant({ kind: 'app', id: v.consumer }, credentialReadPermission(key), { by, scope: userScope(owner), appScope: scope });
+      if (pin) {
+        await deps.grants.grant({ kind: 'app', id: v.consumer }, credentialReadPermission(key), { by, scope: userScope(owner), ...pin });
         await deps.audit({
           by, action: 'vault.read-granted', target: `vault:${key}`, outcome: 'ok',
           detail: { name: key, app: v.consumer, user: owner, via: 'phase5-migration' },
@@ -207,9 +211,10 @@ export async function migratePhase5Context(deps: ContextMigrationDeps): Promise<
     for (const key of app.context) {
       const row = rows.get(key);
       if (!row) continue;
-      const system = appGrantCounts(await deps.grants.get({ kind: 'app', id: app.appId }, contextReadPermission(key), OS_SCOPE), app.scope)
+      const current = { scope: app.scope, installationId: app.installationId };
+      const system = appGrantCounts(await deps.grants.get({ kind: 'app', id: app.appId }, contextReadPermission(key), OS_SCOPE), current)
         && row.injectAfter.includes('env');
-      const vault = appGrantCounts(await deps.grants.get({ kind: 'app', id: app.appId }, credentialReadPermission(key), userScope(owner)), app.scope)
+      const vault = appGrantCounts(await deps.grants.get({ kind: 'app', id: app.appId }, credentialReadPermission(key), userScope(owner)), current)
         && !!(await deps.vault.describe(owner, key));
       if (system || vault) { holds.add(key); row.reachesAfter.push(app.appId); }
     }

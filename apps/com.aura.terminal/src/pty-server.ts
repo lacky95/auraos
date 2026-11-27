@@ -4,7 +4,7 @@ import { parse as parseUrl } from 'node:url';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { HOST_LABEL, TMUX_CONF, TMUX_SOCKET_ARGS, liveTmuxSessions, respawnIfDead, sessionEnv, sessionEnvArgs, shellArgv, shellCwd, tmuxBin, tmuxKill, tmuxName } from './tmux-control.ts';
+import { HOST_LABEL, TMUX_CONF, TMUX_SOCKET_ARGS, asSessionUser, liveTmuxSessions, respawnIfDead, sessionEnv, sessionEnvArgs, shellArgv, shellCwd, tmuxBin, tmuxKill, tmuxName } from './tmux-control.ts';
 import { dialogAction, getDialog, installDialogHooks, setDialogText } from './input-dialog.ts';
 import { openPaneTap, paneRepaint, tmuxHasSession, type PaneTap } from './pane-tap.ts';
 import { forgetSessionPicks } from './window-session.ts';
@@ -294,7 +294,8 @@ function spawnPty(sessionId: string | null, cols: number, rows: number): IPty {
   // Anonymous connections (sessionId === null) are explicitly ephemeral —
   // they die with their socket by design, so persistence would only leak
   // tmux servers for curl/test clients.
-  if (!tmuxBin || sessionId === null) return pty.spawn(shell, [], opts);
+  // As the session user: through the session launcher when this server is the Terminal service uid (stream T2).
+  if (!tmuxBin || sessionId === null) { const c = asSessionUser(shell, []); return pty.spawn(c.file, c.args, opts); }
 
   // attach-or-create. `-u` forces UTF-8 regardless of the container's locale
   // (node:22 images ship POSIX, which would otherwise mangle box-drawing).

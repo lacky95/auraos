@@ -48,16 +48,18 @@ const input = (principal: AccessPrincipal, rule: AccessRule, via: DecideInput['a
 });
 
 test('C2: a member satisfies no owner level; the owner does', async () => {
-  const d = createDecide({ authorizer: new Authorizer({ grants: memoryGrants(), declared: () => [], appScope: () => 'user' }) });
+  const d = createDecide({ authorizer: new Authorizer({ grants: memoryGrants(), declared: () => [], appBinding: async () => ({ scope: 'user', installationId: 'inst-1' }) }) });
   assert.equal((await d(input(owner, OWNER_RULE))).outcome, 'allow');
-  assert.deepEqual(await d(input(member, OWNER_RULE)), { outcome: 'deny', reason: 'wrong-principal' });
+  assert.deepEqual(await d(input(member, OWNER_RULE)), { outcome: 'deny', reason: 'wrong-principal', facts: { ownerOnly: true } });
   assert.equal((await d(input(member, INSTANCE_RULE))).outcome, 'deny');
 });
 
 test('C7: a member holds an app-permission rule only with its own user grant', async () => {
   const grants = memoryGrants();
-  const d = createDecide({ authorizer: new Authorizer({ grants, declared: () => [], appScope: () => 'user' }) });
-  assert.deepEqual(await d(input(member, USE_RULE)), { outcome: 'deny', reason: 'missing-permission' });
+  const d = createDecide({ authorizer: new Authorizer({ grants, declared: () => [], appBinding: async () => ({ scope: 'user', installationId: 'inst-1' }) }) });
+  assert.deepEqual(await d(input(member, USE_RULE)), {
+    outcome: 'deny', reason: 'missing-permission', facts: { permission: 'app.use:inst-1', missing: 'grant', holder: 'owner-grant' },
+  });
   (grants as unknown as { add(k: string, i: string, p: string): void }).add('user', MEMBER_ID, 'app.use:inst-1');
   assert.deepEqual(await d(input(member, USE_RULE)), { outcome: 'allow', reason: 'app-permission' });
   // An instance acting for the member holds the member's grant (the member's own instance, C7).
@@ -70,7 +72,7 @@ test('D85 A1: a foreign-system principal is refused before any role or grant rul
   const grants = memoryGrants();
   (grants as unknown as { add(k: string, i: string, p: string): void }).add('user', MEMBER_ID, 'app.use:inst-1');
   const d = createDecide({
-    authorizer: new Authorizer({ grants, declared: () => [], appScope: () => 'user' }),
+    authorizer: new Authorizer({ grants, declared: () => [], appBinding: async () => ({ scope: 'user', installationId: 'inst-1' }) }),
     ownerAgent: () => true,
   });
   const remoteOwner = { ...owner, systemId: 'another-aura' };
@@ -174,8 +176,6 @@ test('C8: a user\'s desktop snapshot holds only that user\'s instances, and the 
   const mgrView = {
     getAllInstances: () => list,
     getManifest: () => ({ activityMode: 'none' }),
-    // Stream R: containers survive a shell restart (no respawn).
-    runtimeCapabilitiesOf: () => ({ survivesShellRestart: true }),
   };
   const all = new Set(list.map((i) => i.instanceId));
   assert.deepEqual(sessionInstances(mgrView as never, all, new Set(), 'default').map((i) => i.instanceId), ['a-1', 'a-3'], 'unlabelled instances are the owner\'s');
@@ -185,6 +185,7 @@ test('C8: a user\'s desktop snapshot holds only that user\'s instances, and the 
   const opened: unknown[] = [];
   const mgr = {
     getInstance: () => undefined, getManifest: () => ({}), isEnabled: () => true,
+    respawnedInstance: async () => null,
     start: async (appId: string, opts: unknown) => { started.push({ appId, opts }); return `${appId}-new`; },
     openActivity: async (_id: string, _d: unknown, opts: unknown) => { opened.push(opts); return { activityId: 'x' }; },
   };
@@ -193,7 +194,7 @@ test('C8: a user\'s desktop snapshot holds only that user\'s instances, and the 
     instances: [{ instanceId: 'a-2', appId: 'io.ex.a', view: true }],
     activities: [{ activityId: 'b-1#1', parentInstanceId: 'b-1', appId: 'io.ex.b', path: '/', createdAt: '2026-11-26T00:00:00.000Z' }],
   };
-  const report: RestoreReport = { restored: 0, respawned: 0, failed: [], idMap: {}, pruned: 0 };
+  const report: RestoreReport = { restored: 0, failed: [], idMap: {}, pruned: 0 };
   await reopenActivities(mgr as never, snap, report, true, MEMBER_ID);
   assert.deepEqual(started, [{ appId: 'io.ex.a', opts: { userId: MEMBER_ID } }, { appId: 'io.ex.b', opts: { userId: MEMBER_ID } }]);
   assert.equal((opened[0] as { userId?: string }).userId, MEMBER_ID);

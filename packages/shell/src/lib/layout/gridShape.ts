@@ -1,6 +1,6 @@
 /**
  * Grid geometry shared by the browser tiling strategy (strategies/grid.ts)
- * and the server-rendered first paint (pages/index.astro), so the SSR slots
+ * and the server-rendered first paint (desktop-pages/index.astro), so the SSR slots
  * already sit in the cells the client strategy will give them. Pure and
  * dependency-free: safe to import on the server.
  */

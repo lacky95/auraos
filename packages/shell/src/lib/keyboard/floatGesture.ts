@@ -4,7 +4,7 @@
  * Two things make a naive drag misbehave in the shell:
  *   • App iframes swallow pointer events, so a drag that crosses a window
  *     stalls and its release is lost. `runGesture` captures the pointer and
- *     sets `body.aura-stack-dragging` (pages/index.astro turns off iframe
+ *     sets `body.aura-stack-dragging` (desktop-pages/index.astro turns off iframe
  *     hit-testing for it) — same approach as the free-window layout's
  *     runGesture (lib/layout/strategies/freeWindow/index.ts).
  *   • The shell zooms `<body>` with `transform: scale()` (StatusBar.astro

@@ -7,7 +7,7 @@
  * counted (observer.ts). A rule's `guard` is applied in every mode: it is
  * the check its route made itself before Phase 3 (D36).
  */
-import type { AccessPrincipal, PrincipalClass } from '@aura/core';
+import type { AccessPrincipal, AuraErrorHolder, AuthzMissing, PrincipalClass } from '@aura/core';
 
 export const ACCESS_LEVELS = ['public', 'owner', 'own-instance', 'app-permission'] as const;
 export type AccessLevel = (typeof ACCESS_LEVELS)[number];
@@ -434,6 +434,29 @@ export interface DecideInput {
 export interface DecideResult {
   outcome: PolicyOutcome;
   reason: AccessReason;
+  /** A refusal only: what it knows beyond its reason, for its answer (refusalText.ts). */
+  facts?: RefusalFacts;
+}
+
+/**
+ * What a refusal knows beyond its reason: the structured answer is built
+ * from these (refusalText.ts `refusalBody`), never from a request value.
+ * Never counted (the report keeps closed labels only) and never changes an
+ * outcome.
+ */
+export interface RefusalFacts {
+  /** The first permission that was not held. */
+  permission?: string;
+  /** Who has to hold it. */
+  holder?: AuraErrorHolder;
+  /** core's Authorizer: what is missing (a declaration, the owner's grant, …). */
+  missing?: AuthzMissing;
+  /** The app that has to hold it (`holder: 'target'`). Shown only to whom may know it. */
+  targetAppId?: string;
+  /** The rule admits the owner only: nothing an app could be granted. */
+  ownerOnly?: true;
+  /** The rule admits only callers established this way (`AccessRule.credentials`). */
+  credentials?: readonly AccessVia[];
 }
 
 export type Decide = (input: DecideInput) => Promise<DecideResult>;

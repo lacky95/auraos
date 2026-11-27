@@ -20,5 +20,5 @@ export const GET: APIRoute = async ({ params, request, locals }) => {
     const user = locals?.access?.principal ? actingUser(locals.access.principal) : await requestUserId(request);
     instances = instances.filter((inst) => !inst.inPool && !!user && inst.owner === user);
   }
-  return jsonResponse(instances.map((inst) => publicInstance(inst)));
+  return jsonResponse(instances.map((inst) => publicInstance(inst, mgr)));
 };

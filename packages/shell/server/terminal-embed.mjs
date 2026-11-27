@@ -180,9 +180,11 @@ export async function grantSession(appId, sessionId) {
   const c = await core();
   const binding = await instanceLife(terminalSessionInstance(sessionId));
   if (!binding) throw new Error(`${terminalSessionInstance(sessionId) ?? sessionId} has no instance identity`);
-  const appScope = c.getAppManager().registry.getScopeId(appId);
+  // S1: given to the installation the app runs as now (it counts only while the OS-wide grant does).
+  const { scope: appScope, installationId } = await c.getAppManager().appGrantBinding(appId);
+  if (!installationId) throw new Error(`${appId} has no installation record`);
   await c.getAuthServices().grants.grant({ kind: 'app', id: appId }, 'terminal.embed', {
-    by: { kind: 'system' }, ...(appScope ? { appScope } : {}), scope: c.terminalSessionScope(sessionId), binding,
+    by: { kind: 'system' }, ...(appScope ? { appScope } : {}), installationId, scope: c.terminalSessionScope(sessionId), binding,
   });
 }
 

@@ -31,7 +31,7 @@ test('only an app frame may ask, and the desktop routes it to the one helper', (
   for (const from of ['app-subframe', 'embedded-app', 'native-host'] as const) {
     assert.equal(isAuraChannelRouteAllowed('aura.system.openExternal', from, 'shell'), false, from);
   }
-  const desk = readFileSync(new URL('../src/pages/index.astro', import.meta.url), 'utf8');
+  const desk = readFileSync(new URL('../src/desktop-pages/index.astro', import.meta.url), 'utf8');
   assert.match(desk, /type === 'aura\.system\.openExternal'\) openExternalTab\(/);
   const card = readFileSync(new URL('../src/components/shell/notifications/NotificationCard.ts', import.meta.url), 'utf8');
   assert.ok(!card.includes('window.open('), 'notification links use the same helper');

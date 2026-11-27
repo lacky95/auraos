@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { createWriteStream, existsSync, mkdirSync, readFileSync, statSync, openSync, readSync, closeSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { createWriteStream, existsSync, mkdirSync, statSync, openSync, readSync, closeSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 
 /**
  * The `aura-base` image — what every `sandbox: "container"` app and every
@@ -13,16 +13,24 @@ import { join } from 'node:path';
  * and, when the image is missing, builds it from `/workspace/Dockerfile` in the
  * background. Container spawns wait for it through `whenBaseImageReady()`.
  *
- * The build pipes the Dockerfile on stdin and sends NO context: the
- * `aura-base` stage only has `RUN` lines, and the checkout is over a gigabyte.
- * The shell has no buildx, so this is the legacy builder — its
- * `Step N/M : <instruction>` lines are the progress. Never set
- * DOCKER_BUILDKIT=1 here: without buildx that fails outright.
+ * The build is BuildKit through the image's buildx plugin (D94 IC-3): the
+ * Dockerfile's network steps use secret, tmpfs and named-context mounts, which
+ * the legacy builder can't parse. The context is the Dockerfile's directory;
+ * BuildKit sends only the files a step references (the aura-base stage reads
+ * one, os/infra/build-env.sh), so the gigabyte checkout is not transferred.
+ * `#N [stage k/M] <instruction>` lines (`--progress=plain`) are the progress.
+ * A shell image without buildx (built before IC-3) can't build it: the error
+ * says to rebuild on the host, where compose builds with BuildKit.
  *
  * State lives in `<dataDir>/aura/first-boot/base-image.{json,log}` (same shape
  * as the self-updater's job files); `onChange()` listeners get every state
  * change — the shell turns them into a notification.
+ *
+ * Present means usable: the image's Node must satisfy the root `engines.node`
+ * (Phase 6 G, nodeRequirement.ts). A stale image is rebuilt like a missing
+ * one; still stale after the build, it fails with both versions named.
  */
+import { nodeMismatch, requiredNodeNextTo } from './nodeRequirement.js';
 
 export const BASE_IMAGE = process.env['AURA_BASE_IMAGE'] ?? 'aura-base';
 export const BASE_IMAGE_TARGET = 'aura-base';
@@ -41,11 +49,18 @@ export interface BaseImageState {
   error?: string;
   /** True when this process built the image (vs. found it present). */
   built?: boolean;
+  /** The image's Node and the required range (`engines.node`); null when unknown. */
+  node?: { version: string | null; required: string | null };
 }
 
-/** Parse one legacy-builder line: `Step 3/7 : RUN apt-get …` → { n: 3, of: 7, text }. */
+/**
+ * Parse one build progress line → { n, of, text }: BuildKit's plain progress
+ * `#6 [aura-base 2/4] RUN apt-get …` (also `[2/4]`), or the legacy builder's
+ * `Step 3/7 : RUN apt-get …`.
+ */
 export function parseBuildStep(line: string): { n: number; of: number; text: string } | null {
-  const m = /^Step (\d+)\/(\d+) : (.*)$/.exec(line.trim());
+  const t = line.trim();
+  const m = /^#\d+ \[(?:[^\]]*? )?(\d+)\/(\d+)\] (.*)$/.exec(t) ?? /^Step (\d+)\/(\d+) : (.*)$/.exec(t);
   if (!m) return null;
   const n = Number(m[1]);
   const of = Number(m[2]);
@@ -60,6 +75,8 @@ const BUILD_TIMEOUT_MS = 30 * 60_000;
 export interface BaseImageDeps {
   /** True when the image exists locally. */
   exists(image: string): boolean;
+  /** The image's Node version (read, never run); null or absent: unknown, not checked. */
+  nodeVersion?(image: string): string | null;
   /** Run the build; call `onLine` per output line; resolve with the exit code. */
   build(image: string, dockerfile: string, onLine: (line: string) => void): Promise<number>;
 }
@@ -69,13 +86,23 @@ const defaultDeps: BaseImageDeps = {
     const r = spawnSync('docker', ['image', 'inspect', '--format', '{{.Id}}', image], { stdio: 'ignore', timeout: 15_000 });
     return r.status === 0;
   },
+  // The official node images set NODE_VERSION: read it, never run the image.
+  nodeVersion(image) {
+    const r = spawnSync('docker', ['image', 'inspect', '--format', '{{range .Config.Env}}{{println .}}{{end}}', image], { encoding: 'utf-8', timeout: 15_000 });
+    if (r.status !== 0) return null;
+    const line = r.stdout.split('\n').find((l) => l.startsWith('NODE_VERSION='));
+    return line ? line.slice('NODE_VERSION='.length).trim() || null : null;
+  },
+
   build(image, dockerfile, onLine) {
     return new Promise((resolve) => {
-      const env = { ...process.env };
-      delete env['DOCKER_BUILDKIT'];
-      const child = spawn('docker', ['build', '-t', image, '--target', BASE_IMAGE_TARGET, '-'], {
-        stdio: ['pipe', 'pipe', 'pipe'], env,
-      });
+      if (spawnSync('docker', ['buildx', 'version'], { stdio: 'ignore', timeout: 15_000 }).status !== 0) {
+        onLine('[aura] this shell image has no docker buildx plugin, and the aura-base stage needs BuildKit: rebuild on the host (docker compose up -d --build)');
+        resolve(1);
+        return;
+      }
+      const child = spawn('docker', ['buildx', 'build', '--progress=plain', '--load', '-t', image, '--target', BASE_IMAGE_TARGET,
+        '-f', dockerfile, dirname(dockerfile)], { stdio: ['ignore', 'pipe', 'pipe'], env: process.env });
       const timer = setTimeout(() => { onLine(`[aura] build timed out after ${BUILD_TIMEOUT_MS / 60_000} min`); child.kill('SIGKILL'); }, BUILD_TIMEOUT_MS);
       let buf = '';
       const feed = (d: Buffer) => {
@@ -92,7 +119,6 @@ const defaultDeps: BaseImageDeps = {
         if (buf) onLine(buf);
         resolve(code ?? 1);
       });
-      child.stdin.end(readFileSync(dockerfile));
     });
   },
 };
@@ -167,7 +193,7 @@ export class BaseImage {
     if (this.inflight) return this.inflight;
     if (this.state.phase === 'failed') {
       // The image may have been built by hand since (`docker compose build aura-base`).
-      if (this.deps.exists(this.image)) { this.set({ phase: 'ready', progress: null }); return Promise.resolve(); }
+      if (this.deps.exists(this.image) && !this.staleNode()) { this.set({ phase: 'ready', progress: null }); return Promise.resolve(); }
       return Promise.reject(new Error(`the ${this.image} image is missing and building it failed: ${this.state.error ?? 'unknown error'} — retry from the "Setting up AuraOS" notification or run \`docker compose build aura-base\` on the host`));
     }
     return this.ensure();
@@ -184,10 +210,21 @@ export class BaseImage {
     }
   }
 
+  /** Why the present image's Node does not meet `engines.node` (records both on the state), or null. */
+  private staleNode(): string | null {
+    const node = { version: this.deps.nodeVersion?.(this.image) ?? null, required: requiredNodeNextTo(this.dockerfile) };
+    this.state = { ...this.state, node };
+    return nodeMismatch(this.image, node.version, node.required);
+  }
+
   private async run(): Promise<void> {
     if (this.deps.exists(this.image)) {
-      this.set({ phase: 'ready', progress: null, error: undefined });
-      return;
+      const stale = this.staleNode();
+      if (!stale) {
+        this.set({ phase: 'ready', progress: null, error: undefined });
+        return;
+      }
+      console.warn(`[BaseImage] ${stale} — rebuilding it`);
     }
     if (!existsSync(this.dockerfile)) {
       const error = `${this.dockerfile} not found — cannot build ${this.image}`;
@@ -214,6 +251,14 @@ export class BaseImage {
     });
     await new Promise<void>((res) => log.end(res));
     const finishedAt = new Date().toISOString();
+    const stillStale = code === 0 && this.deps.exists(this.image) ? this.staleNode() : null;
+    if (stillStale) {
+      // The Dockerfile's own Node is below the floor: no rebuild fixes that, the checkout does.
+      const error = `${stillStale}: update the aura-base Node in the Dockerfile`;
+      console.error(`[BaseImage] ${error}`);
+      this.set({ phase: 'failed', error, finishedAt });
+      throw new Error(error);
+    }
     if (code === 0 && this.deps.exists(this.image)) {
       console.log(`[BaseImage] ${this.image} built`);
       this.set({ phase: 'ready', progress: 1, step: undefined, finishedAt });

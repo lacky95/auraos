@@ -71,7 +71,7 @@ ACCEPT_SHIPPED=0
 TRUSTED_KEYS=
 NODE_IMAGE=${AURA_INSTALL_NODE_IMAGE:-node:22.23.5-bookworm}
 MIN_DOCKER=26.0.0      # volume-subpath mounts (sibling containers)
-MIN_COMPOSE=2.24.4     # !reset / !override in the rendered override
+MIN_COMPOSE=2.24.4     # additional_contexts and build secrets in the rendered overrides
 MIN_DISK_GB=${AURA_INSTALL_MIN_DISK_GB:-15}
 READY_TIMEOUT=${AURA_INSTALL_READY_TIMEOUT:-2400}
 

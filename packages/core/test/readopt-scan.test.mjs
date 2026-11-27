@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { ContainerRunner } from '../dist/app-manager/ContainerRunner.js';
 import { AppManager } from '../dist/app-manager/AppManager.js';
 import { PortAllocator } from '../dist/app-manager/PortAllocator.js';
+import { containerRuntime } from '../dist/runtimes/container/index.js';
 
 let dir;
 let savedPath;
@@ -35,7 +36,8 @@ before(() => {
 D="${dir}"
 case "$1" in
   ps) echo "$*" >> "$D/ps.log"; [ -f "$D/ps.fail" ] && exit 1; cat "$D/ps.out" ;;
-  inspect) cat "$D/$2.json" 2>/dev/null || exit 1 ;;
+  inspect) [ -f "$D/$2.slow" ] && { echo "error during connect: context deadline exceeded" >&2; exit 1; }
+           cat "$D/$2.json" 2>/dev/null || { echo "Error: No such object: $2" >&2; exit 1; } ;;
   *) exit 1 ;;
 esac
 `);
@@ -85,6 +87,14 @@ test('a failed scan is null ("unknown"), never an empty list ("no survivors")', 
   finally { rmSync(join(dir, 'ps.fail')); }
 });
 
+test('a survivor whose inspect fails (not gone) makes the scan incomplete: null, never skipped (live 0.0.51: two instances on port 4002)', async () => {
+  writeFileSync(join(dir, 'aura-io.ex.board.slow'), '');
+  try { assert.equal(await runner().listOrphanRecords(), null); }
+  finally { rmSync(join(dir, 'aura-io.ex.board.slow')); }
+  // A container gone between `ps` and `inspect` (aura-gone) is no survivor: skipped, the scan still answers.
+  assert.equal((await runner().listOrphanRecords()).length, 3);
+});
+
 // ── AppManager.adoptOrphans ────────────────────────────────────────────────
 
 function fakeManager(records, { pooled = [], running = [] } = {}) {
@@ -98,20 +108,26 @@ function fakeManager(records, { pooled = [], running = [] } = {}) {
     registry: { getById: (appId) => (appId === 'io.ex.gone' ? undefined : { id: appId }) },
     providers: { registerInstance: (i) => calls.providers.push(i.instanceId) },
     interfaces: { registerInstance: () => {} },
-    container: {
-      listOrphanRecords: async () => records,
-      isRunning: (id) => running.includes(id),
-      registerAdopted: (o) => calls.registered.push(o.instanceId),
-      onExit: (id) => calls.exits.push(id),
-    },
     loadPoolIds: () => new Set(pooled),
     loadPoolHomes() {},
     handleUnexpectedExit: () => {},
     measureAdopted: async (id) => { calls.measured.push(id); },
+    tokenlessSurvivors: new Set(),
+    modulesWith: AppManager.prototype.modulesWith,
+    adoptFrom: AppManager.prototype.adoptFrom,
   };
+  // 5b CR: adoption goes through the container module's `adoption` group, over the runner's surface.
+  const module = containerRuntime({
+    capabilities: () => ContainerRunner.prototype.capabilities.call({}),
+    listOrphanRecords: async () => records,
+    isRunning: (id) => running.includes(id),
+    registerAdopted: (o) => calls.registered.push(o.instanceId),
+    onExit: (id) => calls.exits.push(id),
+  });
+  fake.runtimes = { list: () => [module] };
   return { fake, calls, adopt: () => AppManager.prototype.adoptOrphans.call(fake) };
 }
-const rec = (instanceId, appId, extra = {}) => ({ instanceId, appId, port: 4001, hostname: `aura-${instanceId}`, pid: 1, ...extra });
+const rec = (instanceId, appId, extra = {}) => ({ instanceId, appId, port: 4001, hostname: `aura-${instanceId}`, pid: 1, tokenNonce: `n-${instanceId}`, ...extra });
 
 test('a failed scan adopts nothing and reports it (the caller retries)', async () => {
   const { fake, adopt } = fakeManager(null);
@@ -122,9 +138,9 @@ test('a failed scan adopts nothing and reports it (the caller retries)', async (
 test('owner label cases: labelled, unlabelled (pre-owner or claimed pool member), idle pool member', async () => {
   const { fake, calls, adopt } = fakeManager([
     rec('com.aura.terminal-3', 'com.aura.terminal', { ownerLabel: 'default', tokenNonce: 'n3' }),
-    rec('com.aura.terminal-4', 'com.aura.terminal'),
-    rec('com.aura.terminal-5', 'com.aura.terminal'),
-    rec('io.ex.board', 'io.ex.board', { ownerLabel: 'BAD OWNER' }),
+    rec('com.aura.terminal-4', 'com.aura.terminal', { tokenNonce: undefined }),
+    rec('com.aura.terminal-5', 'com.aura.terminal', { tokenNonce: undefined }),
+    rec('io.ex.board', 'io.ex.board', { ownerLabel: 'BAD OWNER', tokenNonce: undefined }),
   ], { pooled: ['com.aura.terminal-5'] });
   assert.equal(await adopt(), true);
   const i = (id) => fake.instances.get(id);
@@ -138,8 +154,11 @@ test('owner label cases: labelled, unlabelled (pre-owner or claimed pool member)
   assert.equal(i('io.ex.board').owner, 'default', 'a malformed label falls back to the local owner');
   assert.deepEqual(calls.tokens, [['com.aura.terminal-3', 'n3']]);
   assert.equal(calls.registered.length, 4);
-  assert.equal(calls.exits.length, 4, 'every adopted container has its exit watcher');
-  assert.equal(calls.measured.length, 4, 'every adopted container gets the lifecycle checks again (F0a)');
+  assert.equal(calls.exits.length, 4, 'every survivor has its exit watcher');
+  // D89 (owner answer 5): only the one with a workload token stays adopted and gets the lifecycle checks
+  // again (F0a); the tokenless ones are stopped through their lifecycle by init and start fresh.
+  assert.deepEqual(calls.measured, ['com.aura.terminal-3']);
+  assert.deepEqual([...fake.tokenlessSurvivors].sort(), ['com.aura.terminal-4', 'com.aura.terminal-5', 'io.ex.board']);
   assert.equal(fake.nextInstanceNum.get('com.aura.terminal'), 5, 'new spawns never reuse an adopted name');
 });
 
@@ -201,7 +220,7 @@ test('after adoption every running UI instance holds its App Host slot; pool mem
 test('while the survivors are unknown, sidecars are never reaped', async () => {
   const fake = {
     adoptionPending: true,
-    runtimes: { list: () => [{ runner: { listSidecars: async () => { throw new Error('must not list'); } } }] },
+    runtimes: { list: () => [{ workloads: { list: async () => { throw new Error('must not list'); } } }] },
   };
   await AppManager.prototype.syncSidecars.call(fake, 1);
 });
@@ -236,4 +255,43 @@ test('a port two survivors share is given back only when the last of them goes',
   fake.instances.delete('com.aura.console');
   release('com.aura.counter-4');
   assert.deepEqual(released, [4004]);
+});
+
+test('a pending adoption is retried once for concurrent callers, then survivors are reconciled', async () => {
+  let scans = 0; let survivors = 0;
+  let answer = false;
+  const fake = {
+    adoptionPending: true, adoptionRetry: null, appHostsReady: false,
+    adoptOrphans: async () => { scans++; await new Promise((r) => setTimeout(r, 10)); return answer; },
+    reconcileSurvivors: async () => { survivors++; },
+    // 5b CR: a survivor without a workload token is stopped after the adoption, never adopted.
+    stopTokenlessSurvivors: async () => { tokenless++; },
+  };
+  let tokenless = 0;
+  const retry = () => AppManager.prototype.retryAdoption.call(fake);
+  await Promise.all([retry(), retry(), retry()]);
+  assert.deepEqual([scans, survivors, fake.adoptionPending], [1, 0, true], 'one scan for all; still unknown');
+  answer = true;
+  await retry();
+  assert.deepEqual([scans, survivors, tokenless, fake.adoptionPending, fake.adoptionRetry], [2, 1, 1, false, null]);
+  await retry();
+  assert.equal(scans, 2, 'nothing pending: no scan');
+});
+
+test('a spawn while the survivors are unknown retries the adoption before it takes an instance name or a port', () => {
+  const src = readFileSync(new URL('../src/app-manager/AppManager.ts', import.meta.url), 'utf-8');
+  const spawn = src.slice(src.indexOf('private async spawnInstance('));
+  const retry = spawn.indexOf('await this.retryAdoption()');
+  assert.ok(retry > 0, 'spawnInstance retries the adoption');
+  assert.ok(retry < spawn.indexOf('this.allocateInstanceId(') && retry < spawn.indexOf('this.ports.allocate('));
+});
+
+test('adopting a survivor on a port another instance holds says so (and keeps both)', async () => {
+  const { fake, adopt } = fakeManager([rec('io.ex.board', 'io.ex.board', { port: 4002 })]);
+  fake.instances.set('com.aura.browser', { instanceId: 'com.aura.browser', appId: 'com.aura.browser', state: 'resumed', port: 4002 });
+  const warned = [];
+  const warn = console.warn; console.warn = (m) => warned.push(String(m));
+  try { assert.equal(await adopt(), true); } finally { console.warn = warn; }
+  assert.ok(fake.instances.has('io.ex.board') && fake.ports.isInUse(4002));
+  assert.ok(warned.some((m) => /io\.ex\.board on port 4002, which com\.aura\.browser holds too/.test(m)), warned.join('\n'));
 });

@@ -4,7 +4,7 @@
  * Inputs are minimal (an ordered viewId list + the optional bbox rects for
  * stack-style layouts) so this module stays trivially testable. The shell
  * layer wires these into the keymap dispatcher's `aura.nav.up/down/left/
- * right` handlers — see `pages/index.astro`.
+ * right` handlers — see `desktop-pages/index.astro`.
  */
 
 export type NavDirection = 'up' | 'down' | 'left' | 'right';

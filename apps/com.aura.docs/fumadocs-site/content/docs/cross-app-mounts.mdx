@@ -106,8 +106,24 @@ which ones bite.
 
 Read these before you rely on it.
 
-- **Container sandboxes only.** A PRoot instance has no `/data` volume
-  mount to receive propagation; the API answers **409**.
+- **Runtimes with `mounts` only.** The check is the instance's runtime
+  capability, not its name: a runtime without `mounts` (PRoot) has nothing
+  to receive a live bind, and the API answers **409** `capability-missing`
+  with `missing: ["mounts"]`.
+- **Writable between different uids (D80).** Apps run under their own
+  uids, so a `--wr` mount into a consumer that runs as another uid than the
+  files' owner is an **idmapped bind**: inside the bind the owner's files
+  show as the consumer's, on disk they stay the owner's, and the bind is
+  `nosuid,nodev`. It needs the runtime capability `idmappedMounts` (probed
+  at boot: `aura runtime show container`); without it the mount is refused
+  with `capability-missing: idmappedMounts`, never made read-only or
+  broader. A writable **source** mount into another uid also needs
+  Developer Mode (closed sources stay read-only; use a patch workspace), and
+  a root-owned data tree is never mapped (the data must be owned by the
+  app's identity). A patch workspace (`/mnt/aura/work/…`) needs no
+  Developer Mode. Switching Developer Mode off makes writable source mounts
+  read-only again; revoking `apps.mount` detaches every cross-app mount of
+  that app. Read-only mounts are unchanged.
 - **Not atomic.** There is no bulk endpoint, so the wizard issues one
   request per change. A failure partway leaves a *partial* set — the CLI
   reports each outcome rather than implying the whole plan applied.

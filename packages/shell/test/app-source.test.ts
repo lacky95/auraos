@@ -62,6 +62,13 @@ let audits: unknown[];
 let auditRows: Array<{ action: string; target?: string; outcome?: string; detail: Record<string, any> }>;
 /** Previews the fake AppManager started: instanceId → { appId, appDir, workspace, owner }. */
 let previews: Map<string, { appId: string; appDir: string; workspace: string; owner: string }>;
+/** Apps with no installation record yet, and the apps `syncAppHost` gave one. */
+let unallocated: Set<string>;
+let synced: string[];
+/** Apps whose repair fails. */
+let unrepairable: Set<string>;
+/** Source trees handed to the owner (`handToOwner`), as `appId`. */
+let handed: string[];
 
 const put = (p: string, text: string) => { mkdirSync(join(p, '..'), { recursive: true }); writeFileSync(p, text); };
 const writeApp = (dir: string, m: Record<string, unknown>, body = 'v1\n') => {
@@ -74,7 +81,7 @@ function apps(): ScopedApp[] {
   // The active copy of each id: user over global over system.
   const out = new Map<string, ScopedApp>();
   for (const s of [...scopes].sort((a, b) => a.priority - b.priority)) {
-    for (const id of ['io.shop.app', 'com.aura.terminal', 'io.lakner.terminalx', 'io.local.app']) {
+    for (const id of ['io.shop.app', 'io.shop.mine', 'com.aura.terminal', 'io.lakner.terminalx', 'io.local.app']) {
       const dir = join(s.appsDir, id);
       if (!existsSync(join(dir, 'app.manifest.json'))) continue;
       out.set(id, { ...core.validateStagedDir(dir), scopeId: s.id, appDir: dir } as ScopedApp);
@@ -104,7 +111,8 @@ function deps(): AppSourceDeps {
         return a ? core.effectiveSourceMode(scopeDir(a.scopeId), a) : null;
       },
       instance: (id) => (id.startsWith('com.aura.terminal') || id.startsWith('io.lakner.terminalx')
-        ? { appId: id.replace(/-\d+$/, ''), sandbox: 'container' } : id === 'io.proot.app' ? { appId: id, sandbox: 'proot' } : undefined),
+        ? { appId: id.replace(/-\d+$/, ''), runtime: 'container', capabilities: { mounts: true } as never }
+        : id === 'io.proot.app' ? { appId: id, runtime: 'proot', capabilities: { mounts: false } as never } : undefined),
       instancesOf: (appId) => (appId === 'io.shop.app' ? ['io.shop.app'] : []),
       startPreview: async (appId, opts) => {
         for (const [id, p] of previews) if (p.appId === appId && p.owner === opts.owner) previews.delete(id);
@@ -148,8 +156,18 @@ function deps(): AppSourceDeps {
         for (const m of kernel) if (m.targetAppId === appId && m.kind === 'source' && deps().apps.sourceMode(appId)?.mode === 'closed') m.mode = 'ro';
       },
     },
-    installationId: async (appId, scope) => `inst-${scope}-${appId.replace(/\./g, '-')}`,
+    ensureInstallation: async (appId) => {
+      const scope = apps().find((a) => a.id === appId)?.scopeId;
+      if (!scope) return { installation: null, error: `${appId} is not installed` };
+      if (unallocated.has(appId)) {
+        synced.push(appId);
+        if (unrepairable.has(appId)) return { installation: null, error: `${appId} has no installation record and it could not be created (kv down)` };
+        unallocated.delete(appId);
+      }
+      return { installation: { installationId: `inst-${scope}-${appId.replace(/\./g, '-')}` } };
+    },
     nexus,
+    handToOwner: async (appDir, appId) => { assert.equal(appDir, apps().find((a) => a.id === appId)?.appDir); handed.push(appId); return null; },
     audit: { record: async (e: any) => { auditRows.push({ ...e, detail: e.detail ?? {} }); return e; } },
   };
 }
@@ -161,6 +179,10 @@ beforeEach(async () => {
   audits = [];
   auditRows = [];
   previews = new Map();
+  unallocated = new Set();
+  synced = [];
+  unrepairable = new Set();
+  handed = [];
   root = mkdtempSync(join(tmpdir(), 'aura-src-'));
   const scope = (id: core.ScopeId, priority: number, immutable: boolean) =>
     ({ id, appsDir: join(root, id, 'apps'), dataDir: join(root, id, 'data'), immutable, priority }) as core.ScopeDefinition;
@@ -227,6 +249,24 @@ test('status by id or name: a closed install\'s source view is bound read-only i
   assert.equal((await read(await appSourceStatus(req('POST', { app: 'io.shop.app' }), 'io.proot.app', deps(), true))).status, 409);
 });
 
+test('an app without its installation (a clone before 0.0.50) gets it on the first status, once', async () => {
+  unallocated.add('io.shop.app');
+  const r = await read(await appSourceStatus(req('POST', { app: 'io.shop.app' }), 'com.aura.terminal', deps(), true));
+  assert.equal(r.status, 200);
+  assert.deepEqual([r.body.installationId, r.body.activeInstallationId], ['inst-global-io-shop-app', 'inst-global-io-shop-app']);
+  assert.deepEqual(synced, ['io.shop.app']);
+  await read(await appSourceStatus(req('POST', { app: 'io.shop.app' }), 'com.aura.terminal', deps(), true));
+  assert.deepEqual(synced, ['io.shop.app'], 'an app that has one is never synced here');
+});
+
+test('B7: an installation that cannot be repaired is a clear error, never a silent no-op', async () => {
+  unallocated.add('io.shop.app');
+  unrepairable.add('io.shop.app');
+  const r = await read(await mountAppVolume(req('POST'), 'com.aura.terminal', deps(), { app: 'io.shop.app', kind: 'work' }));
+  assert.deepEqual([r.status, r.body.error], [409, 'no-installation']);
+  assert.match(r.body.message, /could not be created \(kv down\)/);
+});
+
 test('a system app is closed: its source view is read-only too, and it cannot be opened', async () => {
   const r = await read(await appSourceStatus(req('POST', { app: 'Terminal' }), 'com.aura.terminal', deps(), true));
   assert.deepEqual([r.body.appId, r.body.mode, r.body.modeFrom, r.body.source.writable], ['com.aura.terminal', 'closed', 'system', false]);
@@ -259,6 +299,35 @@ test('opening needs the owner (202, then approved, then once); the open view is 
   const closed = await read(await setSourceMode({ request: req('POST', { mode: 'closed' }), cookies: {} as never }, 'io.shop.app', deps()));
   assert.deepEqual([closed.status, closed.body.mode], [200, 'closed']);
   assert.equal(kernel.find((m) => m.instanceId === 'com.aura.terminal')?.mode, 'ro');
+  assert.deepEqual(handed, [], 'a global-scope app\'s source is never handed to the owner');
+});
+
+test('B6: opening a user-scope install hands its source to the owner, as `aura dev new` does; closing does not', async () => {
+  const release = join(root, 'release-mine');
+  writeApp(release, { id: 'io.shop.mine', originId: O2.replace(/2$/, '3'), name: 'Mine', version: '1.0.0' });
+  const it = nexus.install({ ref: release, scope: 'user', approval: async () => true });
+  for (let c = await it.next(); !c.done; c = await it.next()) { /* to the end */ }
+  const ctx = (mode: string, headers: Record<string, string> = {}) => ({ request: req('POST', { mode }, headers), cookies: {} as never });
+  const first = await read(await setSourceMode(ctx('open'), 'io.shop.mine', deps()));
+  assert.equal(first.status, 202);
+  assert.deepEqual(handed, [], 'nothing before the owner approved');
+  assert.equal((await store.approve(first.body.approvalId as string, DECIDER)).ok, true);
+  const done = await read(await setSourceMode(ctx('open', { 'x-aura-approval': first.body.approvalId as string }), 'io.shop.mine', deps()));
+  assert.deepEqual([done.status, done.body.mode], [200, 'open']);
+  assert.deepEqual(handed, ['io.shop.mine']);
+  const closed = await read(await setSourceMode(ctx('closed'), 'io.shop.mine', deps()));
+  assert.deepEqual([closed.status, closed.body.mode], [200, 'closed']);
+  assert.deepEqual(handed, ['io.shop.mine'], 'closing changes no owner');
+});
+
+test('B6: a user-scope clone is handed to the owner after it landed and before it is registered, as a scaffold is', () => {
+  const src = readFileSync(new URL('../src/pages/api/admin/clone-app.ts', import.meta.url), 'utf8');
+  const hand = src.indexOf("if (targetScopeId === 'user') {\n      const ownership = await handOwnAppSourceToOwner(dest, targetAppId);");
+  assert.ok(hand > 0, 'clone-app hands a user-scope clone to the owner');
+  assert.ok(hand > src.indexOf('renameSync(staging, dest)'), 'after the tree landed');
+  assert.ok(hand < src.indexOf('mgr.reloadScopedApp(targetAppId)'), 'before it is registered and can start');
+  const scaffold = readFileSync(new URL('../src/pages/api/admin/scaffold.ts', import.meta.url), 'utf8');
+  assert.match(scaffold, /scope === 'user' \? await handOwnAppSourceToOwner\(dest, appId\)/, 'the same function as scaffold');
 });
 
 test('a workspace is created and bound writable at /mnt/aura/work/<app> in the calling Terminal only', async () => {
@@ -514,6 +583,12 @@ test('preview: the caller\'s own workspace runs as a separate instance, no appro
   writeApp(join(root, 'root', 'aura', 'workspaces', 'default', 'inst-global-io-shop-app', '2'), { id: 'io.other.app', name: 'Other', version: '1.0.0' });
   assert.equal((await read(await startPreview(req('POST', { workspace: 2 }), 'io.shop.app', deps()))).status, 422);
   assert.equal((await read(await startPreview(req('POST', {}), 'io.shop.app', deps()))).status, 400);
+  // D48: a workspace built for a newer Aura contract never runs.
+  writeApp(join(root, 'root', 'aura', 'workspaces', 'default', 'inst-global-io-shop-app', '3'), { id: 'io.shop.app', originId: O1, name: 'Shop', version: '2.0.0', auraContract: 2 });
+  const future = await read(await startPreview(req('POST', { workspace: 3 }), 'io.shop.app', deps()));
+  assert.deepEqual([future.status, future.body.error], [422, 'contract-unsupported']);
+  assert.match(future.body.message, /^io\.shop\.app is built for Aura contract 2; this AuraOS implements 1\./);
+  assert.equal(previews.size, 0);
   assert.equal((await read(await startPreview(req('POST', { workspace: 1 }), 'com.aura.terminal', deps()))).body.error, 'system-app-later');
 });
 

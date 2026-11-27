@@ -183,6 +183,42 @@ test('install from the System Terminal: the password, bound to operation, name a
   assert.equal(installs.length, 1);
 });
 
+test('a successful install is persisted at once, read fresh after the install, before the refresh can fail', async () => {
+  caller = TERMINAL;
+  const order: string[] = [];
+  let saved: any = null;
+  const d = deps();
+  d.installer = {
+    ...d.installer,
+    install: async (name) => { order.push(`install:${name}`); return { symlink: `/os/toolchain/bin/${name}`, version: '2.1.7', libsCopied: 0, libs: [], sidecars: [] }; },
+    // A cap another request recorded while this install ran.
+    loadState: () => { order.push('load'); return { capabilities: { nano: { installed: true, installedAt: 'x', version: '7' } }, services: {} }; },
+    saveState: (s) => { order.push('save'); saved = s; },
+  };
+  d.refresh = () => { order.push('refresh'); throw new Error('refresh failed'); };
+  const id = (await read(await postCapability(req('POST', { action: 'install', name: 'zot' }), d))).body.approvalId as string;
+  assert.equal((await approvals.approve(id, FRESH)).ok, true);
+  const r = await postCapability(req('POST', { action: 'install', name: 'zot' }, { 'x-aura-approval': id }), d);
+  assert.equal(r.status, 500, 'the refresh failure is reported');
+  assert.deepEqual(order, ['install:zot', 'load', 'save', 'refresh']);
+  assert.equal(saved.capabilities.zot.installed, true);
+  assert.equal(saved.capabilities.zot.version, '2.1.7');
+  assert.equal(saved.capabilities.nano.installed, true, 'a concurrent record is not overwritten');
+});
+
+test('an install that fails records nothing', async () => {
+  caller = TERMINAL;
+  let saves = 0;
+  const d = deps();
+  d.installer = { ...d.installer, install: async () => { throw new Error('zot: its binary did not reach /data/aura/toolchain/bin'); }, saveState: () => { saves++; } };
+  const id = (await read(await postCapability(req('POST', { action: 'install', name: 'zot' }), d))).body.approvalId as string;
+  assert.equal((await approvals.approve(id, FRESH)).ok, true);
+  const r = await read(await postCapability(req('POST', { action: 'install', name: 'zot' }, { 'x-aura-approval': id }), d));
+  assert.equal(r.status, 500);
+  assert.match(String(r.body.error), /did not reach/);
+  assert.equal(saves, 0);
+});
+
 test('a changed definition invalidates the approval (TOCTOU): the digest it was bound to no longer matches', async () => {
   caller = TERMINAL;
   const first = await read(await postCapability(req('POST', { action: 'install', name: 'zot' }), deps()));
@@ -326,7 +362,7 @@ test('executor: apt is verified and argv; tar runs with -- and members; file and
 });
 
 test('source: no shell anywhere in the privileged path', () => {
-  for (const f of ['../src/lib/privilegedExec.ts', '../src/lib/capabilities.ts', '../src/lib/capabilityInstall.ts', '../src/lib/prootUpgrade.ts', '../src/lib/baseInstall.ts', '../src/lib/chrootDevices.ts',
+  for (const f of ['../src/lib/privilegedExec.ts', '../src/lib/capabilities.ts', '../src/lib/capabilityInstall.ts', '../src/lib/prootUpgrade.ts', '../src/lib/baseInstall.ts', '../../core/src/runtimes/proot/chrootDevices.ts', '../../core/src/runtimes/proot/actions.ts',
     '../src/pages/api/admin/cap.ts', '../src/pages/api/admin/cap-registry.ts', '../src/pages/api/admin/upgrade-proot.ts', '../src/pages/api/admin/base-install.ts']) {
     const src = readFileSync(new URL(f, import.meta.url), 'utf8');
     assert.doesNotMatch(src, /\bexecSync\b|\bexec\(|shell:\s*true|\/bin\/sh -c|bash -c|install_cmd\)/, f);
@@ -342,7 +378,8 @@ test('upgrade-proot: a rebuild needs the password and is audited; reporting an e
     ...deps(),
     run: (file, args) => { ran.push([file, ...args].join(' ')); return file.endsWith('proot') ? 'proot v5.4.0' : ''; },
     exists: (p) => (p === '/usr/local/bin/proot' ? installed : false),
-    baseRootfs: '/os/base-rootfs',
+    // 5b PR: the mechanism is the PRoot module's (the route authorizes and audits).
+    action: (id) => core.prootOwnerActions('/os/base-rootfs')[id],
   });
   const ctx = (q: string, headers: Record<string, string> = {}) => ({ ...req('POST', undefined, headers, `/api/admin/upgrade-proot${q}`), url: new URL(`http://shell.test/api/admin/upgrade-proot${q}`) });
   caller = TERMINAL;

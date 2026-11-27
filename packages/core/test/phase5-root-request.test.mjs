@@ -20,7 +20,7 @@ import {
 } from '../dist/identity/execution.js';
 import { createAppHostRegistry } from '../dist/app-hosts/AppHostRegistry.js';
 import { AppHostLifecycle } from '../dist/app-hosts/lifecycle.js';
-import { containerIdentityArgs, sidecarIdentityArgs, requireProotIdentity } from '../dist/app-manager/spawn/identityArgs.js';
+import { containerIdentityArgs, sidecarIdentityArgs, requireProotIdentity } from '../dist/runtimes/spawn/identityArgs.js';
 import { AppManager, adoptedIdentity } from '../dist/app-manager/AppManager.js';
 import { NexusManager } from '../dist/nexus/NexusManager.js';
 import { installExposure } from '../dist/nexus/PermissionDiff.js';
@@ -137,7 +137,7 @@ test('lifecycle: approveExecution records exactly the approved digest on the act
   const app = { appId: 'org.r.app', originId: null, scope: 'user', source: SRC };
   await life.sync(app);
   assert.equal((await life.installationOf('org.r.app', 'user')).runAs, 'app', 'a new installation starts as app');
-  const rec = await life.approveExecution('org.r.app', 'user', { runAs: 'root', digest: DIGEST, approvedAt: 7, via: 'nexus.install' });
+  const rec = await life.approveExecution('org.r.app', 'user', { runAs: 'root', digest: DIGEST, approvedAt: 7, via: 'nexus.install' }, { newRecord: true });
   assert.deepEqual([rec.runAs, rec.execution.digest, rec.execution.via], ['root', DIGEST, 'nexus.install']);
   const kept = await life.approveExecution('org.r.app', 'user', { runAs: 'root', digest: DIGEST, approvedAt: 99, via: 'nexus.update' });
   assert.equal(kept.execution.approvedAt, 7, 'an update that keeps the config keeps the approval');

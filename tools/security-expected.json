@@ -39,7 +39,7 @@
     },
     {
       "id": "auth-pages-send-headers",
-      "files": ["packages/shell/src/pages/login.astro", "packages/shell/src/pages/setup.astro"],
+      "files": ["packages/shell/src/desktop-pages/login.astro", "packages/shell/src/desktop-pages/setup.astro"],
       "require": ["authPageHeaders()"]
     },
     {

@@ -163,10 +163,14 @@ async function checkHttp(r, client, guard, apps, tier) {
 
   const terminals = guard.runningTerminals();
   if (!terminals.length) r.skip('terminal-sessions', 'live', 'no running Terminal instance discovered');
+  // The caller's own Terminals (its instance list is per user, D69): another user's answers 403 by design.
+  const mine = new Set(Array.isArray(term.json) ? term.json.map((i) => i?.instanceId).filter(Boolean) : []);
   for (const id of terminals) {
     const res = await client.getJson(`/api/proxy/${id}/api/sessions`);
     if (Array.isArray(res.json?.sessions) && Array.isArray(res.json?.reserved)) {
       r.pass(`terminal-sessions:${id}`, 'live', 'sessions[] and reserved[] present');
+    } else if (res.status === 403 && mine.size && !mine.has(id)) {
+      r.pass(`terminal-sessions:${id}`, 'live', 'another user\'s Terminal: its sessions refused (D69)');
     } else r.fail(`terminal-sessions:${id}`, 'live', res.error ?? 'missing sessions[] or reserved[]');
   }
 

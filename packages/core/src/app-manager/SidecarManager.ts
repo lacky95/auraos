@@ -1,28 +1,25 @@
-import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, rmdirSync, writeFileSync } from 'node:fs';
 import { defaultKv } from '@aura/kv-store';
 import { connect } from 'node:net';
 import { dirname, join } from 'node:path';
 import type { AppRegistry } from './AppRegistry.js';
-import type { ContainerRunner } from './ContainerRunner.js';
+import type { ContainerSidecarBackend } from '../runtimes/container/backends.js';
+import type { RuntimeWorkloads } from '../runtimes/ari.js';
 import type { InstanceTokens } from './InstanceTokens.js';
 import type { FanoutTarget, MountManager } from './MountManager.js';
-import { MOUNT_ROOT_PATH } from './MountManager.js';
 import type { PermissionManager } from '../permissions/PermissionManager.js';
 import type { AppManifest } from '../types/manifest.js';
-import { rawSocketArgs } from './spawn/networkArgs.js';
-import { sidecarIdentityArgs } from './spawn/identityArgs.js';
-import { BASE_IMAGE } from './BaseImage.js';
 import type { SpawnIdentity } from '../identity/types.js';
-import {
-  MY_TOOLS_PATH, SHARED_HOME_PATH, listToolchainBinaries, provisionAllowlist, readSidecarMap, toolchainMirrorBin,
-} from './tool-provision.js';
+import { listToolchainBinaries, provisionAllowlist, readSidecarMap, toolchainMirrorBin } from './tool-provision.js';
 import { SIDECAR_TOOL_RE, effectiveSidecarTools } from './sidecar-tools.js';
-import { containerHomeMount } from './spawn/homeArgs.js';
+import { privateHomeSidecarRefusal } from './privateHomeNetwork.js';
+import { inheritHomeUser } from '../runtimes/spawn/identityArgs.js';
 import type { ResolvedHome } from '../homes/types.js';
+import { authFailureReason, isAuthFailure, parseImageRef } from '../nexus/RegistryAuth.js';
+import type { PullCredential } from '../nexus/types.js';
 import {
-  SpecError, resolveSidecarSpec, specHash,
+  SidecarIdentityError, SpecError, resolveSidecarSpec, specHash,
   type ResolvedSidecarSpec, type SidecarSpawnRequest,
 } from './sidecar-spec.js';
 
@@ -30,26 +27,24 @@ import {
  * OS-managed sidecars: the official way for an app to run a foreign image
  * next to itself. The app asks (`POST /api/instances/:id/sidecars`, or
  * `osSidecars()` in the SDK); the OS validates the request against the app's
- * `services[]` templates and permissions (sidecar-spec.ts) and does the
- * `docker run` — the app needs no docker tool and never touches the socket.
+ * `services[]` templates and permissions (sidecar-spec.ts), and the runtime
+ * that declares `workload.dynamic` realises it through its `workloads` group
+ * (the container module: runtimes/container/sidecars.ts, Phase 6 D-S) — the
+ * app needs no docker tool and never touches the socket. This manager keeps
+ * the policy: who may act on which sidecar, the limit, tokens, tool grants,
+ * mounts, seed markers and readiness.
  *
- * Built like PortManager: docker is the source of truth. Every OS sidecar
- * carries its full record in labels, so a shell restart re-learns everything
- * from `docker ps` (reconcile). `aura.parent` makes the existing reaper treat
- * it like any sidecar — removed on stop and crash, skipped by orphan adoption.
- *
- *   aura.parent=<instanceId>  aura.app=<appId>  aura.service=<name>
- *   aura.managed=os           aura.sidecar.template=<template>
- *   aura.sidecar.owner=<sidecar that spawned it, or ->
- *   aura.sidecar.spec=<json SpecRecord>
+ * Every OS sidecar carries its full record with it (the runtime keeps it as
+ * a tag), so a shell restart re-learns everything from the runtime
+ * (reconcile); Phase 8 moves that desired state into the kernel.
  *
  * Apps that run docker themselves (SDK docker mode, raw `docker run`) keep
  * working unchanged; their containers lack `aura.managed=os`, and this
  * manager never touches them (a name collision is a 409, unless the caller
  * asks to take over its own app-managed container).
  *
- * Every docker call is async: dynamic sidecars come in bursts, and the shell's
- * event loop serves every app at once.
+ * Every runtime call is async: dynamic sidecars come in bursts, and the
+ * shell's event loop serves every app at once.
  */
 
 export interface SidecarMountsView { own: boolean; inherit: boolean; exclude: string[]; forceRo: boolean }
@@ -66,6 +61,8 @@ interface SpecRecord {
   owner?: string;
   /** Has its own tools dir (template `tools`); absent otherwise. */
   ownTools?: true;
+  /** D107: on its instance's own network only; absent: the shared network. */
+  network?: 'instance';
   createdAt: string;
 }
 
@@ -103,6 +100,8 @@ export interface OsSidecar {
   owner?: string;
   managedBy: 'os';
   mounts: SidecarMountsView;
+  /** D107: `instance` (its instance's own network only) or `shared`. */
+  network: 'instance' | 'shared';
   specHash: string;
 }
 
@@ -132,13 +131,16 @@ export interface Caller {
 }
 
 interface SidecarManagerOpts {
-  runner: ContainerRunner;
+  /** The kernel's storage facts (data dir, tools and mount-root dirs; A4). */
+  runner: ContainerSidecarBackend;
+  /** The runtime that realises OS sidecars (its `workloads` group, Phase 6 D-S); absent: none is installed. */
+  workloads?: RuntimeWorkloads;
   registry: AppRegistry;
   permissions: PermissionManager;
   tokens: InstanceTokens;
   mounts: MountManager;
   /** Live instance → app + its shell-side data dir. */
-  instance(instanceId: string): { appId: string; instanceDataDir: string; owner?: string; identity?: SpawnIdentity } | null;
+  instance(instanceId: string): { appId: string; instanceDataDir: string; owner?: string; identity?: SpawnIdentity; privateHome?: boolean; runtime?: string } | null;
   /**
    * D65: the parent instance's App Home (what `inheritHome` mounts); null
    * when it can't be resolved, and the sidecar is then not created.
@@ -150,11 +152,24 @@ interface SidecarManagerOpts {
    */
   context(instanceId: string): Promise<{ env: Record<string, string>; known: Set<string> }>;
   /**
+   * The registry credential `image` may be pulled with on behalf of `appId`
+   * (AppManager.pullCredentialFor → nexus resolvePullCredential: only its own
+   * install source's login, only inside its own artifact repository), or null
+   * for an anonymous pull.
+   */
+  pullCredential?(appId: string, image: string): Promise<PullCredential | null>;
+  /**
    * A sidecar was created or removed — lets AppManager refresh its sidecar
    * cache now instead of at the next reconciler tick (else `GET sidecars`
    * and `aura get sc` show the old state for up to a tick).
    */
   changed?(): void;
+  /**
+   * D107: refuses (RuntimeFeatureError, D105 shape) unless the runtime
+   * isolates workloads at `level` (`requireNetworkIsolation` over the
+   * registry). Asked before anything is created for an isolated sidecar.
+   */
+  requireNetwork?(level: 'instance'): void;
 }
 
 /**
@@ -173,62 +188,39 @@ export async function sidecarLimit(): Promise<number> {
   return Number.isInteger(env) && env > 0 ? env : DEFAULT_MAX_PER_INSTANCE;
 }
 const MAX_STDIN = 64 * 1024;
-const MAX_OUTPUT = 4 * 1024 * 1024;
-const PULL_TIMEOUT_MS = 10 * 60_000;
-/** Readiness waits ask docker whether the container is still up on every Nth failed probe. */
+/** Readiness waits ask the runtime whether the sidecar is still up on every Nth failed probe. */
 const UP_CHECK_EVERY = 4;
 
-interface DockerResult { code: number | null; stdout: string; stderr: string; timedOut: boolean; truncated: boolean }
-
-/** Run docker; never rejects — the caller decides what a non-zero exit means. */
-function docker(args: string[], opts: { timeoutMs?: number; input?: string; maxBuffer?: number } = {}): Promise<DockerResult> {
-  return new Promise((resolve) => {
-    // Own timer instead of execFile's `timeout`: the docker CLI forwards the
-    // SIGTERM to the exec'd process and then exits CLEANLY, so execFile
-    // reports no error at all and a timeout would read as success.
-    let timedOut = false;
-    const child = execFile('docker', args, {
-      maxBuffer: opts.maxBuffer ?? MAX_OUTPUT,
-      encoding: 'utf-8',
-    }, (err, stdout, stderr) => {
-      clearTimeout(timer);
-      clearTimeout(hardKill);
-      const e = err as (NodeJS.ErrnoException & { code?: number | string }) | null;
-      resolve({
-        code: timedOut ? null : e ? (typeof e.code === 'number' ? e.code : null) : 0,
-        stdout: String(stdout ?? ''),
-        stderr: String(stderr ?? '') || (e && typeof e.code !== 'number' ? e.message : ''),
-        timedOut,
-        truncated: e?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
-      });
-    });
-    let hardKill: NodeJS.Timeout | undefined;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill('SIGTERM');
-      hardKill = setTimeout(() => child.kill('SIGKILL'), 2_000);
-    }, opts.timeoutMs ?? 60_000);
-    if (opts.input !== undefined) child.stdin?.end(opts.input);
-  });
-}
-
-async function dockerOk(args: string[], what: string, timeoutMs?: number): Promise<string> {
-  const r = await docker(args, { timeoutMs });
-  if (r.code !== 0) throw new Error(`${what}: ${r.stderr.trim() || `docker exited ${r.code}`}`);
-  return r.stdout;
-}
-
-export function sidecarContainerName(instanceId: string, name: string): string {
-  return `aura-${instanceId}--${name}`;
+/**
+ * A registry refused a sidecar image pull (`code: 'image_auth'`). Fails the
+ * spawn closed with the way out; the message carries the registry's words,
+ * never a credential.
+ */
+export class ImageAuthError extends SpecError {
+  readonly code = 'image_auth';
+  constructor(readonly image: string, detail: string, cred: PullCredential | null, reason: 'rejected' | 'missing' | 'forbidden') {
+    const { host } = parseImageRef(image);
+    super(502, !cred
+      ? `image_auth: ${host} refused the pull of ${image} without a login (${detail}). A private image is pulled with the registry login of the Nexus source the app was installed from, and only when it lives inside the app's own repository there (e.g. <app repository>/runtime); other sources' logins and other repositories are never used. Set that source's login: aura nexus registry login <source>`
+      : reason === 'forbidden'
+        ? `image_auth: the login of Nexus source '${cred.source}' may not read ${host}/${cred.repository} (${detail}). Give its token read access to that repository (GitLab: a deploy token with the read_registry scope on the project or group), then set it: aura nexus registry login ${cred.source}`
+        : `image_auth: ${host} rejected the login of Nexus source '${cred.source}' for ${cred.repository} (${detail}). Check or renew it (GitLab: a deploy token with read_registry): aura nexus registry login ${cred.source}`);
+    this.name = 'ImageAuthError';
+  }
 }
 
 export class SidecarManager {
   /** consumerKey → what fan-out (and tool refresh) needs about each live OS sidecar. */
   private live = new Map<string, { instanceId: string; name: string; mounts: SidecarMountsView; template?: string; ownTools?: boolean }>();
   private locks = new Map<string, Promise<unknown>>();
-  private pulls = new Map<string, Promise<void>>();
 
   constructor(private readonly opts: SidecarManagerOpts) {}
+
+  /** The runtime's `workloads` group; refused explicitly without one (never a silent no-op). */
+  private wl(): RuntimeWorkloads {
+    if (!this.opts.workloads) throw new SpecError(501, 'capability-missing: sidecars (no installed runtime runs OS sidecars)');
+    return this.opts.workloads;
+  }
 
   /** Serialise work on one container name (concurrent spawn/delete of the same sidecar). */
   private async locked<T>(key: string, fn: () => Promise<T>): Promise<T> {
@@ -274,7 +266,7 @@ export class SidecarManager {
   // ─── Queries ───────────────────────────────────────────────────────────
 
   /**
-   * OS sidecars of an instance, straight from docker. With a sidecar `caller`
+   * OS sidecars of an instance, straight from the runtime. With a sidecar `caller`
    * only what it may manage (see authorize).
    */
   async list(instanceId: string, caller?: Caller): Promise<OsSidecar[]> {
@@ -284,18 +276,14 @@ export class SidecarManager {
   }
 
   private async listAll(instanceId: string): Promise<OsSidecar[]> {
-    const out = await dockerOk(['ps', '-a',
-      '--filter', 'label=aura.managed=os', '--filter', `label=aura.parent=${instanceId}`,
-      '--format', '{{.Names}}\t{{.State}}\t{{.Label "aura.sidecar.spec"}}'], 'docker ps');
-    return out.split('\n').filter(Boolean).flatMap((line) => {
-      const [name, state, spec] = line.split('\t');
-      const rec = parseRecord(spec);
-      return rec ? [toView(name!, state ?? 'unknown', rec)] : [];
+    return (await this.wl().listOf(instanceId)).flatMap((w) => {
+      const rec = parseRecord(w.record);
+      return rec ? [toView(w.ref, w.state ?? 'unknown', rec)] : [];
     });
   }
 
   async get(instanceId: string, name: string): Promise<OsSidecar | null> {
-    const found = await this.inspect(sidecarContainerName(instanceId, name));
+    const found = await this.inspect(this.wl().ref(instanceId, name));
     if (!found || found.labels['aura.managed'] !== 'os' || found.labels['aura.parent'] !== instanceId) return null;
     const rec = parseRecord(found.labels['aura.sidecar.spec']);
     return rec ? toView(found.name, found.state, rec) : null;
@@ -327,7 +315,7 @@ export class SidecarManager {
     const legacy = new Set<string>();
     for (const v of (manifest.services ?? []).flatMap((s) => s.volumes ?? [])) {
       const name = `aura-${inst.appId}-${v.name}`;
-      if ((await docker(['volume', 'inspect', name])).code === 0) legacy.add(name);
+      if (await this.wl().storageExists(name)) legacy.add(name);
     }
     const spec = resolveSidecarSpec(req, {
       appId: inst.appId,
@@ -338,8 +326,20 @@ export class SidecarManager {
       appDataVolume: rt.appDataVolume,
       legacyVolumeExists: (n) => legacy.has(n),
     });
+    // B12: an inheritHome sidecar runs as its app's identity; a conflicting template user is refused (D105).
+    if (spec.inheritHome && spec.user !== undefined) {
+      const appUser = inheritHomeUser(inst.identity);
+      if (spec.user !== appUser) throw new SidecarIdentityError(inst.appId, spec.template, spec.user, appUser);
+    }
+    // D107: mandatory isolation, refused before anything is made when the runtime can't enforce it.
+    if (spec.network === 'instance') this.opts.requireNetwork?.('instance');
+    // D107 / D9: a parent with a Private Home: none of its sidecars on the shared network (privateHomeNetwork.ts).
+    if (inst.privateHome) {
+      const refusal = privateHomeSidecarRefusal(inst.runtime ?? 'unknown', inst.appId, spec.name, spec.network ?? 'shared');
+      if (refusal) throw refusal;
+    }
     const hash = specHash(spec);
-    const container = sidecarContainerName(instanceId, spec.name);
+    const container = this.wl().ref(instanceId, spec.name);
     // Spawn-time tools = initial runtime grants (resolveSidecarSpec already
     // required sidecars.tools and a template with `tools`).
     const spawnTools = req.tools?.length ? SidecarManager.checkToolNames(req.tools) : [];
@@ -378,6 +378,8 @@ export class SidecarManager {
             // Same spec, already up: adopt. Re-learn its nonce and make sure its
             // mounts are there (idempotent — present ones are skipped).
             if (rec.nonce) this.opts.tokens.register(instanceId, rec.nonce, spec.name);
+            // D107: a restarted instance's container rejoins its workload network before it calls the sidecar.
+            if (rec.network === 'instance') await this.wl().attachInstance(instanceId);
             this.track(instanceId, spec.name, rec.mounts, rec);
             let tools: SidecarToolsView | null = null;
             if (rec.ownTools) {
@@ -395,7 +397,7 @@ export class SidecarManager {
         }
         // Recreate. Own mount declarations stay; the binds go with the container.
         this.opts.mounts.removeAll(`${instanceId}--${spec.name}`);
-        await dockerOk(['rm', '-f', container], `docker rm ${container}`);
+        await this.wl().destroy(container);
         this.untrack(instanceId, spec.name);
       } else {
         // Running ones only — a stopped sidecar holds a name, not resources.
@@ -406,7 +408,7 @@ export class SidecarManager {
         }
       }
 
-      await this.ensureImage(spec.image);
+      await this.ensureImage(spec.image, inst.appId);
       for (const v of spec.volumes) if (v.subpath) mkdirSync(join(rt.dataDir, v.subpath), { recursive: true });
       const wantsMountRoot = spec.mounts.own || spec.mounts.inherit;
       const consumer = `${instanceId}--${spec.name}`;
@@ -428,28 +430,30 @@ export class SidecarManager {
         mounts: spec.mounts,
         ...(caller.sidecar ? { owner: caller.sidecar } : {}),
         ...(spec.ownTools ? { ownTools: true as const } : {}),
+        ...(spec.network ? { network: spec.network } : {}),
         createdAt: new Date().toISOString(),
       };
-      const args = await this.createArgs(instanceId, inst.appId, container, spec, record, env, token?.token ?? null);
-      const id = (await dockerOk(args, `docker create ${container}`)).trim();
-      const started = await docker(['start', id]);
-      if (started.code !== 0) {
-        await docker(['rm', '-f', id]);
-        if (token) this.opts.tokens.forget(instanceId, spec.name);
-        undoTools();
-        throw new Error(`docker start ${container}: ${started.stderr.trim()}`);
+      // inheritHome: the parent's App Home (D65), the one its app process has; never a Private Home.
+      let home: ResolvedHome | null = null;
+      if (spec.inheritHome) {
+        home = await this.opts.appHome(instanceId);
+        if (!home || home.kind === 'private') throw new Error(`sidecar ${spec.name}: the app's home can't be resolved, so inheritHome has nothing to mount; not created`);
       }
-
-      // A runtime that dies on boot (bad command, missing config) should fail
-      // the spawn with its own words, not leave a corpse behind.
-      await new Promise((r) => setTimeout(r, 400));
-      const after = await this.inspect(container);
-      if (!after || after.state !== 'running') {
-        const logs = await docker(['logs', '--tail', '20', container]);
-        await docker(['rm', '-f', container]);
+      const permissions = this.opts.registry.getById(inst.appId)?.permissions;
+      const parentIdentity = this.opts.instance(instanceId)?.identity;
+      const id = await this.wl().create({
+        instanceId, appId: inst.appId, spec, record: JSON.stringify(record), ...(record.owner ? { owner: record.owner } : {}),
+        env, token: token?.token ?? null, home,
+        ...(parentIdentity ? { parentIdentity } : {}),
+        ...(permissions ? { permissions } : {}),
+      });
+      // Started and up, or removed again with its own words (a failed start, a runtime that dies on boot).
+      try {
+        await this.wl().start(id, container);
+      } catch (err) {
         if (token) this.opts.tokens.forget(instanceId, spec.name);
         undoTools();
-        throw new Error(`${container} exited right after start:\n${(logs.stdout + logs.stderr).trim() || '(no output)'}`);
+        throw err;
       }
 
       this.track(instanceId, spec.name, spec.mounts, record);
@@ -482,21 +486,36 @@ export class SidecarManager {
       const now = await this.inspect(container);
       if (!now) throw new Error(`${container} was removed before it became ready`);
       if (now.state === 'running' && now.restarts <= restartsAtStart) return;
-      const logs = await docker(['logs', '--tail', '20', container]);
+      const words = await this.wl().lastWords(container);
       const how = now.state === 'running' ? `restarted ${now.restarts - restartsAtStart} time(s)` : `is ${now.state}`;
-      throw new Error(`${container} ${how} before it became ready:\n${(logs.stdout + logs.stderr).trim() || '(no output)'}`);
+      throw new Error(`${container} ${how} before it became ready:\n${words || '(no output)'}`);
     };
   }
 
-  private async ensureImage(image: string): Promise<void> {
-    if ((await docker(['image', 'inspect', '--format', '{{.Id}}', image])).code === 0) return;
-    let pull = this.pulls.get(image);
-    if (!pull) {
-      pull = dockerOk(['pull', image], `docker pull ${image}`, PULL_TIMEOUT_MS).then(() => undefined);
-      this.pulls.set(image, pull);
-      void pull.finally(() => this.pulls.delete(image)).catch(() => undefined);
+  /**
+   * Make `image` present through the runtime (its `workloads.prepareImage`).
+   * With a credential for it (opts.pullCredential, asked only when the image
+   * is missing) the runtime pulls with a throwaway auth file holding only that
+   * login, removed in every case; the secret is never in argv, the env, a log
+   * or an error, and never reaches the app or the sidecar. A refused pull is
+   * an ImageAuthError (`image_auth`): the kernel classifies the runtime's
+   * (redacted) words.
+   */
+  private async ensureImage(image: string, appId: string): Promise<void> {
+    let cred: PullCredential | null = null;
+    try {
+      await this.wl().prepareImage(image, async () => {
+        try { cred = (await this.opts.pullCredential?.(appId, image)) ?? null; }
+        catch (err) { console.warn(`[SidecarManager] no registry credential for ${image} (${appId}), pulling anonymously: ${(err as Error).message}`); }
+        return cred;
+      });
+    } catch (err) {
+      const out = (err as { output?: unknown }).output;
+      if (typeof out === 'string' && isAuthFailure(out)) {
+        throw new ImageAuthError(image, out.split('\n').pop()!.slice(-300), cred, authFailureReason(out, !!cred));
+      }
+      throw err;
     }
-    await pull;
   }
 
   /**
@@ -513,27 +532,12 @@ export class SidecarManager {
         if (ctx.env[name] !== undefined) { env[name] = ctx.env[name]; continue; }
         // A Context key the app does not hold, or names unknown (Valkey down): never from the container's env.
         if (!ctx.known || ctx.known.has(name)) continue;
-        parentEnv ??= await this.containerEnv(`aura-${instanceId}`);
+        parentEnv ??= await this.wl().instanceEnv(instanceId);
         if (parentEnv[name] !== undefined) env[name] = parentEnv[name];
       }
     }
     void appId;
     return { ...env, ...spec.env };
-  }
-
-  private async containerEnv(container: string): Promise<Record<string, string>> {
-    const r = await docker(['inspect', '--format', '{{range .Config.Env}}{{println .}}{{end}}', container]);
-    const env: Record<string, string> = {};
-    for (const line of r.stdout.split('\n')) {
-      const i = line.indexOf('=');
-      if (i > 0) env[line.slice(0, i)] = line.slice(i + 1);
-    }
-    return env;
-  }
-
-  private volumeArgs(spec: ResolvedSidecarSpec): string[] {
-    return spec.volumes.flatMap((v) => ['--mount',
-      `type=volume,source=${v.source},target=${v.target}${v.subpath ? `,volume-subpath=${v.subpath}` : ''}`]);
   }
 
   /**
@@ -566,16 +570,7 @@ export class SidecarManager {
     // Serialised per marker: two sidecars on the same shared data seed once.
     return this.locked(`seed:${marker}`, async () => {
     if (existsSync(marker) || existsSync(before)) return;
-    // aura.mount=1 keeps the throwaway out of sidecar listings; aura.parent
-    // lets the reaper remove it if the instance dies mid-seed.
-    const args = ['run', '--rm', '--network', rt.network, ...rawSocketArgs(spec), '--label', 'aura.mount=1', '--label', `aura.parent=${instanceId}`,
-      ...this.volumeArgs(spec),
-      ...Object.entries(env).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
-      ...(spec.user ? ['--user', spec.user] : []),
-      ...(spec.workdir ? ['--workdir', spec.workdir] : []),
-      spec.image, ...spec.seed!.command];
-    const r = await docker(args, { timeoutMs: 10 * 60_000 });
-    if (r.code !== 0) throw new Error(`seed for ${spec.name} failed: ${(r.stderr || r.stdout).trim().slice(-2000)}`);
+    await this.wl().seed({ instanceId, spec, env });
     mkdirSync(dirname(marker), { recursive: true });
     writeFileSync(marker, new Date().toISOString());
     });
@@ -589,99 +584,11 @@ export class SidecarManager {
   async prePull(manifest: Pick<AppManifest, 'id' | 'services'>): Promise<void> {
     for (const svc of (manifest.services ?? []).filter((x) => x.prePull)) {
       try {
-        await this.ensureImage(svc.image);
+        await this.ensureImage(svc.image, manifest.id);
       } catch (err) {
         console.warn(`[SidecarManager] prePull ${svc.image} for ${manifest.id} failed: ${(err as Error).message}`);
       }
     }
-  }
-
-  private async createArgs(
-    instanceId: string, appId: string, container: string, spec: ResolvedSidecarSpec,
-    record: SpecRecord, env: Record<string, string>, token: string | null,
-  ): Promise<string[]> {
-    const rt = this.opts.runner.sidecarRuntime();
-    const consumer = `${instanceId}--${spec.name}`;
-    const identity: Record<string, string> = spec.inheritIdentity ? {
-      AURA_APP_ID: appId,
-      AURA_INSTANCE_ID: instanceId,
-      AURA_SIDECAR_NAME: spec.name,
-      AURA_OS_URL: rt.osApiBase,
-      OS_API_BASE: rt.osApiBase,
-      AURA_SHELL_HOSTNAME: rt.shellHostname,
-      ...(token ? { AURA_INSTANCE_TOKEN: token } : {}),
-    } : {};
-    const manifest = this.opts.registry.getById(appId);
-    // inheritHome: the parent's App Home (D65), the one its app process has; never a Private Home.
-    let homeMount: string[] = [];
-    if (spec.inheritHome) {
-      const home = await this.opts.appHome(instanceId);
-      if (!home || home.kind === 'private') throw new Error(`sidecar ${spec.name}: the app's home can't be resolved, so inheritHome has nothing to mount; not created`);
-      homeMount = containerHomeMount({ appDataVolume: rt.appDataVolume, home });
-    }
-    const a: string[] = [
-      'create', '--name', container, '--network', rt.network, '--restart', spec.restart,
-      // No raw sockets unless the template's reviewed privileged/NET_RAW asks (spawn/networkArgs.ts, D88 S1).
-      ...rawSocketArgs(spec),
-      '--label', `aura.parent=${instanceId}`,
-      '--label', `aura.app=${appId}`,
-      '--label', `aura.service=${spec.name}`,
-      '--label', 'aura.managed=os',
-      '--label', `aura.sidecar.template=${spec.template}`,
-      '--label', `aura.sidecar.owner=${record.owner ?? '-'}`,
-      '--label', `aura.sidecar.spec=${JSON.stringify(record)}`,
-      ...spec.dns.flatMap((d) => ['--dns', d]),
-      ...spec.publish.flatMap((p) => ['-p', `${p.host}:${p.container}`]),
-      ...this.volumeArgs(spec),
-      // inheritHome: the app's own App Home (spawn/homeArgs.ts): the sidecar doesn't exceed its app.
-      ...homeMount,
-      // HOME after the template env (a template can't point it elsewhere while
-      // the mount is there); identity last: a template env key can't replace
-      // the OS's own values.
-      ...Object.entries({ ...env, ...(spec.inheritHome ? { HOME: SHARED_HOME_PATH } : {}), ...identity })
-        .flatMap(([k, v]) => ['-e', `${k}=${v}`]),
-      ...spec.capabilities.flatMap((c) => ['--cap-add', c]),
-      ...spec.devices.flatMap((d) => ['--device', d]),
-      ...(spec.privileged ? ['--privileged'] : []),
-      ...(spec.limits?.memory ? ['--memory', spec.limits.memory] : []),
-      ...(spec.limits?.cpus ? ['--cpus', String(spec.limits.cpus)] : []),
-      ...(spec.user ? ['--user', spec.user] : []),
-      // P5-3: an aura-base sidecar that inherits the app's home is the app's own code: the app's identity.
-      ...sidecarIdentityArgs(spec, this.opts.instance(instanceId)?.identity, { appDataVolume: rt.appDataVolume, instanceId, baseImage: BASE_IMAGE }),
-      ...(spec.workdir ? ['--workdir', spec.workdir] : []),
-      ...(spec.inheritPermissions && manifest?.permissions?.length ? ['-e', `AURA_PERMISSIONS=${manifest.permissions.join(',')}`] : []),
-    ];
-    // inheritTools: the app's own dir (whole set); ownTools: the sidecar's dir.
-    if (spec.inheritTools) a.push(...await this.toolArgs(instanceId, spec.image));
-    else if (spec.ownTools) a.push(...await this.toolArgs(consumer, spec.image));
-    if (spec.mounts.own || spec.mounts.inherit) {
-      a.push('--mount', `type=volume,source=${rt.appDataVolume},target=${MOUNT_ROOT_PATH},volume-subpath=${this.opts.runner.mountRootSubpath(consumer)}`,
-        '-e', `AURA_MOUNT_ROOT=${MOUNT_ROOT_PATH}`);
-    }
-    a.push(spec.image, ...spec.command);
-    return a;
-  }
-
-  /**
-   * A tools allowlist dir, mounted the way ContainerRunner mounts the app's
-   * (port of the SDK's `inheritTools`). `dirKey` is the instance id for the
-   * app's own set, or the consumer key `<inst>--<name>` for a sidecar's own.
-   */
-  private async toolArgs(dirKey: string, image: string): Promise<string[]> {
-    const rt = this.opts.runner.sidecarRuntime();
-    const r = await docker(['image', 'inspect', image, '--format', '{{range .Config.Env}}{{println .}}{{end}}']);
-    const basePath = r.stdout.split('\n').find((l) => l.startsWith('PATH='))?.slice('PATH='.length)
-      ?? '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
-    return [
-      ...(rt.toolsMode === 'symlink'
-        ? ['--mount', `type=volume,source=${rt.appDataVolume},target=/aura/all-tools,volume-subpath=aura/toolchain/bin,readonly`]
-        : []),
-      '--mount', `type=volume,source=${rt.appDataVolume},target=${MY_TOOLS_PATH},volume-subpath=aura/runtime/${dirKey}/tools,readonly`,
-      '-v', `${rt.workspaceRoot}/packages:/workspace/packages:ro`,
-      '--mount', `type=volume,source=${rt.nodeModulesVolume},target=/workspace/node_modules,readonly`,
-      '-e', `PATH=${MY_TOOLS_PATH}:${basePath}`,
-      '-v', `${rt.workspaceRoot}/os/bashrc.aura.sh:/etc/profile.d/aura-prompt.sh:ro`,
-    ];
   }
 
   // ─── Tools of a sidecar ─────────────────────────────────────────────────
@@ -751,7 +658,7 @@ export class SidecarManager {
   private async toolsTarget(instanceId: string, name: string): Promise<{ appId: string; sc: OsSidecar; own: boolean }> {
     const appId = this.opts.instance(instanceId)?.appId;
     if (!appId) throw new SpecError(404, `Instance not found: ${instanceId}`);
-    const found = await this.inspect(sidecarContainerName(instanceId, name));
+    const found = await this.inspect(this.wl().ref(instanceId, name));
     const rec = found && found.labels['aura.managed'] === 'os' && found.labels['aura.parent'] === instanceId
       ? parseRecord(found.labels['aura.sidecar.spec']) : null;
     if (!found || !rec) throw new SpecError(404, `no OS sidecar '${name}' in ${instanceId}`);
@@ -774,7 +681,7 @@ export class SidecarManager {
    */
   async grantTools(instanceId: string, name: string, tools: string[]): Promise<SidecarToolsView & { granted: string[] }> {
     const list = SidecarManager.checkToolNames(tools);
-    return this.locked(sidecarContainerName(instanceId, name), async () => {
+    return this.locked(this.wl().ref(instanceId, name), async () => {
       const { appId, sc, own } = await this.toolsTarget(instanceId, name);
       if (!this.opts.permissions.hasPermission(appId, 'sidecars.tools')) {
         throw new SpecError(403, `${appId} is not granted 'sidecars.tools' (aura grant perms ${appId} sidecars.tools)`);
@@ -791,7 +698,7 @@ export class SidecarManager {
   /** Revoke runtime grants (template tools go through the template). */
   async revokeTools(instanceId: string, name: string, tools: string[]): Promise<SidecarToolsView & { revoked: string[] }> {
     const list = SidecarManager.checkToolNames(tools);
-    return this.locked(sidecarContainerName(instanceId, name), async () => {
+    return this.locked(this.wl().ref(instanceId, name), async () => {
       const { appId, sc, own } = await this.toolsTarget(instanceId, name);
       if (!own) throw SidecarManager.noOwnTools(sc);
       const consumer = `${instanceId}--${name}`;
@@ -846,21 +753,19 @@ export class SidecarManager {
 
   /** Delete an OS sidecar and every sidecar it spawned (grandchildren). */
   async remove(instanceId: string, name: string): Promise<void> {
-    const container = sidecarContainerName(instanceId, name);
+    const container = this.wl().ref(instanceId, name);
     await this.locked(container, async () => {
       const found = await this.inspect(container);
       if (!found || found.labels['aura.managed'] !== 'os' || found.labels['aura.parent'] !== instanceId) {
         throw new SpecError(404, `no OS sidecar '${name}' in ${instanceId}`);
       }
-      const children = await dockerOk(['ps', '-aq', '--filter', 'label=aura.managed=os',
-        '--filter', `label=aura.parent=${instanceId}`, '--filter', `label=aura.sidecar.owner=${name}`], 'docker ps');
-      for (const child of children.split('\n').filter(Boolean)) {
+      for (const child of await this.wl().spawnedBy(instanceId, name)) {
         const c = await this.inspect(child);
         const childName = c?.labels['aura.service'];
         if (childName && childName !== name) await this.remove(instanceId, childName).catch(() => undefined);
       }
       this.opts.mounts.forgetConsumer(`${instanceId}--${name}`);
-      await dockerOk(['rm', '-f', container], `docker rm ${container}`);
+      await this.wl().destroy(container);
       this.forgetTools(`${instanceId}--${name}`);
       this.opts.tokens.forget(instanceId, name);
       this.untrack(instanceId, name);
@@ -877,25 +782,22 @@ export class SidecarManager {
     const sc = await this.get(instanceId, name);
     if (!sc) throw new SpecError(404, `no OS sidecar '${name}' in ${instanceId}`);
     if (sc.state !== 'running') throw new SpecError(409, `${sc.containerName} is ${sc.state}`);
-    const r = await docker(['exec',
-      ...(req.stdin !== undefined ? ['-i'] : []),
-      ...(req.user ? ['--user', req.user] : []),
-      ...(req.workdir ? ['--workdir', req.workdir] : []),
-      ...Object.entries(req.env ?? {}).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
-      sc.containerName, ...req.cmd], { timeoutMs, input: req.stdin });
-    return { exitCode: r.timedOut ? null : r.code, stdout: r.stdout, stderr: r.stderr, truncated: r.truncated, timedOut: r.timedOut };
+    return this.wl().run(sc.containerName, {
+      argv: req.cmd, timeoutMs,
+      ...(req.stdin !== undefined ? { stdin: req.stdin } : {}),
+      ...(req.user ? { user: req.user } : {}),
+      ...(req.workdir ? { workdir: req.workdir } : {}),
+      ...(req.env ? { env: req.env } : {}),
+    });
   }
 
   async logs(instanceId: string, name: string, opts: { tail?: number; since?: string; timestamps?: boolean } = {}): Promise<{ stdout: string; stderr: string }> {
     const sc = await this.get(instanceId, name);
     if (!sc) throw new SpecError(404, `no OS sidecar '${name}' in ${instanceId}`);
     const tail = Math.min(Math.max(Math.floor(opts.tail ?? 200), 1), 5000);
-    const r = await docker(['logs', '--tail', String(tail),
-      ...(opts.since ? ['--since', opts.since] : []),
-      ...(opts.timestamps ? ['--timestamps'] : []),
-      sc.containerName]);
-    if (r.code !== 0) throw new Error(`docker logs ${sc.containerName}: ${r.stderr.trim()}`);
-    return { stdout: r.stdout, stderr: r.stderr };
+    return this.wl().output(sc.containerName, {
+      tail, ...(opts.since ? { since: opts.since } : {}), ...(opts.timestamps ? { timestamps: true } : {}),
+    });
   }
 
   // ─── Lifecycle ─────────────────────────────────────────────────────────
@@ -930,28 +832,30 @@ export class SidecarManager {
   }
 
   /**
-   * After a shell restart: re-learn every OS sidecar from docker — nonces back
+   * After a shell restart: re-learn every OS sidecar from its runtime — nonces back
    * into InstanceTokens, inheritance back into the fan-out view — and remove
    * the ones whose instance no longer exists. Run after orphan adoption and
    * BEFORE mount reconcile (which needs `liveConsumerKeys()`).
    */
   async reconcile(liveInstanceIds: Set<string>): Promise<{ adopted: number; reaped: number }> {
     let adopted = 0, reaped = 0;
-    const r = await docker(['ps', '-a', '--filter', 'label=aura.managed=os',
-      '--format', '{{.Names}}\t{{.Label "aura.parent"}}\t{{.Label "aura.sidecar.spec"}}']);
-    if (r.code !== 0) return { adopted, reaped };
-    for (const line of r.stdout.split('\n').filter(Boolean)) {
-      const [container, parent, spec] = line.split('\t') as [string, string, string];
-      const rec = parseRecord(spec);
+    const managed = await this.wl().listManaged();
+    if (!managed) return { adopted, reaped };
+    for (const { ref: container, instanceId: parent, record } of managed) {
+      const rec = parseRecord(record);
       if (!rec || !parent) continue;
       if (!liveInstanceIds.has(parent)) {
-        await docker(['rm', '-f', container]);
+        await this.wl().destroy(container, { quiet: true });
         this.forgetTools(`${parent}--${rec.name}`);
         reaped++;
         continue;
       }
       if (rec.nonce) this.opts.tokens.register(parent, rec.nonce, rec.name);
       this.track(parent, rec.name, rec.mounts, rec);
+      if (rec.network === 'instance') {
+        try { await this.wl().attachInstance(parent); }
+        catch (err) { console.warn(`[SidecarManager] ${container}: its instance can't rejoin the instance network: ${(err as Error).message}`); }
+      }
       if (rec.ownTools) {
         // Re-provision: the app's tools[] or the template may have changed
         // while the shell was down.
@@ -976,13 +880,10 @@ export class SidecarManager {
     this.live.delete(`${instanceId}--${name}`);
   }
 
+  /** The workload as its runtime reports it: its name, state, tags (labels) and restarts. */
   private async inspect(container: string): Promise<{ name: string; state: string; labels: Record<string, string>; restarts: number } | null> {
-    const r = await docker(['inspect', '--format', '{{.Name}}\t{{.State.Status}}\t{{json .Config.Labels}}\t{{.RestartCount}}', container]);
-    if (r.code !== 0) return null;
-    const [name, state, labels, restarts] = r.stdout.trim().split('\t');
-    let parsed: Record<string, string> = {};
-    try { parsed = (JSON.parse(labels ?? '{}') ?? {}) as Record<string, string>; } catch { /* no labels */ }
-    return { name: (name ?? container).replace(/^\//, ''), state: state ?? 'unknown', labels: parsed, restarts: Number(restarts) || 0 };
+    const w = await this.wl().inspect(container);
+    return w ? { name: w.ref, state: w.state, labels: w.tags, restarts: w.restarts } : null;
   }
 }
 
@@ -1007,6 +908,7 @@ function toView(containerName: string, state: string, rec: SpecRecord): OsSideca
     ...(rec.owner ? { owner: rec.owner } : {}),
     managedBy: 'os',
     mounts: rec.mounts,
+    network: rec.network ?? 'shared',
     specHash: rec.specHash,
   };
 }

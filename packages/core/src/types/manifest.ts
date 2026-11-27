@@ -459,9 +459,18 @@ export const AppManifestSchema = z.object({
    * The app contract this app was built for (D48, `AURA_CONTRACT` in the SDK
    * and in core's contract/appContract.ts). Absent: built before the contract.
    * AuraOS reports it per app (`aura get apps -o wide`, the contract report);
-   * from Phase 6 it refuses an unknown major version with a clear message.
+   * AuraOS refuses a newer major with a clear message (contract/types.ts).
    */
   auraContract: z.number().int().min(1).optional(),
+  /**
+   * Reserved for D108 (app setup and operating profiles): kept as declared,
+   * never interpreted. Until AuraOS has the setup engine an app declaring
+   * either is refused at install and never started (contract/types.ts
+   * `operationalBlock`), instead of running unconfigured. Apps without them
+   * are unaffected.
+   */
+  setup: z.record(z.string(), z.unknown()).optional(),
+  profiles: z.array(z.unknown()).optional(),
   /**
    * The Aura Context keys this app reads with `osClient.context.get(key)`
    * (D48). Only these are handed to it; reading another key is refused and
@@ -877,6 +886,21 @@ export const AppManifestSchema = z.object({
     inheritHome: z.boolean().optional(),
     /** The app's cross-app mounts at /mnt/aura (live). */
     inheritMounts: z.boolean().optional(),
+    /**
+     * OS sidecars (D107, ARI `network.isolation`): `instance` puts the
+     * sidecar on its instance's own network only (the app's container, its
+     * isolated siblings and the shell reach it; no other app does), `shared`
+     * on the shared app network. Default: `instance` for a sidecar that
+     * inherits the app's home (it holds the app's credentials), else
+     * `shared`. Mandatory: a runtime that can't isolate refuses the sidecar.
+     */
+    network: z.enum(['instance', 'shared']).optional(),
+    /**
+     * The sidecar runs a nested sandbox (user namespaces, e.g. bwrap):
+     * the runtime must declare `userNamespaces`, else the app is refused
+     * (capability-missing). Never granted by weakening the container.
+     */
+    userNamespaces: z.boolean().optional(),
     /** The host docker socket — host root. Only if the app itself holds the docker tool. */
     inheritDockerSocket: z.boolean().optional(),
     /** `--cap-add` (OS sidecars: needs `sidecars.privileged`). */

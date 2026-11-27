@@ -12,6 +12,7 @@
 import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { refsOf } from './config.mjs';
+import { BUILD_SECRET_IDS, renderSecrets } from './adapters/index.mjs';
 
 export class CredentialError extends Error {
   constructor(code, message) { super(message); this.code = code; }
@@ -21,8 +22,8 @@ const PEM_KEY = /-----BEGIN ([A-Z ]*)PRIVATE KEY-----[\s\S]*?-----END \1PRIVATE 
 
 /**
  * The one redactor (D94 §6.3): URL userinfo, Authorization and
- * Proxy-Authorization headers, npm auth lines, PEM private keys, and every
- * known secret value (plain, URL-encoded and base64 forms).
+ * Proxy-Authorization headers, npm auth lines, docker config.json auths, PEM
+ * private keys, and every known secret value (plain, URL-encoded and base64 forms).
  */
 export function redactSecrets(text, known = []) {
   let s = String(text);
@@ -34,6 +35,7 @@ export function redactSecrets(text, known = []) {
     .replace(/(\b[a-z][a-z0-9+.-]*:\/\/)[^/\s@:]*:[^/\s@]*@/gi, '$1***@')
     .replace(/((?:proxy-)?authorization\s*[:=]\s*)(?:basic|bearer|token)?\s*[^\s"',]+/gi, '$1***')
     .replace(/(_auth(?:Token)?\s*=\s*)\S+/g, '$1***')
+    .replace(/("(?:auth|identitytoken|registrytoken|password)"\s*:\s*")[^"]*"/gi, '$1***"')
     .replace(/(:_password\s*=\s*)\S+/g, '$1***')
     .replace(/(\bpassword\s+)\S+/g, '$1***');
 }
@@ -91,55 +93,26 @@ export function checkConfigCredentials(cfg, dir, opts) {
   return { ok: refs.every((r) => r.status === 'ok' || r.status === 'later'), refs };
 }
 
-const withUserinfo = (url, c) => {
-  const u = new URL(url);
-  u.username = encodeURIComponent(c.user);
-  u.password = encodeURIComponent(c.password);
-  return u.toString();
+/** A resolver for bootstrap refs in a credentials dir (`system:` refs resolve in the kernel: null here). */
+export const bootstrapResolver = (dir, opts) => (ref) => {
+  const n = bootstrapName(ref);
+  return n && dir ? readBootstrapCredential(dir, n, opts) : null;
 };
 
 /**
- * The BuildKit secret files for one build (D94 §6.3), from the bootstrap
- * credentials: `{ id: content }`. Ids are fixed: infra_proxy (the proxy URL
- * with credentials, for `RUN --mount=type=secret,id=infra_proxy,env=HTTPS_PROXY`),
- * infra_npmrc, infra_pip (index URL with credentials), infra_apt_auth
- * (auth.conf), infra_git (git-credentials store), infra_mtls_<name>_key.
- * The Dockerfile consumes them from IC-3 on; until then they are passed but unused.
+ * The BuildKit secret files for one image build (D94 §6.3), from the bootstrap
+ * credentials: `{ id: content }`. The contents come from the adapters
+ * (os/infra/adapters, one rendering per ecosystem); this keeps the ids the
+ * Dockerfile consumes (BUILD_SECRET_IDS: infra_proxy[_http], infra_npmrc,
+ * infra_npm_basic, infra_apt_auth, infra_git) plus the install-time client keys
+ * infra_mtls_<name>_key (O8, IC-8).
  */
 export function renderBuildSecrets(cfg, dir, opts) {
-  const out = {};
-  const get = (ref) => { const n = bootstrapName(ref); return n ? readBootstrapCredential(dir, n, opts) : null; };
-  const p = cfg.network?.proxy;
-  if (p?.credential) {
-    const c = get(p.credential.ref);
-    if (c) out.infra_proxy = `${withUserinfo(p.https ?? p.http, c)}\n`;
-  }
-  const r = cfg.registries ?? {};
-  if (r.npm?.credential) {
-    const c = get(r.npm.credential.ref);
-    if (c) {
-      const auth = Buffer.from(`${c.user}:${c.password}`).toString('base64');
-      out.infra_npmrc = [r.npm.url, ...Object.values(r.npm.scopes ?? {})]
-        .map((u) => { const x = new URL(u); return `//${x.host}${x.pathname.endsWith('/') ? x.pathname : `${x.pathname}/`}:_auth=${auth}`; })
-        .filter((l, i, a) => a.indexOf(l) === i).join('\n') + '\n';
-    }
-  }
-  if (r.python?.credential) {
-    const c = get(r.python.credential.ref);
-    if (c) out.infra_pip = `${withUserinfo(r.python.index, c)}\n`;
-  }
-  if (r.apt?.credential) {
-    const c = get(r.apt.credential.ref);
-    if (c) out.infra_apt_auth = [...new Set(Object.values(r.apt.mirrors).map((u) => { const x = new URL(u); return `${x.host}${x.pathname}`.replace(/\/$/, ''); }))]
-      .map((m) => `machine ${m} login ${c.user} password ${c.password}`).join('\n') + '\n';
-  }
-  if (r.git?.credential) {
-    const c = get(r.git.credential.ref);
-    if (c) out.infra_git = [...new Set(Object.values(r.git.rewrites ?? {}).map((u) => new URL(u).origin))]
-      .map((o) => withUserinfo(o, c).replace(/\/$/, '')).join('\n') + '\n';
-  }
+  const resolve = bootstrapResolver(dir, opts);
+  const all = renderSecrets(cfg, resolve);
+  const out = Object.fromEntries(Object.entries(all).filter(([id]) => BUILD_SECRET_IDS.includes(id)));
   for (const cc of cfg.clientCertificates ?? []) {
-    const c = get(cc.key.ref);
+    const c = resolve(cc.key.ref);
     if (c) out[`infra_mtls_${cc.name.replace(/-/g, '_')}_key`] = c.pem;
   }
   return out;

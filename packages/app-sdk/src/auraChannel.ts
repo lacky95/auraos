@@ -215,6 +215,8 @@ export interface AuraApprovalResult {
   approvalId: string;
   ok: boolean;
   error?: string;
+  /** D102: the owner's optional words with a denial (`error: 'denied'`). Grants nothing. */
+  feedback?: string;
 }
 
 /**
@@ -234,13 +236,15 @@ export interface AuraUserConfirmRequest {
 /**
  * `aura.user.confirm.result`: only whether the owner confirmed, and then the
  * single-use approval id the app's server presents (consumed once). Never a
- * password, a session or a reason.
+ * password or a session. D102: `feedback`, only on a no, is the owner's own
+ * optional message typed with Deny.
  */
 export interface AuraUserConfirmResult {
   type: 'aura.user.confirm.result';
   requestId: string;
   confirmed: boolean;
   approvalId?: string;
+  feedback?: string;
 }
 
 /**

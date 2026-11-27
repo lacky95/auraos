@@ -11,7 +11,15 @@
  *   - Enter activates the focused button; in a field it is the mode's primary
  *     action, which for an approval still waits for APPROVE_DELAY_MS;
  *   - Esc (and the browser's own close request) is Deny or Cancel, never
- *     Approve.
+ *     Approve (D102: for forced and deferrable requests alike).
+ *
+ * D102: a `deferrable` request also shows Later, which puts it on hold
+ * (`POST /api/approvals/<id>/hold`): the dialog closes, the request stays
+ * pending and never pops up again by itself, and AuraOS posts one important
+ * notification. Its Review calls `window.auraOpenApproval(id)`, which reads
+ * the request again from the server and shows it here, with the Approve
+ * delay re-armed and the password and secret fields empty. Deny may carry
+ * the owner's optional feedback for the requester.
  */
 import { approvalBelongsToSender, onAuraChannel, replyTo, type AuraChannelEvent } from '../auraChannelShell.ts';
 import {
@@ -19,6 +27,8 @@ import {
   passwordTransportNote, secretTransportNotice,
   type ApprovalDialogView, type ApprovalOutcome, type ApprovalWaiterKind,
 } from './dialogClient.ts';
+import { renderMarkdown } from '../../components/shell/notifications/MarkdownField.ts';
+import { visibleText } from './visibleText.ts';
 
 interface Policy { minLength: number; requiredClasses: number; differFromUsername: boolean }
 type Mode = 'password' | 'policy';
@@ -97,6 +107,8 @@ export function initOwnerDialog(): void {
   const riskList = $<HTMLUListElement>('aura-owner-password-risk-list');
   const reasonBox = $('aura-owner-password-reason');
   const reasonText = $('aura-owner-password-reason-text');
+  const explanationBox = $('aura-owner-password-explanation');
+  const explanationBody = $('aura-owner-password-explanation-body');
   const diffBox = $<HTMLDetailsElement>('aura-owner-password-diff');
   const diffText = $('aura-owner-password-diff-text');
   const currentLabel = $('aura-owner-password-current-label');
@@ -114,6 +126,9 @@ export function initOwnerDialog(): void {
   const error = $('aura-owner-password-error');
   const cancel = $<HTMLButtonElement>('aura-owner-password-cancel');
   const blockBtn = $<HTMLButtonElement>('aura-owner-password-block');
+  const laterBtn = $<HTMLButtonElement>('aura-owner-password-later');
+  const feedbackLabel = $('aura-owner-password-feedback-label');
+  const feedback = $<HTMLTextAreaElement>('aura-owner-password-feedback');
   const submit = $<HTMLButtonElement>('aura-owner-password-submit');
   if (!dlg || !form || !current || !next || !confirm || !cancel || !submit) return;
 
@@ -130,7 +145,7 @@ export function initOwnerDialog(): void {
   }
 
   function clearFields(): void {
-    for (const input of [current, next, confirm, secret]) if (input) input.value = '';
+    for (const input of [current, next, confirm, secret, feedback]) if (input) input.value = '';
   }
 
   function finish(result: { ok: true } | { ok: false; error?: string }): void {
@@ -145,9 +160,13 @@ export function initOwnerDialog(): void {
   /** The password and policy modes' own layout (the approval mode changes it). */
   function setPasswordMode(): void {
     if (reasonBox) reasonBox.hidden = true;
+    if (explanationBox) explanationBox.hidden = true;
+    explanationBody?.replaceChildren();
     if (riskBox) riskBox.hidden = true;
     if (diffBox) diffBox.hidden = true;
     if (blockBtn) blockBtn.hidden = true;
+    if (laterBtn) laterBtn.hidden = true;
+    if (feedbackLabel) feedbackLabel.hidden = true;
     if (secretLabel) secretLabel.hidden = true;
     if (secretNotice) secretNotice.hidden = true;
     if (currentLabel) currentLabel.hidden = false;
@@ -164,6 +183,8 @@ export function initOwnerDialog(): void {
   /** The approval in the dialog now. */
   let shown: { id: string; readyAt: number; expiry: ReturnType<typeof setTimeout>; wake: ReturnType<typeof setTimeout> } | null = null;
   let busy = false;
+  /** D102: the held request the owner asked to review (Review in its notification); shown next. */
+  let reopenId: string | null = null;
 
   const clientSession = (): ClientSession | undefined => (window as unknown as { __auraClientSession?: ClientSession }).__auraClientSession;
   const locked = () => clientSession()?.lock === 'locked';
@@ -173,17 +194,22 @@ export function initOwnerDialog(): void {
     return r?.ok ? parseApprovalView(await r.json().catch(() => null), location.protocol) : null;
   }
 
-  function settle(id: string, outcome: ApprovalOutcome): void {
+  /** Close the dialog on `id` without answering anyone (a hold, a lock). */
+  function stepAside(id: string): void {
+    if (shown?.id !== id) return;
+    clearTimeout(shown.expiry);
+    clearTimeout(shown.wake);
+    shown = null;
+    clearFields();
+    hide();
+  }
+
+  function settle(id: string, outcome: ApprovalOutcome, words?: string): void {
     const entry = queue.get(id);
     queue.delete(id);
-    if (shown?.id === id) {
-      clearTimeout(shown.expiry);
-      clearTimeout(shown.wake);
-      shown = null;
-      clearFields();
-      hide();
-    }
-    for (const w of entry?.waiters ?? []) replyTo(w.ev, approvalReply(w.kind, w.ev.data['requestId'], id, outcome));
+    if (reopenId === id) reopenId = null;
+    stepAside(id);
+    for (const w of entry?.waiters ?? []) replyTo(w.ev, approvalReply(w.kind, w.ev.data['requestId'], id, outcome, words));
     pump();
   }
 
@@ -207,15 +233,36 @@ export function initOwnerDialog(): void {
     pump();
   }
 
-  /** Show the oldest open approval, unless another dialog is up or the screen is locked. */
+  /**
+   * Show the request the owner asked to review, else the oldest open one
+   * that is not on hold, unless another dialog is up or the screen is locked.
+   */
   function pump(): void {
     if (shown || pending || busy || !dlg || dlg.open || locked()) return;
     const now = Date.now();
-    for (const [id, entry] of queue) {
+    const asked = reopenId ? queue.get(reopenId) : undefined;
+    for (const [id, entry] of asked && reopenId ? [[reopenId, asked] as const, ...queue] : queue) {
       if (entry.view.expiresAt <= now) { settle(id, 'expired'); return; }
+      // D102: a held request comes back only through its Review.
+      if (entry.view.heldAt !== undefined && id !== reopenId) continue;
       showApproval(entry.view);
       return;
     }
+  }
+
+  /** D102 Review: show this request again (a held one too), read fresh from the server. */
+  async function openApproval(id: unknown): Promise<'opened' | ApprovalOutcome> {
+    if (typeof id !== 'string' || !APPROVAL_ID_RE.test(id)) return 'unavailable';
+    const view = await readApproval(id);
+    if (!view) { settle(id, 'unavailable'); return 'unavailable'; }
+    const outcome = outcomeOf(view.state);
+    if (outcome) { settle(id, outcome); return outcome; }
+    const entry = queue.get(id);
+    if (entry) entry.view = view;
+    else queue.set(id, { view, waiters: [] });
+    reopenId = id;
+    pump();
+    return 'opened';
   }
 
   function showApproval(view: ApprovalDialogView): void {
@@ -248,6 +295,12 @@ export function initOwnerDialog(): void {
     if (riskBox) riskBox.hidden = risks.length === 0;
     reasonText.textContent = view.display.reason ?? '';
     reasonBox.hidden = !view.display.reason;
+    // D109 AF2: the requester's summary as safe Markdown (no HTML node, links and images as text, nothing
+    // loaded), cleaned of invisible and bidi characters again here, in its own scroll box below the facts.
+    const explanation = view.display.explanation?.text;
+    explanationBody?.replaceChildren(...(explanation ? [renderMarkdown(visibleText(explanation), { links: 'text' })] : []));
+    if (explanationBody) explanationBody.scrollTop = 0;
+    if (explanationBox) explanationBox.hidden = !explanation;
     if (diffBox && diffText) {
       diffText.textContent = view.display.diff ?? '';
       diffBox.open = false;
@@ -274,6 +327,9 @@ export function initOwnerDialog(): void {
     const notice = secretTransportNotice(view.action, location.protocol);
     if (secretNotice) { secretNotice.textContent = notice ?? ''; secretNotice.hidden = !notice; }
     if (blockBtn) blockBtn.hidden = !view.blockable;
+    // D102: Later only for a deferrable request; feedback goes with a Deny.
+    if (laterBtn) { laterBtn.hidden = view.class !== 'deferrable'; laterBtn.disabled = false; }
+    if (feedbackLabel) feedbackLabel.hidden = false;
     cancel.textContent = 'DENY';
     submit.textContent = 'APPROVE';
     // Nothing under a click or an Enter can approve it (5.10).
@@ -290,12 +346,44 @@ export function initOwnerDialog(): void {
 
   /** Step aside while the screen locks; come back on unlock. */
   function hideForLock(): void {
-    if (!shown) return;
-    clearTimeout(shown.expiry);
-    clearTimeout(shown.wake);
-    shown = null;
-    clearFields();
-    hide();
+    if (shown) stepAside(shown.id);
+  }
+
+  /** D102 Later: hold the shown deferrable request. Answers no app: its waiters keep waiting. */
+  async function later(): Promise<void> {
+    const now = shown;
+    if (!now || busy || !error || !laterBtn || laterBtn.hidden) return;
+    const entry = queue.get(now.id);
+    if (!entry || entry.view.class !== 'deferrable') return;
+    busy = true;
+    laterBtn.disabled = true;
+    const r = await fetch(`/api/approvals/${encodeURIComponent(now.id)}/hold`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', ...(clientSession()?.headers?.() ?? {}) },
+      body: '{}',
+    }).catch(() => null);
+    busy = false;
+    laterBtn.disabled = false;
+    if (shown?.id !== now.id) return;
+    const data = (r ? await r.json().catch(() => ({})) : {}) as { error?: string; heldAt?: unknown; expiresAt?: unknown };
+    if (r?.ok) {
+      entry.view = {
+        ...entry.view,
+        heldAt: typeof data.heldAt === 'number' ? data.heldAt : Date.now(),
+        ...(typeof data.expiresAt === 'number' ? { expiresAt: data.expiresAt } : {}),
+      };
+      if (reopenId === now.id) reopenId = null;
+      stepAside(now.id);
+      pump();
+      return;
+    }
+    if (data.error === 'expired' || data.error === 'wrong-state' || data.error === 'not-found') {
+      settle(now.id, outcomeOf((await readApproval(now.id))?.state) ?? 'unavailable');
+      return;
+    }
+    error.textContent = r ? decisionErrorText(data.error, now.id) : 'Could not reach AuraOS.';
+    error.hidden = false;
   }
 
   async function decide(decision: 'approve' | 'deny', block = false): Promise<void> {
@@ -314,6 +402,8 @@ export function initOwnerDialog(): void {
       body['secret'] = secret.value;
     }
     if (block) body['block'] = true;
+    const words = decision === 'deny' ? feedback?.value.trim() || undefined : undefined;
+    if (words) body['feedback'] = words;
     busy = true;
     submit.disabled = true;
     const r = await fetch(`/api/approvals/${encodeURIComponent(now.id)}/${decision}`, {
@@ -327,7 +417,7 @@ export function initOwnerDialog(): void {
     if (current) current.value = '';
     busy = false;
     if (shown?.id !== now.id) return;
-    if (r?.ok) { settle(now.id, decision === 'approve' ? 'approved' : 'denied'); return; }
+    if (r?.ok) { settle(now.id, decision === 'approve' ? 'approved' : 'denied', words); return; }
     const data = (r ? await r.json().catch(() => ({})) : {}) as { error?: string };
     if (data.error === 'expired' || data.error === 'wrong-state' || data.error === 'not-found') {
       settle(now.id, outcomeOf((await readApproval(now.id))?.state) ?? 'unavailable');
@@ -357,7 +447,11 @@ export function initOwnerDialog(): void {
         const view = parseApprovalView(raw, location.protocol);
         if (!view || view.state !== 'pending') continue;
         open.add(view.id);
-        if (!queue.has(view.id)) queue.set(view.id, { view, waiters: [] });
+        const entry = queue.get(view.id);
+        if (!entry) { queue.set(view.id, { view, waiters: [] }); continue; }
+        entry.view = view;
+        // D102: put on hold in another tab: step aside here too (its waiters keep waiting).
+        if (view.heldAt !== undefined && shown?.id === view.id && reopenId !== view.id && !busy) stepAside(view.id);
       }
       // Decided elsewhere (another tab, `aura approve`) or gone: settle what waits here.
       for (const id of [...queue.keys()]) {
@@ -462,9 +556,9 @@ export function initOwnerDialog(): void {
 
   const usable = (el: HTMLInputElement | HTMLButtonElement) => !el.disabled && !el.closest('[hidden]');
   /** What Tab cycles through: the shown, enabled fields and buttons, in order. */
-  const controls = () => [...dlg.querySelectorAll<HTMLInputElement | HTMLButtonElement>('input, button')].filter(usable);
+  const controls = () => [...dlg.querySelectorAll<HTMLInputElement | HTMLButtonElement>('input, textarea, button')].filter(usable);
   /** What the arrows move between. */
-  const answers = () => [blockBtn, cancel, submit].filter((b): b is HTMLButtonElement => !!b && usable(b));
+  const answers = () => [blockBtn, cancel, laterBtn, submit].filter((b): b is HTMLButtonElement => !!b && usable(b));
 
   /** Esc or a close request: Deny an approval, cancel a password dialog. Never Approve. */
   function dismiss(): void {
@@ -496,7 +590,8 @@ export function initOwnerDialog(): void {
       list[Math.min(list.length - 1, Math.max(0, i + step))]!.focus();
       return;
     }
-    if (e.key === 'Enter' && at && inside && !e.altKey && !e.ctrlKey && !e.metaKey) {
+    // The feedback box takes Enter as a new line.
+    if (e.key === 'Enter' && at && inside && at.tagName !== 'TEXTAREA' && !e.altKey && !e.ctrlKey && !e.metaKey) {
       handled();
       // A held Enter from before the dialog opened answers nothing.
       if (e.repeat) return;
@@ -511,6 +606,9 @@ export function initOwnerDialog(): void {
   onAuraChannel('aura.user.confirm.request', (ev) => { void onAppRequest(ev, 'confirm'); });
   cancel.addEventListener('click', dismiss);
   blockBtn?.addEventListener('click', () => { void decide('deny', true); });
+  laterBtn?.addEventListener('click', () => { void later(); });
+  // D102: a hold notification's Review (lib/notifications/context.ts `goToContext`).
+  (window as unknown as { auraOpenApproval?: (id: unknown) => Promise<string> }).auraOpenApproval = openApproval;
   // Before the shell's own shortcuts; the open modal makes everything else inert.
   window.addEventListener('keydown', onKey, { capture: true });
   // The browser's close request (Android back, a CloseWatcher) is Esc too. If it

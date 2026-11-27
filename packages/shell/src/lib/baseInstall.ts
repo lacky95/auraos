@@ -7,13 +7,15 @@
  * the running container's base-rootfs, so the canonical list can change
  * without a rebuild. Idempotent: apt-get skips packages already present.
  *
- * Mechanism: chroot into the base-rootfs and run apt-get there. The
+ * Mechanism (the PRoot module's `baseInstall` action, core
+ * runtimes/proot/actions.ts; this route authorizes and audits, 5b PR): chroot
+ * into the base-rootfs and run apt-get there. The
  * base-rootfs is a complete Debian filesystem with its own apt config and the
  * Debian archive keyring, so apt verifies every signature as usual: the
  * route never turns that off, and a failed verification fails the request
  * (D94 G8). resolv.conf is copied in first so DNS works inside the chroot,
  * and `<rootfs>/dev/{null,zero,random,urandom}` are made the right character
- * devices (lib/chrootDevices.ts: mknod by argv, symlinks refused, a wrong
+ * devices (core runtimes/proot/chrootDevices.ts: mknod by argv, symlinks refused, a wrong
  * node replaced atomically): apt cannot verify without `/dev/null`.
  *
  * It runs as root in the master (D8/D30), so (SF-1, through the shared
@@ -31,15 +33,13 @@
  *
  * Body: `{}` or `{ packages?: string[] }` (empty or absent: the built-in list).
  */
-import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import type { ApprovalLevel } from '@aura/core';
+import { existsSync } from 'node:fs';
+import type { ApprovalLevel, ProotActionHost, RuntimeAction } from '@aura/core';
 import { json } from './approvals/service.ts';
-import { ensureChrootDevices } from './chrootDevices.ts';
 import {
-  aptInstallArgv, aptUpdateArgv, auditPrivileged, isDebianPackageName, livePrivilegedDeps, privilegedAction, runArgv,
-  UNVERIFIED_HINT, UNVERIFIED_RE, type PrivilegedDeps,
+  auditPrivileged, isDebianPackageName, livePrivilegedDeps, privilegedAction, UNVERIFIED_HINT, UNVERIFIED_RE, type PrivilegedDeps,
 } from './privilegedExec.ts';
+import { runtimeAction } from './runtimeActions.ts';
 
 export { APT_VERIFY_ARGS } from './privilegedExec.ts';
 
@@ -60,11 +60,9 @@ export const BASE_INSTALL_AUDIT_ACTION = 'base-rootfs.install';
 
 type Ctx = Parameters<PrivilegedDeps['ownerAction']>[0];
 
-export interface BaseInstallDeps extends PrivilegedDeps {
-  /** Stages the master's resolv.conf into the chroot; returns whether it did. */
-  stageResolvConf(baseRootfs: string): boolean;
-  /** Makes `<rootfs>/dev/{null,zero,random,urandom}` the right devices (fails closed); returns what it changed. */
-  ensureDevices(baseRootfs: string): string[];
+export interface BaseInstallDeps extends PrivilegedDeps, Pick<ProotActionHost, 'stageResolvConf' | 'ensureDevices'> {
+  /** The PRoot module's `baseInstall` action: the mechanism (this route only authorizes and audits). */
+  action(): RuntimeAction | Response;
   exists(path: string): boolean;
   baseRootfs: string;
 }
@@ -72,14 +70,7 @@ export interface BaseInstallDeps extends PrivilegedDeps {
 export function liveBaseInstallDeps(): BaseInstallDeps {
   return {
     ...livePrivilegedDeps(),
-    stageResolvConf: (baseRootfs) => {
-      if (!existsSync('/etc/resolv.conf')) return false;
-      const dst = join(baseRootfs, 'etc', 'resolv.conf');
-      mkdirSync(dirname(dst), { recursive: true });
-      copyFileSync('/etc/resolv.conf', dst);
-      return true;
-    },
-    ensureDevices: (baseRootfs) => ensureChrootDevices(baseRootfs, runArgv),
+    action: () => runtimeAction('proot', 'baseInstall'),
     exists: existsSync,
     baseRootfs: process.env['AURA_BASE_ROOTFS'] ?? '/os/base-rootfs',
   };
@@ -129,6 +120,8 @@ export async function postBaseInstall(ctx: Ctx, deps: BaseInstallDeps = liveBase
   const { packages } = parsed;
 
   const { baseRootfs } = deps;
+  const action = deps.action();
+  if (action instanceof Response) return action;
   if (!deps.exists(baseRootfs)) return json({ error: `base-rootfs not found: ${baseRootfs}` }, 500);
 
   // The approval binds its payload's hash: this operation on exactly this
@@ -146,12 +139,15 @@ export async function postBaseInstall(ctx: Ctx, deps: BaseInstallDeps = liveBase
 
   const log: string[] = [];
   const target = `rootfs:${baseRootfs}`;
+  const host: ProotActionHost = {
+    run: deps.run,
+    ...(deps.stageResolvConf ? { stageResolvConf: deps.stageResolvConf } : {}),
+    ...(deps.ensureDevices ? { ensureDevices: deps.ensureDevices } : {}),
+  };
   try {
-    if (deps.stageResolvConf(baseRootfs)) log.push('staged /etc/resolv.conf for chroot DNS');
-    log.push(...deps.ensureDevices(baseRootfs));
-    log.push(deps.run('chroot', [baseRootfs, ...aptUpdateArgv()], { timeoutMs: 60_000 }));
-    log.push(deps.run('chroot', [baseRootfs, ...aptInstallArgv(packages)], { timeoutMs: 300_000 }));
+    log.push(...((await action.run({ packages }, host))['log'] as string[]));
   } catch (err) {
+    log.push(...((err as { log?: string[] }).log ?? []));
     const message = (err as Error).message;
     await auditPrivileged(deps, actor, BASE_INSTALL_AUDIT_ACTION, { target, outcome: 'failed', detail: { packages, level }, error: message });
     return json({ error: message, log, ...(UNVERIFIED_RE.test(message) ? { hint: UNVERIFIED_HINT } : {}) }, 500);

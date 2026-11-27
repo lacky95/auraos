@@ -201,7 +201,7 @@ test('no shell code reads or writes a per-user preference in the shared os names
   const keys = USER_PREF_KEYS.join('|');
   const pattern = new RegExp(`['"\`]os['"\`]\\s*,\\s*['"\`](${keys})['"\`]`);
   // Allowed: seeding the shared fallback (first boot) and the fresh-install probe.
-  const allowed = new Set(['src/lib/kvBootstrap.ts', 'src/middleware.ts']);
+  const allowed = new Set(['src/middleware.ts']); // the seed moved to core (system/kvBootstrap.ts, Phase 6 K)
   const hits: string[] = [];
   const walk = (dir: string) => {
     for (const name of readdirSync(join(root, dir))) {

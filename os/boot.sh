@@ -26,6 +26,13 @@ set -u
 SHELL_MODE_FILE=/data/aura/shell-mode
 SHELL_MODE="${AURA_SHELL_MODE:-$(tr -d '[:space:]' < "$SHELL_MODE_FILE" 2>/dev/null)}"
 case "$SHELL_MODE" in prod|dev) ;; *) SHELL_MODE=dev ;; esac
+# Composition (D76, Phase 6 W): AURA_COMPOSITION, else /data/aura/composition, else
+# desktop. `server` builds and serves the shell with no Web Shell (Headless); the
+# kernel, API, App Hosts and WS proxy are the same. Exported for the build and the shell.
+COMPOSITION_FILE=/data/aura/composition
+COMPOSITION="${AURA_COMPOSITION:-$(tr -d '[:space:]' < "$COMPOSITION_FILE" 2>/dev/null)}"
+case "$COMPOSITION" in server|desktop) ;; *) COMPOSITION=desktop ;; esac
+export AURA_COMPOSITION="$COMPOSITION"
 # Prod only: AURA_SHELL_WATCH=1 (or "1"/"on" in /data/aura/shell-watch) makes
 # the running prod shell rebuild itself on source saves and swap to the new
 # build in-process (packages/shell/server/watchRebuild.mjs) — live changes on
@@ -84,7 +91,25 @@ if [ "${AURA_BOOT_SPLASH:-1}" != "0" ] && [ -f /workspace/os/boot-splash.mjs ]; 
 fi
 
 phase installing
-run pnpm install \
+# D94: `pnpm install` goes through the infrastructure config (registry, proxy
+# without credentials, CA). os/infra/render.mjs renders the stored config into
+# /data/aura/infra/generated/current (a no-op when unchanged; nothing without a
+# config), linked at /etc/aura/infra, where every rendered path points. The env
+# is applied to this step only here; the kernel's own propagation is IC-5.
+INFRA_ENV= INFRA_NPMRC=
+if [ -f /data/aura/infra/config.yaml ]; then
+  if run node /workspace/os/infra/render.mjs apply --data /data && [ -f /data/aura/infra/generated/current/env.sh ]; then
+    mkdir -p /etc/aura && ln -sfn /data/aura/infra/generated/current /etc/aura/infra
+    INFRA_ENV=/etc/aura/infra/env.sh
+    # pnpm reads no global npmrc: the boot's install uses the rendered one as
+    # its user config, unless the master has its own ~/.npmrc (that wins).
+    if [ -f /etc/aura/infra/npmrc ] && [ ! -f "$HOME/.npmrc" ]; then INFRA_NPMRC=/etc/aura/infra/npmrc; fi
+  else
+    echo '[aura] boot: the infrastructure config was not applied (see above): pnpm install runs without it — aura admin infra doctor' | tee -a "$LOG"
+  fi
+fi
+# shellcheck disable=SC1090
+run sh -c '[ -z "$1" ] || . "$1"; [ -z "$2" ] || export NPM_CONFIG_USERCONFIG="$2"; exec pnpm install' boot-install "$INFRA_ENV" "$INFRA_NPMRC" \
   || echo '[aura] pnpm install exited non-zero (likely ERR_PNPM_IGNORED_BUILDS) — continuing' | tee -a "$LOG"
 
 phase building
@@ -123,7 +148,9 @@ BUILD_PACKAGES=/workspace/os/build-packages.sh
 
 stamp_of() { grep "^$1 " "$BUILD_STAMP" 2>/dev/null | cut -d' ' -f2; }
 output_ok() {
-  if [ "$1" = shell ]; then [ -f "/workspace/packages/shell/$SHELL_PROD_DIST/server/entry.mjs" ]
+  # The prod shell build must also be of this composition (its .aura-composition marker).
+  if [ "$1" = shell ]; then [ -f "/workspace/packages/shell/$SHELL_PROD_DIST/server/entry.mjs" ] \
+    && grep -q "\"composition\": \"$COMPOSITION\"" "/workspace/packages/shell/$SHELL_PROD_DIST/.aura-composition" 2>/dev/null
   else [ -d "/workspace/packages/$1/dist" ]; fi
 }
 
@@ -189,12 +216,6 @@ install -D -m 0755 /workspace/os/aura-cli-shim.sh /usr/local/bin/aura \
 phase starting
 (pnpm --filter @aura/cli build:watch &)
 stop_splash
-# The OS boots (Valkey, AppManager, services, onboarding) on the shell's first
-# request (packages/shell/src/middleware.ts). Send that request ourselves, so
-# `compose up` alone brings everything up — not only once a browser or the
-# CLI happens to call in. Both shell modes serve :3000.
-( until curl -sf -o /dev/null --max-time 60 http://127.0.0.1:3000/api/apps; do sleep 2; done
-  echo '[aura] boot: shell warmed up' ) &
 if [ "$SHELL_MODE" = prod ]; then
   echo "[aura] boot: shell mode prod (packages/shell/server.mjs)${AURA_SHELL_WATCH:+, watching sources for live rebuilds}" | tee -a "$LOG"
   # node itself is PID 1: SIGTERM to a PID 1 without a handler is dropped,
@@ -206,4 +227,7 @@ fi
 # Astro 7: stay in the foreground under an agent (ASTRO_DEV_BACKGROUND=0) and
 # skip the .astro/dev.json lock (--ignore-lock) — boot supervises the shell,
 # exactly as with Astro 6 (provisioning.ts ASTRO_START_SHELL does the same).
-ASTRO_DEV_BACKGROUND=0 exec pnpm --filter @aura/shell dev --host 0.0.0.0 --ignore-lock
+# node is PID 1 here too (not the pnpm launcher, which drops SIGTERM as PID 1):
+# docker stop runs the kernel shutdown (Phase 6 K, D77) in both shell modes.
+cd /workspace/packages/shell || fail starting
+ASTRO_DEV_BACKGROUND=0 PATH="/workspace/packages/shell/node_modules/.bin:$PATH" exec astro dev --host 0.0.0.0 --ignore-lock

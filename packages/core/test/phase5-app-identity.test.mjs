@@ -8,6 +8,8 @@
 
 import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+// The composition root (system/compose.ts, Phase 6 K) wires the service accessors when the barrel loads.
+import '../dist/index.js';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync,
@@ -25,8 +27,8 @@ import { buildOwnershipReport } from '../dist/identity/ownershipReport.js';
 import { APP_MIGRATION, buildPrivilegeReview, manifestPrivilegeNeeds } from '../dist/identity/privilegeReview.js';
 import { newInstallationRunAs } from '../dist/identity/types.js';
 import {
-  containerIdentityArgs, identityFilesSubpath, renderIdentityFiles, sidecarIdentityArgs, writeIdentityFiles,
-} from '../dist/app-manager/spawn/identityArgs.js';
+  containerIdentityArgs, identityFilesSubpath, inheritHomeUser, renderIdentityFiles, sidecarIdentityArgs, writeIdentityFiles,
+} from '../dist/runtimes/spawn/identityArgs.js';
 import {
   ASTRO_START_SHELL, BUILDER_CACHE_PATH, RAW_START_SHELL, builderProvisionEnv, builderProvisionShell, PROVISION_BEGIN,
 } from '../dist/app-manager/provisioning.js';
@@ -83,6 +85,40 @@ test('setRunAs: the owner flip, compare-and-set, and the per-app rollback', asyn
   assert.equal((await reg.getInstallation(inst.installationId)).runAs, 'root');
   await assert.rejects(reg.setRunAs(inst.installationId, 'admin'), /invalid runAs/);
   assert.deepEqual(await reg.setRunAs('no-such-installation', 'app'), { ok: false, installation: null });
+});
+
+test('run-as migration record: marked before the change (CAS, one at a time), cleared with the flip, which names its journal', async () => {
+  const reg = createAppHostRegistry(r);
+  const inst = await reg.createInstallation({ appId: 'org.a.migrate', originId: null, scope: 'global', source: SRC });
+  const id = inst.installationId;
+  const m = { to: 'app', digest: 'a'.repeat(64), journal: '2026-11-27T10-00-00-000Z-aaaaaaaaaaaa.ndjson', startedAt: 1 };
+  await assert.rejects(reg.setRunAsMigration(id, 'root', { ...m, journal: '../x' }), /invalid run-as migration/);
+  assert.equal((await reg.setRunAsMigration(id, 'app', m)).ok, false, 'from the runAs it is not: refused');
+  assert.equal((await reg.setRunAsMigration(id, 'root', m)).ok, true);
+  assert.deepEqual((await reg.getInstallation(id)).runAsMigration, m);
+  assert.equal((await reg.setRunAsMigration(id, 'root', { ...m, digest: 'b'.repeat(64) })).ok, false, 'one migration at a time');
+  // A plain flip (not the migration's) keeps the marker; the migration's flip ends it.
+  const flipped = await reg.setRunAs(id, 'app', 'root', undefined, { journal: m.journal });
+  assert.equal(flipped.ok, true);
+  const rec = await reg.getInstallation(id);
+  assert.deepEqual([rec.runAs, rec.runAsMigration, rec.runAsJournal], ['app', undefined, m.journal]);
+  // Cleared without a flip (a restored failure or recovery).
+  assert.equal((await reg.setRunAsMigration(id, 'app', { ...m, to: 'root' })).ok, true);
+  assert.equal((await reg.setRunAsMigration(id, 'app', null)).ok, true);
+  const back = await reg.getInstallation(id);
+  assert.deepEqual([back.runAs, back.runAsMigration, back.runAsJournal], ['app', undefined, m.journal], 'the journal stays for the flip back');
+});
+
+test('an install that approves a root request flips only a new record; an app-uid installation keeps runAs app (its data moves with the migration)', async () => {
+  const reg = createAppHostRegistry(r);
+  const life = new AppHostLifecycle(reg);
+  const approval = { runAs: 'root', digest: `sha256:${'c'.repeat(64)}`, approvedAt: 1, via: 'nexus.install' };
+  const a = (await life.sync({ appId: 'org.a.rq1', originId: null, scope: 'global', source: SRC })).installation;
+  assert.equal(a.runAs, 'app');
+  await assert.rejects(life.approveExecution('org.a.rq1', 'global', approval), /run-as migration/);
+  assert.equal((await reg.getInstallation(a.installationId)).runAs, 'app');
+  const fresh = await life.approveExecution('org.a.rq1', 'global', approval, { newRecord: true });
+  assert.deepEqual([fresh.runAs, fresh.execution.digest], ['root', approval.digest]);
 });
 
 // ── the identity provider: no root fallback ─────────────────────────────────
@@ -154,14 +190,22 @@ test('identity files: deterministic, the app account with pw_dir /home/aura, wri
   assert.equal(statSync(join(out, 'passwd')).mode & 0o777, 0o644);
 });
 
-test('sidecars keep their image user; only an aura-base inheritHome sidecar of an app runs as the app', () => {
+test('sidecars keep their image user; every inheritHome sidecar runs as its app, whatever the image (B12)', () => {
   const opts = { appDataVolume: 'vol', instanceId: 'org.b.board', baseImage: 'aura-base' };
-  assert.deepEqual(sidecarIdentityArgs({ image: 'trilium', inheritHome: false }, APP, opts), [], 'foreign image');
-  assert.deepEqual(sidecarIdentityArgs({ image: 'canvas', inheritHome: false, user: '0:0' }, APP, opts), [], 'explicit user wins');
+  const NO_PRIV = ['--cap-drop', 'ALL', '--security-opt', 'no-new-privileges'];
+  assert.deepEqual(sidecarIdentityArgs({ image: 'trilium', inheritHome: false }, APP, opts), [], 'foreign image without the home');
+  assert.deepEqual(sidecarIdentityArgs({ image: 'canvas', inheritHome: false, user: '0:0' }, APP, opts), [], 'explicit user wins without the home');
   assert.deepEqual(sidecarIdentityArgs({ image: 'aura-base', inheritHome: false }, APP, opts), [], 'aura-base without the home');
-  assert.deepEqual(sidecarIdentityArgs({ image: 'aura-base', inheritHome: true }, { uid: 0, gid: 0, range: 'root' }, opts), [], 'root parent');
+  // B12: a root installation's home sidecar keeps its image user, never with capabilities.
+  assert.deepEqual(sidecarIdentityArgs({ image: 'aura-base', inheritHome: true }, { uid: 0, gid: 0, range: 'root' }, opts), NO_PRIV, 'root parent');
+  assert.deepEqual(sidecarIdentityArgs({ image: 'ghcr.io/x/webui:1', inheritHome: true }, undefined, opts), NO_PRIV, 'root parent, foreign image');
   const s = sidecarIdentityArgs({ image: 'aura-base', inheritHome: true }, APP, opts);
-  assert.deepEqual(s.slice(0, 6), ['--user', '200007:200007', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges']);
+  assert.deepEqual(s.slice(0, 6), ['--user', '200007:200007', ...NO_PRIV]);
+  assert.ok(s.some((a) => a.includes('target=/etc/passwd')), 'aura-base: the identity files');
+  // B12: a foreign image with the home runs as the app too (its own /etc/passwd stays).
+  assert.deepEqual(sidecarIdentityArgs({ image: 'ghcr.io/x/webui:1', inheritHome: true }, APP, opts), ['--user', '200007:200007', ...NO_PRIV]);
+  assert.equal(inheritHomeUser(APP), '200007:200007');
+  assert.equal(inheritHomeUser({ uid: 0, gid: 0, range: 'root' }), null);
 });
 
 test('adoption keeps the latched identity from Config.User (D77)', () => {

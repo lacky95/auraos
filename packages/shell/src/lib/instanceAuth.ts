@@ -1,5 +1,8 @@
 import { getAppManager, type AccessPrincipal, type ExecBridgeError } from '@aura/core';
+import * as core from '@aura/core';
+import { capabilityRefusal, refusalResponse } from './runtimeCaps.ts';
 import { errorResponse, jsonResponse } from './appResponse.js';
+import type { AuraErrorBody } from '@aura/core';
 import { isOwnerPrincipal, isTrustedOwnerAgent } from './access/identify.ts';
 
 /**
@@ -46,17 +49,29 @@ export function sidecarTarget(
   if (p?.kind !== 'instance' || p.instanceId !== instanceId) {
     return errorResponse('send Authorization: Bearer $AURA_INSTANCE_TOKEN (the OS injects it into every app container)', 401);
   }
-  if (instance.sandbox && instance.sandbox !== 'container') {
-    return errorResponse(`${instanceId} runs in a '${instance.sandbox}' sandbox; OS sidecars need sandbox: container`, 409);
-  }
+  // OS sidecars need the runtime's `sidecars` capability (5b G), whatever the runtime is called.
+  const refused = capabilityRefusal(instanceId, core.requestNeeds('sidecars'), 'OS sidecars', mgr);
+  if (refused) return refused;
   return { mgr, instance, caller: { instanceId, ...(p.sidecar ? { sidecar: p.sidecar } : {}) } };
 }
 
-/** Map a SidecarManager / MountManager failure to a status. */
+/**
+ * Map a SidecarManager / MountManager failure to a status. A runtime refusal
+ * (D107 isolation, a capability) is the 409 D105 body (`refusalResponse`); a
+ * failure that names a code (e.g. `image_auth`) answers the one error body,
+ * `error` the code and `message` the sentence (D105; the SDK reads `error`).
+ */
 export function sidecarError(err: unknown): Response {
-  const status = (err as { status?: unknown })?.status;
+  const refused = refusalResponse(err);
+  if (refused) return refused;
+  const { status, code, body } = (err ?? {}) as { status?: unknown; code?: unknown; body?: AuraErrorBody };
   const message = err instanceof Error ? err.message : String(err);
-  if (typeof status === 'number') return errorResponse(message, status);
+  // A refusal that carries its D105 body (e.g. B12 sidecar-identity-conflict) answers it as is.
+  if (typeof status === 'number' && body && typeof body.error === 'string' && typeof body.message === 'string') return errorResponse(status, body);
+  if (typeof status === 'number') {
+    return typeof code === 'string' && /^[a-z_]{1,32}$/.test(code)
+      ? errorResponse(status, { error: code, message }) : errorResponse(message, status);
+  }
   if (/no OS sidecar|not mounted|not found/i.test(message)) return errorResponse(message, 404);
   if (/already mounted|unavailable|refusing|inherited from|no mount root/i.test(message)) return errorResponse(message, 409);
   return errorResponse(message, 500);
@@ -102,6 +117,9 @@ export function execCaller(
 export function execError(err: unknown): Response {
   // By name, not instanceof: under `astro dev` core can load twice (SSR and Node's loader).
   const e = err as Partial<ExecBridgeError> | null;
-  if (e?.name === 'ExecBridgeError' && typeof e.status === 'number') return jsonResponse({ error: e.message, code: e.code }, e.status);
+  // The one error body (D105): `error` is the code, `message` the sentence, `category` what a client may do.
+  if (e?.name === 'ExecBridgeError' && typeof e.status === 'number') {
+    return errorResponse(e.status, { error: e.code ?? 'error', message: e.message ?? '', ...(e.category ? { category: e.category } : {}) });
+  }
   return errorResponse(err instanceof Error ? err.message : String(err), 500);
 }
