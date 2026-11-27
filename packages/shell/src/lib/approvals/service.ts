@@ -381,23 +381,27 @@ export function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: HEADERS });
 }
 
-/** Each store refusal as its answer. */
+/** The status and closed code of each store refusal (the text is core's APPROVAL_REFUSAL_TEXT). */
+const REFUSAL_ANSWER: Readonly<Record<ApprovalRefusal | 'not-a-requester', { status: number; error: string; category: core.ErrorCategory }>> = {
+  'not-found': { status: 404, error: 'not-found', category: 'not-found' },
+  expired: { status: 410, error: 'expired', category: 'needs-approval' },
+  'too-many-pending': { status: 429, error: 'too-many-pending', category: 'resource-exhausted' },
+  'rate-limited': { status: 429, error: 'rate-limited', category: 'resource-exhausted' },
+  blocked: { status: 403, error: 'blocked', category: 'not-grantable' },
+  'needs-fresh-auth': { status: 403, error: 'needs-fresh-auth', category: 'needs-approval' },
+  'not-a-decider': { status: 403, error: 'decider-required', category: 'not-grantable' },
+  'not-a-requester': { status: 403, error: 'requester-required', category: 'not-grantable' },
+  mismatch: { status: 409, error: 'mismatch', category: 'conflict' },
+  'not-deferrable': { status: 409, error: 'not-deferrable', category: 'conflict' },
+  stale: { status: 409, error: 'stale', category: 'conflict' },
+  'wrong-state': { status: 409, error: 'wrong-state', category: 'conflict' },
+};
+
+/** Each store refusal as its answer: the code, one sentence and the step (D105 Pass B). */
 export function refusal(reason: ApprovalRefusal | 'not-a-requester'): Response {
-  switch (reason) {
-    case 'not-found': return json({ error: 'not-found' }, 404);
-    case 'expired': return json({ error: 'expired' }, 410);
-    case 'too-many-pending': return json({ error: 'too-many-pending', message: 'An earlier request is still waiting for the owner (or on hold in the desktop): withdraw it or wait.' }, 429);
-    case 'rate-limited': return json({ error: 'rate-limited' }, 429);
-    case 'blocked': return json({ error: 'blocked', message: 'The owner blocked approval requests from this app.' }, 403);
-    case 'needs-fresh-auth': return json({ error: 'needs-fresh-auth' }, 403);
-    case 'not-a-decider': return json({ error: 'decider-required' }, 403);
-    case 'not-a-requester': return json({ error: 'requester-required' }, 403);
-    case 'mismatch': return json({ error: 'mismatch' }, 409);
-    case 'not-deferrable': return json({ error: 'not-deferrable', message: 'This request must be decided now: approve or deny it.' }, 409);
-    case 'stale': return json({ error: 'stale', message: 'This request is no longer valid and was cancelled. Ask again.' }, 409);
-    case 'wrong-state':
-    default: return json({ error: 'wrong-state' }, 409);
-  }
+  const answer = REFUSAL_ANSWER[reason] ?? REFUSAL_ANSWER['wrong-state'];
+  const text = core.APPROVAL_REFUSAL_TEXT[reason] ?? core.APPROVAL_REFUSAL_TEXT['wrong-state'];
+  return json({ error: answer.error, category: answer.category, message: text.message, ...(text.hint ? { hint: text.hint } : {}) }, answer.status);
 }
 
 /**

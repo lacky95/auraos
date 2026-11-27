@@ -111,18 +111,23 @@ const refuse = (code, message) => { throw new BuildError(code, message, { exit: 
 
 // ── process helpers ─────────────────────────────────────────────────────────
 
-/** `git archive <commit> | tar -x -C dir`, both statuses checked. */
-function archiveInto(mirror, commit, dir, env) {
-  return new Promise((resolve) => {
-    const ga = spawn('git', ['-C', mirror, 'archive', '--format=tar', commit], { env, stdio: ['ignore', 'pipe', 'pipe'] });
-    const tar = spawn('tar', ['-x', '-C', dir], { stdio: ['pipe', 'ignore', 'pipe'] });
-    let err = '';
-    ga.stderr.on('data', (d) => { err += d; });
-    tar.stderr.on('data', (d) => { err += d; });
-    ga.stdout.pipe(tar.stdin);
-    let gaCode = null;
-    ga.on('close', (c) => { gaCode = c; });
-    tar.on('close', (c) => resolve({ ok: c === 0 && gaCode === 0, err }));
+/**
+ * `git archive <commit> | tar -x -C dir`, both statuses checked. Resolves only after BOTH processes closed:
+ * tar can finish (its stdin at EOF) before git's own exit is seen, and reading git's status then (null) failed
+ * a good extraction with an empty error (the flaky release-builder tests of 2026-11-27).
+ */
+export function archiveInto(mirror, commit, dir, env) {
+  const closed = (p) => new Promise((res) => { p.on('error', (e) => res({ code: 127, error: e.message })); p.on('close', (code, signal) => res({ code, signal })); });
+  const ga = spawn('git', ['-C', mirror, 'archive', '--format=tar', commit], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const tar = spawn('tar', ['-x', '-C', dir], { stdio: ['pipe', 'ignore', 'pipe'] });
+  let err = '';
+  ga.stderr.on('data', (d) => { err += d; });
+  tar.stderr.on('data', (d) => { err += d; });
+  tar.stdin.on('error', () => { /* tar died early: its status says so */ });
+  ga.stdout.pipe(tar.stdin);
+  return Promise.all([closed(ga), closed(tar)]).then(([g, t]) => {
+    const why = [g.code !== 0 && `git archive exit ${g.code ?? g.signal}${g.error ? ` (${g.error})` : ''}`, t.code !== 0 && `tar exit ${t.code ?? t.signal}${t.error ? ` (${t.error})` : ''}`].filter(Boolean);
+    return { ok: !why.length, err: `${why.join('; ')}${why.length && err ? ': ' : ''}${err}`.trim() };
   });
 }
 

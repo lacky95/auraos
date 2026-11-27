@@ -142,7 +142,26 @@ export interface ResolveContext {
 }
 
 export class SpecError extends Error {
-  constructor(readonly status: number, message: string) { super(message); }
+  /** The D105 body, when the refusal names its facts (code, permission, fix). */
+  readonly body?: AuraErrorBody;
+  constructor(readonly status: number, message: string, facts?: Omit<AuraErrorBody, 'message'>) {
+    super(message);
+    if (facts) this.body = { ...facts, message };
+  }
+}
+
+/**
+ * A sidecar permission the app does not declare (D105 Pass B, review row 15):
+ * the access layer's shape (`access-denied` · `missing-permission`), the
+ * permission, and the owner's command. The caller is the app itself (or one
+ * of its sidecars), so its own id is named.
+ */
+export function sidecarPermissionError(appId: string, permission: string, message: string): SpecError {
+  return new SpecError(403, message, {
+    error: 'access-denied', reason: 'missing-permission', category: 'missing-declaration',
+    permission, holder: 'caller', manifestField: 'permissions[]', target: appId,
+    hint: `Add "${permission}" to permissions[] in app.manifest.json, or the owner adds it: aura grant perms ${appId} ${permission}.`,
+  });
 }
 
 /**
@@ -152,7 +171,7 @@ export class SpecError extends Error {
  */
 export class SidecarIdentityError extends SpecError {
   readonly code = 'sidecar-identity-conflict';
-  readonly body: AuraErrorBody;
+  override readonly body: AuraErrorBody;
   constructor(appId: string, template: string, user: string, appUser: string) {
     const message = `template '${template}' sets user '${user}' and inheritHome: a sidecar with ${appId}'s home runs as `
       + `the app's identity (${appUser}), so it is not created`;
@@ -228,7 +247,7 @@ export function resolveSidecarSpec(req: SidecarSpawnRequest, ctx: ResolveContext
   }
 
   if (req.image && req.image !== tpl.image && !ctx.can('sidecars.anyImage')) {
-    throw new SpecError(403, `${ctx.appId} is not granted 'sidecars.anyImage' — it can only run its services[] templates' images`);
+    throw sidecarPermissionError(ctx.appId, 'sidecars.anyImage', `${ctx.appId} is not granted 'sidecars.anyImage' — it can only run its services[] templates' images`);
   }
 
   const privileged = tpl.privileged === true;
@@ -236,7 +255,7 @@ export function resolveSidecarSpec(req: SidecarSpawnRequest, ctx: ResolveContext
   const devices = tpl.devices ?? [];
   const publish = tpl.publish ?? [];
   if ((privileged || capabilities.length || devices.length || publish.length) && !ctx.can('sidecars.privileged')) {
-    throw new SpecError(403, `template '${tpl.name}' uses privileged/capabilities/devices/publish — ${ctx.appId} needs 'sidecars.privileged'`);
+    throw sidecarPermissionError(ctx.appId, 'sidecars.privileged', `template '${tpl.name}' uses privileged/capabilities/devices/publish — ${ctx.appId} needs 'sidecars.privileged'`);
   }
   if (tpl.inheritDockerSocket) {
     // Stream J.7 (D54/D55): no sidecar gets the Docker socket; OS sidecars (sidecars.spawn) replace it.
@@ -253,7 +272,7 @@ export function resolveSidecarSpec(req: SidecarSpawnRequest, ctx: ResolveContext
   // app must hold the permission. (inheritTools shares the app's own dir and
   // needs nothing extra.)
   if (tpl.tools && !ctx.can('sidecars.tools')) {
-    throw new SpecError(403, `template '${tpl.name}' declares tools — ${ctx.appId} needs 'sidecars.tools' to grant tools to its sidecars (aura grant perms ${ctx.appId} sidecars.tools)`);
+    throw sidecarPermissionError(ctx.appId, 'sidecars.tools', `template '${tpl.name}' declares tools — ${ctx.appId} needs 'sidecars.tools' to grant tools to its sidecars (aura grant perms ${ctx.appId} sidecars.tools)`);
   }
   if (tpl.inheritHome && (tpl.volumes ?? []).some((v) => v.target.replace(/\/+$/, '') === SHARED_HOME_PATH)) {
     throw new SpecError(400, `template '${tpl.name}' sets inheritHome and also mounts a volume at ${SHARED_HOME_PATH} — drop one of them`);

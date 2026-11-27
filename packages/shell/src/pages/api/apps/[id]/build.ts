@@ -1,6 +1,6 @@
 import type { APIRoute } from 'astro';
 import { getAppManager } from '@aura/core';
-import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
+import { jsonResponse, errorResponse, failureResponse } from '../../../../lib/appResponse.js';
 import { buildApps } from '../../../../lib/appBuilds.js';
 
 /**
@@ -9,7 +9,7 @@ import { buildApps } from '../../../../lib/appBuilds.js';
  * its running instances now (windows come back). See lib/appBuilds.ts.
  * Answers when the build is done (can take a minute).
  */
-export const POST: APIRoute = async ({ params, request }) => {
+export const POST: APIRoute = async ({ params, request, locals }) => {
   const appId = params['id'];
   if (!appId) return errorResponse('Missing app id', 400);
   if (!getAppManager().getManifest(appId)) return errorResponse(`App not found: ${appId}`, 404);
@@ -19,6 +19,6 @@ export const POST: APIRoute = async ({ params, request }) => {
     const [res] = await buildApps([appId], { force: body.force === true, restart: body.restart === true });
     return jsonResponse(res, res?.ok ? 200 : 500);
   } catch (err) {
-    return errorResponse(String(err), 500);
+    return failureResponse({ request, locals }, err);
   }
 };

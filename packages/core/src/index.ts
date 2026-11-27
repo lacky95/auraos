@@ -33,6 +33,7 @@ export * from './app-hosts/auraChannel.js';
 export { RELAY_CLAIM_HEADER, RELAY_CLAIM_TTL_S, relayKey, verifyRelayClaim, type RelayClaim } from './app-hosts/relayClaim.js';
 export type * from './app-hosts/contracts.js';
 export type * from './errors/contracts.js';
+export { AuraError, auraErrorOf, sourceClosedBody } from './errors/auraError.js';
 export * from './app-hosts/AppHostRegistry.js';
 export * from './app-hosts/lifecycle.js';
 export * from './app-hosts/manifestHostGuard.js';

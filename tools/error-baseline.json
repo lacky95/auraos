@@ -1,0 +1,315 @@
+{
+  "note": "D105 Pass B error-answer debt per file and rule (tools/error-lint.mjs). It only shrinks: new code uses errorResponse(status, body) / failureResponse.",
+  "files": {
+    "packages/shell/src/lib/appCheckout.ts": {
+      "raw-error": 3
+    },
+    "packages/shell/src/lib/appRunAs.ts": {
+      "raw-error": 4
+    },
+    "packages/shell/src/lib/appSource.ts": {
+      "raw-error": 11
+    },
+    "packages/shell/src/lib/approvals/nexus.ts": {
+      "old-form": 1
+    },
+    "packages/shell/src/lib/auth.ts": {
+      "old-form": 3
+    },
+    "packages/shell/src/lib/capabilities.ts": {
+      "raw-error": 4
+    },
+    "packages/shell/src/lib/homesAdmin.ts": {
+      "raw-error": 5
+    },
+    "packages/shell/src/lib/instanceAuth.ts": {
+      "old-form": 9,
+      "raw-error": 2
+    },
+    "packages/shell/src/lib/nexusErrors.ts": {
+      "old-form": 1
+    },
+    "packages/shell/src/lib/nexusIdentity.ts": {
+      "old-form": 2
+    },
+    "packages/shell/src/lib/nexusListing.ts": {
+      "raw-error": 1
+    },
+    "packages/shell/src/lib/notificationCaller.ts": {
+      "old-form": 3
+    },
+    "packages/shell/src/lib/prootUpgrade.ts": {
+      "raw-error": 1
+    },
+    "packages/shell/src/lib/securityOptions.ts": {
+      "raw-error": 1
+    },
+    "packages/shell/src/lib/terminalAgents.ts": {
+      "raw-error": 1
+    },
+    "packages/shell/src/lib/terminalScreen.ts": {
+      "raw-error": 1
+    },
+    "packages/shell/src/lib/usersAdmin.ts": {
+      "raw-error": 3
+    },
+    "packages/shell/src/pages/api/activities/[activityId]/back-to.ts": {
+      "old-form": 4
+    },
+    "packages/shell/src/pages/api/activities/[activityId]/back.ts": {
+      "old-form": 1
+    },
+    "packages/shell/src/pages/api/activities/[activityId]/breadcrumb.ts": {
+      "old-form": 5
+    },
+    "packages/shell/src/pages/api/activities/[activityId]/close.ts": {
+      "old-form": 1
+    },
+    "packages/shell/src/pages/api/activities/[activityId]/flight/[action].ts": {
+      "old-form": 6
+    },
+    "packages/shell/src/pages/api/activities/[activityId]/flight/index.ts": {
+      "old-form": 4
+    },
+    "packages/shell/src/pages/api/activities/[activityId]/flight/notify.ts": {
+      "old-form": 5,
+      "raw-error": 1
+    },
+    "packages/shell/src/pages/api/activities/[activityId]/navigate.ts": {
+      "old-form": 5
+    },
+    "packages/shell/src/pages/api/activities/[activityId]/state.ts": {
+      "old-form": 7
+    },
+    "packages/shell/src/pages/api/admin/app-origin.ts": {
+      "raw-error": 2
+    },
+    "packages/shell/src/pages/api/admin/apps/enabled.ts": {
+      "raw-error": 1
+    },
+    "packages/shell/src/pages/api/admin/cap-refresh.ts": {
+      "ad-hoc": 2,
+      "raw-error": 1
+    },
+    "packages/shell/src/pages/api/admin/clone-app.ts": {
+      "raw-error": 4
+    },
+    "packages/shell/src/pages/api/admin/grants.ts": {
+      "raw-error": 1
+    },
+    "packages/shell/src/pages/api/admin/manifest-edit.ts": {
+      "raw-error": 4
+    },
+    "packages/shell/src/pages/api/admin/notifications/release.ts": {
+      "old-form": 2
+    },
+    "packages/shell/src/pages/api/admin/scaffold.ts": {
+      "raw-error": 2
+    },
+    "packages/shell/src/pages/api/admin/shell-mode.ts": {
+      "raw-error": 1
+    },
+    "packages/shell/src/pages/api/admin/system-mode.ts": {
+      "raw-error": 2
+    },
+    "packages/shell/src/pages/api/apps/[id]/build.ts": {
+      "old-form": 2
+    },
+    "packages/shell/src/pages/api/apps/[id]/hosts.ts": {
+      "old-form": 2
+    },
+    "packages/shell/src/pages/api/apps/[id]/hosts/[name].ts": {
+      "old-form": 3
+    },
+    "packages/shell/src/pages/api/apps/[id]/instances.ts": {
+      "old-form": 2
+    },
+    "packages/shell/src/pages/api/apps/[id]/remove.ts": {
+      "old-form": 3
+    },
+    "packages/shell/src/pages/api/apps/[id]/restart.ts": {
+      "old-form": 2
+    },
+    "packages/shell/src/pages/api/apps/[id]/start.ts": {
+      "old-form": 2
+    },
+    "packages/shell/src/pages/api/apps/[id]/status.ts": {
+      "old-form": 2
+    },
+    "packages/shell/src/pages/api/apps/[id]/stop.ts": {
+      "old-form": 1
+    },
+    "packages/shell/src/pages/api/apps/events.ts": {
+      "ad-hoc": 1
+    },
+    "packages/shell/src/pages/api/data/[authority]/[...path].ts": {
+      "raw-error": 1,
+      "ad-hoc": 1
+    },
+    "packages/shell/src/pages/api/instances/[instanceId]/activities.ts": {
+      "old-form": 7
+    },
+    "packages/shell/src/pages/api/instances/[instanceId]/exec.ts": {
+      "old-form": 4
+    },
+    "packages/shell/src/pages/api/instances/[instanceId]/kill.ts": {
+      "old-form": 1
+    },
+    "packages/shell/src/pages/api/instances/[instanceId]/logs.ts": {
+      "old-form": 3
+    },
+    "packages/shell/src/pages/api/instances/[instanceId]/mounts.ts": {
+      "old-form": 11
+    },
+    "packages/shell/src/pages/api/instances/[instanceId]/mounts/[mountId].ts": {
+      "old-form": 3
+    },
+    "packages/shell/src/pages/api/instances/[instanceId]/pause.ts": {
+      "old-form": 2
+    },
+    "packages/shell/src/pages/api/instances/[instanceId]/ports.ts": {
+      "old-form": 10
+    },
+    "packages/shell/src/pages/api/instances/[instanceId]/ports/[portId].ts": {
+      "old-form": 3
+    },
+    "packages/shell/src/pages/api/instances/[instanceId]/restart.ts": {
+      "old-form": 2
+    },
+    "packages/shell/src/pages/api/instances/[instanceId]/resume.ts": {
+      "old-form": 2
+    },
+    "packages/shell/src/pages/api/instances/[instanceId]/runtime.ts": {
+      "old-form": 2
+    },
+    "packages/shell/src/pages/api/instances/[instanceId]/sidecars.ts": {
+      "old-form": 3,
+      "raw-error": 1
+    },
+    "packages/shell/src/pages/api/instances/[instanceId]/sidecars/[name].ts": {
+      "old-form": 3
+    },
+    "packages/shell/src/pages/api/instances/[instanceId]/sidecars/[name]/exec.ts": {
+      "old-form": 1
+    },
+    "packages/shell/src/pages/api/instances/[instanceId]/sidecars/[name]/logs.ts": {
+      "old-form": 1
+    },
+    "packages/shell/src/pages/api/instances/[instanceId]/sidecars/[name]/mounts.ts": {
+      "old-form": 8
+    },
+    "packages/shell/src/pages/api/instances/[instanceId]/sidecars/[name]/mounts/[mountId].ts": {
+      "old-form": 2
+    },
+    "packages/shell/src/pages/api/instances/[instanceId]/sidecars/[name]/tools.ts": {
+      "old-form": 6
+    },
+    "packages/shell/src/pages/api/instances/[instanceId]/status.ts": {
+      "old-form": 2
+    },
+    "packages/shell/src/pages/api/instances/[instanceId]/stop.ts": {
+      "old-form": 1
+    },
+    "packages/shell/src/pages/api/intents/start.ts": {
+      "old-form": 4,
+      "raw-error": 1
+    },
+    "packages/shell/src/pages/api/interfaces/[name].ts": {
+      "old-form": 2
+    },
+    "packages/shell/src/pages/api/interfaces/custom/[name].ts": {
+      "old-form": 5
+    },
+    "packages/shell/src/pages/api/interfaces/custom/index.ts": {
+      "old-form": 2
+    },
+    "packages/shell/src/pages/api/interfaces/index.ts": {
+      "old-form": 3
+    },
+    "packages/shell/src/pages/api/nexus/install.ts": {
+      "old-form": 2
+    },
+    "packages/shell/src/pages/api/nexus/preview.ts": {
+      "old-form": 1
+    },
+    "packages/shell/src/pages/api/nexus/publish.ts": {
+      "old-form": 4
+    },
+    "packages/shell/src/pages/api/nexus/screenshots.ts": {
+      "old-form": 2,
+      "raw-error": 2
+    },
+    "packages/shell/src/pages/api/nexus/sources.ts": {
+      "raw-error": 1
+    },
+    "packages/shell/src/pages/api/nexus/sources/[name].ts": {
+      "raw-error": 1
+    },
+    "packages/shell/src/pages/api/nexus/sources/discover.ts": {
+      "raw-error": 1
+    },
+    "packages/shell/src/pages/api/nexus/submit.ts": {
+      "old-form": 3
+    },
+    "packages/shell/src/pages/api/nexus/uninstall/[id].ts": {
+      "old-form": 2
+    },
+    "packages/shell/src/pages/api/nexus/update/[id].ts": {
+      "old-form": 2
+    },
+    "packages/shell/src/pages/api/notifications/[id].ts": {
+      "old-form": 7
+    },
+    "packages/shell/src/pages/api/notifications/[id]/[action].ts": {
+      "old-form": 3
+    },
+    "packages/shell/src/pages/api/notifications/history.ts": {
+      "old-form": 1
+    },
+    "packages/shell/src/pages/api/os/app-runtime.js.ts": {
+      "old-form": 2
+    },
+    "packages/shell/src/pages/api/os/clients/[sid]/[action].ts": {
+      "old-form": 3
+    },
+    "packages/shell/src/pages/api/os/clients/index.ts": {
+      "old-form": 2
+    },
+    "packages/shell/src/pages/api/os/context.ts": {
+      "old-form": 4
+    },
+    "packages/shell/src/pages/api/os/context/[key].ts": {
+      "old-form": 1
+    },
+    "packages/shell/src/pages/api/os/lock.ts": {
+      "raw-error": 1
+    },
+    "packages/shell/src/pages/api/os/ui/claim.ts": {
+      "old-form": 2
+    },
+    "packages/shell/src/pages/api/os/ui/command.ts": {
+      "old-form": 3
+    },
+    "packages/shell/src/pages/api/os/ui/result.ts": {
+      "old-form": 2
+    },
+    "packages/shell/src/pages/api/os/unlock.ts": {
+      "raw-error": 1
+    },
+    "packages/shell/src/pages/api/os/volumes.ts": {
+      "old-form": 3
+    },
+    "packages/shell/src/pages/api/os/volumes/[name].ts": {
+      "old-form": 1
+    },
+    "packages/shell/src/pages/api/scopes/[id]/git-repo.ts": {
+      "old-form": 1
+    },
+    "packages/shell/src/pages/api/terminal/sessions.ts": {
+      "raw-error": 1
+    },
+    "packages/shell/src/pages/api/terminal/sessions/ended.ts": {
+      "raw-error": 1
+    }
+  }
+}

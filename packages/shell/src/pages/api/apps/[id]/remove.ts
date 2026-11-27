@@ -1,6 +1,7 @@
 import type { APIRoute } from 'astro';
-import { getAppManager, removeInstalledApp, SystemAppRemovalError } from '@aura/core';
+import { getAppManager, removeInstalledApp } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
+import { nexusFailure } from '../../../../lib/nexusErrors.ts';
 import { deleteHomeRefusal, deleteHomesAfterRemove, installationBeforeRemove } from '../../../../lib/homesAdmin.ts';
 
 /**
@@ -19,15 +20,15 @@ import { deleteHomeRefusal, deleteHomesAfterRemove, installationBeforeRemove } f
 
 const APP_ID_RE = /^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/;
 
-export const POST: APIRoute = async ({ params, url }) => deleteApp(params['id'], url.searchParams.get('deleteHome') === '1');
+export const POST: APIRoute = async ({ params, url, request, locals }) => deleteApp(params['id'], url.searchParams.get('deleteHome') === '1', { request, locals });
 // DELETE method too — the CLI's `aura app remove` historically used it.
-export const DELETE: APIRoute = async ({ params, url }) => deleteApp(params['id'], url.searchParams.get('deleteHome') === '1');
+export const DELETE: APIRoute = async ({ params, url, request, locals }) => deleteApp(params['id'], url.searchParams.get('deleteHome') === '1', { request, locals });
 
 /**
  * `?deleteHome=1` also deletes the installation's App Homes (D65 §13: an
  * explicit choice; by default they are kept). A Private Home is never touched.
  */
-async function deleteApp(appId: string | undefined, deleteHome = false): Promise<Response> {
+async function deleteApp(appId: string | undefined, deleteHome: boolean, reader: { request: Request; locals?: App.Locals }): Promise<Response> {
   if (!appId) return errorResponse('Missing app id', 400);
   if (!APP_ID_RE.test(appId)) {
     return errorResponse(`Invalid app id: ${appId}. Expected reverse-domain notation.`, 400);
@@ -46,8 +47,8 @@ async function deleteApp(appId: string | undefined, deleteHome = false): Promise
     result = await removeInstalledApp(appId);
     if (home) homeDeleted = await deleteHomesAfterRemove(appId, home.installationId);
   } catch (err) {
-    if (err instanceof SystemAppRemovalError) return errorResponse(err.message, 409);
-    return errorResponse(`Could not delete ${appId}: ${(err as Error).message}`, 500);
+    // D105 Pass B (review row 29): 409 system-app with `aura disable app`; anything else for its reader.
+    return nexusFailure(reader, err);
   }
   if (!result.removed) {
     return jsonResponse({ ok: true, appId, removed: false, homeDeleted, message: `${result.dest} did not exist on disk; registry will reconcile.` });

@@ -1,6 +1,7 @@
 import type { APIRoute } from 'astro';
 import { getNexusManager } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../lib/appResponse.js';
+import { nexusFailure } from '../../../lib/nexusErrors.ts';
 
 /**
  * GET — the aggregated app-store catalog across every registered source
@@ -15,7 +16,7 @@ import { jsonResponse, errorResponse } from '../../../lib/appResponse.js';
  *
  * `?refresh=1` forces every source to re-fetch, bypassing the per-source cache.
  */
-export const GET: APIRoute = async ({ url }) => {
+export const GET: APIRoute = async ({ url, request, locals }) => {
   const refresh = url.searchParams.get('refresh') === '1';
   const nexus = getNexusManager();
   try {
@@ -34,6 +35,6 @@ export const GET: APIRoute = async ({ url }) => {
     });
     return jsonResponse({ ...cat, apps });
   } catch (err) {
-    return errorResponse((err as Error).message, 500);
+    return nexusFailure({ request, locals }, err);
   }
 };

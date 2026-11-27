@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { getAppManager, lifecyclePath, RELAY_CLAIM_HEADER } from '@aura/core';
+import { auraErrorOf, getAppManager, lifecyclePath, RELAY_CLAIM_HEADER, sourceClosedBody } from '@aura/core';
 import { relayClaimFor, type RelaySigner } from './access/relay.ts';
 import type { AppManifest, AppInstance, AuraErrorBody } from '@aura/core';
 
@@ -156,11 +156,127 @@ export function jsonResponse(data: unknown, status = 200) {
 export function errorResponse(status: number, body: AuraErrorBody): Response;
 export function errorResponse(message: string, status?: number): Response;
 export function errorResponse(a: string | number, b?: number | AuraErrorBody): Response {
-  if (typeof a === 'number') {
-    return new Response(JSON.stringify(b), {
-      status: a,
-      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' },
-    });
+  // The old form keeps `error` as the sentence for the clients that show it,
+  // and says it in `message` too, where the SDK and the CLI read it first.
+  const [status, body] = typeof a === 'number' ? [a, b as AuraErrorBody] : [typeof b === 'number' ? b : 500, { error: a, message: a }];
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' },
+  });
+}
+
+/**
+ * The migration form of a structured body (review §4.3): every fact, the
+ * right status, but `error` keeps the sentence, for a route whose clients
+ * still show `error` (the Nexus app, Settings). Moves to the plain body once
+ * they read `message`; tools/error-lint.mjs counts it as old-form debt.
+ */
+export function legacyErrorBody(body: AuraErrorBody): AuraErrorBody {
+  return { ...body, error: body.message };
+}
+
+// ── failures (error-messages review §4.4 rule 5, D105 Pass B) ──────────────
+
+/** Who reads an error body: the owner (or the host operator, a trusted owner agent), or anyone else. */
+export type ErrorAudience = 'owner' | 'app';
+
+/** Public routes and gateway paths stay readable; every other absolute path is internal. */
+const ABS_PATH = /(?<![\w.:/~-])\/(?!api\/|_aura\/)(?:[\w.@+~-]+\/)*[\w.@+~-]+\/?/g;
+const URL_USERINFO = /\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi;
+const BEARER = /\bBearer\s+[A-Za-z0-9._~+/=-]+/g;
+const ENV_ASSIGNMENT = /\b[A-Z][A-Z0-9]*_[A-Z0-9_]*=\S+/g;
+const ENV_NAME = /\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b/g;
+const CONTAINER = /\baura-[a-z0-9][a-z0-9_.-]*/g;
+const MAX_MESSAGE = 300;
+
+/**
+ * The text of an unexpected error, without the noise a reader can't use:
+ * the `Error: ` of `String(err)` and a `[ProotRunner] ` style origin tag.
+ */
+export function errorText(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  return raw.replace(/^(?:[A-Za-z]*Error: )+/, '').replace(/^\[[A-Za-z][\w.-]*\]\s*/, '').trim() || 'unknown error';
+}
+
+/**
+ * The same text for a reader who is not the owner (review §4.4 rules 5 and
+ * 6): no host or container path, no container name, no credential in a URL,
+ * no bearer token, no env name or value. Docker, git and fs messages keep
+ * what they say, not where.
+ */
+export function redactInternal(text: string): string {
+  const out = text
+    .replace(URL_USERINFO, '$1<redacted>@')
+    .replace(BEARER, 'Bearer <redacted>')
+    .replace(ENV_ASSIGNMENT, '<redacted>')
+    .replace(ENV_NAME, '<env>')
+    .replace(ABS_PATH, '<path>')
+    .replace(CONTAINER, '<container>');
+  return out.length > MAX_MESSAGE ? `${out.slice(0, MAX_MESSAGE - 1)}…` : out;
+}
+
+export interface FailureOptions {
+  /** The status when the error carries none (default 500). */
+  status?: number;
+  /**
+   * The closed code. Without it, and without `coded`, the answer is the
+   * migration form (`legacyErrorBody`: `error` is the sentence) for the
+   * clients that show `error`; the ratchet lint (tools/error-lint.mjs) counts
+   * those.
+   */
+  error?: string;
+  /** Answer a carried code (`AuraError`) as the plain body: the route's clients read `message`. */
+  coded?: boolean;
+  hint?: string;
+  category?: AuraErrorBody['category'];
+  /** The app the request works on, as the caller named it: an EROFS under it is `source-closed`. */
+  appId?: string;
+  /** What failed, said before the error's text (`navigate failed: …`). */
+  what?: string;
+}
+
+/**
+ * The body of a failure for one reader. An error that carries its D105 body
+ * (`AuraError`, matched by shape) is answered as is; a write that hit a
+ * read-only install is `source-closed`; anything else says its text, whole
+ * to the owner and redacted to everyone else.
+ */
+export function failureBody(err: unknown, audience: ErrorAudience, opts: FailureOptions = {}): { status: number; body: AuraErrorBody } {
+  const carried = auraErrorOf(err);
+  if (carried) return carried;
+  if ((err as NodeJS.ErrnoException | null)?.code === 'EROFS') {
+    return opts.appId
+      ? { status: 409, body: sourceClosedBody(opts.appId) }
+      : { status: 409, body: { error: 'read-only', category: 'not-grantable', message: 'This is read-only here (a closed install, or the release).' } };
   }
-  return jsonResponse({ error: a }, typeof b === 'number' ? b : 500);
+  const text = `${opts.what ? `${opts.what}: ` : ''}${errorText(err)}`;
+  const message = audience === 'owner' ? text : redactInternal(text);
+  return {
+    status: opts.status ?? 500,
+    body: {
+      error: opts.error ?? 'internal-error', message,
+      ...(opts.category ? { category: opts.category } : {}),
+      ...(opts.hint ? { hint: opts.hint } : {}),
+    },
+  };
+}
+
+/** Who reads the answer to this request (the access gate's own view; anyone unverified is not the owner). */
+export async function errorAudience(ctx: { request: Request; locals?: App.Locals }): Promise<ErrorAudience> {
+  try {
+    const [{ identifyAccess, liveDeps }, { refusalView }] = await Promise.all([
+      import('./access/observer.ts'), import('./access/enforce.ts'),
+    ]);
+    const identity = ctx.locals?.access ?? await identifyAccess(ctx.request);
+    if (!identity) return 'app';
+    return refusalView(liveDeps, identity.principal as Parameters<typeof refusalView>[1], identity.via).audience;
+  } catch {
+    return 'app';
+  }
+}
+
+/** An unexpected failure as an answer, for this request's reader (see `failureBody`, `FailureOptions.error`). */
+export async function failureResponse(ctx: { request: Request; locals?: App.Locals }, err: unknown, opts: FailureOptions = {}): Promise<Response> {
+  const { status, body } = failureBody(err, auraErrorOf(err) ? 'app' : await errorAudience(ctx), opts);
+  return errorResponse(status, opts.error || opts.coded ? body : legacyErrorBody(body));
 }

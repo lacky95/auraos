@@ -1,7 +1,8 @@
 import type { APIRoute } from 'astro';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { BUILTIN_PERMISSIONS, readAliasMap, toolchainMirrorBin, toolsGrant } from '@aura/core';
+import { closestName, closestPermission, isKnownPermission, listToolchainBinaries, namedTools, readAliasMap, sourceClosedBody, toolchainMirrorBin, toolsGrant } from '@aura/core';
+import { liveCapabilityDeps, resolveRegistry } from '../../../lib/capabilities.ts';
 import { auditOwner, manifestEditLevel, ownerAction } from '../../../lib/approvals/admin.ts';
 
 /**
@@ -122,12 +123,21 @@ export const POST: APIRoute = async (ctx) => {
   }
   const path = join(mgr.registry.getAppDir(appId), 'app.manifest.json');
   if (!existsSync(path)) {
-    return json({ error: 'manifest-not-found', appId, path }, 404);
+    // The host path is internal (D105 Pass B, review row 33): the app is named, not where it lives.
+    return json({ error: 'manifest-not-found', target: appId, appId, message: `${appId} has no app.manifest.json where it is installed.` }, 404);
   }
 
   let manifest: Record<string, unknown>;
   try { manifest = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>; }
-  catch (err) { return json({ error: 'manifest-parse-failed', message: (err as Error).message }, 500); }
+  catch (err) { return json({ error: 'manifest-parse-failed', message: `${appId}'s app.manifest.json is not valid JSON: ${(err as Error).message}` }, 500); }
+
+  // D105 Pass B (review row 21): a tool the capability registry does not know is refused before the owner is asked.
+  // Only names this edit adds: a set-tools that keeps an old, since removed tool stays possible.
+  const had = Array.isArray(manifest['tools']) ? manifest['tools'] as string[] : [];
+  const adds = action === 'set-tools' ? (setTools ?? []).filter((t) => !had.includes(t))
+    : action === 'add-tool' || action === 'add-service-tool' ? [tool ?? ''] : [];
+  const unknownTool = await unknownCapability(adds, mgr.getDataDir());
+  if (unknownTool) return json(unknownTool, 404);
 
   // The owner decides this exact edit (D50).
   const edit: { appId: string; action: Action; tool?: string; tools?: string[]; permission?: string; service?: string } = {
@@ -168,12 +178,13 @@ export const POST: APIRoute = async (ctx) => {
     // Unknown names are allowed through (PermissionSchema is a free-form
     // string and apps may define their own) but flagged, since a typo would
     // otherwise silently grant nothing.
-    const unknown = action === 'add-permission' && !BUILTIN_PERMISSIONS.includes(perm as never);
+    const unknown = action === 'add-permission' && !isKnownPermission(perm);
+    const suggest = unknown ? closestPermission(perm) : null;
 
     if (changed) {
       manifest['permissions'] = next;
       try { writeFileSync(path, JSON.stringify(manifest, null, 2) + '\n'); }
-      catch (err) { return json({ error: 'write-failed', message: (err as Error).message }, 500); }
+      catch (err) { return writeFailed(appId, err); }
       await auditOwner(admin, `manifest.${action}`, { target: `app:${appId}`, detail: { permission: perm } });
     }
 
@@ -196,12 +207,12 @@ export const POST: APIRoute = async (ctx) => {
       if (changed && perm === 'apps.mount' && action !== 'add-permission') {
         for (const i of mgr.getInstancesByApp(appId)) mgr.mounts.revokeConsumer(i.instanceId);
       }
-      return json({ ok: true, appId, action, permission: perm, changed, permissions: next, unknown, reloaded: true });
+      return json({ ok: true, appId, action, permission: perm, changed, permissions: next, unknown, ...(suggest ? { suggest: [suggest] } : {}), reloaded: true });
     } catch (err) {
       // The file is written but the running registry still has the old value,
       // so the grant won't take effect until a restart. Say so rather than
       // reporting a success the caller can't actually use.
-      return json({ ok: true, appId, action, permission: perm, changed, permissions: next, unknown, reloaded: false, reloadError: (err as Error).message });
+      return json({ ok: true, appId, action, permission: perm, changed, permissions: next, unknown, ...(suggest ? { suggest: [suggest] } : {}), reloaded: false, reloadError: (err as Error).message });
     }
   }
 
@@ -237,7 +248,7 @@ export const POST: APIRoute = async (ctx) => {
     if (changed) {
       svc['tools'] = next;
       try { writeFileSync(path, JSON.stringify(manifest, null, 2) + '\n'); }
-      catch (err) { return json({ error: 'write-failed', message: (err as Error).message }, 500); }
+      catch (err) { return writeFailed(appId, err); }
       await auditOwner(admin, `manifest.${action}`, { target: `app:${appId}`, detail: { service: body.service, tool } });
     }
     // Editing the manifest stays an admin action, but its sidecars only get
@@ -270,7 +281,7 @@ export const POST: APIRoute = async (ctx) => {
   if (changed) {
     manifest['tools'] = nextTools;
     try { writeFileSync(path, JSON.stringify(manifest, null, 2) + '\n'); }
-    catch (err) { return json({ error: 'write-failed', message: (err as Error).message }, 500); }
+    catch (err) { return writeFailed(appId, err); }
     await auditOwner(admin, `manifest.${action}`, { target: `app:${appId}`, detail: action === 'set-tools' ? { tools: nextTools } : { tool } });
 
     // Hot-refresh running instances of this app so their /aura/my-tools
@@ -297,6 +308,43 @@ export const POST: APIRoute = async (ctx) => {
 
   return json({ ok: true, appId, action, tool, changed: false, tools });
 };
+
+/**
+ * A manifest write that failed. A closed install is read-only: EROFS is
+ * `source-closed` with the way out (D105 Pass B, review row 30); anything
+ * else names the app, not the host path.
+ */
+function writeFailed(appId: string, err: unknown): Response {
+  if ((err as NodeJS.ErrnoException).code === 'EROFS') return json(sourceClosedBody(appId), 409);
+  return json({ error: 'write-failed', message: `${appId}'s app.manifest.json could not be written (${(err as NodeJS.ErrnoException).code ?? 'error'}).` }, 500);
+}
+
+/**
+ * The first named tool the capability registry does not know, as the 404
+ * answer (markers `*` and `#` are not tools; a capability's registry
+ * aliases name its binary). Null when every name is known, or when the registry cannot be
+ * read (the edit then goes on as before).
+ */
+async function unknownCapability(tools: string[], dataDir: string): Promise<Record<string, unknown> | null> {
+  const aliases = readAliasMap(toolchainMirrorBin(dataDir));
+  const named = namedTools(tools.filter(Boolean), aliases);
+  if (named.length === 0) return null;
+  let known: string[];
+  try {
+    // The registry, plus whatever the toolchain holds (a binary installed without a registry entry is grantable too).
+    known = [...Object.keys(await resolveRegistry(liveCapabilityDeps())), ...listToolchainBinaries(toolchainMirrorBin(dataDir))];
+  } catch { return null; }
+  if (known.length === 0) return null;
+  const missing = named.find((t) => !known.includes(t));
+  if (!missing) return null;
+  const near = closestName(missing, known);
+  return {
+    error: 'unknown-capability', category: 'invalid-input', capability: missing,
+    message: `'${missing}' is not in the capability registry.`,
+    hint: `aura cap registry show lists the capabilities${near ? `; did you mean ${near}?` : '.'}`,
+    ...(near ? { suggest: [near] } : {}),
+  };
+}
 
 function json(payload: unknown, status = 200): Response {
   return new Response(JSON.stringify(payload, null, 2), {

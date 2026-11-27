@@ -1,6 +1,6 @@
 import type { APIRoute } from 'astro';
 import * as core from '@aura/core';
-import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
+import { jsonResponse, errorResponse, failureResponse } from '../../../../lib/appResponse.js';
 import { jsonBody, sidecarError, sidecarTarget } from '../../../../lib/instanceAuth.js';
 
 /**
@@ -27,7 +27,7 @@ import { jsonBody, sidecarError, sidecarTarget } from '../../../../lib/instanceA
  * OS-managed sidecars: the OS does the `docker run` (SidecarManager), so the
  * app needs no docker tool. See core's sidecar-spec.ts for what may be asked.
  */
-export const GET: APIRoute = async ({ params, url, locals }) => {
+export const GET: APIRoute = async ({ params, url, request, locals }) => {
   const instanceId = params['instanceId'];
   if (!instanceId) return errorResponse('Missing instance id', 400);
 

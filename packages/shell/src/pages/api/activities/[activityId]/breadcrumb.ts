@@ -1,7 +1,7 @@
 import type { APIRoute } from 'astro';
 import { getAppManager, OsEventBus } from '@aura/core';
 import type { AppActivity } from '@aura/core';
-import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
+import { jsonResponse, errorResponse, failureResponse } from '../../../../lib/appResponse.js';
 
 /**
  * Toggle the OS-rendered breadcrumb trail for an activity at runtime.
@@ -14,7 +14,7 @@ import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
  * chrome can return `{ breadcrumb: 'off' }` from `onActivityCreate` (mirrors
  * the `minimizable` pattern); this endpoint covers the runtime-flip case.
  */
-export const POST: APIRoute = async ({ params, request }) => {
+export const POST: APIRoute = async ({ params, request, locals }) => {
   const raw = params['activityId'];
   if (!raw) return errorResponse('Missing activity id', 400);
   const activityId = decodeURIComponent(raw);
@@ -53,6 +53,6 @@ export const POST: APIRoute = async ({ params, request }) => {
     } as never);
     return jsonResponse({ ok: true, activityId, breadcrumb: mode, viaFallback: true });
   } catch (err) {
-    return errorResponse(`breadcrumb toggle failed: ${(err as Error).message}`, 500);
+    return failureResponse({ request, locals }, err, { what: 'breadcrumb toggle failed', status: 500 });
   }
 };
