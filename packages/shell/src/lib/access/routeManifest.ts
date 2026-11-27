@@ -194,6 +194,12 @@ const routes: RouteAccessManifest['routes'] = {
   '/api/admin/manifest-edit': {
     methods: { POST: ownerManages('Edits an app\'s permissions and tools: the owner decides.') },
   },
+  '/api/admin/overlay': {
+    methods: {
+      GET: ownerManages('The settings overlay migration report (Phase 6 O): local grant edits of tracked manifests and the registry. An owner view.'),
+      POST: ownerManages('Moves local grant edits into the settings overlay (Phase 6 O), exactly the reviewed report: the owner decides.'),
+    },
+  },
   '/api/admin/notifications/release': {
     methods: { POST: ownerManages('Releases blocking system modals: the owner decides.') },
   },

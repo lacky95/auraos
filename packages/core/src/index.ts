@@ -118,3 +118,14 @@ export * from './release/types.js';
 export * as releasePaths from './release/paths.js';
 export * from './infra/types.js';
 export { InfraPropagationError, buildSecrets, infraExecEnv, renderDigest } from './infra/propagate.js';
+// Phase 6 O: the settings overlay (the owner's grants beside the installed tree), the effective
+// capability registry (release + the owner's sealed entries) and the one-shot migration of local edits.
+export {
+  MANIFEST_OVERLAY_VERSION, ManifestOverlayError, applyManifestOverlay, editManifestOverlay, manifestOverlayPath,
+  mergeManifestOverlays, normalizeManifestOverlay, overlayFromDiff, parseManifestOverlay, readManifestOverlay, writeManifestOverlay,
+} from './app-manager/manifestOverlay.js';
+export type { ManifestOverlay, OverlayEdit, OverlayListOps } from './app-manager/manifestOverlay.js';
+export { CAPABILITY_REGISTRY_TARGET, capabilityRegistryMount, effectiveCapabilityRegistry, writeCapabilityRegistryOverlay } from './capabilities/registryOverlay.js';
+export type { CapabilityRegistryMount } from './capabilities/registryOverlay.js';
+export { OVERLAY_FIELDS, OverlayMigrationError, applyOverlayMigration, migratedDir, overlayMigrationReport } from './release/overlayMigration.js';
+export type { OverlayMigrationApp, OverlayMigrationOptions, OverlayMigrationRegistry, OverlayMigrationReport, OverlayMigrationResult } from './release/overlayMigration.js';

@@ -65,6 +65,7 @@ let caller: CallerPrincipal;
 let audits: Array<{ action: string; opts: any; actor: any }>;
 let installs: Array<{ op: string; name: string; def: CapabilityDefinition; force?: boolean }>;
 let owned: Record<string, CapabilityRegistryEntry>;
+let overlays: string[][] = [];
 let release: Record<string, unknown>;
 
 function deps(): CapabilityDeps {
@@ -93,6 +94,7 @@ function deps(): CapabilityDeps {
       },
       remove: async (name) => { const had = !!owned[name]; delete owned[name]; return { ok: true, changed: had }; },
     },
+    writeOverlay: (o) => { overlays.push(Object.keys(o).sort()); },
     installer: {
       install: async (name, def, force): Promise<InstallResult> => {
         installs.push({ op: 'install', name, def, force });
@@ -110,6 +112,7 @@ beforeEach(() => {
   approvals = new MemoryApprovals();
   caller = OWNER;
   audits = [];
+  overlays = [];
   installs = [];
   owned = {};
   release = { ...RELEASE };
@@ -271,6 +274,8 @@ test('the owner\'s registry: add needs the password, digest-bound; injection, so
   assert.equal(owned['sl']?.digest, done.body.digest);
   assert.equal(owned['sl']?.approval, first.body.approvalId);
   assert.equal(audits.find((a) => a.action === CAP_OPS.registryAdd)?.opts.detail.digest, done.body.digest);
+  // Phase 6 O: the effective registry overlay is regenerated with the new entry (nothing writes the release file).
+  assert.deepEqual(overlays.at(-1), Object.keys(owned).sort());
 
   // Installing it asks again, bound to origin owner and its digest.
   const inst = await read(await postCapability(req('POST', { action: 'install', name: 'sl' }), deps()));

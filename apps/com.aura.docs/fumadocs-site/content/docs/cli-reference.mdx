@@ -239,11 +239,11 @@ aura port expose at.oebb.opsconsole:5173 --host --sticky
 
 | Command | What it does | Key flags |
 |---|---|---|
-| `aura grant perms <app> [names...]` | Add manifest permissions; takes effect immediately. No names → picker (unchecking revokes). No app either → picks the app too. | — |
+| `aura grant perms <app> [names...]` | Add manifest permissions (system apps too); takes effect immediately. Grants and revokes are kept in the app's settings overlay (`/data/aura/overlay/apps/<app>.json`), never in its installed files. No names → picker (unchecking revokes). No app either → picks the app too. | — |
 | `aura grant caps <app> [names...]` | Add capabilities to the app's `tools[]` and hot-refresh running instances (no respawn). `'*'` grants all, `'#'` all-except. No names → picker showing what is already granted. | `-i, --interactive` (picker even when names are given) |
 | `aura revoke perms <app> <names...>` | Remove manifest permissions. | — |
 | `aura revoke caps <app> <names...>` | Remove capabilities from the app's manifest and restart its running instances. Also gone from every OS sidecar of the app. | — |
-| `aura grant\|revoke caps <app> <caps...> --template <tpl>` | Tools of a `services[]` template: every OS sidecar of it holds them at `/aura/my-tools`, capped at the app's own `tools[]`. Persistent (the manifest), works from anywhere, applied live. The app also needs the permission `sidecars.tools`; the CLI prints the `aura grant perms <app> sidecars.tools` command when it lacks it. | `--template <tpl>` |
+| `aura grant\|revoke caps <app> <caps...> --template <tpl>` | Tools of a `services[]` template: every OS sidecar of it holds them at `/aura/my-tools`, capped at the app's own `tools[]`. Persistent (the app's settings overlay), works from anywhere, applied live. The app also needs the permission `sidecars.tools`; the CLI prints the `aura grant perms <app> sidecars.tools` command when it lacks it. | `--template <tpl>` |
 | `aura grant\|revoke caps <inst\|app> <caps...> --sidecar <name>` | Tools of one running OS sidecar (runtime; its template must declare `tools`). Needs the app's token: run it inside the app. Revoke removes runtime grants only. | `--sidecar <name>` |
 | `aura cap ...` | Manage the capability registry (below). | — |
 
@@ -385,6 +385,7 @@ the owner first; the CLI waits for the decision in the desktop. See [Approvals](
 | `aura admin homes plan` · `import-report` · `ownership --dry-run` | Read-only [home](/docs/core-concepts#homes) reports: each instance's home, what each app may want from your Private Home, and the targeted ownership changes. | `-o json` |
 | `aura admin homes ownership --apply <digest>` | Apply exactly the ownership report you reviewed (its digest), journaled. Needs your password. | — |
 | `aura admin homes import <app> <path...>` | Copy paths (e.g. `.claude.json`) from your Private Home into the app's App Home. A dry run unless `--apply` (the app stopped); never overwrites; personal logins only with `--personal`. | `--apply`, `--personal`, `--user <id>` |
+| `aura admin overlay report` · `apply <digest>` | Move grant edits that older versions wrote into tracked system manifests (and the capability registry backup) into the settings overlay, once: `report` shows exactly what moves (only `tools`, `services[].tools`, `permissions`) and its digest; `apply` does exactly that and restores the tracked files. | `-o json` |
 | `aura admin homes reset <app>` | Empty the app's App Home (the app stopped); it starts with a fresh one. Needs your password. | `--user <id>` |
 | `aura admin security set <id> <value>` | Set a writable security option, e.g. `set fresh-auth-require-https on`. Needs your password in the desktop (from the Terminal), or runs directly on the host. Options set on the host (env) answer where to set them. | — |
 

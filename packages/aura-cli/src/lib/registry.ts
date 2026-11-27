@@ -14,7 +14,10 @@ import { api } from './client.js';
  * `/api/admin/cap-registry`. Installs name a capability; the shell resolves
  * and runs its definition. This file reads the same registry for listings
  * when the shell is unreachable, and the `services:` section for
- * `aura service`.
+ * `aura service`. It writes neither (Phase 6 O): the release file is
+ * read-only, and the shell generates the effective view (release + the
+ * owner's entries) into the overlay `/data/aura/overlay/capabilities.yaml`
+ * (`AURA_REGISTRY_OVERLAY`), which containers see at the release path.
  */
 export type CapabilitySource = 'apt' | 'npm' | 'steps' | 'builtin';
 
@@ -60,17 +63,27 @@ export interface State {
 }
 
 const REGISTRY_PATH = process.env['AURA_REGISTRY_PATH'] ?? '/workspace/.aura/capabilities.yaml';
+const REGISTRY_OVERLAY = process.env['AURA_REGISTRY_OVERLAY'] ?? '/data/aura/overlay/capabilities.yaml';
 const STATE_PATH    = process.env['AURA_STATE_PATH']    ?? '/data/aura/state/capabilities.json';
 const TOOLCHAIN_BIN = join(process.env['AURA_TOOLCHAIN_DIR'] ?? '/os/toolchain', 'bin');
 
-/** The registry file as this process sees it (read-only; empty when it is not mounted here). */
+function readRegistryFile(path: string): Partial<Registry> | null {
+  return existsSync(path) ? parseYaml(readFileSync(path, 'utf-8')) as Partial<Registry> | null : null;
+}
+
+/**
+ * The registry as this process sees it (read-only; empty when it is not mounted here): the
+ * release file, plus the overlay's capabilities it does not define (in the master; in a
+ * container the release path already holds the effective view).
+ */
 export function loadRegistry(): Registry {
-  if (!existsSync(REGISTRY_PATH)) return { capabilities: {}, services: {} };
-  const text = readFileSync(REGISTRY_PATH, 'utf-8');
-  const parsed = parseYaml(text) as Partial<Registry> | null;
+  const release = readRegistryFile(REGISTRY_PATH);
+  let overlay: Partial<Registry> | null = null;
+  // A generated view: a broken one never hides the release's entries.
+  try { if (REGISTRY_OVERLAY !== REGISTRY_PATH) overlay = readRegistryFile(REGISTRY_OVERLAY); } catch { /* the release's only */ }
   return {
-    capabilities: parsed?.capabilities ?? {},
-    services:     parsed?.services ?? {},
+    capabilities: { ...(overlay?.capabilities ?? {}), ...(release?.capabilities ?? {}) },
+    services:     release?.services ?? overlay?.services ?? {},
   };
 }
 

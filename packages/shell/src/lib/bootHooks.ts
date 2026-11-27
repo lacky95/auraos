@@ -50,6 +50,12 @@ export const SHELL_BOOT_HOOKS: readonly BootHook[] = [
       });
     },
   },
+  // Phase 6 O: the effective capability registry (release + the owner's entries) at
+  // /data/aura/overlay/capabilities.yaml, before any app container mounts it (lib/capabilities.ts).
+  {
+    name: 'capability-overlay', layer: 'server', phase: 'beforeApps',
+    run: async () => { await (await import('./capabilities.js')).writeCapabilityOverlay(); },
+  },
   // The access observer (lib/access/observer.ts) registers the `aura.access` bridge, so App
   // Host and WS surfaces of a Headless system are decided before any API call (risk R2).
   { name: 'access-observer', layer: 'server', run: async () => { await import('./access/observer.ts'); } },

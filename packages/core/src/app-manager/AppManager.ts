@@ -113,6 +113,7 @@ import type { AuraErrorBody } from '../errors/contracts.js';
 import { MOUNT_DIR_NAME } from './MountManager.js';
 import { ExecBridge } from './ExecBridge.js';
 import { RootGrants } from './rootTabs.js';
+import { layout as releaseLayout } from '../release/paths.js';
 
 const RECONCILE_INTERVAL_MS = 5_000;
 const ERROR_GRACE_MS        = 30_000;
@@ -356,6 +357,8 @@ export class AppManager {
     this.baseRootfs = opts.baseRootfs;
     this.scopeRegistry = new ScopeRegistry({ systemAppsDir: opts.appsDir, dataDir: opts.dataDir });
     this.registry = new AppRegistry(this.scopeRegistry.getAll(), {
+      // Phase 6 O: the owner's grants (settings overlay), applied to every scope's manifests.
+      overlayAppsDir: releaseLayout(opts.dataDir).overlayApps,
       // The start gate (D48, D108): the same audit style as a refused runtime module (`runtime.module-refused`).
       onBlocked: (b) => {
         void new AdminAudit(() => defaultRedis()).record({

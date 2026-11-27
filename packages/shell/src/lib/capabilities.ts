@@ -13,6 +13,11 @@
  * Both are validated (core capabilities/definition.ts) and run as argv or fs
  * work only (lib/capabilityInstall.ts).
  *
+ * Nothing writes the release tree (Phase 6 O): the effective view of both is
+ * generated into the capability registry overlay
+ * `/data/aura/overlay/capabilities.yaml` (core registryOverlay.ts) at boot and
+ * after every registry add or remove; containers read it there (read-only).
+ *
  * Every install, update, remove, registry add and registry remove is an owner
  * action at `fresh` (the password; D50 `ownerAction`: the desktop owner and
  * the host operator act directly), bound to the operation, the name and the
@@ -51,6 +56,8 @@ export interface CapabilityDeps extends PrivilegedDeps {
   installer: CapabilityInstaller;
   /** After an install: mirror the toolchain and hot-refresh `*`/`#` apps; the instances refreshed. */
   refresh(): string[];
+  /** Regenerate the effective registry overlay from the release file and these entries (Phase 6 O). */
+  writeOverlay?(owner: Record<string, CapabilityDefinition>): void;
 }
 
 /** The release tree's registry file (the CLI reads the same path). */
@@ -68,6 +75,10 @@ export function liveCapabilityDeps(): CapabilityDeps {
     releaseRegistry: () => readReleaseRegistry(),
     store: core.getAuthServices().capabilityRegistry,
     installer: liveCapabilityInstaller(priv.run),
+    writeOverlay: (owner) => {
+      const doc = existsSync(RELEASE_REGISTRY_PATH) ? parseYaml(readFileSync(RELEASE_REGISTRY_PATH, 'utf-8')) : {};
+      core.writeCapabilityRegistryOverlay(core.releasePaths.dataLayout().root, doc, owner);
+    },
     refresh: () => {
       const mgr = core.getAppManager();
       // Push the freshly installed binary into the toolchain mirror BEFORE
@@ -144,6 +155,20 @@ export async function reconcileCapabilities(deps: CapabilityDeps = liveCapabilit
     deps.installer.reconcile?.(defs);
   } catch (err) {
     console.warn(`[cap] could not reconcile the capability state: ${(err as Error).message}`);
+  }
+}
+
+/**
+ * The effective registry overlay (release + the owner's sealed entries), for containers and the
+ * CLI. Boot (before any app starts) and after each registry change. Never throws.
+ */
+export async function writeCapabilityOverlay(deps: Pick<CapabilityDeps, 'store' | 'writeOverlay'> = liveCapabilityDeps()): Promise<void> {
+  if (!deps.writeOverlay) return;
+  try {
+    const owner = Object.fromEntries(Object.entries(await deps.store.list()).map(([n, e]) => [n, e.definition]));
+    deps.writeOverlay(owner);
+  } catch (err) {
+    console.warn(`[cap] could not write the capability registry overlay: ${(err as Error).message}`);
   }
 }
 
@@ -253,6 +278,7 @@ export async function postCapabilityRegistry(ctx: Ctx, deps: CapabilityDeps = li
   const r = await deps.store.put(name, definition, approval ? { approval } : {});
   if (!r.ok) return json({ error: 'conflict', message: 'The registry changed meanwhile. Try again.' }, 409);
   await auditPrivileged(deps, actor, CAP_OPS.registryAdd, { target: `capability:${name}`, outcome: 'ok', detail: { name, digest, changed: r.changed } });
+  if (r.changed) await writeCapabilityOverlay(deps);
   return json({ ok: true, name, digest, changed: r.changed });
 }
 
@@ -270,5 +296,6 @@ export async function deleteCapabilityRegistry(ctx: Ctx, deps: CapabilityDeps = 
   const r = await deps.store.remove(name);
   if (!r.ok) return json({ error: 'conflict', message: 'The registry changed meanwhile. Try again.' }, 409);
   await auditPrivileged(deps, actor, CAP_OPS.registryRemove, { target: `capability:${name}`, outcome: 'ok', detail: { name, digest: entry.digest } });
+  await writeCapabilityOverlay(deps);
   return json({ ok: true, name });
 }
