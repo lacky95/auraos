@@ -134,6 +134,11 @@ export const HELP_SECTIONS: Array<{ title: string; lines: Array<[string, string]
   ], note: 'Grants, API keys, the audit and manifest edits are the owner\'s: in the System Terminal they wait for '
     + 'your approval in the desktop (privileged ones with your password); on the host (docker exec -it aura-shell aura …) '
     + 'they run directly. There is no admin login.' },
+  { title: 'App setup', lines: [
+    ['aura app setup <app>', 'Set up an app with setup or operating profiles (--profile, --values, --resume)'],
+    ['aura app config get|set <app>', 'Its setup values (secrets as vault handles only)'],
+    ['aura app profile ls|use <app>', 'Its operating profiles: which are available here and why not; switch'],
+  ] },
   { title: 'Ecosystem & dev', lines: [
     ['aura nexus ...', 'Find, install, update, publish apps'],
     ['aura dev ...', 'Scaffold, validate, run apps standalone; rebuild/restart AuraOS'],

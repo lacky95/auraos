@@ -160,6 +160,14 @@ test('every command in the main help exists in exactly that constellation', () =
       for (const verb of verbTok!.split('|')) {
         const cmd = find(program, verb);
         assert.ok(cmd, `${usage}: no command '${verb}'`);
+        // A current subcommand of a hidden legacy group (D108 owner decision 4: aura app setup|config|profile) is listed.
+        const current = CURRENT_SUBCOMMANDS[verb]?.includes(rest[0] ?? '');
+        if (current) {
+          const sub = find(cmd!, rest[0]!);
+          assert.ok(sub && !hidden(sub), `${usage}: '${verb} ${rest[0]}' is not a visible subcommand`);
+          for (const s2 of (rest[1] ?? '').split('|').filter((x) => /^[a-z]/.test(x))) assert.ok(find(sub!, s2), `${usage}: no '${verb} ${rest[0]} ${s2}'`);
+          continue;
+        }
         assert.ok(!hidden(cmd!), `${usage}: '${verb}' is hidden`);
         for (const t of rest.filter((x) => x.startsWith('-') && x !== '--')) {
           assert.ok(hasFlag(cmd!, t), `${usage}: '${verb}' has no flag ${t}`);
@@ -192,7 +200,12 @@ test('main help: every visible command is listed, plus every resource short name
     assert.ok(names.some((n) => listed.has(n)), `visible command '${c.name()}' is missing from the main help`);
   }
   assert.match(help, new RegExp(`Short names: ${RESOURCES.map((r) => shortName(r)).join(' ')}`));
-  for (const g of LEGACY_GROUPS.filter((x) => x !== 'whereami')) assert.doesNotMatch(help, new RegExp(`^  aura ${g} `, 'm'));
+  for (const g of LEGACY_GROUPS.filter((x) => x !== 'whereami')) {
+    // Only its current subcommands (D108: aura app setup|config|profile), never a deprecated one.
+    const current = CURRENT_SUBCOMMANDS[g] ?? [];
+    const lines = help.split('\n').filter((l) => l.startsWith(`  aura ${g} `));
+    assert.deepEqual(lines.filter((l) => !current.some((c) => l.startsWith(`  aura ${g} ${c} `))), [], `legacy group ${g} in the main help`);
+  }
   assert.match(help, /^Usage: aura <command> \[resource\] \[name\.\.\.\] \[flags\]$/m);
 });
 
