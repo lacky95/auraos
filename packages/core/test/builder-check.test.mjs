@@ -55,7 +55,10 @@ test('check options: run-tests --only by default, the check profile, --network n
   assert.deepEqual(d.cmd, ['node', 'tools/run-tests.mjs', '--only=core,kv-store']);
   assert.deepEqual(d.limits, { ...LIM.DEFAULT_CHECK_LIMITS });
   assert.equal(d.network, 'none');
-  assert.equal(d.image, 'aura-base');
+  assert.equal(d.image, 'self', 'the image of the container the check runs in');
+  assert.equal(CHK.resolveImage('self', { image: 'aura-aura-os' }), 'aura-aura-os');
+  assert.equal(CHK.resolveImage('self', null), 'aura-base', 'outside a container');
+  assert.equal(CHK.resolveImage('aura-base', { image: 'x' }), 'aura-base');
   assert.equal(d.timeoutS, 2400);
   assert.equal(d.git, true);
   const o = CHK.parseCheckArgs(['--cpus=2', '--memory', '3g', '--pids=512', '--network', 'bridge', '--timeout=60', '--no-lock', '--no-git',
@@ -96,11 +99,12 @@ test('a linked worktree needs its git common dir (mounted read-only); a plain cl
   assert.equal(CHK.gitCommonDir('/data/dev/clone', { read }), null);
 });
 
-test('the check container: --rm, the limits profile, no capabilities, --network none, only the worktree (rw) and its git dir (ro), labelled', () => {
-  const o = { ...CHK.parseCheckArgs(['--only=kv-store', '--env', 'X=1']), worktree: '/data/dev/x', gitDir: '/workspace/.git', branch: 'phase6/x' };
+test('the check container: --rm, the limits profile, only the check capabilities, init, --network none, only the worktree (rw) and its git dir (ro), labelled', () => {
+  const o = { ...CHK.parseCheckArgs(['--only=kv-store', '--env', 'X=1']), image: 'aura-base', worktree: '/data/dev/x', gitDir: '/workspace/.git', branch: 'phase6/x' };
   const mounts = [{ Type: 'volume', Name: 'vol', Destination: '/data' }, { Type: 'bind', Source: '/srv/aura', Destination: '/workspace' }];
   const a = CHK.checkRunArgs(o, { name: 'aura-check-1', mounts, owner: '0:0', started: '2026-11-27T20:00:00.000Z' }).join(' ');
-  assert.match(a, /^create --rm --name aura-check-1 --network none --cpus=4 --memory=6442450944 --memory-swap=6442450944 --pids-limit=2048 --cap-drop ALL --security-opt no-new-privileges --user 0:0 --workdir \/data\/dev\/x /);
+  assert.match(a, /^create --rm --name aura-check-1 --network none --cpus=4 --memory=6442450944 --memory-swap=6442450944 --pids-limit=2048 --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add FSETID --cap-add SETUID --cap-add SETGID --cap-add KILL --security-opt no-new-privileges --init --user 0:0 --workdir \/data\/dev\/x /);
+  assert.doesNotMatch(a, /--cap-add (NET_|SYS_|MKNOD|SETPCAP|SETFCAP|ALL)/);
   assert.match(a, /--mount type=volume,source=vol,target=\/data\/dev\/x,volume-subpath=dev\/x --mount type=bind,source=\/srv\/aura\/\.git,target=\/workspace\/\.git,readonly /);
   assert.equal((a.match(/--mount/g) ?? []).length, 2);
   assert.doesNotMatch(a, /docker\.sock|\/home|aura-net|--privileged|-v \//);
@@ -118,11 +122,15 @@ test('the check container: --rm, the limits profile, no capabilities, --network 
 
 test('capProblems: a created container must carry every limit of its profile, --rm, its network and the role label', () => {
   const o = { limits: { ...LIM.DEFAULT_CHECK_LIMITS }, network: 'none' };
-  const good = { hostConfig: { NanoCpus: 4e9, Memory: 6 * GiB, MemorySwap: 6 * GiB, PidsLimit: 2048, AutoRemove: true, Privileged: false, NetworkMode: 'none' }, labels: { 'aura.role': 'check' } };
+  const good = { hostConfig: { NanoCpus: 4e9, Memory: 6 * GiB, MemorySwap: 6 * GiB, PidsLimit: 2048, AutoRemove: true, Privileged: false, NetworkMode: 'none',
+    Init: true, CapDrop: ['ALL'], CapAdd: ['CAP_CHOWN', 'KILL'], SecurityOpt: ['no-new-privileges'] }, labels: { 'aura.role': 'check' } };
   assert.deepEqual(CHK.capProblems(good, o), []);
   assert.deepEqual(CHK.capProblems({ ...good, hostConfig: { ...good.hostConfig, NanoCpus: 0, MemorySwap: -1 } }, o), ['NanoCpus is 0, expected 4000000000', `MemorySwap is -1, expected ${6 * GiB}`]);
   const { Memory, PidsLimit, AutoRemove, ...rest } = good.hostConfig;
   assert.equal(CHK.capProblems({ hostConfig: rest, labels: {} }, o).length, 4);
+  assert.deepEqual(CHK.capProblems({ ...good, hostConfig: { ...good.hostConfig, CapAdd: ['CHOWN', 'NET_ADMIN', 'CAP_SYS_ADMIN'] } }, o), ['CapAdd has NET_ADMIN, SYS_ADMIN beyond the check\'s capabilities']);
+  assert.deepEqual(CHK.capProblems({ ...good, hostConfig: { ...good.hostConfig, CapDrop: null, SecurityOpt: [], Init: false } }, o),
+    ['Init is false, expected true', 'CapDrop is null, expected ["ALL"]', 'SecurityOpt lacks no-new-privileges']);
   assert.match(CHK.capProblems({ ...good, hostConfig: { ...good.hostConfig, Privileged: true, NetworkMode: 'bridge' } }, o).join(), /Privileged.*NetworkMode/);
 });
 
@@ -151,12 +159,14 @@ const a = process.argv.slice(2);
 const S = process.env.FAKE_STATE;
 const log = S + '/calls.log';
 fs.appendFileSync(log, 'docker ' + a.join(' ') + '\\n');
-if (a[0] === 'inspect' && a[2] === '{{json .Mounts}}') { console.log('[{"Type":"bind","Source":"/host","Destination":"/"}]'); process.exit(0); }
+if (a[0] === 'inspect' && a[2].startsWith('{{json .Mounts}}')) { console.log('[{"Type":"bind","Source":"/host","Destination":"/"}]\\taura-shell-image'); process.exit(0); }
 if (a[0] === 'inspect') {
   const c = fs.readFileSync(log, 'utf8').split('\\n').filter((l) => l.startsWith('docker create ')).pop().split(' ');
   const v = (f) => c.find((x) => x.startsWith(f + '='))?.slice(f.length + 1);
   const hc = { NanoCpus: Number(v('--cpus')) * 1e9, Memory: Number(v('--memory')), MemorySwap: Number(v('--memory-swap')), PidsLimit: Number(v('--pids-limit')),
-    AutoRemove: c.includes('--rm'), Privileged: false, NetworkMode: c[c.indexOf('--network') + 1] };
+    AutoRemove: c.includes('--rm'), Privileged: false, NetworkMode: c[c.indexOf('--network') + 1], Init: c.includes('--init'),
+    CapDrop: c.includes('ALL') ? ['ALL'] : null, CapAdd: c.map((x, i) => (c[i - 1] === '--cap-add' ? x : null)).filter(Boolean),
+    SecurityOpt: c.includes('no-new-privileges') ? ['no-new-privileges'] : [] };
   if (process.env.FAKE_DROP) delete hc[process.env.FAKE_DROP];
   const labels = Object.fromEntries(c.map((x, i) => (c[i - 1] === '--label' ? x.split(/=(.*)/s).slice(0, 2) : null)).filter(Boolean));
   console.log(JSON.stringify(hc) + '\\t' + JSON.stringify(labels));
@@ -193,14 +203,15 @@ test('builder.mjs check: create, inspect, start; output and exit code pass throu
   const name = /--name (aura-check-[0-9a-f]{8}) /.exec(create)[1];
   assert.match(create, new RegExp(`type=bind,source=(/host)?${wt},target=${wt} `));
   assert.match(create, / --label aura\.role=check .*--label aura\.check\.started=\d{4}-\d\d-\d\dT[^ ]+ --label aura\.check\.timeout=2400 /);
-  assert.match(create, /--entrypoint timeout aura-base -k 30 2400 node tools\/run-tests\.mjs --only=core$/);
+  // --image self: the fake's own container image inside a container, aura-base outside one
+  assert.match(create, /--entrypoint timeout (aura-shell-image|aura-base) -k 30 2400 node tools\/run-tests\.mjs --only=core$/);
   const order = calls().filter((l) => !l.includes('{{json .Mounts}}')).map((l) => l.split(' ').slice(0, 2).join(' '));
   assert.deepEqual(order, ['docker create', 'docker inspect', 'docker start'], 'inspected before it starts');
   assert.match(calls().find((l) => l.startsWith('docker start')), new RegExp(`start -a ${name}$`));
   const free = run(['--worktree', wt, '--no-lock', '--', 'true']);
   assert.equal(free.status, 7);
   assert.equal(readFileSync(join(state, 'lock'), 'utf8').trim(), 'free');
-  for (const field of ['Memory', 'MemorySwap', 'NanoCpus', 'PidsLimit', 'AutoRemove']) {
+  for (const field of ['Memory', 'MemorySwap', 'NanoCpus', 'PidsLimit', 'AutoRemove', 'Init']) {
     writeFileSync(join(state, 'calls.log'), '');
     const u = run(['--worktree', wt, '--no-lock'], { FAKE_DROP: field });
     assert.equal(u.status, 3, field);
