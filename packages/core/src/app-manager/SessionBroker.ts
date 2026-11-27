@@ -233,8 +233,14 @@ export class SessionBroker {
     const id = await engine.execCreate(SESSION_BROKER_NAME, {
       Cmd: [helper, 'enter', JSON.stringify(input)], Tty: spec.tty, AttachStdin: true, User: '0',
     });
-    const sock: Duplex = await engine.execStart(id, spec.tty);
+    const sock: Duplex = await engine.execStart(id, spec.tty, { cols: spec.cols, rows: spec.rows });
     let launcherPid = 0;
+    // The session takes the stream at once, before the launcher's pid is read: a command that writes nothing
+    // ends its stream right away, and an `end`/`close` nobody listened to is lost (the session never ended).
+    const session = engineSession(engine, id, sock, spec, onOutput, {
+      // The caller went away (disconnect, End, timeout): end the launcher, so the session hangs up.
+      onEnd: () => { if (launcherPid) void this.brokerCommand([helper, 'end', String(launcherPid)]).catch(() => undefined); },
+    });
     for (let i = 0; i < 20 && !launcherPid; i++) {
       const r = await engine.execInspect(id).catch(() => null);
       launcherPid = r?.Pid ?? 0;
@@ -246,10 +252,6 @@ export class SessionBroker {
       kind: spec.kind, home: spec.home.mode, uid: spec.uid, launcherPid, startedAt: new Date().toISOString(),
     };
     if (launcherPid) this.open.set(spec.sessionId, record);
-    const session = engineSession(engine, id, sock, spec, onOutput, {
-      // The caller went away (disconnect, End, timeout): end the launcher, so the session hangs up.
-      onEnd: () => { if (launcherPid) void this.brokerCommand([helper, 'end', String(launcherPid)]).catch(() => undefined); },
-    });
     void session.exited.then(() => { this.open.delete(spec.sessionId); }, () => { this.open.delete(spec.sessionId); });
     return session;
   }
