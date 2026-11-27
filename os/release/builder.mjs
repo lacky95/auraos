@@ -39,6 +39,14 @@
 //                     [--infra FILE] [--first-install] [--job ID]
 //   builder.mjs status --data-root D
 //   builder.mjs gc --data-root D [--data-volume V]
+//   builder.mjs check [--only=PKGS] [--worktree DIR] [--cpus N --memory 6g --pids N] [--network none|bridge]
+//                     [--timeout SEC] [--env K=V]... [--lock FILE | --no-lock] [--no-git] [-- CMD...]
+//     D106 item 1: a package suite, typecheck, lint or build of a worktree in the same throwaway
+//     container, limits enforced (check.mjs); the command's exit code and output.
+//
+// Every throwaway container (build steps and check) comes from container.mjs with a
+// resources.limits profile (limits.mjs = core runtimes/container/limits.ts): RELEASE_BUILD_LIMITS
+// for a release build, DEFAULT_CHECK_LIMITS for a check.
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
@@ -51,7 +59,10 @@ import {
 } from '../release-verify.mjs';
 import { renameDurable, writeFileDurable, writeJsonDurable } from './durable.mjs';
 import { LockError, acquireLock, lockStatus } from './lock.mjs';
+import { checkMain } from './check.mjs';
+import { throwawayArgs } from './container.mjs';
 import { imageFingerprint, satisfiesNode, targetsOf } from './images.mjs';
+import { RELEASE_BUILD_LIMITS } from './limits.mjs';
 import {
   COMPLETE_MARKER, RELEASE_RECORD, STAGING_PREFIX, assertReleaseId, layout, newJobId, subpathOf,
 } from './layout.mjs';
@@ -256,23 +267,16 @@ export function infraInputs(x) {
   };
 }
 
-/** Container mounts and env for the throwaway build (no socket, no home, no /data beyond these). */
-export function buildContainerArgs({ name, image, dataVolume, stagingSub, storeSub, publicSub, secretsSub, env = {}, network, limits = {} }) {
-  const a = [
-    'run', '--rm', '--name', name,
-    '--network', network,
-    '--pids-limit', String(limits.pids ?? 2048), '--memory', limits.memory ?? '6g', '--cpus', String(limits.cpus ?? 2),
-    '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
-    '--workdir', '/workspace',
-    '--mount', `type=volume,source=${dataVolume},target=/workspace,volume-subpath=${stagingSub}`,
-    '--mount', `type=volume,source=${dataVolume},target=/pnpm-store,volume-subpath=${storeSub}`,
-  ];
-  if (publicSub) a.push('--mount', `type=volume,source=${dataVolume},target=/etc/aura/build-infra,volume-subpath=${publicSub},readonly`);
-  if (secretsSub) a.push('--mount', `type=volume,source=${dataVolume},target=/run/aura-build,volume-subpath=${secretsSub},readonly`);
-  const e = { HOME: '/tmp', npm_config_store_dir: '/pnpm-store', ...env };
-  for (const [k, v] of Object.entries(e)) a.push('-e', `${k}=${v}`);
-  a.push('--entrypoint', 'sh', image);
-  return a;
+/** The throwaway build's container (container.mjs): staging + store only, no socket, no home, the release limits profile. */
+export function buildContainerArgs({ name, image, dataVolume, stagingSub, storeSub, publicSub, secretsSub, env = {}, network, limits }) {
+  const vol = (target, subpath, readonly = false) => ({ type: 'volume', source: dataVolume, target, subpath, readonly });
+  const mounts = [vol('/workspace', stagingSub), vol('/pnpm-store', storeSub)];
+  if (publicSub) mounts.push(vol('/etc/aura/build-infra', publicSub, true));
+  if (secretsSub) mounts.push(vol('/run/aura-build', secretsSub, true));
+  return throwawayArgs({
+    name, image, network, limits: limits ?? RELEASE_BUILD_LIMITS, workdir: '/workspace', mounts,
+    env: { HOME: '/tmp', npm_config_store_dir: '/pnpm-store', ...env }, entrypoint: 'sh',
+  });
 }
 
 const shortHash = (o) => createHash('sha256').update(JSON.stringify(o)).digest('hex').slice(0, 8);
@@ -318,7 +322,8 @@ const readVersionConst = (dir, rel, name) => {
  *   series                     Phase 7: the series to apply; refused in Phase 6 when non-empty
  *   firstInstall               write the first pointer (no current release yet)
  *   lock                       a lock handle the caller (U) already holds; else taken here
- *   jobId, docker, log, limits, timeouts
+ *   limits                     resources.limits of the throwaway containers ({cpus, memoryBytes, pids}; RELEASE_BUILD_LIMITS)
+ *   jobId, docker, log, timeouts
  * Resolves { ok, id, release, reused, job }; throws BuildError (job file records the step).
  */
 export async function build(o) {
@@ -639,9 +644,10 @@ export function status(dataRoot) {
 const jsonOut = (o) => process.stdout.write(`${JSON.stringify(o, null, 2)}\n`);
 
 export async function main(argv = process.argv.slice(2)) {
+  if (argv[0] === 'check') return checkMain(argv.slice(1));
   const a = parseArgs(argv);
   const [cmd] = a._;
-  const usage = () => { process.stderr.write('usage: builder.mjs build|status|gc … (see the file header)\n'); return 64; };
+  const usage = () => { process.stderr.write('usage: builder.mjs build|status|gc|check … (see the file header)\n'); return 64; };
   try {
     switch (cmd) {
       case 'build': {

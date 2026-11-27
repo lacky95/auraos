@@ -16,6 +16,7 @@
     "publish:local:fresh": "pnpm build:libs && pnpm publish:local",
     "typecheck": "pnpm -r typecheck",
     "test": "node tools/run-tests.mjs",
+    "check": "node os/release/builder.mjs check",
     "smoke": "node tools/smoke/run.mjs",
     "security": "node tools/security-check.mjs",
     "arch": "node tools/dep-check.mjs"

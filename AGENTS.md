@@ -85,6 +85,7 @@ Read the `AGENTS.md` files from here down to the directory you work in.
 pnpm arch                               # architecture dependency check (tools/dep-check.mjs, D97)
 node tools/dep-check.mjs --report       # module graph: sizes, fan-in and fan-out, cycles
 node tools/run-tests.mjs --only=<pkg>   # unit, contract and golden suites (runs pnpm arch first; never in /workspace)
+pnpm check --only=<pkg>                 # the same in a capped throwaway container (D106, os/release/check.mjs)
 pnpm security                           # security gate
 pnpm typecheck
 ```
