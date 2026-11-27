@@ -2,7 +2,10 @@
  * Phase 5 stream I: the read-only identity and home reports, on the live
  * system. This module only gathers inputs (accounts, identities, installed
  * apps, running instances) and hands them to core, which measures and
- * decides. Nothing here allocates, chowns, copies or writes.
+ * decides. Nothing here allocates an identity, chowns, copies or writes; an
+ * installed app whose installation record is missing gets it, exactly as the
+ * boot migration would (AppManager `ensureInstallation`), so no row is
+ * reported without its installation by accident.
  *
  *   ownershipReport()  the dry-run ownership report (P5-2, D70): what stream
  *                      H would chown, per row, with counts and a digest
@@ -35,8 +38,9 @@ function scopeDataDir(mgr: Mgr, scopeId: string): string | null {
   }
 }
 
-async function installationOf(appId: string, scopeId: string): Promise<string | null> {
-  try { return (await core.getAppHostServices().registry.findInstallation(appId, scopeId))?.installationId ?? null; } catch { return null; }
+/** An installed app's installation (repaired when missing); null when it has none after all, which the report shows. */
+async function installationOf(appId: string): Promise<core.AppInstallation | null> {
+  try { return (await core.getAppManager().ensureInstallation(appId)).installation; } catch { return null; }
 }
 
 function subdirs(dir: string): string[] {
@@ -70,7 +74,7 @@ export async function liveOwnershipSpecs(): Promise<OwnershipRowSpec[]> {
 
   for (const m of mgr.registry.getAll()) {
     const scopeDir = scopeDataDir(mgr, m.scopeId);
-    const installationId = await installationOf(m.id, m.scopeId);
+    const installationId = (await installationOf(m.id))?.installationId ?? null;
     const app = installationId ? await svc.identity.getApp(installationId) : null;
     if (scopeDir) {
       // Stream A's rows (core appOwnershipSpecs), the same ones a `runAs: app` start applies:
@@ -118,7 +122,7 @@ export async function homesPlan(): Promise<core.HomePlanReport> {
     if (!m) continue;
     rows.push({
       instanceId: inst.instanceId, appId: inst.appId,
-      installationId: await installationOf(inst.appId, m.scopeId),
+      installationId: (await installationOf(inst.appId))?.installationId ?? null,
       environmentScope: m.environmentScope ?? 'global',
       ...((inst as { owner?: string }).owner ? { owner: (inst as { owner?: string }).owner } : {}),
       currentHostPath: (await mgr.appHomeOf(inst.instanceId))?.hostPath ?? null,
@@ -132,7 +136,7 @@ export async function importReport(): Promise<core.ImportReport> {
   const installations: core.ImportReportInstallation[] = [];
   for (const m of mgr.registry.getAll()) {
     if (m.scopeId === 'system') continue; // built-in apps keep no personal tool state to import
-    const installationId = await installationOf(m.id, m.scopeId);
+    const installationId = (await installationOf(m.id))?.installationId ?? null;
     if (installationId) installations.push({ installationId, appId: m.id, tools: Array.isArray(m.tools) ? m.tools : [] });
   }
   return core.buildImportReport(core.userHomeDir(dataDir()), installations);
@@ -168,12 +172,10 @@ export async function identityCheck(): Promise<IdentityCheck> {
 export async function privilegeReview(): Promise<core.PrivilegeReview> {
   const svc = core.getAuthServices();
   const mgr = core.getAppManager();
-  const hosts = core.getAppHostServices().registry;
   const inputs: core.PrivilegeReviewInput[] = [];
   const instances = mgr.getAllInstances();
   for (const m of mgr.registry.getAll()) {
-    let inst: core.AppInstallation | null = null;
-    try { inst = await hosts.findInstallation(m.id, m.scopeId); } catch { inst = null; }
+    const inst = await installationOf(m.id);
     const app = inst ? await svc.identity.getApp(inst.installationId) : null;
     let runtime: { id: string | null; identity: 'none' | 'emulated' | 'enforced' | null } = { id: null, identity: null };
     try {

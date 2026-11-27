@@ -61,6 +61,8 @@ let previews: Map<string, { appId: string; appDir: string; workspace: string; ow
 /** Apps with no installation record yet, and the apps `syncAppHost` gave one. */
 let unallocated: Set<string>;
 let synced: string[];
+/** Apps whose repair fails. */
+let unrepairable: Set<string>;
 /** Source trees handed to the owner (`handToOwner`), as `appId`. */
 let handed: string[];
 
@@ -149,8 +151,16 @@ function deps(): AppSourceDeps {
         for (const m of kernel) if (m.targetAppId === appId && m.kind === 'source' && deps().apps.sourceMode(appId)?.mode === 'closed') m.mode = 'ro';
       },
     },
-    installationId: async (appId, scope) => (unallocated.has(appId) ? null : `inst-${scope}-${appId.replace(/\./g, '-')}`),
-    syncAppHost: async (appId) => { synced.push(appId); unallocated.delete(appId); return null; },
+    ensureInstallation: async (appId) => {
+      const scope = apps().find((a) => a.id === appId)?.scopeId;
+      if (!scope) return { installation: null, error: `${appId} is not installed` };
+      if (unallocated.has(appId)) {
+        synced.push(appId);
+        if (unrepairable.has(appId)) return { installation: null, error: `${appId} has no installation record and it could not be created (kv down)` };
+        unallocated.delete(appId);
+      }
+      return { installation: { installationId: `inst-${scope}-${appId.replace(/\./g, '-')}` } };
+    },
     nexus,
     handToOwner: async (appDir, appId) => { assert.equal(appDir, apps().find((a) => a.id === appId)?.appDir); handed.push(appId); return null; },
   };
@@ -164,6 +174,7 @@ beforeEach(async () => {
   previews = new Map();
   unallocated = new Set();
   synced = [];
+  unrepairable = new Set();
   handed = [];
   root = mkdtempSync(join(tmpdir(), 'aura-src-'));
   const scope = (id: core.ScopeId, priority: number, immutable: boolean) =>
@@ -210,6 +221,14 @@ test('an app without its installation (a clone before 0.0.50) gets it on the fir
   assert.deepEqual(synced, ['io.shop.app']);
   await read(await appSourceStatus(req('POST', { app: 'io.shop.app' }), 'com.aura.terminal', deps(), true));
   assert.deepEqual(synced, ['io.shop.app'], 'an app that has one is never synced here');
+});
+
+test('B7: an installation that cannot be repaired is a clear error, never a silent no-op', async () => {
+  unallocated.add('io.shop.app');
+  unrepairable.add('io.shop.app');
+  const r = await read(await mountAppVolume(req('POST'), 'com.aura.terminal', deps(), { app: 'io.shop.app', kind: 'work' }));
+  assert.deepEqual([r.status, r.body.error], [409, 'no-installation']);
+  assert.match(r.body.message, /could not be created \(kv down\)/);
 });
 
 test('a system app is closed: its source view is read-only too, and it cannot be opened', async () => {

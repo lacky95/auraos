@@ -338,7 +338,7 @@ function landedAppManager(scope) {
     refreshManifestDerived() {},
     async blockForeignHosts() {},
   };
-  for (const name of ['reloadScopedApp', 'reloadManifest', 'syncAppHost']) fake[name] = AppManager.prototype[name].bind(fake);
+  for (const name of ['reloadScopedApp', 'reloadManifest', 'syncAppHost', 'ensureInstallation']) fake[name] = AppManager.prototype[name].bind(fake);
   return fake;
 }
 function installedEvents(appId) {
@@ -383,6 +383,34 @@ test('clone: a silent reloadManifest of a landed app hides it from the watcher (
     mgr.registry['loadManifestFile'](manifestPath, user);
     assert.deepEqual(ev.seen, [], 'no app:installed: nothing would allocate its installation');
   } finally { ev.off(); }
+});
+
+test('ensureInstallation (B7): find, else repair, then find; a failed repair says why, never null silently', async () => {
+  const user = scopes()[2];
+  const id = 'com.example.repair';
+  putApp(user, id, { originId: randomUUID() });
+  const mgr = landedAppManager(user);
+  mgr.registry.reloadFromDisk(id);
+  assert.equal(await registry.findInstallation(id, 'user'), null, 'registered without its installation (a pre-0.0.50 clone)');
+  const first = await mgr.ensureInstallation(id, { registry, lifecycle });
+  assert.ok(first.installation, 'repaired');
+  assert.equal(first.installation.installationId, (await registry.findInstallation(id, 'user')).installationId);
+  let synced = 0;
+  const again = await mgr.ensureInstallation(id, { registry, lifecycle: { syncDiscovered: async () => { synced++; } } });
+  assert.equal(again.installation.installationId, first.installation.installationId);
+  assert.equal(synced, 0, 'an app that has one is never synced');
+
+  const broken = 'com.example.broken';
+  putApp(user, broken);
+  mgr.registry.reloadFromDisk(broken);
+  const failed = await mgr.ensureInstallation(broken, { registry, lifecycle: { syncDiscovered: async () => { throw new Error('kv down'); } } });
+  assert.equal(failed.installation, null);
+  assert.match(failed.error, /com\.example\.broken has no installation record and it could not be created \(kv down\)/);
+  mgr.appHostsReady = false;
+  assert.match((await mgr.ensureInstallation(broken, { registry, lifecycle })).error, /boot migration has not completed/);
+  assert.match((await mgr.ensureInstallation('com.example.nowhere', { registry, lifecycle })).error, /is not installed/);
+  await assert.rejects(mgr.ensureInstallation(id, { registry: { findInstallation: async () => { throw new Error('ECONNREFUSED'); } }, lifecycle }), /ECONNREFUSED/,
+    'an unreadable record throws: a start must not guess how it runs');
 });
 
 test('syncAppHost: says why it failed, and waits for the boot migration', async () => {

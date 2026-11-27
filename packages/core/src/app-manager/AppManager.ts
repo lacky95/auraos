@@ -65,7 +65,7 @@ import { appOwnershipSpecs, applyAppOwnership } from '../identity/appOwnership.j
 import { ownershipJournalPath } from '../identity/ownershipApply.js';
 import { runAsMigrationBlock, type RunAsOwnershipInput } from '../identity/runAsOwnership.js';
 import { installationAppHomes } from '../homes/appHomeAdmin.js';
-import type { AppRunAsMigration } from '../app-hosts/contracts.js';
+import type { AppInstallation, AppRunAsMigration } from '../app-hosts/contracts.js';
 import { RuntimeCapabilityError } from '../runtimes/types.js';
 import { BASE_GROUP, BASE_PASSWD, identityAccountName, isNonRootIdentity, isSessionIdentity } from './spawn/identityArgs.js';
 import { renderGroup, renderPasswd, type PasswdEntry } from '../identity/passwd.js';
@@ -519,6 +519,31 @@ export class AppManager {
       console.warn(`[AppManager] app host sync for ${appId} failed: ${(err as Error).message}`);
       return (err as Error).message;
     }
+  }
+
+  /**
+   * The app's installation in the scope it resolves to, repaired when it is
+   * missing: found, else this app's boot-migration sync (`syncAppHost`),
+   * then found again. The one repair for every caller that needs the
+   * installation (a start, `aura dev` patching, run-as, App Home deletion,
+   * the identity reports), so a missing record is never a silent no-op.
+   * A record that can't be read throws; no record after the repair answers why.
+   */
+  async ensureInstallation(
+    appId: string,
+    hosts: Pick<ReturnType<typeof getAppHostServices>, 'registry' | 'lifecycle'> = getAppHostServices(),
+  ): Promise<{ installation: AppInstallation } | { installation: null; error: string }> {
+    const scope = this.registry.getScopeId(appId);
+    if (!scope) return { installation: null, error: `${appId} is not installed` };
+    const found = await hosts.registry.findInstallation(appId, scope);
+    if (found) return { installation: found };
+    if (!this.appHostsReady) {
+      return { installation: null, error: `${appId} has no installation record and the App Host boot migration has not completed (see the shell log)` };
+    }
+    const why = await this.syncAppHost(appId, hosts.lifecycle);
+    const repaired = await hosts.registry.findInstallation(appId, scope);
+    return repaired ? { installation: repaired }
+      : { installation: null, error: `${appId} has no installation record and it could not be created${why ? ` (${why})` : ''}` };
   }
 
   /** A manifest host equal to another app's generated label stops routing. */
@@ -2194,18 +2219,12 @@ export class AppManager {
   async installationRunAs(appId: string): Promise<{
     installationId: string; runAs?: AppRunAs; execution?: ExecutionApproval; runAsMigration?: AppRunAsMigration; runAsJournal?: string;
   } | null> {
-    const scope = this.registry.getScopeId(appId);
-    if (!scope) return null;
+    // An app discovered moments ago (scaffold, clone) gets its record from the
+    // background sync; `ensureInstallation` records it now rather than fail the first start (D65).
     let inst;
-    try { inst = await getAppHostServices().registry.findInstallation(appId, scope); }
+    try { inst = (await this.ensureInstallation(appId)).installation; }
     catch (err) {
       throw new Error(`${appId}: its installation record can't be read (${(err as Error).message}); not started, since how it runs is unknown`);
-    }
-    if (!inst && this.appHostsReady) {
-      // An app discovered moments ago (scaffold, clone) gets its record from the
-      // background sync; record it now rather than fail the first start (D65).
-      await this.syncAppHost(appId);
-      try { inst = await getAppHostServices().registry.findInstallation(appId, scope); } catch { inst = null; }
     }
     return inst ? {
       installationId: inst.installationId, ...(inst.runAs ? { runAs: inst.runAs } : {}), ...(inst.execution ? { execution: inst.execution } : {}),

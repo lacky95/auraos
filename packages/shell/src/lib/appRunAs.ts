@@ -65,8 +65,9 @@ export interface RunAsMigrationDeps {
 export interface RunAsDeps {
   ownerAction(ctx: Ctx, req: Parameters<typeof ownerAction>[1]): Promise<OwnerActor | Response>;
   audit(actor: OwnerActor, action: string, opts: Parameters<typeof auditOwner>[2]): Promise<void>;
-  mgr: Pick<Mgr, 'registry' | 'getAllInstances'>;
-  hosts: Pick<core.AppHostStore, 'findInstallation' | 'setRunAs' | 'setRunAsMigration'>;
+  /** `ensureInstallation`: an app without its installation record is repaired, never answered "not ready". */
+  mgr: Pick<Mgr, 'registry' | 'getAllInstances' | 'ensureInstallation'>;
+  hosts: Pick<core.AppHostStore, 'setRunAs' | 'setRunAsMigration'>;
   /** The effective `app-root-execution` value (a read failure counts as refuse: fail closed). */
   rootPolicy(): Promise<core.AppRootExecutionPolicy>;
   migration: RunAsMigrationDeps;
@@ -132,6 +133,14 @@ async function body(ctx: Ctx): Promise<Record<string, unknown> | Response> {
 
 const recoverHint = (appId: string) => `aura admin apps run-as ${appId} --recover`;
 
+/** The app's installation, repaired when it is missing (AppManager `ensureInstallation`); else why not. */
+async function installationOf(deps: RunAsDeps, appId: string): Promise<core.AppInstallation | Response> {
+  let r;
+  try { r = await deps.mgr.ensureInstallation(appId); }
+  catch (err) { return json({ error: 'not-ready', message: `${appId}: its installation record can't be read (${(err as Error).message})` }, 503); }
+  return r.installation ?? json({ error: 'no-installation', message: r.error }, 409);
+}
+
 export async function postRunAs(ctx: Ctx, deps: RunAsDeps = liveRunAsDeps()): Promise<Response> {
   const b = await body(ctx);
   if (b instanceof Response) return b;
@@ -145,8 +154,8 @@ export async function postRunAs(ctx: Ctx, deps: RunAsDeps = liveRunAsDeps()): Pr
   }
   const m = deps.mgr.registry.getById(appId);
   if (!m) return json({ error: 'not-found', message: `unknown app: ${appId}` }, 404);
-  const inst = await deps.hosts.findInstallation(appId, m.scopeId);
-  if (!inst) return json({ error: 'not-ready', message: `${appId} has no recorded installation yet` }, 409);
+  const inst = await installationOf(deps, appId);
+  if (inst instanceof Response) return inst;
   if (inst.runAsMigration) {
     return json({ error: 'migration-pending', message: `${appId}: an earlier run-as change (to ${inst.runAsMigration.to}) did not finish. Restore it first: ${recoverHint(appId)}` }, 409);
   }
@@ -287,8 +296,8 @@ export async function postRunAs(ctx: Ctx, deps: RunAsDeps = liveRunAsDeps()): Pr
 async function recoverRunAs(ctx: Ctx, appId: string, deps: RunAsDeps): Promise<Response> {
   const m = deps.mgr.registry.getById(appId);
   if (!m) return json({ error: 'not-found', message: `unknown app: ${appId}` }, 404);
-  const inst = await deps.hosts.findInstallation(appId, m.scopeId);
-  if (!inst) return json({ error: 'not-ready', message: `${appId} has no recorded installation yet` }, 409);
+  const inst = await installationOf(deps, appId);
+  if (inst instanceof Response) return inst;
   const pending = inst.runAsMigration;
   if (!pending) return json({ ok: true, changed: false, appId, message: `${appId} has no unfinished run-as change` });
   const before = inst.runAs ?? 'root';

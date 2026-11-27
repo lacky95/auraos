@@ -59,6 +59,9 @@ let records: Map<string, core.AppInstallation>;
 let steps: string[];
 let applyFails: boolean;
 let restoreSkips: string[];
+/** Apps registered without an installation record (`ensureInstallation` repairs them), and the ones it can't. */
+let missing: Set<string>;
+let unrepairable: Set<string>;
 const PLAN_DIGEST = (appId: string, runAs: string, journal: string | null) => (`${appId}|${runAs}|${journal ?? ''}`.length.toString(16).padStart(2, '0')).repeat(32);
 
 function deps(): RunAsDeps {
@@ -81,9 +84,19 @@ function deps(): RunAsDeps {
           : id === 'org.a.rooted' ? { id, scopeId: 'global', execution: { runAs: 'root', reason: 'binds port 80 inside' } } : undefined),
       },
       getAllInstances: () => [{ instanceId: 'org.a.notes', appId: 'org.a.notes' }],
+      ensureInstallation: async (appId: string) => {
+        if (unrepairable.has(appId)) return { installation: null, error: `${appId} has no installation record and it could not be created (kv down)` };
+        if (missing.delete(appId)) {
+          records.set(`i-${appId}`, {
+            installationId: `i-${appId}`, appId, originId: null, scope: 'global', userId: 'default',
+            source: { kind: 'local', ref: appId }, state: 'active', runAs: 'app', createdAt: 0, updatedAt: 0,
+          } as core.AppInstallation);
+        }
+        const installation = [...records.values()].find((r) => r.appId === appId) ?? null;
+        return installation ? { installation } : { installation: null, error: `${appId} has no installation record` };
+      },
     } as never,
     hosts: {
-      findInstallation: async (appId: string) => [...records.values()].find((r) => r.appId === appId) ?? null,
       setRunAs: async (id: string, runAs: 'app' | 'root', expect?: 'app' | 'root', execution?: core.ExecutionApproval, migrated?: { journal: string | null }) => {
         const cur = records.get(id)!;
         if (expect !== undefined && (cur.runAs ?? 'root') !== expect) return { ok: false, installation: cur };
@@ -159,6 +172,8 @@ beforeEach(() => {
   steps = [];
   applyFails = false;
   restoreSkips = [];
+  missing = new Set(['org.a.new']);
+  unrepairable = new Set();
   rootPolicy = 'approve';
   records = new Map([['i-notes', {
     installationId: 'i-notes', appId: 'org.a.notes', originId: null, scope: 'global', userId: 'default',
@@ -216,8 +231,20 @@ test('the operator flips both ways; the flip back restores the earlier migration
   assert.equal((await postRunAs(req({ appId: 'org.a.notes', runAs: 'admin' }), deps())).status, 400);
   assert.equal((await postRunAs(req({ appId: 'org.a.notes', runAs: 'app', digest: 'nope' }), deps())).status, 400);
   assert.equal((await postRunAs(req({ appId: 'org.a.gone', runAs: 'app' }), deps())).status, 404);
-  assert.equal((await postRunAs(req({ appId: 'org.a.new', runAs: 'app' }), deps())).status, 409, 'no installation record yet');
   assert.deepEqual(audits.map((a) => a.action), ['app.run-as-changed', 'app.run-as-changed']);
+});
+
+test('B7: an app without its installation record is repaired, not answered 409 not-ready; one that cannot be is a clear error', async () => {
+  const r = await read(await postRunAs(req({ appId: 'org.a.new', runAs: 'app' }), deps()));
+  assert.deepEqual([r.status, r.body.changed, r.body.installationId], [200, false, 'i-org.a.new'], 'repaired: it already runs as its app identity');
+  assert.ok(records.has('i-org.a.new'));
+  unrepairable.add('org.a.rooted');
+  const no = await read(await postRunAs(req({ appId: 'org.a.rooted', runAs: 'root' }), deps()));
+  assert.deepEqual([no.status, no.body.error], [409, 'no-installation']);
+  assert.match(no.body.message, /could not be created \(kv down\)/);
+  const rec = await read(await postRunAs(req({ appId: 'org.a.rooted', recover: true }), deps()));
+  assert.deepEqual([rec.status, rec.body.error], [409, 'no-installation'], '--recover the same');
+  assert.deepEqual(steps, []);
 });
 
 test('a digest other than the current dry run\'s applies nothing (409 with the new digest)', async () => {

@@ -2,7 +2,7 @@ import type { APIRoute } from 'astro';
 import { getAppManager, removeInstalledApp } from '@aura/core';
 import { defaultKv } from '@aura/kv-store';
 import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
-import { deleteHomesAfterRemove, installationBeforeRemove } from '../../../../lib/homesAdmin.ts';
+import { deleteHomeRefusal, deleteHomesAfterRemove, installationBeforeRemove } from '../../../../lib/homesAdmin.ts';
 
 /**
  * Delete an installed app through the core lifecycle (`removeInstalledApp`):
@@ -36,12 +36,13 @@ async function deleteApp(appId: string | undefined, deleteHome = false): Promise
     return errorResponse(`App not installed: ${appId}`, 404);
   }
 
-  const installationId = await installationBeforeRemove(appId);
+  const home = deleteHome ? await installationBeforeRemove(appId) : null;
+  if (home && 'error' in home) return errorResponse(deleteHomeRefusal(appId, home.error), 409);
   let result: { removed: boolean; dest: string };
   let homeDeleted = false;
   try {
     result = await removeInstalledApp(appId);
-    if (deleteHome) homeDeleted = await deleteHomesAfterRemove(appId, installationId);
+    if (home) homeDeleted = await deleteHomesAfterRemove(appId, home.installationId);
   } catch (err) {
     return errorResponse(`Could not delete ${appId}: ${(err as Error).message}`, 500);
   }

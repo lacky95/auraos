@@ -67,10 +67,8 @@ export interface AppSourceDeps {
     /** Live binds of a workspace dir (relative to dataDir), in every instance. */
     workspaceBinds(subpath: string): Array<{ instanceId: string; mountId: string }>;
   };
-  /** The App Host installation of an app in a scope (`apphost:install:*`), or null. */
-  installationId(appId: string, scope: string): Promise<string | null>;
-  /** The boot backfill for one app: its missing installation and host (AppManager `syncAppHost`). */
-  syncAppHost(appId: string): Promise<string | null>;
+  /** The app's App Host installation, repaired when it is missing (AppManager `ensureInstallation`). */
+  ensureInstallation(appId: string): Promise<{ installation: { installationId: string } } | { installation: null; error: string }>;
   nexus: Pick<NexusManager, 'install' | 'setSourceMode' | 'rollbackTrees' | 'records'>;
   /** Open user-scope source becomes the owner's (identityReports `handOwnAppSourceToOwner`); a note, or null. */
   handToOwner(appDir: string, appId: string): Promise<string | null>;
@@ -94,8 +92,7 @@ export function liveAppSourceDeps(authenticate: AppSourceDeps['authenticate'], a
       stopPreview: (instanceId) => mgr.stopPreview(instanceId),
     },
     mounts: mgr.mounts,
-    installationId: async (appId, scope) => (await core.getAppHostServices().registry.findInstallation(appId, scope))?.installationId ?? null,
-    syncAppHost: (appId) => mgr.syncAppHost(appId),
+    ensureInstallation: (appId) => mgr.ensureInstallation(appId),
     nexus: core.getNexusManager(),
     handToOwner: handOwnAppSourceToOwner,
   };
@@ -124,16 +121,18 @@ function builtInApp(app: ScopedApp): boolean {
   return app.scopeId === 'system';
 }
 
-/** The installation patches and workspaces belong to: the active copy's. */
-async function patchInstallation(deps: AppSourceDeps, app: ScopedApp): Promise<{ key: string | null; active: string | null }> {
-  let active = await deps.installationId(app.id, app.scopeId).catch(() => null);
-  if (!active) {
-    // A registered app without its installation (a clone before 0.0.50 never
-    // got one): the boot migration's idempotent sync, for this app only.
-    await deps.syncAppHost(app.id).catch(() => null);
-    active = await deps.installationId(app.id, app.scopeId).catch(() => null);
+/**
+ * The installation patches and workspaces belong to: the active copy's. A
+ * registered app without one (a clone before 0.0.50 never got one) is
+ * repaired here (`ensureInstallation`); `error` says why there is none.
+ */
+async function patchInstallation(deps: AppSourceDeps, app: ScopedApp): Promise<{ key: string | null; error: string }> {
+  try {
+    const r = await deps.ensureInstallation(app.id);
+    return r.installation ? { key: r.installation.installationId, error: '' } : { key: null, error: r.error };
+  } catch (err) {
+    return { key: null, error: `${app.id}: its installation record can't be read (${(err as Error).message})` };
   }
-  return { key: active, active };
 }
 
 /** The user a request acts for: workspaces are per user. */
@@ -230,7 +229,7 @@ export async function appSourceStatus(request: Request, instanceId: string | und
   const app = resolveApp(deps, ref);
   if (app instanceof Response) return app;
   const mode = deps.apps.sourceMode(app.id) ?? { mode: 'closed', defaultMode: 'closed', from: 'default' } as SourceModeInfo;
-  const { key, active } = await patchInstallation(deps, app);
+  const { key } = await patchInstallation(deps, app);
   const userId = actingUser(principal);
 
   const writable = mode.mode === 'open' && mayWrite(principal, deps);
@@ -260,7 +259,7 @@ export async function appSourceStatus(request: Request, instanceId: string | und
         : `Read the source at ${path} (read-only). To change it: \`aura dev patch start ${app.id}\`.`;
   return json({
     appId: app.id, name: app.name, version: app.version, scope: app.scopeId,
-    installationId: key, activeInstallationId: active,
+    installationId: key, activeInstallationId: key,
     mode: mode.mode, defaultMode: mode.defaultMode, modeFrom: mode.from,
     upstream: upstreamOf(deps, app),
     source: { path, writable: view?.mode === 'rw', mounted: !!view },
@@ -310,8 +309,8 @@ export async function mountAppVolume(
   }
   const cap = deps.mounts.capable();
   if (!cap.ok) return json({ error: 'mounts-unavailable', message: cap.reason ?? 'mount propagation is unavailable on this host' }, 503);
-  const { key } = await patchInstallation(deps, app);
-  if (!key) return json({ error: 'no-installation', message: `${app.id} has no installation record yet; try again once it has started` }, 409);
+  const { key, error } = await patchInstallation(deps, app);
+  if (!key) return json({ error: 'no-installation', message: error }, 409);
 
   const bound = deps.mounts.list(inst).find((m) => m.id === `${app.id}:${body.kind}`);
   let subpath: string;
@@ -368,8 +367,8 @@ export async function cleanWorkspaces(request: Request, instanceId: string | und
     return json({ error: 'invalid-delete', message: 'delete must be a list of workspace numbers' }, 400);
   }
   const force = body['force'] === true;
-  const { key } = await patchInstallation(deps, app);
-  if (!key) return json({ error: 'no-installation', message: `${app.id} has no installation record` }, 409);
+  const { key, error } = await patchInstallation(deps, app);
+  if (!key) return json({ error: 'no-installation', message: error }, 409);
   const userId = actingUser(principal);
   const all = core.listWorkspaces(deps.dataDir, userId, key);
   const bound = deps.mounts.list(inst).find((m) => m.id === `${app.id}:work`);
@@ -468,8 +467,8 @@ export async function activatePrepared(request: Request, appId: string | undefin
     if (!Number.isInteger(n)) return json({ error: 'invalid-workspace', message: 'pass workspace: <n>, or rollback: true' }, 400);
     const user = workspaceOwner(principal, body['user']);
     if (user instanceof Response) return user;
-    const { key } = await patchInstallation(deps, app);
-    if (!key) return json({ error: 'no-installation', message: `${app.id} has no installation record` }, 409);
+    const { key, error } = await patchInstallation(deps, app);
+    if (!key) return json({ error: 'no-installation', message: error }, 409);
     try { tree = join(deps.dataDir, core.workspaceSubpath(user, key, n as number)); }
     catch (err) { return json({ error: 'invalid-workspace', message: (err as Error).message }, 400); }
     if (!existsSync(tree)) return json({ error: 'no-workspace', message: `workspace ${String(n)} of ${app.id} does not exist` }, 404);
@@ -520,8 +519,8 @@ export async function startPreview(request: Request, appId: string | undefined, 
   if (body instanceof Response) return body;
   const n = body['workspace'];
   if (!Number.isInteger(n)) return json({ error: 'invalid-workspace', message: 'pass workspace: <n>' }, 400);
-  const { key } = await patchInstallation(deps, app);
-  if (!key) return json({ error: 'no-installation', message: `${app.id} has no installation record` }, 409);
+  const { key, error } = await patchInstallation(deps, app);
+  if (!key) return json({ error: 'no-installation', message: error }, 409);
   const user = actingUser(principal);
   let subpath: string;
   try { subpath = core.workspaceSubpath(user, key, n as number); }
