@@ -9,13 +9,14 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
   secretKeyFor, sealedLoginValue, passwordForHost, authFileContent, orasTargetHost,
   isAuthFailure, authFailureReason, orasSync, orasAsync, OrasAuthError, SOURCE_SECRET_PATTERN,
+  imageRegistryHost, appPullLogin, writeAuthConfig, redactLogin,
 } from '../dist/nexus/RegistryAuth.js';
 import { parseStoreDescriptor, wellKnownUrl, discoverStore, StoreDiscoveryError } from '../dist/nexus/StoreDiscovery.js';
 import { isSourceEntry, isSourceAuth } from '../dist/nexus/SourcesConfig.js';
@@ -166,4 +167,51 @@ test('orasAsync: same login handling, and the event loop keeps running meanwhile
     await assert.rejects(orasAsync(['repo', 'ls', 'registry.acme.com'], {}, { username: 'cust', password: 'x' }),
       (err) => err instanceof OrasAuthError && /login to registry\.acme\.com failed/.test(err.message));
   } finally { process.env.PATH = old; }
+});
+
+test('the registry host of a docker image reference', () => {
+  assert.equal(imageRegistryHost('registry.lakner.io/lakner-io/auraos/apps/x/runtime:1'), 'registry.lakner.io');
+  assert.equal(imageRegistryHost('reg.io:5000/a/b@sha256:abc'), 'reg.io:5000');
+  assert.equal(imageRegistryHost('localhost/x:1'), 'localhost');
+  assert.equal(imageRegistryHost('alpine:3'), 'docker.io');
+  assert.equal(imageRegistryHost('library/alpine:3'), 'docker.io');
+  assert.equal(imageRegistryHost('ghcr.io/o/r:1'), 'ghcr.io');
+});
+
+test('appPullLogin: only the install source login, only for that source host', async () => {
+  const cfg = { sources: [
+    { kind: 'oci', name: 'acme', url: 'https://registry.acme.com', priority: 1, auth: { type: 'basic', username: 'cust', secret: 'NEXUS_SRC_ACME_PASSWORD' } },
+    { kind: 'oci', name: 'other', url: 'https://registry.other.io/', priority: 2, auth: { type: 'basic', username: 'o', secret: 'NEXUS_SRC_OTHER_PASSWORD' } },
+    { kind: 'oci', name: 'forged', url: 'https://registry.acme.com', priority: 3, auth: { type: 'basic', username: 'x', secret: 'NEXUS_SRC_FORGED_PASSWORD' } },
+    { kind: 'oci', name: 'open', url: 'https://registry.open.io', priority: 4 },
+    { kind: 'git-index', name: 'idx', url: 'https://idx.example.com/index.yaml', priority: 5 },
+  ] };
+  const sealed = {
+    NEXUS_SRC_ACME_PASSWORD: sealedLoginValue('registry.acme.com', 'pw-acme'),
+    NEXUS_SRC_OTHER_PASSWORD: sealedLoginValue('registry.other.io', 'pw-other'),
+    // A source re-pointed at acme's host, holding a login sealed for another host.
+    NEXUS_SRC_FORGED_PASSWORD: sealedLoginValue('registry.other.io', 'pw-other'),
+  };
+  const read = { sources: async () => cfg, secret: async (k) => sealed[k] ?? null };
+  assert.deepEqual(await appPullLogin('acme', 'registry.acme.com', read), { username: 'cust', password: 'pw-acme' });
+  assert.equal(await appPullLogin('acme', 'registry.other.io', read), null, 'never another source login');
+  assert.equal(await appPullLogin('other', 'registry.acme.com', read), null);
+  assert.equal(await appPullLogin('forged', 'registry.acme.com', read), null, 'a login sealed for another host');
+  assert.equal(await appPullLogin('open', 'registry.open.io', read), null, 'a source without a login');
+  assert.equal(await appPullLogin('idx', 'idx.example.com', read), null, 'not an oci source');
+  assert.equal(await appPullLogin('gone', 'registry.acme.com', read), null, 'a source that no longer exists');
+  assert.equal(await appPullLogin(undefined, 'registry.acme.com', read), null, 'no install source');
+});
+
+test('writeAuthConfig: a private dir with one host, removed by cleanup; redactLogin masks the secret', () => {
+  const login = { username: 'u', password: 'pa55' };
+  const a = writeAuthConfig('reg.io', login);
+  assert.equal(statSync(a.dir).mode & 0o777, 0o700);
+  assert.equal(statSync(a.file).mode & 0o777, 0o600);
+  assert.deepEqual(Object.keys(JSON.parse(readFileSync(a.file, 'utf-8')).auths), ['reg.io']);
+  a.cleanup();
+  assert.equal(existsSync(a.dir), false);
+  const b64 = Buffer.from('u:pa55').toString('base64');
+  assert.equal(redactLogin(`x pa55 ${b64} y`, login), 'x *** *** y');
+  assert.equal(redactLogin('x pa55', null), 'x pa55');
 });

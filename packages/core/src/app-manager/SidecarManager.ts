@@ -19,6 +19,9 @@ import {
 import { SIDECAR_TOOL_RE, effectiveSidecarTools } from './sidecar-tools.js';
 import { userHomeSubpath } from '../scopes/home.js';
 import {
+  imageRegistryHost, isAuthFailure, redactLogin, writeAuthConfig, type RegistryLogin,
+} from '../nexus/RegistryAuth.js';
+import {
   SpecError, resolveSidecarSpec, specHash,
   type ResolvedSidecarSpec, type SidecarSpawnRequest,
 } from './sidecar-spec.js';
@@ -137,6 +140,12 @@ interface SidecarManagerOpts {
   /** Live instance → app + its shell-side data dir. */
   instance(instanceId: string): { appId: string; instanceDataDir: string; owner?: string } | null;
   /**
+   * The registry login an image of `appId` may be pulled with (nexus
+   * `appPullLogin`: only the login of the app's own install source, only for
+   * that source's registry host), or null for an anonymous pull.
+   */
+  pullLogin?(appId: string, imageHost: string): Promise<RegistryLogin | null>;
+  /**
    * A sidecar was created or removed — lets AppManager refresh its sidecar
    * cache now instead of at the next reconciler tick (else `GET sidecars`
    * and `aura get sc` show the old state for up to a tick).
@@ -204,6 +213,21 @@ async function dockerOk(args: string[], what: string, timeoutMs?: number): Promi
   const r = await docker(args, { timeoutMs });
   if (r.code !== 0) throw new Error(`${what}: ${r.stderr.trim() || `docker exited ${r.code}`}`);
   return r.stdout;
+}
+
+/**
+ * A registry refused a sidecar image pull (`code: 'image_auth'`). Fails the
+ * spawn closed with the way out; the message carries the registry's words,
+ * never a credential.
+ */
+export class ImageAuthError extends SpecError {
+  readonly code = 'image_auth';
+  constructor(readonly image: string, readonly host: string, detail: string, hadLogin: boolean) {
+    super(502, hadLogin
+      ? `image_auth: ${host} refused the pull of ${image} with the login of the source this app was installed from — check that login (aura nexus registry login <source>) and its read access (${detail})`
+      : `image_auth: ${host} refused the pull of ${image} (${detail}) — a private image needs a login on the Nexus source this app was installed from, for that same registry host (aura nexus registry login <source>); other sources' logins are never used`);
+    this.name = 'ImageAuthError';
+  }
 }
 
 export function sidecarContainerName(instanceId: string, name: string): string {
@@ -395,7 +419,7 @@ export class SidecarManager {
         }
       }
 
-      await this.ensureImage(spec.image);
+      await this.ensureImage(spec.image, inst.appId);
       for (const v of spec.volumes) if (v.subpath) mkdirSync(join(rt.dataDir, v.subpath), { recursive: true });
       const wantsMountRoot = spec.mounts.own || spec.mounts.inherit;
       const consumer = `${instanceId}--${spec.name}`;
@@ -477,13 +501,26 @@ export class SidecarManager {
     };
   }
 
-  private async ensureImage(image: string): Promise<void> {
+  /**
+   * Pull `image` unless docker has it. When the app's install source has a
+   * login for the image's registry host (opts.pullLogin), the pull runs with
+   * a throwaway docker config holding only that login (`docker --config`,
+   * removed in every case); the login is never in argv, the env or a log.
+   * A refused pull is an ImageAuthError (`image_auth`).
+   */
+  private async ensureImage(image: string, appId: string): Promise<void> {
     if ((await docker(['image', 'inspect', '--format', '{{.Id}}', image])).code === 0) return;
-    let pull = this.pulls.get(image);
+    const host = imageRegistryHost(image);
+    let login: RegistryLogin | null = null;
+    try { login = (await this.opts.pullLogin?.(appId, host)) ?? null; }
+    catch (err) { console.warn(`[SidecarManager] registry login for ${image} (${appId}) unavailable, pulling anonymously: ${(err as Error).message}`); }
+    // A pull with a login is never shared with an anonymous one (or another login's).
+    const key = login ? `${image}\0${login.username}` : image;
+    let pull = this.pulls.get(key);
     if (!pull) {
-      pull = dockerOk(['pull', image], `docker pull ${image}`, PULL_TIMEOUT_MS).then(() => undefined);
-      this.pulls.set(image, pull);
-      void pull.finally(() => this.pulls.delete(image)).catch(() => undefined);
+      pull = pullImage(image, host, login);
+      this.pulls.set(key, pull);
+      void pull.finally(() => this.pulls.delete(key)).catch(() => undefined);
     }
     await pull;
   }
@@ -572,7 +609,7 @@ export class SidecarManager {
   async prePull(manifest: Pick<AppManifest, 'id' | 'services'>): Promise<void> {
     for (const svc of (manifest.services ?? []).filter((x) => x.prePull)) {
       try {
-        await this.ensureImage(svc.image);
+        await this.ensureImage(svc.image, manifest.id);
       } catch (err) {
         console.warn(`[SidecarManager] prePull ${svc.image} for ${manifest.id} failed: ${(err as Error).message}`);
       }
@@ -962,6 +999,20 @@ export class SidecarManager {
     let parsed: Record<string, string> = {};
     try { parsed = (JSON.parse(labels ?? '{}') ?? {}) as Record<string, string>; } catch { /* no labels */ }
     return { name: (name ?? container).replace(/^\//, ''), state: state ?? 'unknown', labels: parsed, restarts: Number(restarts) || 0 };
+  }
+}
+
+/** `docker pull`, with `login` (if any) in a temporary docker config dir that is always removed. */
+async function pullImage(image: string, host: string, login: RegistryLogin | null): Promise<void> {
+  const auth = login ? writeAuthConfig(host, login) : null;
+  try {
+    const r = await docker([...(auth ? ['--config', auth.dir] : []), 'pull', image], { timeoutMs: PULL_TIMEOUT_MS });
+    if (r.code === 0) return;
+    const out = redactLogin(r.stderr.trim() || (r.timedOut ? 'timed out' : `docker exited ${r.code}`), login);
+    if (isAuthFailure(out)) throw new ImageAuthError(image, host, out.split('\n').pop()!.slice(-300), !!login);
+    throw new Error(`docker pull ${image}: ${out}`);
+  } finally {
+    auth?.cleanup();
   }
 }
 

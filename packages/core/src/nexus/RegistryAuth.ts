@@ -30,7 +30,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ContextStore } from '../context/ContextStore.js';
 import { orasHostFromUrl } from './RegistryConfig.js';
-import type { SourcesConfig } from './SourcesConfig.js';
+import type { OciSource, SourcesConfig } from './SourcesConfig.js';
 
 export interface RegistryLogin {
   username: string;
@@ -101,8 +101,8 @@ export async function loadRegistryCredentials(dataDir: string, cfg: SourcesConfi
     if (s.kind !== 'oci' || !s.auth || !SOURCE_SECRET_PATTERN.test(s.auth.secret)) continue;
     const host = orasHostFromUrl(s.url);
     try {
-      const password = passwordForHost(await store.get(s.auth.secret), host);
-      if (password !== null) next.set(host, { username: s.auth.username, password });
+      const login = await sealedSourceLogin(s, (key) => store.get(key));
+      if (login) next.set(host, login);
       else console.warn(`[nexus] the login of source '${s.name}' is not for ${host} — not used (enter it again)`);
     } catch (err) {
       console.warn(`[nexus] could not read the login for source '${s.name}': ${(err as Error).message}`);
@@ -111,6 +111,14 @@ export async function loadRegistryCredentials(dataDir: string, cfg: SourcesConfi
   const m = logins();
   m.clear();
   for (const [h, l] of next) m.set(h, l);
+}
+
+/** The login of one OCI source: its sealed password, only when sealed for the
+ *  source's own registry host (and under a key this module writes). */
+async function sealedSourceLogin(s: OciSource, secret: (key: string) => Promise<string | null>): Promise<RegistryLogin | null> {
+  if (!s.auth || !SOURCE_SECRET_PATTERN.test(s.auth.secret)) return null;
+  const password = passwordForHost(await secret(s.auth.secret), orasHostFromUrl(s.url));
+  return password === null ? null : { username: s.auth.username, password };
 }
 
 /** True when a login is loaded for this registry host. */
@@ -172,6 +180,64 @@ export function authFileContent(host: string, login: RegistryLogin): string {
   return JSON.stringify({ auths: { [host]: { auth } } });
 }
 
+// ─── Sidecar image pulls ────────────────────────────────────────────────
+
+/**
+ * The registry host of a docker image reference: the first path component
+ * when it looks like a host (has a `.` or `:`, or is `localhost`), else
+ * Docker Hub (`docker.io`), as the docker CLI reads it.
+ */
+export function imageRegistryHost(image: string): string {
+  const slash = image.indexOf('/');
+  if (slash < 0) return 'docker.io';
+  const first = image.slice(0, slash);
+  return first.includes('.') || first.includes(':') || first === 'localhost' ? first : 'docker.io';
+}
+
+/**
+ * The login an app's sidecar image may be pulled with (SidecarManager): the
+ * one of the OCI source the app was installed from (its install record's
+ * `sourceName`), and only when the image lives on that source's own registry
+ * host. An app never borrows another source's login; no source, a non-OCI
+ * source or another host → null (the pull goes out anonymously). Read fresh
+ * from the sources config and the sealed secret on every call, so a login
+ * added or removed with `aura nexus registry login|logout` counts at once.
+ */
+export async function appPullLogin(
+  installSource: string | undefined, imageHost: string,
+  read: { sources(): Promise<SourcesConfig>; secret(key: string): Promise<string | null> },
+): Promise<RegistryLogin | null> {
+  if (!installSource) return null;
+  const s = (await read.sources()).sources.find((x): x is OciSource => x.kind === 'oci' && x.name === installSource);
+  if (!s || orasHostFromUrl(s.url) !== imageHost) return null;
+  return sealedSourceLogin(s, read.secret);
+}
+
+/**
+ * A docker-style config dir holding only `host`'s login (dir 0700 from
+ * mkdtemp, `config.json` 0600), for `docker --config <dir>` or oras'
+ * `--registry-config <file>`. The caller calls `cleanup()` in a finally.
+ */
+export function writeAuthConfig(host: string, login: RegistryLogin): { dir: string; file: string; cleanup: () => void } {
+  const dir = mkdtempSync(join(tmpdir(), 'aura-regauth-'));
+  const cleanup = () => rmSync(dir, { recursive: true, force: true });
+  const file = join(dir, 'config.json');
+  try { writeFileSync(file, authFileContent(host, login), { mode: 0o600 }); }
+  catch (err) { cleanup(); throw err; }
+  return { dir, file, cleanup };
+}
+
+/** `text` with the login's password (plain and inside the base64 auth) masked —
+ *  for registry output that ends up in an error or a log. */
+export function redactLogin(text: string, login: RegistryLogin | null): string {
+  if (!login) return text;
+  let out = text;
+  for (const secret of [login.password, Buffer.from(`${login.username}:${login.password}`, 'utf-8').toString('base64')]) {
+    if (secret) out = out.split(secret).join('***');
+  }
+  return out;
+}
+
 // ─── Pushing Aura artifacts ─────────────────────────────────────────────
 
 /** Where an Aura artifact type is kept when the registry refuses it as the
@@ -222,14 +288,9 @@ function orasAuth(args: string[], login?: RegistryLogin): { fullArgs: string[]; 
   const host = orasTargetHost(args);
   const use = login ?? (host ? logins().get(host) : undefined);
   const fullArgs = [...args];
-  let dir: string | null = null;
-  if (host && use) {
-    dir = mkdtempSync(join(tmpdir(), 'aura-oras-'));
-    const file = join(dir, 'config.json');
-    writeFileSync(file, authFileContent(host, use), { mode: 0o600 });
-    fullArgs.push('--registry-config', file);
-  }
-  return { fullArgs, host, hadLogin: !!use, cleanup: () => { if (dir) rmSync(dir, { recursive: true, force: true }); } };
+  const auth = host && use ? writeAuthConfig(host, use) : null;
+  if (auth) fullArgs.push('--registry-config', auth.file);
+  return { fullArgs, host, hadLogin: !!use, cleanup: () => auth?.cleanup() };
 }
 
 /** A failed oras call as a readable error (OrasAuthError for login trouble). */

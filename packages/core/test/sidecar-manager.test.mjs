@@ -9,10 +9,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SidecarManager } from '../dist/app-manager/SidecarManager.js';
+import { SidecarManager, ImageAuthError } from '../dist/app-manager/SidecarManager.js';
+import { appPullLogin, sealedLoginValue } from '../dist/nexus/RegistryAuth.js';
 import { InstanceTokens } from '../dist/app-manager/InstanceTokens.js';
 import { userHomeSubpath } from '../dist/scopes/home.js';
 
@@ -20,7 +21,7 @@ const APP = 'io.test.app';
 const INST = 'io.test.app-2';
 
 /** In-memory docker: just enough of the CLI for SidecarManager. */
-function fakeDocker(t, { failStart = false, dieOnBoot = false, missingImages = [], onCreate } = {}) {
+function fakeDocker(t, { failStart = false, dieOnBoot = false, missingImages = [], onCreate, onPull } = {}) {
   const containers = new Map();   // name → { id, state, labels, args }
   const calls = [];
   let nextId = 1;
@@ -38,7 +39,13 @@ function fakeDocker(t, { failStart = false, dieOnBoot = false, missingImages = [
       if (args.includes('{{.Id}}') && missingImages.includes(args.at(-1))) reply(cb, 1, '', 'No such image');
       else reply(cb, 0, args.includes('{{.Id}}') ? 'sha256:x' : 'PATH=/usr/bin:/bin\n');
     }
-    else if (verb === 'pull') { missingImages.splice(missingImages.indexOf(args[1]), 1); reply(cb, 0); }
+    else if (verb === 'pull' || verb === '--config') {
+      // `[--config <dir>] pull <image>`; onPull may answer for the registry.
+      const r = onPull?.(args) ?? { code: 0 };
+      const i = missingImages.indexOf(args.at(-1));
+      if (r.code === 0 && i >= 0) missingImages.splice(i, 1);
+      reply(cb, r.code, '', r.stderr ?? '');
+    }
     else if (verb === 'inspect') {
       const ref = args[args.length - 1];
       if (args[2]?.startsWith('{{range .Config.Env}}')) { reply(cb, 0, 'PARENT_ONLY=yes\nK1=from-parent\n'); return { stdin: { end() {} } }; }
@@ -115,6 +122,7 @@ function fixture(t, opts = {}) {
       forgetConsumer: (k) => mountCalls.push(['forget', k]),
     },
     instance: (id) => (id === INST ? { appId: APP, instanceDataDir: join(dataDir, 'scopes/users/default/apps', APP, INST) } : null),
+    ...(opts.pullLogin ? { pullLogin: opts.pullLogin } : {}),
   });
   return { mgr, tokens, mountCalls, dataDir, perms };
 }
@@ -552,4 +560,118 @@ test('tools at spawn: a failed start leaves no grants behind', async (t) => {
   const f = toolsFixture(t);
   await assert.rejects(f.mgr.spawn(INST, { template: 'worker', tools: ['git'] }, { instanceId: INST }));
   assert.equal(existsSync(join(f.dataDir, 'aura', 'runtime', '.state', `${INST}--worker.tools.json`)), false);
+});
+
+// ─── Private sidecar images: the install source's registry login ──────────
+
+const PRIVATE = 'registry.acme.com/team/apps/io.test.app/runtime:1';
+const SECRET = 'dt-s3cret-Pw';
+const LOGIN = { username: 'deploy-token', password: SECRET };
+const SECRET_B64 = Buffer.from(`deploy-token:${SECRET}`).toString('base64');
+
+/** Sources as Nexus keeps them: `acme` (the app's source) and `other`, both with a login. */
+const SOURCES = { sources: [
+  { kind: 'oci', name: 'acme',  url: 'https://registry.acme.com',  priority: 1, auth: { type: 'basic', username: 'deploy-token', secret: 'NEXUS_SRC_ACME_PASSWORD' } },
+  { kind: 'oci', name: 'other', url: 'https://registry.other.io', priority: 2, auth: { type: 'basic', username: 'deploy-token', secret: 'NEXUS_SRC_OTHER_PASSWORD' } },
+] };
+const SEALED = { NEXUS_SRC_ACME_PASSWORD: sealedLoginValue('registry.acme.com', SECRET), NEXUS_SRC_OTHER_PASSWORD: sealedLoginValue('registry.other.io', SECRET) };
+/** AppManager's wiring with a fixed install source (`installSourceOf`). */
+const pullLoginFrom = (installSource, asked = []) => (appId, host) => {
+  asked.push([appId, host]);
+  return appPullLogin(installSource, host, { sources: async () => SOURCES, secret: async (k) => SEALED[k] ?? null });
+};
+
+/** Records each pull: its argv, and the docker config it was given (read while the pull runs). */
+function pullRecorder(answer = () => ({ code: 0 })) {
+  const pulls = [];
+  return {
+    pulls,
+    onPull: (args) => {
+      const dir = args[0] === '--config' ? args[1] : null;
+      const file = dir ? join(dir, 'config.json') : null;
+      pulls.push({
+        args: [...args], dir,
+        config: file ? JSON.parse(readFileSync(file, 'utf-8')) : null,
+        dirMode: dir ? statSync(dir).mode & 0o777 : null,
+        fileMode: file ? statSync(file).mode & 0o777 : null,
+      });
+      return answer(args);
+    },
+  };
+}
+
+/** console.log/warn/error output while `fn` runs. */
+async function captureConsole(t, fn) {
+  const lines = [];
+  for (const m of ['log', 'warn', 'error']) t.mock.method(console, m, (...a) => { lines.push(a.map(String).join(' ')); });
+  try { return { result: await fn(), lines }; } finally { for (const m of ['log', 'warn', 'error']) console[m].mock?.restore?.(); }
+}
+
+const privateBox = { name: 'priv', image: PRIVATE, command: ['sleep', 'infinity'] };
+
+test('private image: pulled with the install source login in a temp docker config, never in argv, removed afterwards', async (t) => {
+  const rec = pullRecorder();
+  const d = fakeDocker(t, { missingImages: [PRIVATE], onPull: rec.onPull });
+  const asked = [];
+  const { mgr } = fixture(t, { services: [privateBox], pullLogin: pullLoginFrom('acme', asked) });
+  await mgr.spawn(INST, { template: 'priv' }, { instanceId: INST });
+  assert.deepEqual(asked, [[APP, 'registry.acme.com']], 'asked for the image host, for this app');
+  assert.equal(rec.pulls.length, 1);
+  const [p] = rec.pulls;
+  assert.deepEqual(p.args, ['--config', p.dir, 'pull', PRIVATE]);
+  assert.deepEqual(Object.keys(p.config.auths), ['registry.acme.com'], 'only the image host is in the config');
+  assert.equal(Buffer.from(p.config.auths['registry.acme.com'].auth, 'base64').toString(), `deploy-token:${SECRET}`);
+  assert.equal(p.dirMode, 0o700);
+  assert.equal(p.fileMode, 0o600);
+  assert.equal(existsSync(p.dir), false, 'the temp config is removed after the pull');
+  for (const args of d.calls) assert.ok(!args.join(' ').includes(SECRET) && !args.join(' ').includes(SECRET_B64), 'no secret in any docker argv');
+});
+
+test('private image: a foreign host, another source or no source pulls anonymously', async (t) => {
+  const rec = pullRecorder();
+  const foreign = 'registry.other.io/x/runtime:1';
+  fakeDocker(t, { missingImages: [foreign, 'alpine:3.20', PRIVATE], onPull: rec.onPull });
+  // Installed from acme; the image lives on other's host (which has a login): not borrowed.
+  const a = fixture(t, { pullLogin: pullLoginFrom('acme') });
+  await a.mgr.prePull({ id: APP, services: [{ name: 'f', image: foreign, prePull: true }, { name: 'h', image: 'alpine:3.20', prePull: true }] });
+  // No install source (a scaffolded / cloned copy) → anonymous even on acme's host.
+  const b = fixture(t, { pullLogin: pullLoginFrom(undefined) });
+  await b.mgr.prePull({ id: APP, services: [{ name: 'p', image: PRIVATE, prePull: true }] });
+  assert.deepEqual(rec.pulls.map((p) => p.args), [['pull', foreign], ['pull', 'alpine:3.20'], ['pull', PRIVATE]]);
+});
+
+test('private image: a refused pull fails closed as image_auth, without the secret, and the temp config is removed', async (t) => {
+  // A registry that even echoes the credentials back must not leak them.
+  const rec = pullRecorder(() => ({ code: 1, stderr: `Error response from daemon: error from registry: access forbidden (${SECRET} ${SECRET_B64})` }));
+  const d = fakeDocker(t, { missingImages: [PRIVATE], onPull: rec.onPull });
+  const { mgr } = fixture(t, { services: [privateBox], pullLogin: pullLoginFrom('acme') });
+  const { lines } = await captureConsole(t, async () => {
+    await assert.rejects(mgr.spawn(INST, { template: 'priv' }, { instanceId: INST }), (err) => {
+      assert.ok(err instanceof ImageAuthError);
+      assert.equal(err.code, 'image_auth');
+      assert.equal(err.status, 502);
+      assert.match(err.message, /^image_auth: registry\.acme\.com refused the pull/);
+      assert.match(err.message, /aura nexus registry login/);
+      assert.ok(!err.message.includes(SECRET) && !err.message.includes(SECRET_B64), 'no secret in the error');
+      return true;
+    });
+    // prePull logs the same failure: no secret in the log either.
+    await mgr.prePull({ id: APP, services: [{ ...privateBox, prePull: true }] });
+  });
+  assert.equal(rec.pulls.length, 2);
+  for (const p of rec.pulls) assert.equal(existsSync(p.dir), false, 'the temp config is removed after a failed pull');
+  assert.ok(lines.some((l) => l.includes('image_auth')), 'prePull logged the failure');
+  for (const l of lines) assert.ok(!l.includes(SECRET) && !l.includes(SECRET_B64), `no secret in the log: ${l}`);
+  assert.equal(d.containers.size, 0, 'nothing was created');
+});
+
+test('an anonymous refused pull is image_auth too; other pull failures stay plain errors', async (t) => {
+  let answer = { code: 1, stderr: 'Error response from daemon: error from registry: access forbidden' };
+  fakeDocker(t, { missingImages: [PRIVATE], onPull: () => answer });
+  const { mgr } = fixture(t, { services: [privateBox] });
+  await assert.rejects(mgr.spawn(INST, { template: 'priv' }, { instanceId: INST }),
+    (err) => err instanceof ImageAuthError && /needs a login on the Nexus source this app was installed from/.test(err.message));
+  answer = { code: 1, stderr: 'Error response from daemon: manifest unknown' };
+  await assert.rejects(mgr.spawn(INST, { template: 'priv' }, { instanceId: INST }),
+    (err) => !(err instanceof ImageAuthError) && /docker pull .*manifest unknown/.test(err.message));
 });
