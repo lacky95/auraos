@@ -259,8 +259,9 @@ export function requirements(repo, cfg) {
   const lock = join(repo, 'pnpm-lock.yaml');
   if (existsSync(lock)) {
     const text = readFileSync(lock, 'utf8');
-    const sect = /\npackages:\n([\s\S]*?)(?:\n\S|$)/.exec(text)?.[1] ?? '';
-    packages = (sect.match(/^ {2}\S.*:$/gm) ?? []).length;
+    // Every `packages:` section: with a root `packageManager`, pnpm 12 writes the package manager's own
+    // lockfile as a first YAML document (`---`) before the project's.
+    for (const m of text.matchAll(/\npackages:\n([\s\S]*?)(?=\n\S|$)/g)) packages += (m[1].match(/^ {2}\S.*:$/gm) ?? []).length;
   }
   const mirrors = cfg?.registries?.oci?.mirrors ?? {};
   // The release builder's runner (Normal installs) pulls its two base images too.

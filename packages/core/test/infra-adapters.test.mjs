@@ -323,7 +323,7 @@ test('Dockerfile: pnpm pinned, no agent CLI baked in, no silent install, buildx 
 
 test('Dockerfile defaults: the same base images and downloads as before (no config = today)', () => {
   const r = INST.requirements(ROOT, null);
-  assert.deepEqual(r.images.map((i) => i.image), ['debian:bookworm-slim', 'node:22.23.5-bookworm', 'node:22.23.5-bookworm-slim', 'valkey/valkey:8-bookworm']);
+  assert.deepEqual(r.images.map((i) => i.image), ['debian:bookworm-slim', 'docker:29.3.1-cli', 'node:22.23.5-bookworm', 'node:22.23.5-bookworm-slim', 'valkey/valkey:8.1.3-bookworm@sha256:fea8b3e67b15729d4bb70589eb03367bab9ad1ee89c876f54327fc7c6e618571']); // + the builder runner (B), Valkey pinned (G)
   for (const i of r.images) assert.equal(i.via, i.image);
   const hosts = [...new Set(r.downloads.map((d) => new URL(d.url).host))].sort();
   assert.deepEqual(hosts, ['download.docker.com', 'github.com']);

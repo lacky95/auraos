@@ -2,6 +2,8 @@
 // the dataDir report helpers.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+// The composition root (Phase 6 K) wires the service accessors when the barrel loads.
+import '../dist/index.js';
 import { existsSync, mkdtempSync, mkdirSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

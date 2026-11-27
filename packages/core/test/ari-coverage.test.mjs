@@ -117,6 +117,7 @@ const EXEMPT = {
   'packages/core/src/updater/SelfUpdater.ts': 'OS self-update (Phase 6 updater)',
   'packages/aura-cli/src/commands/jump.ts': 'jump -m: the host operator into the master',
   'os/migrate-redis-to-valkey.mjs': 'OS data migration on the host',
+  'os/release/builder.mjs': 'the Phase 6 release builder: OS infrastructure, builds the OS before any runtime exists (ari-gap-review §5.3, owner answer 2)',
   'packages/core/src/types/manifest.ts': 'R2 schema rule (execution.runAs root on proot): a manifest parse has no registry; the start gate is capability-based',
 };
 

@@ -186,7 +186,7 @@ test('requirements and the deny audit read the Dockerfile and lockfile', () => {
   const cfg = C.parseInfraConfig(EXAMPLE).config;
   const req = INST.requirements(ROOT, cfg);
   assert.ok(req.images.some((i) => /^node:22/.test(i.image)));
-  assert.ok(req.images.some((i) => i.image === 'valkey/valkey:8-bookworm' && i.via === 'artifactory.corp.example/docker-remote/valkey/valkey:8-bookworm'));
+  assert.ok(req.images.some((i) => i.image === 'valkey/valkey:8.1.3-bookworm@sha256:fea8b3e67b15729d4bb70589eb03367bab9ad1ee89c876f54327fc7c6e618571' && i.via === 'artifactory.corp.example/docker-remote/valkey/valkey:8.1.3-bookworm@sha256:fea8b3e67b15729d4bb70589eb03367bab9ad1ee89c876f54327fc7c6e618571'));
   assert.ok(req.clones.some((c) => c.url === 'https://github.com/proot-me/proot' && c.via.startsWith('https://git.corp.example/')));
   assert.match(req.npm.pnpm, /^\d+\.\d+\.\d+$/, 'pnpm is pinned');
   assert.ok(req.npm.packages > 100);
