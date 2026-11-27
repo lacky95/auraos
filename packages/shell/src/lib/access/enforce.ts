@@ -1,10 +1,12 @@
-import type { AccessPrincipal } from '@aura/core';
+import type { AccessPrincipal, AuraErrorBody } from '@aura/core';
 import { GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
 import { accessMode } from '../../../server/access-mode.mjs';
 import { createDecide, targetPermissionsHeld } from './decide.ts';
 import { snapshotOf, type AccessContext } from './guard.ts';
 import { OWNER_UI_EXCLUDED_TARGETS, actingInstance, type ResolvedPrincipal } from './identify.ts';
 import { resolveCaller } from '../auth.ts';
+import { errorResponse } from '../appResponse.ts';
+import { refusalBody, type RefusalView } from './refusalText.ts';
 import {
   combineCandidates, concreteRule, decideRule, isInternalCall, kvNamespace, liveDeps, resourceFor, withNetworkCaller,
   type CandidateRequest, type ObserverDeps,
@@ -12,7 +14,7 @@ import {
 import { candidateRules, handlersOf, manifestRoute, normalizeMethod, readsBody, type RuleCandidate } from './resolve.ts';
 import { ROUTE_ACCESS_MANIFEST } from './routeManifest.ts';
 import type {
-  AccessReason, AccessRule, DecideResult, PolicyOutcome, RequestSnapshot, RouteAccessManifest, VerifiedIdentity,
+  AccessReason, AccessRule, DecideResult, RequestSnapshot, RouteAccessManifest, VerifiedIdentity,
 } from './types.ts';
 
 /**
@@ -31,7 +33,9 @@ import type {
  * report counts and the route reads (`locals.access`). A refusal is JSON in
  * the gateway's style: 401 for an unauthenticated caller, 403 otherwise, its
  * `error` the outcome when a further step is needed (`needs-fresh-auth`,
- * `needs-approval`, …).
+ * `needs-approval`, …). Its body is the one structured error body
+ * (refusalText.ts): the reason, the missing permission and the fix, as far
+ * as this caller may know them.
  */
 
 export interface GateDeps extends ObserverDeps {
@@ -75,20 +79,33 @@ export async function readJsonBody(request: Request): Promise<unknown> {
   try { return JSON.parse(new TextDecoder().decode(Buffer.concat(chunks))); } catch { return null; }
 }
 
-/** A refusal, JSON and never cached. */
-export const refused = (status: number, error: string, extra: Record<string, string> = {}): Response =>
-  new Response(JSON.stringify({ error, ...extra }), {
-    status,
-    headers: { 'content-type': 'application/json', 'cache-control': 'no-store' },
-  });
+/** A refusal, JSON and never cached (lib/appResponse.ts, the one error body). */
+export const refused = (status: number, error: string, message: string, extra: Omit<Partial<AuraErrorBody>, 'error' | 'message'> = {}): Response =>
+  errorResponse(status, { error, message, ...extra });
 
-/** The answer to a decision that is not `allow`. */
-export function refusal(result: DecideResult): Response {
-  const outcome: PolicyOutcome = result.outcome;
-  if (outcome !== 'deny') return refused(403, outcome, { reason: result.reason });
-  if (result.reason === 'unauthenticated') return refused(401, 'unauthenticated', { reason: result.reason });
-  return refused(403, 'access-denied', { reason: result.reason });
+/** The answer to a decision that is not `allow`, worded for its reader. */
+export function refusal(result: DecideResult, view: RefusalView = { audience: 'app' }): Response {
+  const { status, body } = refusalBody(result, view);
+  return errorResponse(status, body);
 }
+
+/** Who reads a refusal (refusalText.ts): the owner, or anyone else. */
+export function refusalView(
+  deps: Pick<GateDeps, 'ownerAgent' | 'mgr'>, principal: AccessPrincipal, via: string, extra: Omit<RefusalView, 'audience' | 'callerAppId' | 'scopeOf'> = {},
+): RefusalView {
+  const owner = principal.kind === 'operator' || (principal.kind === 'user' && principal.role === 'owner')
+    || (principal.kind === 'instance' && via === 'instance-token' && deps.ownerAgent?.(principal) === true);
+  const app = principal.kind === 'instance' ? principal.appId : actingInstance(principal)?.appId ?? null;
+  const registry = (() => { try { return deps.mgr()?.registry; } catch { return undefined; } })();
+  return {
+    audience: owner ? 'owner' : 'app',
+    callerAppId: app,
+    ...(registry?.getScopeId ? { scopeOf: (id: string) => registry.getScopeId!(id) } : {}),
+    ...extra,
+  };
+}
+
+const TOO_LARGE_MESSAGE = 'The request body is larger than any request an access rule reads (1 MiB).';
 
 const allowed = (reason: AccessReason = 'public'): DecideResult => ({ outcome: 'allow', reason });
 
@@ -160,7 +177,7 @@ export async function accessGate(
   let bodyVariant: string | null | undefined;
   if (readsBody(manifest, info, method)) {
     const body = await readJsonBody(ctx.request);
-    if (body === TOO_LARGE) return { refused: refused(413, 'body-too-large'), identity };
+    if (body === TOO_LARGE) return { refused: refused(413, 'body-too-large', TOO_LARGE_MESSAGE, { category: 'invalid-request' }), identity };
     candidates = candidateRules(manifest, info, method, { ...facts, body });
     const read = new Set((manifest.routes[route]?.variants ?? []).filter((v) => v.match.on === 'body' && v.match.read).map((v) => v.id));
     bodyVariant = candidates.find((c) => c.variant !== null && read.has(c.variant))?.variant ?? null;
@@ -183,7 +200,8 @@ export async function accessGate(
   const { result } = enforcing || results.length ? combineCandidates(results) : { result: allowed() };
   const verdict: VerifiedIdentity = { principal: seen.principal, via: seen.via };
   if (result.outcome === 'allow') return { refused: null, identity: verdict, ...settled };
-  return { refused: refusal(result), identity: verdict, ...settled };
+  const view = refusalView(deps, seen.principal as AccessPrincipal, seen.via, { route, method });
+  return { refused: refusal(result, view), identity: verdict, ...settled };
 }
 
 // ── the running shell ───────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { getAppManager, lifecyclePath } from '@aura/core';
-import type { AppManifest, AppInstance } from '@aura/core';
+import type { AppManifest, AppInstance, AuraErrorBody } from '@aura/core';
 
 export interface AppHealth {
   /** Process is alive (kill -0 PID succeeds). null = no PID known. */
@@ -135,6 +135,21 @@ export function jsonResponse(data: unknown, status = 200) {
   });
 }
 
-export function errorResponse(message: string, status = 500) {
-  return jsonResponse({ error: message }, status);
+/**
+ * An error answer. Two forms during the migration (error-messages review §4.3):
+ *   errorResponse(status, body)   the structured body (`AuraErrorBody`: `error`
+ *                                 is the code, `message` the sentence, plus
+ *                                 hint/docs/permission/… when they apply), no-store
+ *   errorResponse(message, status) the old form, `{error: message}`
+ */
+export function errorResponse(status: number, body: AuraErrorBody): Response;
+export function errorResponse(message: string, status?: number): Response;
+export function errorResponse(a: string | number, b?: number | AuraErrorBody): Response {
+  if (typeof a === 'number') {
+    return new Response(JSON.stringify(b), {
+      status: a,
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' },
+    });
+  }
+  return jsonResponse({ error: a }, typeof b === 'number' ? b : 500);
 }

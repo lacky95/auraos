@@ -78,7 +78,7 @@ export interface ObserverManager {
   getManifest?(id: string): unknown;
   /** AppManager `isTrustedSystemCopy`: the system copy, or an approved overlay of it (Track P). */
   isTrustedSystemCopy?(appId: string): boolean;
-  registry?: { getById(id: string): unknown };
+  registry?: { getById(id: string): unknown; getScopeId?(id: string): string | undefined };
   providers?: {
     resolveProvider(authority: string, path: string): {
       appId: string;

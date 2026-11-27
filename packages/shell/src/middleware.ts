@@ -189,8 +189,14 @@ let flightServiceStarted = false;
 // The access report (lib/access/observer.ts): loaded on first use, and nothing it does can reach a response.
 const reportAccess = createAccessReporter(() => import('./lib/access/observer.ts'));
 
-const accessUnavailable = () => new Response(JSON.stringify({ error: 'access-unavailable' }), {
-  status: 503, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' },
+// Fails closed: the access check itself failed, which is not a policy refusal.
+const accessUnavailable = () => new Response(JSON.stringify({
+  error: 'access-unavailable',
+  message: 'AuraOS could not check this request, so it is refused (fails closed).',
+  category: 'unavailable',
+  hint: 'Retry; if it persists, the owner checks aura status.',
+}), {
+  status: 503, headers: { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' },
 });
 
 export const onRequest = defineMiddleware(async (ctx, next) => {
@@ -209,7 +215,8 @@ export const onRequest = defineMiddleware(async (ctx, next) => {
     try {
       refused = await (await import('./lib/access/gatewayCaller.ts')).enforceGateway(ctx);
     } catch {
-      refused = new Response(JSON.stringify({ error: 'gateway-denied' }), { status: 403, headers: { 'content-type': 'application/json' } });
+      // The check failed, not the policy: fails closed, as the gate below does.
+      refused = accessUnavailable();
     }
     if (refused) {
       reportAccess(access, refused.status);

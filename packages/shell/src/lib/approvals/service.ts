@@ -217,11 +217,22 @@ export function actionGate(
       const created = await requestApproval(deps, principal, req);
       if (created.ok) {
         const r = created.record;
-        return json({ ...base, approvalId: r.id, expiresAt: r.expiresAt, display: r.display }, 202);
+        return json({
+          message: `This request needs the owner's ${req.level === 'fresh' ? 'fresh ' : ''}approval.`,
+          category: 'needs-approval',
+          hint: `The owner approves it in the AuraOS desktop${req.level === 'fresh' ? ' (with the password)' : ''}, or the host operator runs: aura approve ${r.id}. `
+            + `Then send the same request again with the header X-Aura-Approval: ${r.id}.`,
+          ...base, approvalId: r.id, expiresAt: r.expiresAt, display: r.display,
+        }, 202);
       }
       if (created.reason === 'not-a-requester') {
         // The host operator path (D18): `aura` on the host confirms this exact payload.
-        return json({ ...base, operatorOnly: true, operatorSubject: actionSubject(req.action, req.payload) }, 202);
+        return json({
+          message: 'Only the host operator can confirm this request.',
+          category: 'needs-approval',
+          hint: 'Run the same command on the host, where aura asks the operator to confirm it.',
+          ...base, operatorOnly: true, operatorSubject: actionSubject(req.action, req.payload),
+        }, 202);
       }
       return refusal(created.reason);
     },

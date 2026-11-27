@@ -114,6 +114,19 @@ test('Authorizer matrix: system / owner / instance / apiKey / anonymous', async 
   for (const p of ['system.notifications', ...PRIVILEGED_PERMISSIONS]) assert.ok(ENFORCED_PERMISSIONS.includes(p), p);
 });
 
+test('a refusal says what is missing (missing), for the structured answer; an allow carries none', async () => {
+  const m = (p, act) => authz.authorize(p, act).then((d) => (d.allow ? 'allow' : d.missing));
+  assert.equal(await m(inst('com.example.mute'), 'system.notifications'), 'declaration', 'enforced, not declared');
+  assert.equal(await m(inst('com.example.basic'), 'notifications.locked'), 'declaration', 'privileged, not requested');
+  assert.equal(await m(inst('com.example.priv'), 'notifications.locked'), 'grant', 'requested, not granted');
+  assert.equal(await m(inst('com.example.unknown'), 'system.notifications'), 'unknown-app');
+  assert.equal(await m(ANON, 'notifications.locked'), 'verified-caller');
+  for (const p of [OWNER, inst('com.example.priv'), ANON]) assert.equal(await m(p, 'admin.grants'), 'not-grantable');
+  assert.equal(await m(JSON.parse(JSON.stringify(SYSTEM_PRINCIPAL)), 'system.notifications'), 'not-grantable');
+  assert.equal(await m(inst('com.example.basic'), 'system.notifications'), 'allow');
+  assert.equal((await authz.authorize(inst('com.example.basic'), 'system.notifications')).missing, undefined);
+});
+
 test('a declared actor name never changes a decision', async () => {
   const names = ['admin', 'root', 'system', 'AuraOS', 'com.example.priv', 'claude'];
   for (const p of [inst('com.example.basic'), inst('com.example.mute'), inst('com.example.priv'), ANON, OWNER]) {

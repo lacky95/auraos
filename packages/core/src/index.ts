@@ -27,6 +27,7 @@ export * from './interfaces/index.js';
 export * from './app-hosts/appHosts.js';
 export * from './app-hosts/auraChannel.js';
 export type * from './app-hosts/contracts.js';
+export type * from './errors/contracts.js';
 export * from './app-hosts/AppHostRegistry.js';
 export * from './app-hosts/lifecycle.js';
 export * from './app-hosts/manifestHostGuard.js';

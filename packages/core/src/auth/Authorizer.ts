@@ -45,7 +45,20 @@ export interface AuthzDecision {
   allow: boolean;
   /** Human-readable, safe to return to the caller. */
   reason: string;
+  /**
+   * A refusal only: what is missing, for a structured refusal (shell
+   * `lib/access/refusalText.ts`). Never changes the decision.
+   *   declaration     the app does not declare it in app.manifest.json permissions[]
+   *   grant           declared, but the owner has not granted it (or granted it for another scope)
+   *   scope           an API key without that scope
+   *   verified-caller an unverified caller (no instance token or API key)
+   *   not-grantable   no principal can be given it (admin.*, system, an agent's scope)
+   *   unknown-app     the app is not installed
+   */
+  missing?: AuthzMissing;
 }
+
+export type AuthzMissing = 'declaration' | 'grant' | 'scope' | 'verified-caller' | 'not-grantable' | 'unknown-app';
 
 export interface AuthorizerDeps {
   grants: GrantStore;
@@ -66,7 +79,7 @@ function actorScopeAllows(_actor: DeclaredActor | undefined, _action: string): b
 }
 
 const allow = (reason: string): AuthzDecision => ({ allow: true, reason });
-const deny = (reason: string): AuthzDecision => ({ allow: false, reason });
+const deny = (reason: string, missing: AuthzMissing): AuthzDecision => ({ allow: false, reason, missing });
 
 export class Authorizer {
   constructor(private readonly deps: AuthorizerDeps) {}
@@ -79,7 +92,7 @@ export class Authorizer {
     const base = await this.base(principal, action);
     if (!base.allow) return base;
     const actor = (principal as { actor?: DeclaredActor }).actor;
-    if (!actorScopeAllows(actor, action)) return deny(`the acting agent's scope does not include '${action}'`);
+    if (!actorScopeAllows(actor, action)) return deny(`the acting agent's scope does not include '${action}'`, 'not-grantable');
     return base;
   }
 
@@ -101,50 +114,50 @@ export class Authorizer {
 
   private async base(principal: Principal, action: string): Promise<AuthzDecision> {
     if (isSystemPrincipal(principal)) return allow('AuraOS core (in-process)');
-    if ((principal as { kind: string }).kind === 'system') return deny('only the in-process SYSTEM_PRINCIPAL may act as system');
+    if ((principal as { kind: string }).kind === 'system') return deny('only the in-process SYSTEM_PRINCIPAL may act as system', 'not-grantable');
 
-    if (action.startsWith('admin.')) return deny('managing AuraOS is the owner\'s, through its routes: never an app permission');
+    if (action.startsWith('admin.')) return deny('managing AuraOS is the owner\'s, through its routes: never an app permission', 'not-grantable');
 
     switch (principal.kind) {
       case 'anonymous':
         if (action === BASIC_NOTIFICATION_PERMISSION) return allow('unverified caller: basic Simple notifications only (phase-1 compatibility)');
-        return deny(`'${action}' needs a verified caller (Authorization: Bearer $AURA_INSTANCE_TOKEN or an API key) and the owner's grant`);
+        return deny(`'${action}' needs a verified caller (Authorization: Bearer $AURA_INSTANCE_TOKEN or an API key) and the owner's grant`, 'verified-caller');
 
       case 'apiKey': {
         if (principal.scopes.includes(action)) return allow(`API key '${principal.name}' has scope '${action}'`);
         if (isPrivilegedPermission(action) && await this.deps.grants.get({ kind: 'apiKey', id: principal.keyId }, action)) {
           return allow(`granted to API key '${principal.name}' by the owner`);
         }
-        return deny(`API key '${principal.name}' has no scope '${action}'`);
+        return deny(`API key '${principal.name}' has no scope '${action}'`, 'scope');
       }
 
       case 'instance': {
         const appId = principal.appId;
         const declared = this.deps.declared(appId);
-        if (!declared) return deny(`unknown app ${appId}`);
+        if (!declared) return deny(`unknown app ${appId}`, 'unknown-app');
         // Deprecated names in permissions[] still count (phase 6: desktopModal → systemModal).
         const legacy = declared.find((p) => p !== action && canonicalPermission(p) === action);
         if (legacy) warnLegacy(appId, legacy, action);
         const has = declared.includes(action) || !!legacy;
         if (isPrivilegedPermission(action)) {
-          if (!has) return deny(`${appId} does not request '${action}' in app.manifest.json permissions[]`);
+          if (!has) return deny(`${appId} does not request '${action}' in app.manifest.json permissions[]`, 'declaration');
           const subject: GrantSubject = { kind: 'app', id: appId };
           const g = await this.deps.grants.get(subject, action);
           const short = action.startsWith('notifications.') ? action.split('.')[1] : action;
-          if (!g) return deny(`'${action}' is requested by ${appId} but not granted — the owner must grant it (aura grant notif-perms ${appId} ${short})`);
+          if (!g) return deny(`'${action}' is requested by ${appId} but not granted — the owner must grant it (aura grant notif-perms ${appId} ${short})`, 'grant');
           const scope = this.deps.appScope(appId);
           if (g.appScope && scope && g.appScope !== scope) {
-            return deny(`'${action}' was granted to ${appId} in scope '${g.appScope}', but the app now resolves to scope '${scope}' — grant it again`);
+            return deny(`'${action}' was granted to ${appId} in scope '${g.appScope}', but the app now resolves to scope '${scope}' — grant it again`, 'grant');
           }
           return allow(`requested by ${appId} and granted by the owner`);
         }
         if (has) return allow(`declared by ${appId}`);
         if (ENFORCED.has(action)) {
-          return deny(`${appId} does not declare '${action}' in app.manifest.json permissions[] (aura grant perms ${appId} ${action})`);
+          return deny(`${appId} does not declare '${action}' in app.manifest.json permissions[] (aura grant perms ${appId} ${action})`, 'declaration');
         }
         return allow(`'${action}' is not enforced yet (MVP auto-grant)`);
       }
     }
-    return deny('unknown principal');
+    return deny('unknown principal', 'not-grantable');
   }
 }
