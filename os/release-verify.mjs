@@ -476,14 +476,16 @@ export function selectRelease(repo, { channel = 'signed', maturity = 'alpha', re
  * The git tree id of a directory, computed like `git write-tree` would for
  * its files (blobs, 100644/100755, symlinks; empty directories and `.git`
  * left out). The builder checks a `git archive` extraction with it, so a
- * release tree is bound to `meta.gitTree` without carrying a .git.
+ * release tree is bound to `meta.gitTree` without carrying a .git. `skip`
+ * leaves out top-level names (the builder's `treeDigest` skips the release
+ * record files it describes).
  */
-export function gitTreeOfDir(dir, { algo = 'sha1' } = {}) {
+export function gitTreeOfDir(dir, { algo = 'sha1', skip = [] } = {}) {
   const hash = (type, body) => createHash(algo).update(`${type} ${body.length}\0`).update(body).digest();
   const walk = (d) => {
     const entries = [];
     for (const name of readdirSync(d)) {
-      if (name === '.git') continue;
+      if (name === '.git' || (d === dir && skip.includes(name))) continue;
       const p = join(d, name);
       const st = lstatSync(p);
       if (st.isSymbolicLink()) entries.push({ name, mode: '120000', id: hash('blob', Buffer.from(readlinkSync(p, { encoding: 'buffer' }))) });

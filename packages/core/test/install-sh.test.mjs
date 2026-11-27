@@ -10,38 +10,32 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileS
 import { join } from 'node:path';
 import { ROOT, V, commitAll, git, makeRepo, release, throwawayKey, tmp, write } from './release-fixtures.mjs';
 import { CANARY, EXAMPLE, exampleFixture } from './infra-fixtures.mjs';
+import { auraSource, fakeDocker } from './release-builder-fixtures.mjs';
 
 function fakeBin({ dockerVersion = '27.3.1', composeVersion = '2.29.7' } = {}) {
+  // docker: the release builder tests' fake (records argv, simulates images and build containers).
   const bin = tmp('aura-fakebin-');
   const log = join(bin, 'calls.log');
-  const dockerRoot = tmp('aura-dockerroot-');
-  writeFileSync(join(bin, 'docker'), `#!/bin/sh
-printf 'docker %s\\n' "$*" >> '${log}'
-case "$1" in
-  info) case "$*" in *DockerRootDir*) echo '${dockerRoot}' ;; *) echo 'Server: fake' ;; esac ;;
-  version) echo '${dockerVersion}' ;;
-  compose) case "$2" in version) echo '${composeVersion}' ;; esac ;;
-  inspect) echo running ;;
-  volume) [ "$2" = inspect ] && exit 1 ;;
-  exec) case "$*" in *credentialsImported*) exit 1 ;; esac ;;
-esac
-exit 0
-`);
+  const data = tmp('aura-fakedata-');
+  const docker = fakeDocker(data, { bin });
   writeFileSync(join(bin, 'curl'), `#!/bin/sh
 printf 'curl %s\\n' "$*" >> '${log}'
 for a in "$@"; do case "$a" in -K) k=1 ;; *) [ -n "\${k:-}" ] && { cat "$a" >> '${log}.curlrc'; k=; } ;; esac; done
 printf 200
 `);
-  chmodSync(join(bin, 'docker'), 0o755);
   chmodSync(join(bin, 'curl'), 0o755);
-  return { bin, log, calls: () => (existsSync(log) ? readFileSync(log, 'utf8') : '') };
+  return {
+    bin, log, data,
+    env: { ...docker.env, FAKE_DOCKER_STATE: bin, FAKE_DOCKER_VERSION: dockerVersion, FAKE_COMPOSE_VERSION: composeVersion },
+    calls: () => (existsSync(log) ? readFileSync(log, 'utf8') : ''),
+  };
 }
 
 function install(args, { fake = fakeBin(), env = {} } = {}) {
   const state = env.STATE ?? join(tmp('aura-inst-'), 'state');
   const r = spawnSync('sh', [join(ROOT, 'install.sh'), '--state-dir', state, ...args], {
     encoding: 'utf8', input: '',
-    env: { ...process.env, PATH: `${fake.bin}:${process.env.PATH}`, HOME: tmp(), GIT_CONFIG_NOSYSTEM: '1', AURA_INSTALL_MIN_DISK_GB: '0', AURA_INSTALL_READY_TIMEOUT: '30', ...env },
+    env: { ...process.env, ...fake.env, HOME: tmp(), GIT_CONFIG_NOSYSTEM: '1', AURA_INSTALL_MIN_DISK_GB: '0', AURA_INSTALL_READY_TIMEOUT: '30', ...env },
   });
   const logs = existsSync(join(state, 'logs')) ? readdirSync(join(state, 'logs')).map((f) => readFileSync(join(state, 'logs', f), 'utf8')).join('') : '';
   return { ...r, out: r.stdout + r.stderr, state, calls: fake.calls(), log: logs };
@@ -167,15 +161,30 @@ test('a wrong pinned key is refused', () => {
   assert.match(r.out, /refused \(untrusted-key\)/);
 });
 
-test('Normal Mode (default): verified and staged, then stops cleanly without the release builder (stream B)', () => {
-  const src = signedSource();
-  const r = install(['--source', src.url, '--trusted-key', src.keyFile]);
+test('Normal Mode (default): the release builder builds the verified release, then stops before the runtime (stream L)', () => {
+  const key = throwawayKey();
+  const src = auraSource(key);
+  const keyFile = join(tmp(), 'release.pub');
+  writeFileSync(keyFile, key.pem);
+  const fake = fakeBin();
+  const r = install(['--source', `file://${src.dir}`, '--trusted-key', keyFile], { fake });
   assert.equal(r.status, 3, r.out);
   assert.match(r.out, /Verified stable release 0\.1\.0 \(v0\.1\.0\): commit [0-9a-f]{40}/);
-  assert.match(r.out, /staged tree = verified tree/);
-  assert.match(r.out, /no release builder \(Phase 6 stream B\)/);
-  assert.doesNotMatch(r.calls, /docker (compose .* up|run )/);
-  assert.deepEqual(readdirSync(r.state).filter((n) => n.startsWith('staging-')), [], 'the staging dir is removed');
+  assert.match(r.out, /ok +release builder runtime: host node/);
+  assert.match(r.out, /stage: staged tree = verified tree/);
+  assert.match(r.out, /release (0\.1\.0-[0-9a-f]{12}-[0-9a-f]{8}) built \(read-only, current\)/);
+  assert.match(r.out, /no Normal-mode runtime yet \(Phase 6 stream L\): nothing was started/);
+  const lines = r.calls.split('\n');
+  const handoff = lines.findIndex((l) => / write-data --data \/data .*--system-mode normal --source-json /.test(l));
+  const firstBuild = lines.findIndex((l) => /^docker (buildx build|run .*os\/release\/build\.sh)/.test(l));
+  assert.ok(handoff >= 0 && firstBuild > handoff, r.calls);
+  assert.doesNotMatch(r.calls, /docker compose .* up/, 'nothing started');
+  // The release and the first pointer are on the data volume; no staging copy on the host.
+  const ptr = JSON.parse(readFileSync(join(fake.data, 'aura/release/pointer.json'), 'utf8'));
+  assert.equal(ptr.previous, null);
+  assert.ok(existsSync(join(fake.data, 'releases', ptr.current, '.complete')));
+  assert.equal(JSON.parse(readFileSync(join(fake.data, 'releases', ptr.current, 'release.json'), 'utf8')).provenance, 'upstream-signed');
+  assert.deepEqual(readdirSync(r.state).filter((n) => n.startsWith('staging-')), []);
 });
 
 test('maturity floor: an alpha-only source is refused for --maturity stable, installed by default', () => {

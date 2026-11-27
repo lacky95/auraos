@@ -118,8 +118,8 @@ BUILD_REQUEST="$BOOT_DIR/build-requested"
 # usual `pnpm --filter ./packages/* build` (it writes packages/shell/dist) can
 # no longer delete the build the running/booting server serves.
 SHELL_PROD_DIST=dist-prod
-# Packages the shell bundle is built from (it aliases them to their sources).
-SHELL_INPUTS=" shell core kv-store ui "
+# The build itself is os/build-packages.sh, shared with the release builder (D36).
+BUILD_PACKAGES=/workspace/os/build-packages.sh
 
 stamp_of() { grep "^$1 " "$BUILD_STAMP" 2>/dev/null | cut -d' ' -f2; }
 output_ok() {
@@ -127,10 +127,7 @@ output_ok() {
   else [ -d "/workspace/packages/$1/dist" ]; fi
 }
 
-PKGS=""
-for d in /workspace/packages/*/; do
-  [ -f "${d}package.json" ] && PKGS="$PKGS $(basename "$d")"
-done
+PKGS=$(sh "$BUILD_PACKAGES" --list | tr '\n' ' ')
 # Current fingerprints, "<name> <fp>" per line (POSIX sh: no arrays).
 FPS_FILE="$BOOT_DIR/.fingerprints"
 : > "$FPS_FILE"
@@ -171,25 +168,11 @@ if [ -z "$CHANGED" ]; then
   [ -n "$DIFF" ] || echo "[aura] boot: packages unchanged since the last build — build skipped" | tee -a "$LOG"
 else
   echo "[aura] boot: changed:$CHANGED — building those and their dependents" | tee -a "$LOG"
-  LIB_FILTERS=""
-  BUILD_SHELL=0
-  for p in $CHANGED; do
-    [ "$p" = shell ] || LIB_FILTERS="$LIB_FILTERS --filter ...{./packages/$p}"
-    case "$SHELL_INPUTS" in *" $p "*) BUILD_SHELL=1 ;; esac
-  done
-  if [ -n "$LIB_FILTERS" ]; then
-    # Unquoted on purpose: each "--filter ...{dir}" pair splits into two words.
-    # shellcheck disable=SC2086
-    # "...{dir}" also selects dependents outside packages/ (apps depend on
-    # @aura/core) — only packages/ is the boot's to build.
-    run pnpm $LIB_FILTERS --filter '!@aura/shell' --filter '!./apps/**' build || fail building
-  fi
-  if [ "$SHELL_MODE" = prod ] && [ "$BUILD_SHELL" = 1 ]; then
-    # The container runs with NODE_ENV=development (dev tooling, app sandboxes);
-    # the shell's own bundle must be a production build — without this Vite
-    # bundles React's development code into the desktop.
-    run env NODE_ENV=production pnpm --filter @aura/shell exec astro build --outDir "$SHELL_PROD_DIST" || fail building
-  fi
+  # dev: astro dev serves the shell from source, so no shell bundle.
+  SHELL_ARGS=""
+  [ "$SHELL_MODE" = prod ] && SHELL_ARGS="--shell $SHELL_PROD_DIST"
+  # shellcheck disable=SC2086
+  run sh "$BUILD_PACKAGES" --root /workspace $SHELL_ARGS $CHANGED || fail building
   # Everything built (or unchanged): this state is the new baseline.
   cp "$FPS_FILE" "$BUILD_STAMP"
   rm -f "$BUILD_REQUEST"

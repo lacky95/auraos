@@ -18,6 +18,7 @@
 //   requirements --repo R [--config F]                           what to mirror (D94 §6.1.5)
 //   audit-public --repo R --config F                             public build inputs under publicFallback: deny
 //   write-data  --data D [--seed S] [--system-mode M] [--source-json F]   first-boot handoff into the data volume
+//   build-inputs --state-dir S [--config F]                      the release builder's D94 inputs (JSON; paths, never values)
 //   redact      [--config F --credentials-dir D]                 stdin → stdout with secrets redacted
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -323,6 +324,31 @@ export function writeData({ data, seed, systemMode, sourceJson }) {
   return out;
 }
 
+/**
+ * The release builder's D94 build inputs (os/release/builder.mjs `--infra`)
+ * from what `stage` rendered: non-secret build args and env, the BuildKit
+ * secret FILES (paths only), the public named context and the corporate CA.
+ * No config: every field empty (today's behaviour).
+ */
+export function buildInputs({ stateDir, config }) {
+  const S = resolve(stateDir);
+  const out = { v: 1, digest: null, buildArgs: {}, env: {}, secrets: {}, publicContext: null, caBundle: null, gitConfig: null };
+  if (!config) return out;
+  const staged = stageConfig(config);
+  out.digest = staged.digest;
+  out.buildArgs = proxyEnv(staged.config);
+  out.env = proxyEnv(staged.config);
+  const secDir = join(S, 'rendered', 'secrets');
+  if (existsSync(secDir)) for (const id of readdirSync(secDir).sort()) out.secrets[id] = join(secDir, id);
+  const pub = join(S, 'rendered', 'public');
+  if (existsSync(pub)) {
+    out.publicContext = pub;
+    const corp = join(pub, 'corporate-ca.pem');
+    if (existsSync(corp) && readFileSync(corp, 'utf8').trim()) out.caBundle = corp;
+  }
+  return out;
+}
+
 function cmdRedact(a) {
   let known = [];
   if (a.config && a['credentials-dir']) {
@@ -350,9 +376,10 @@ export function main(argv = process.argv.slice(2)) {
       case 'audit-public': need('repo', 'config'); return cmdAuditPublic(a);
       case 'write-data': need('data'); say(JSON.stringify(writeData({ data: a.data, seed: a.seed, systemMode: a['system-mode'], sourceJson: a['source-json'] }))); return 0;
       case 'store-show': need('data'); { const s = readStore(infraDir(a.data)); say(s ? `${s.file} ${s.digest}` : 'no infrastructure config'); return 0; }
+      case 'build-inputs': need('state-dir'); say(JSON.stringify(buildInputs({ stateDir: a['state-dir'], config: a.config }))); return 0;
       case 'redact': return cmdRedact(a);
       case 'node-ok': return 0;
-      default: fail('usage: installer.mjs validate|endpoints|net-config|stage|select|tree|fingerprint|requirements|audit-public|write-data|redact (see the file header)'); return 64;
+      default: fail('usage: installer.mjs validate|endpoints|net-config|stage|select|tree|fingerprint|requirements|audit-public|write-data|build-inputs|redact (see the file header)'); return 64;
     }
   } catch (e) {
     if (e instanceof InfraConfigError) { fail(`infrastructure config is invalid:\n${e.errors.map((x) => `  ${x.path || '(root)'}: ${x.message}`).join('\n')}`); return 1; }

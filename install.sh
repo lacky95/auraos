@@ -7,7 +7,7 @@
 # mechanisms and holds no build, patch or config logic of its own: the D94
 # config is validated and rendered by os/infra/*, releases are verified by
 # os/release-verify.mjs (D71), and Normal Mode builds through the release
-# builder (stream B). Every helper runs from THIS installer's copy, never from
+# builder (os/release/builder.mjs, stream B; it needs node >= 20 on the host). Every helper runs from THIS installer's copy, never from
 # the release it is about to install: nothing from a candidate runs before it
 # verified.
 #
@@ -44,6 +44,7 @@ umask 022
 
 INSTALLER_ROOT=$(cd "$(dirname "$0")" && pwd -P)
 HELPER="$INSTALLER_ROOT/os/install/installer.mjs"
+BUILDER="$INSTALLER_ROOT/os/release/builder.mjs"
 STATE_DIR=/etc/auraos
 DIR=/opt/auraos
 SOURCE=https://github.com/lacky95/auraos.git
@@ -213,6 +214,15 @@ preflight() {
       tail -5 "$LOG" > "$TMP/pull"
       check_fail registry "docker pull $NODE_IMAGE" "$(pull_diagnosis "$TMP/pull"); or install node >= 20 on the host"
       return 0
+    fi
+  fi
+  if [ "$MODE" = normal ]; then
+    # The release builder drives Docker (buildx, throwaway containers) and works on the data
+    # volume's files: it runs on the host's node in the alpha (open question: a builder runner image).
+    if [ "$NODE_MODE" = host ]; then ok "release builder runtime: host node $(node -v)"
+    else check_fail tools "node >= 20 on the host" "Normal Mode builds its release on the host: install node >= 20, or install the Developer layout with --developer"; fi
+    if [ -n "$root" ] && [ -d "$root" ] && [ ! -w "$root" ]; then
+      check_fail permissions "$root" "the release builder writes the data volume: run the installer as root on the Docker host"
     fi
   fi
   if [ "$NODE_MODE" = host ] && ! docker image inspect "$NODE_IMAGE" >/dev/null 2>&1; then
@@ -412,6 +422,10 @@ compose_files() {
   [ -f "$STATE_DIR/compose.secrets.yml" ] && printf -- ' -f %s/compose.secrets.yml' "$STATE_DIR"
   return 0
 }
+compose_files_extra() {
+  [ -f "$STATE_DIR/compose.infra.yml" ] && printf -- '-f %s/compose.infra.yml' "$STATE_DIR"
+  return 0
+}
 # Compose's own project name for a directory (its default; volumes are named after it).
 project_of() { basename "$1" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9_-'; }
 
@@ -456,27 +470,52 @@ finish_credentials() {
 
 # ── 4. build and start ───────────────────────────────────────────────────────
 if [ "$MODE" = normal ]; then
-  # Stage the verified tree exactly as the release builder (stream B, step 2) does, and prove the
-  # staged files are the signed tree. No .git in a release.
-  STAGING="$STATE_DIR/staging-$TS"
-  mkdir -p "$STAGING"
-  git -C "$MIRROR" archive --format=tar "$REL_COMMIT" | tar -x -C "$STAGING" || die 1 "extracting $REL_COMMIT failed"
-  hmount "$STAGING" ro
-  got=$(helper tree "$STAGING" | sed -n 's/.*"gitTree": "\([0-9a-f]*\)".*/\1/p')
-  [ "$got" = "$REL_TREE" ] || { rm -rf "$STAGING"; die 3 "the staged tree $got is not the verified tree $REL_TREE"; }
-  ok "staged tree = verified tree $REL_TREE"
-  # ── STREAM B HANDOFF (not built yet) ───────────────────────────────────────
-  # Normal Mode builds through the one release builder entry, build(commit, series) (Phase 6 plan,
-  # stream B): images through BuildKit with the secrets staged above, the throwaway deps+build
-  # container, release.json, the pointer, then `compose up` of the release's docker-compose.release.yml
-  # (stream L). The installer calls the builder's host entry in the VERIFIED staged tree; until a
-  # release ships it, a Normal install stops here, having changed nothing outside $STATE_DIR.
-  if [ ! -f "$STAGING/os/release/build.sh" ]; then
-    rm -rf "$STAGING"
-    die 3 "release $REL_REF has no release builder (Phase 6 stream B): Normal Mode cannot be installed from it yet. Use --developer for the Developer layout."
+  # The one release builder (Phase 6 stream B), THIS installer's copy: it fetches the verified
+  # revision from the host mirror into the data volume's own mirror, verifies it again with the
+  # same trust (D71), stages it with git archive and checks the staged tree, builds the images
+  # (BuildKit, the D94 secrets as secret mounts only), installs and builds in a throwaway
+  # container, runs server.mjs --check and writes the read-only release and the first pointer.
+  P=$(project_of "$DIR")
+  VOL="${P}_aura-app-data"
+  write_data "$P"
+  ok "first-boot handoff written (system-mode normal, source.json${CONFIG:+, infrastructure seed})"
+  DATA_ROOT=$(docker volume inspect -f '{{.Mountpoint}}' "$VOL" 2>/dev/null || true)
+  [ -n "$DATA_ROOT" ] && [ -d "$DATA_ROOT" ] && [ -w "$DATA_ROOT" ] \
+    || die 1 "the data volume $VOL is not writable from this host at '${DATA_ROOT:-?}': run the installer as root on the Docker host"
+  helper build-inputs --state-dir "$STATE_DIR" ${CONFIG:+--config "$CONFIG"} > "$TMP/infra.json" || die 1 "rendering the build inputs failed"
+  BREF=$REL_REF
+  [ "$CHANNEL" = main ] && BREF=$REL_COMMIT
+  say "Building release $REL_VERSION ($REL_COMMIT) with the release builder (this takes a while)"
+  # shellcheck disable=SC2086
+  { brc=0; node "$BUILDER" build --data-root "$DATA_ROOT" --data-volume "$VOL" --fetch-from "$MIRROR" \
+      --channel "$CHANNEL" --maturity "$MATURITY" --ref "$BREF" --expect-commit "$REL_COMMIT" $KEYARGS \
+      --infra "$TMP/infra.json" --first-install 2>&1 >"$TMP/build.json" || brc=$?; echo "$brc" > "$TMP/.brc"; } | redact | sed 's/^/  /' | tee -a "$LOG"
+  rm -rf "$STATE_DIR/rendered/secrets" "$STATE_DIR/compose.secrets.yml"
+  brc=$(cat "$TMP/.brc")
+  if [ "$brc" != 0 ]; then
+    redact < "$TMP/build.json" | tee -a "$LOG"
+    [ "$brc" = 3 ] && die 3 "the release builder refused (see above): nothing was installed or started"
+    die 1 "the release build failed (see above): nothing was started"
   fi
-  rm -rf "$STAGING"
-  die 3 "the release builder handoff (stream B) is not wired into install.sh yet"
+  REL_ID=$(sed -n 's/^ *"id": "\([^"]*\)".*/\1/p' "$TMP/build.json" | head -1)
+  ok "release $REL_ID built (read-only, current)"
+  # ── STREAM L HANDOFF ─────────────────────────────────────────────────────
+  # The Normal layout starts from the release's own compose file (Phase 6 stream L:
+  # docker-compose.release.yml, release-entry.sh). Until a release ships it, the install
+  # stops here: the release is built and current, no container was started.
+  if [ ! -f "$DATA_ROOT/releases/$REL_ID/docker-compose.release.yml" ]; then
+    die 3 "release $REL_ID is built, but it has no Normal-mode runtime yet (Phase 6 stream L): nothing was started. Use --developer for the Developer layout."
+  fi
+  # shellcheck disable=SC2046
+  if ! AURA_RELEASE_ID="$REL_ID" logged docker compose -p "$P" -f "$DATA_ROOT/releases/$REL_ID/docker-compose.release.yml" $(compose_files_extra) up -d; then
+    tail -30 "$LOG"; die 1 "docker compose up of the Normal layout failed (see above)"
+  fi
+  wait_ready
+  finish_credentials
+  say ""
+  say "AuraOS $REL_VERSION is running (Normal Mode, $PROV) at http://<this host>:3000"
+  say "Owner setup code: docker exec aura-shell aura setup-code"
+  exit 0
 fi
 
 # Developer layout (today's git checkout + compose, D57/owner answer d), from the verified commit.
