@@ -23,6 +23,8 @@ import { APP_HOST_DEFAULT_USER, sameAppSource, type AppHostStore } from './AppHo
 import { manifestHostClaim, type ManifestHostGuard } from './manifestHostGuard.js';
 import { isProtectedHostName } from './hostRules.js';
 import { newInstallationRunAs } from '../identity/types.js';
+import { appSourceFingerprint } from './sourceFingerprint.js';
+export { appSourceFingerprint };
 import type { ExecutionApproval } from '../identity/execution.js';
 
 export interface AppIdentityFacts {
@@ -44,21 +46,6 @@ export type AppRestoreCheck =
   | { kind: 'deny'; installation: AppInstallation };
 
 const userScope = (userId: string): AppInstanceScope => ({ kind: 'user', userId });
-
-/** Where an installed app came from, from its Nexus record when it has one. */
-export function appSourceFingerprint(scope: ScopeDefinition, appId: string): AppSourceFingerprint {
-  if (scope.id === 'system') return { kind: 'system', ref: appId };
-  const recordPath = join(scope.dataDir, 'nexus', 'installed', `${appId}.json`);
-  if (existsSync(recordPath)) {
-    try {
-      const r = JSON.parse(readFileSync(recordPath, 'utf-8')) as { source?: AppSourceFingerprint['kind']; ref?: string; digest?: string };
-      if (r.source && typeof r.ref === 'string') {
-        return { kind: r.source, ref: r.ref, ...(r.digest ? { digest: r.digest } : {}) };
-      }
-    } catch { /* unreadable record: treated as a local app */ }
-  }
-  return { kind: 'local', ref: join(scope.appsDir, appId) };
-}
 
 /** A manifest's raw `hosts[].name`, shadowed copies included. Read-only. */
 function readManifestHostNames(manifestPath: string): string[] {

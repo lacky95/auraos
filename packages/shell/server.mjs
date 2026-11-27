@@ -13,7 +13,13 @@
  *                      without a restart (server/watchRebuild.mjs)
  *
  * `node server.mjs --check` loads the build and attaches everything, then
- * exits without listening (boot / CI sanity check).
+ * exits without listening and without booting the kernel (boot / CI sanity check).
+ *
+ * The kernel boots eagerly (Phase 6 K, D78): the build's own `aura-boot.mjs`
+ * (src/lib/bootHooks.ts, emitted next to entry.mjs) starts `bootSystem()`
+ * before the request handler is loaded; requests that arrive while it boots
+ * get 503 `starting` from the middleware. SIGTERM runs the one kernel
+ * shutdown sequence (desktop save, kernel stop) and exits 0.
  *
  * The adapter stays in `standalone` mode: its entry exports a `handler` that
  * serves dist/client (hashed /_astro assets, immutable) and falls through to
@@ -68,7 +74,17 @@ async function initialBuildDir() {
   }
 }
 
-let current = await loadBuild(await initialBuildDir());
+/** Start the kernel from the build's boot entry (one module graph with its handler). */
+async function bootKernel(outDir) {
+  const entry = join(outDir, 'server', 'aura-boot.mjs');
+  if (!existsSync(entry)) throw new Error(`no boot entry at ${entry} — rebuild the shell`);
+  const mod = await import(pathToFileURL(entry).href);
+  return mod.bootShell('server.mjs');
+}
+
+const buildDir = await initialBuildDir();
+if (!check) await bootKernel(buildDir);
+let current = await loadBuild(buildDir);
 let previous = null;
 
 const server = http.createServer((req, res) => {
@@ -117,23 +133,4 @@ if (process.env.AURA_SHELL_WATCH === '1') {
   }
 }
 
-// Save the desktop before going down (lib/desktopSession.ts): a docker stop or
-// recreate is a restart nobody announced. Bounded, well under docker's 10 s.
-const SHUTDOWN_HOOK = Symbol.for('aura.shellShutdown');
-const SHUTDOWN_MAX_MS = 3_000;
-let stopping = false;
-for (const sig of ['SIGTERM', 'SIGINT']) {
-  process.on(sig, async () => {
-    if (stopping) return;
-    stopping = true;
-    const hook = globalThis[SHUTDOWN_HOOK];
-    if (typeof hook === 'function') {
-      await Promise.race([
-        hook().catch((err) => console.warn(`[shell] shutdown save failed: ${err?.message ?? err}`)),
-        new Promise((r) => setTimeout(r, SHUTDOWN_MAX_MS)),
-      ]);
-    }
-    server.close();
-    process.exit(0);
-  });
-}
+// SIGTERM / SIGINT: the kernel's one shutdown sequence (bootSystem handleSignals), then exit 0.

@@ -99,3 +99,9 @@ export { renderIdentityFiles, identityFilesSubpath, isNonRootIdentity } from './
 export * from './homes/importReport.js';
 export * from './homes/importMarkers.js';
 export * from './homes/plan.js';
+// Phase 6 K: the composition root. Loading the barrel hands every factory and collaborator in.
+export { bootSystem, getSystem, restartKernel, shutdownSystem, compositionFromEnv, SHUTDOWN_BUDGET_MS, SHUTDOWN_HOOKS_MS } from './system/bootstrap.js';
+export { bootStatusFile, readBootStatus, BOOTSTRAP_VERSION } from './system/status.js';
+export type * from './system/types.js';
+import { composeKernel } from './system/compose.js';
+composeKernel();

@@ -97,8 +97,8 @@ import { keymapRegistry } from '../keymap/KeymapRegistry.js';
 import { ScopeRegistry } from '../scopes/ScopeRegistry.js';
 import type { ScopeDefinition, ScopeId } from '../scopes/types.js';
 import { readOriginId } from './AppIdentity.js';
-import { getAppHostServices } from '../app-hosts/services.js';
-import { appSourceFingerprint } from '../app-hosts/lifecycle.js';
+import { getAppHostServices, type AppHostServices } from '../app-hosts/services.js';
+import { appSourceFingerprint } from '../app-hosts/sourceFingerprint.js';
 import { seedHomeAs } from './homeSeed.js';
 import { PREVIEW_IDLE_MS, previewTitle } from './preview.js';
 import { MOUNT_DIR_NAME } from './MountManager.js';
@@ -220,6 +220,7 @@ export class AppManager {
    * cycle is gone). Absent (unit tests): any use is a clear error.
    */
   private readonly auth: () => KernelAuthServices;
+  private readonly appHosts: () => AppHostServices;
   /** Stream C: which Context keys a start gets (declared AND granted, context/grantedContext.ts). */
   private readonly context: GrantedContextDeps;
   /** Stream C: the Context migration's app-source scanner, from the composition point (opts.contractScan). */
@@ -279,7 +280,7 @@ export class AppManager {
    * Per-app enable/disable state. Stores ONLY the explicit `false` flags —
    * absence means "enabled" (the default). That way a newly scaffolded app
    * is implicitly enabled and we don't have to migrate this map on every
-   * `chokidar add`. Hydrated from KV at boot via `setEnabledState()`;
+   * `chokidar add`. Hydrated from KV at the start of `init()` (`hydrateEnabledState`);
    * mutated via `setEnabled()` (which also stops running instances on disable).
    */
   private disabled = new Set<string>();
@@ -328,6 +329,12 @@ export class AppManager {
      * services from AppManager (D97, 5b K).
      */
     auth?: () => KernelAuthServices;
+    /**
+     * The App Host registry, lifecycle and guard (`getAppHostServices` from the
+     * composition root, Phase 6 K). Default: the accessor, a contract file
+     * that imports nothing at runtime (D97: no app-manager <-> app-hosts cycle).
+     */
+    appHosts?: () => AppHostServices;
     /** More runtimes next to the built-in ones (ARI; tests register a fake one). */
     runtimes?: RuntimeModule[];
     /** The Runtime Settings store; default: the sealed record in Valkey. */
@@ -335,6 +342,7 @@ export class AppManager {
   }) {
     this.dataDir = opts.dataDir;
     this.auth = opts.auth ?? (() => { throw new Error('AppManager: no auth services were handed in (initAppManager opts.auth)'); });
+    this.appHosts = opts.appHosts ?? getAppHostServices;
     this.toolchainDir = opts.toolchainDir;
     this.baseRootfs = opts.baseRootfs;
     this.scopeRegistry = new ScopeRegistry({ systemAppsDir: opts.appsDir, dataDir: opts.dataDir });
@@ -535,7 +543,7 @@ export class AppManager {
   /** Before the first manifest scan: load which protected hosts are accepted. */
   private async prepareAppHostGuard(): Promise<void> {
     try {
-      const hosts = getAppHostServices();
+      const hosts = this.appHosts();
       hosts.manifestHostNames = () => this.registry.getAll().flatMap((m) => m.hosts.map((h) => h.name));
       hosts.guard.setKnown(await hosts.registry.getKnownManifestHosts());
       this.registry.setHostGuard(hosts.guard);
@@ -547,7 +555,7 @@ export class AppManager {
   /** After adoption: installation + host for every app, dead slots freed, adopted instances' slots kept. */
   private async migrateAppHosts(): Promise<void> {
     try {
-      const { lifecycle } = getAppHostServices();
+      const { lifecycle } = this.appHosts();
       const { apps, failed } = await lifecycle.migrate(this.getScopeDefinitions());
       for (const f of failed) console.warn(`[AppManager] app host migration failed for ${f}`);
       for (const m of this.registry.getAll()) await this.blockForeignHosts(m.id);
@@ -568,7 +576,7 @@ export class AppManager {
    * unknown then, and the reconciler calls this once it adopted them.
    */
   private async settleAdoptedSlots(
-    lifecycle: Pick<ReturnType<typeof getAppHostServices>['lifecycle'], 'releaseDeadSlots'> = getAppHostServices().lifecycle,
+    lifecycle: Pick<AppHostServices['lifecycle'], 'releaseDeadSlots'> = this.appHosts().lifecycle,
   ): Promise<void> {
     if (this.adoptionPending) return;
     for (const m of this.registry.getAll()) {
@@ -593,7 +601,7 @@ export class AppManager {
   async syncAppHost(
     appId: string,
     scope?: ScopeId,
-    lifecycle: Pick<ReturnType<typeof getAppHostServices>['lifecycle'], 'syncDiscovered'> = getAppHostServices().lifecycle,
+    lifecycle: Pick<ReturnType<typeof getAppHostServices>['lifecycle'], 'syncDiscovered'> = this.appHosts().lifecycle,
   ): Promise<string | null> {
     // Before the boot migration ran, or when it failed: nothing has synced
     // since, so say so (the migration covers it at the next shell start).
@@ -625,7 +633,7 @@ export class AppManager {
    */
   async ensureInstallation(
     appId: string,
-    hosts: Pick<ReturnType<typeof getAppHostServices>, 'registry' | 'lifecycle'> = getAppHostServices(),
+    hosts: Pick<ReturnType<typeof getAppHostServices>, 'registry' | 'lifecycle'> = this.appHosts(),
   ): Promise<{ installation: AppInstallation } | { installation: null; error: string }> {
     const scope = this.registry.getScopeId(appId);
     if (!scope) return { installation: null, error: `${appId} is not installed` };
@@ -642,7 +650,7 @@ export class AppManager {
   private async blockForeignHosts(appId: string): Promise<void> {
     const m = this.registry.getById(appId);
     if (!m || m.scopeId === 'system' || m.hosts.length === 0) return;
-    const { lifecycle, guard } = getAppHostServices();
+    const { lifecycle, guard } = this.appHosts();
     let blocked = false;
     for (const h of m.hosts) {
       if (await lifecycle.isForeignLabel(appId, h.name)) { guard.block(appId, h.name); blocked = true; }
@@ -749,7 +757,7 @@ export class AppManager {
   async claimHostSlot(appId: string, instanceId: string): Promise<void> {
     const scope: ScopeId | undefined = this.registry.getScopeId(appId);
     if (!scope) return;
-    try { await getAppHostServices().lifecycle.claimSlot(appId, scope, instanceId); }
+    try { await this.appHosts().lifecycle.claimSlot(appId, scope, instanceId); }
     catch (err) { console.warn(`[AppManager] app host slot for ${instanceId} failed: ${(err as Error).message}`); }
   }
 
@@ -757,7 +765,7 @@ export class AppManager {
     const scope = this.registry.getScopeId(appId);
     if (!scope) return;
     try {
-      void getAppHostServices().lifecycle.releaseSlot(appId, scope, instanceId)
+      void this.appHosts().lifecycle.releaseSlot(appId, scope, instanceId)
         .catch((err) => console.warn(`[AppManager] app host slot release for ${instanceId} failed: ${(err as Error).message}`));
     } catch { /* no Valkey: the boot migration frees it */ }
   }
@@ -884,7 +892,7 @@ export class AppManager {
   /** The app's current installation (App Host registry), or null when it cannot be read. */
   async installationIdOf(appId: string, scope: string | undefined = this.registry.getScopeId(appId)): Promise<string | null> {
     if (!scope) return null;
-    try { return (await getAppHostServices().registry.findInstallation(appId, scope))?.installationId ?? null; }
+    try { return (await this.appHosts().registry.findInstallation(appId, scope))?.installationId ?? null; }
     catch { return null; }
   }
 
@@ -983,7 +991,7 @@ export class AppManager {
     }
     try {
       const auth = this.auth();
-      const hosts = getAppHostServices().registry;
+      const hosts = this.appHosts().registry;
       const pinned = await auth.grants.attachInstallations(async (appId, appScope) => {
         const scope = appScope ?? this.registry.getScopeId(appId);
         // Throws on a read error: nothing is pinned to none by a Valkey hiccup.
@@ -1492,9 +1500,8 @@ export class AppManager {
   // ─── Enable / disable apps ────────────────────────────────────────────────
   // Android-style component enable state. Default is "enabled"; storing only
   // the disabled set means a freshly-scaffolded app is live without any
-  // migration. The shell hydrates this from KV (`os/app-enabled`) before
-  // calling `init()` and persists every mutation through the corresponding
-  // /api/admin/apps/enabled endpoint.
+  // migration. AppManager owns `os/app-enabled` (Phase 6 K): `init()`
+  // hydrates it and `setEnabled` / `forgetEnabledState` persist it.
 
   // ── Production builds (appBuild.ts) ──────────────────────────────────────
 
@@ -1641,9 +1648,52 @@ export class AppManager {
     return out;
   }
 
-  /** Bulk seed at boot. Accepts `{ appId → boolean }` from KV. */
+  /** Bulk seed (tests; `init()` hydrates from the KV). Accepts `{ appId → boolean }`. */
   setEnabledState(state: Record<string, boolean>): void {
     this.disabled = new Set(Object.entries(state).filter(([, v]) => v === false).map(([k]) => k));
+  }
+
+  /**
+   * The kernel owns `os:app-enabled` (D97, Phase 6 K). Hydrated at the start
+   * of `init()`, so its autoStart / warmPool / service loops skip disabled
+   * apps from the first tick; missing keys mean enabled. Never throws.
+   */
+  private async hydrateEnabledState(): Promise<void> {
+    try {
+      const kv = defaultKv();
+      try {
+        const state = await kv.getValue<Record<string, boolean>>(ENABLED_KEY.ns, ENABLED_KEY.key);
+        if (state) this.setEnabledState(state);
+      } finally { await kv.close().catch(() => undefined); }
+    } catch (err) {
+      console.warn(`[AppManager] could not hydrate the enabled state: ${(err as Error).message}`);
+    }
+  }
+
+  /** Persist the whole map (idempotent if the KV ever drifted). False when the KV write failed. */
+  private async persistEnabledState(mutate?: (map: Record<string, boolean>) => void): Promise<boolean> {
+    try {
+      const kv = defaultKv();
+      try {
+        if (mutate) {
+          const map = (await kv.getValue<Record<string, boolean>>(ENABLED_KEY.ns, ENABLED_KEY.key)) ?? {};
+          mutate(map);
+          await kv.set(ENABLED_KEY.ns, ENABLED_KEY.key, map);
+        } else {
+          await kv.set(ENABLED_KEY.ns, ENABLED_KEY.key, this.getEnabledState());
+        }
+      } finally { await kv.close().catch(() => undefined); }
+      return true;
+    } catch (err) {
+      console.warn(`[AppManager] could not persist the enabled state: ${(err as Error).message}`);
+      return false;
+    }
+  }
+
+  /** A removed app leaves the persisted enabled map (its next install starts enabled). */
+  async forgetEnabledState(appId: string): Promise<void> {
+    this.disabled.delete(appId);
+    await this.persistEnabledState((map) => { delete map[appId]; });
   }
 
   /**
@@ -1652,7 +1702,7 @@ export class AppManager {
    * user asked for). Enabling re-arms autoStart / warmPool by re-running
    * the same init() side-effects, scoped to this app.
    */
-  async setEnabled(appId: string, enabled: boolean): Promise<void> {
+  async setEnabled(appId: string, enabled: boolean): Promise<{ persisted: boolean }> {
     if (!this.registry.has(appId)) throw new Error(`Unknown app: ${appId}`);
     // Critical OS-infrastructure apps (e.g. com.aura.registry) refuse the
     // disable path. They can still be stopped/restarted via the normal
@@ -1668,7 +1718,7 @@ export class AppManager {
       }
     }
     const wasEnabled = !this.disabled.has(appId);
-    if (enabled === wasEnabled) return;
+    if (enabled === wasEnabled) return { persisted: await this.persistEnabledState() };
     if (enabled) {
       this.disabled.delete(appId);
       // Re-arm: same code paths init() runs at boot, just for this app.
@@ -1696,11 +1746,15 @@ export class AppManager {
         catch (err) { console.warn(`[AppManager] disable: stop ${inst.instanceId} failed: ${(err as Error).message}`); }
       }
     }
+    // Persisted before the event, so a listener reading the KV sees the new state.
+    const persisted = await this.persistEnabledState();
     OsEventBus.emit('app:enabledChanged', { appId, enabled });
+    return { persisted };
   }
 
   async init(): Promise<void> {
     mkdirSync(join(this.dataDir, 'apps'), { recursive: true });
+    await this.hydrateEnabledState();
     // 5b RS: what ran on a non-surviving runtime when the previous kernel ended, read before anything changes it.
     const respawn = readRespawnRecord(this.dataDir).entries;
     this.healToolchainShims();
@@ -4416,6 +4470,9 @@ const NO_ENDPOINTS: RuntimeEndpoints = {
  * where different module graphs (SSR vs plugin context) would otherwise see
  * separate module-scoped instances.
  */
+/** `os:app-enabled`: owned by AppManager (D97, Phase 6 K). */
+const ENABLED_KEY = { ns: 'os', key: 'app-enabled' } as const;
+
 const GLOBAL_KEY = '__aura_app_manager__';
 type GlobalWithAura = typeof globalThis & { [GLOBAL_KEY]?: AppManager };
 

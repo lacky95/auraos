@@ -99,7 +99,7 @@ test('B4: every relay to an owner-agent upstream attaches the claim after stripp
   const embed = read('server/terminal-embed.mjs');
   assert.equal((embed.match(/shellRelayHeader\(/g) ?? []).length, 3, 'terminal-embed: the helper, fetchTerminal and the sweep');
   assert.ok(read('src/pages/api/terminal/share.ts').includes('shellRelayHeader(mgr, inst.instanceId'), 'terminal/share');
-  assert.ok(read('src/middleware.ts').includes('installRelaySigner('), 'the middleware registers the signer');
+  assert.ok(read('src/lib/bootHooks.ts').includes('installRelaySigner('), 'the server layer registers the signer at boot (Phase 6 K)');
 });
 
 // ── B7 ─────────────────────────────────────────────────────────────────────

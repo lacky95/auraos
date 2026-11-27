@@ -1,6 +1,5 @@
 import type { APIRoute } from 'astro';
 import { getAppManager, removeInstalledApp, SystemAppRemovalError } from '@aura/core';
-import { defaultKv } from '@aura/kv-store';
 import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
 import { deleteHomeRefusal, deleteHomesAfterRemove, installationBeforeRemove } from '../../../../lib/homesAdmin.ts';
 
@@ -54,23 +53,9 @@ async function deleteApp(appId: string | undefined, deleteHome = false): Promise
     return jsonResponse({ ok: true, appId, removed: false, homeDeleted, message: `${result.dest} did not exist on disk; registry will reconcile.` });
   }
 
-  // KV cleanup — drop this app's entry from the enable map so the persisted
-  // state matches what AppManager will see on next boot (registry no longer
-  // has the app, so the map should drop it too).
-  try {
-    const kv = defaultKv();
-    try {
-      const map = (await kv.getValue<Record<string, boolean>>('os', 'app-enabled')) ?? {};
-      if (appId in map) {
-        delete map[appId];
-        await kv.set('os', 'app-enabled', map);
-      }
-    } finally {
-      await kv.close().catch(() => undefined);
-    }
-  } catch (err) {
-    console.warn(`[apps/remove] KV cleanup failed: ${(err as Error).message}`);
-  }
+  // The kernel drops the app from its persisted enable map (AppManager owns `os/app-enabled`).
+  try { await mgr.forgetEnabledState(appId); }
+  catch (err) { console.warn(`[apps/remove] enable map cleanup failed: ${(err as Error).message}`); }
 
   return jsonResponse({ ok: true, appId, removed: true, dest: result.dest, homeDeleted });
 }

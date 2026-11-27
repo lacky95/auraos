@@ -1,4 +1,5 @@
 import type { APIRoute } from 'astro';
+import * as core from '@aura/core';
 import { getAppManager } from '@aura/core';
 import { auditOwner, ownerAction } from '../../../lib/approvals/admin.ts';
 
@@ -10,14 +11,13 @@ import { auditOwner, ownerAction } from '../../../lib/approvals/admin.ts';
  * NOT re-initialise globalThis singletons. This endpoint:
  *
  *   1. Refuses if anything is mid-spawn (race-corruption hazard).
- *   2. dispose()'s the current AppManager (stops the reconcile interval).
- *   3. force-kill's every tracked instance — the new singleton will not
+ *   2. force-kill's every tracked instance — the new singleton will not
  *      track them, and we don't want squatters from the previous generation.
- *   4. deletes globalThis.__aura_app_manager__ so the next getAppManager()
- *      call re-runs initAppManager() against the freshly imported core code.
+ *   3. restarts the kernel (`restartKernel()` of core's bootstrap, Phase 6 K):
+ *      the AppManager is disposed and the kernel part of `bootSystem()` runs
+ *      again with the freshly imported core code, before this answers.
  *
- * Result: changes to @aura/core take effect on the very next request, no
- * `docker compose restart` needed.
+ * Result: changes to @aura/core take effect without a container restart.
  *
  * Caveat: any in-flight HTTP requests proxying to a tracked instance will
  * see the upstream disappear mid-flight and the client will reconnect.
@@ -55,13 +55,13 @@ export const POST: APIRoute = async (ctx) => {
     catch (err) { errors.push(`${inst.instanceId}: ${(err as Error).message}`); }
   }
 
-  try { mgr.dispose(); }
-  catch (err) { errors.push(`dispose: ${(err as Error).message}`); }
+  try { await core.restartKernel(); }
+  catch (err) {
+    errors.push(`restart: ${(err as Error).message}`);
+    return json({ ok: false, killed, errors }, 500);
+  }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  delete (globalThis as any)['__aura_app_manager__'];
-
-  return json({ ok: true, killed, errors, note: 'next request will reinitialise AppManager' }, 200);
+  return json({ ok: true, killed, errors, note: 'the kernel restarted' }, 200);
 };
 
 function json(body: unknown, status: number): Response {

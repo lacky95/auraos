@@ -851,8 +851,8 @@ test('phase 4: update re-gates scope and blocking (and a context change re-check
   assert.equal((await s.update(sys.notification.id, { scope: 'system' }, SYSTEM_CALLER)).notification.scope, 'system');
 });
 
-test('phase 4: appManagerWindowOwner reads the AppManager singleton', async () => {
-  const { appManagerWindowOwner } = await import('../dist/notifications/index.js');
+test('phase 4 / 6 K: the composition root hands the window-owner lookup in (the AppManager singleton)', async () => {
+  const { windowOwner: appManagerWindowOwner } = await import('../dist/system/compose.js');
   const key = '__aura_app_manager__';
   const prev = globalThis[key];
   try {

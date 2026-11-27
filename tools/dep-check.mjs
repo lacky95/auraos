@@ -38,7 +38,7 @@ const RULES = {
   'package-internals': 'A package reaches another workspace package only through its declared entry points (package.json `exports`), never by a relative path, `src/` or `dist/`.',
   'sdk-core': '@aura/app-sdk imports @aura/core only through its declared entry points and only for types or the declared leaf subpaths (never the kernel root at runtime).',
   'server-webshell': 'The server layer of @aura/shell (API routes, middleware, server/, and the lib modules they reach) never imports Web Shell code (components, layouts, stores, desktop pages) or UI libraries.',
-  'foundation-leaf': 'Foundation modules of @aura/core (sector map in packages/core/AGENTS.md) import no other sector at runtime, except the barrel (src/index.ts) and the composition root (src/system/bootstrap.ts).',
+  'foundation-leaf': 'Foundation modules of @aura/core (sector map in packages/core/AGENTS.md) import no other sector at runtime, except the barrel (src/index.ts) and the composition root (src/system/bootstrap.ts and src/system/compose.ts).',
   'kernel-presentation': 'Kernel sectors never import presentation-contract modules (theme, layout, keymap) at runtime.',
   'contract-leaf': 'Declared contract leaf files of @aura/core (the ARI contract, runtimes/ari.ts, types.ts and requirements.ts; the system app ids) import no other core module at runtime, so any module may depend on them without a cycle (D97, 5b).',
   'runtime-no-bus': 'Runtime provider code (core/src/runtimes/** and the runners and engine files behind them) never imports the event bus (ipc/OsEventBus) at runtime: a runtime reports exits through onExit and the kernel emits app:* (D93 G1, 5b-2 D).',
@@ -297,7 +297,11 @@ function modulesReachable(f) {
   return mods;
 }
 const modCycleEdges = new Map();
+// The composition root (Phase 6 K) imports every module by design; nothing but the barrel imports it
+// (checked below as foundation-leaf), so its edges cannot close a real chain.
+const COMPOSITION_ROOT = new Set(['core/src/system/bootstrap.ts', 'core/src/system/compose.ts']);
 for (const e of coreRuntime) {
+  if (COMPOSITION_ROOT.has(e.from)) continue;
   const a = files.get(e.from).module, b = files.get(e.to)?.module;
   if (!b || a === b) continue;
   if (modulesReachable(e.to).has(a)) { const k = `${a} -> ${b}`; if (!modCycleEdges.has(k)) modCycleEdges.set(k, e); }
@@ -327,7 +331,8 @@ for (const e of edges) {
 // ── docs alignment and sector rules (D97 addendum) ─────────────────────────
 
 const KERNEL_SECTORS = new Set(['foundation', 'execution', 'identity-security', 'resource', 'communication', 'system-management']);
-const COMPOSITION_EXEMPT = new Set(['core/src/index.ts', 'core/src/system/bootstrap.ts']);
+// The composition root: its order half (bootstrap.ts) and its construction half (compose.ts), Phase 6 K.
+const COMPOSITION_EXEMPT = new Set(['core/src/index.ts', 'core/src/system/bootstrap.ts', 'core/src/system/compose.ts']);
 function listAgentsDocs() {
   const git = spawnSync('git', ['-C', ROOT, 'ls-files', '-z', '--cached', '--others', '--exclude-standard'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   const all = git.status === 0 ? git.stdout.split('\0').filter(Boolean) : [];
@@ -374,6 +379,11 @@ if (existsSync(kernelDoc)) {
       if (KERNEL_SECTORS.has(sa) && sb === 'presentation-contracts' && !COMPOSITION_EXEMPT.has(e.from)) add('kernel-presentation', `${e.from} -> ${e.to}`, { from: e.from, line: e.line, detail: `${a} (${sa}) imports ${b}` });
     }
   }
+}
+
+// The composition root is the top of the graph: only the barrel and the root itself import it.
+for (const e of coreRuntime) {
+  if (COMPOSITION_ROOT.has(e.to) && !COMPOSITION_EXEMPT.has(e.from)) add('foundation-leaf', `${e.from} -> ${e.to}`, { from: e.from, line: e.line, detail: 'only the barrel imports the composition root' });
 }
 
 // ── contract-leaf (D97 §4.2, 5b K): declared contract files stay leaves ───────

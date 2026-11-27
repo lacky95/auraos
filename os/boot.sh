@@ -206,12 +206,6 @@ install -D -m 0755 /workspace/os/aura-cli-shim.sh /usr/local/bin/aura \
 phase starting
 (pnpm --filter @aura/cli build:watch &)
 stop_splash
-# The OS boots (Valkey, AppManager, services, onboarding) on the shell's first
-# request (packages/shell/src/middleware.ts). Send that request ourselves, so
-# `compose up` alone brings everything up — not only once a browser or the
-# CLI happens to call in. Both shell modes serve :3000.
-( until curl -sf -o /dev/null --max-time 60 http://127.0.0.1:3000/api/apps; do sleep 2; done
-  echo '[aura] boot: shell warmed up' ) &
 if [ "$SHELL_MODE" = prod ]; then
   echo "[aura] boot: shell mode prod (packages/shell/server.mjs)${AURA_SHELL_WATCH:+, watching sources for live rebuilds}" | tee -a "$LOG"
   # node itself is PID 1: SIGTERM to a PID 1 without a handler is dropped,
@@ -223,4 +217,7 @@ fi
 # Astro 7: stay in the foreground under an agent (ASTRO_DEV_BACKGROUND=0) and
 # skip the .astro/dev.json lock (--ignore-lock) — boot supervises the shell,
 # exactly as with Astro 6 (provisioning.ts ASTRO_START_SHELL does the same).
-ASTRO_DEV_BACKGROUND=0 exec pnpm --filter @aura/shell dev --host 0.0.0.0 --ignore-lock
+# node is PID 1 here too (not the pnpm launcher, which drops SIGTERM as PID 1):
+# docker stop runs the kernel shutdown (Phase 6 K, D77) in both shell modes.
+cd /workspace/packages/shell || fail starting
+ASTRO_DEV_BACKGROUND=0 PATH="/workspace/packages/shell/node_modules/.bin:$PATH" exec astro dev --host 0.0.0.0 --ignore-lock

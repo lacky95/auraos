@@ -220,7 +220,7 @@ test('apps/enabled checks what it is asked: a known app id, and never a critical
   const calls: string[] = [];
   const mgr = {
     getManifest: (id: string) => ({ 'com.acme.notes': { id }, 'com.aura.registry': { id, critical: true } } as Record<string, unknown>)[id],
-    setEnabled: async (id: string, on: boolean) => { calls.push(`${id}=${on}`); },
+    setEnabled: async (id: string, on: boolean) => { calls.push(`${id}=${on}`); return { persisted: true }; },
     getEnabledState: () => ({}),
   };
   await withGlobals({ [MANAGER]: mgr }, async () => {

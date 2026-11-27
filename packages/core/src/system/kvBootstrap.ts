@@ -1,5 +1,5 @@
 /**
- * One-shot KV bootstrap. Runs once per shell boot, AFTER `kvServer.start()`
+ * One-shot KV bootstrap. Runs once per kernel boot (`bootSystem()`), AFTER `kvServer.start()`
  * and BEFORE `AppManager.init()` so apps and SSR see a populated store.
  *
  *   0. If a previous boot quarantined a Redis-format snapshot (see
@@ -9,8 +9,8 @@
  *   2. Else if `/data/settings.json` exists → migrate every top-level
  *      field under `os/<field>`, then rename the file to `.migrated` so
  *      the next boot skips this branch.
- *   3. Else → seed defaults from `@aura/core`'s ThemeManager +
- *      DEFAULT_WORKSPACE_STATE so the first paint isn't blank.
+ *   3. Else → seed the defaults the composition root hands in (theme,
+ *      workspaces) so the first paint isn't blank.
  *   4. Once (D46, F0): copy the per-user preferences out of `os` and every
  *      `app/<appId>` bucket into the owner's area, after a backup. The old
  *      values stay, and reads fall back to them for one release.
@@ -26,7 +26,20 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { defaultKv } from '@aura/kv-store';
-import { DEFAULT_OWNER_ID, DEFAULT_WORKSPACE_STATE, ThemeManager, migrateUserData } from '@aura/core';
+
+/**
+ * What the seed writes and the one-shot per-user migration: handed in by the
+ * composition root (system/bootstrap.ts), so this Foundation file imports no
+ * other sector (D97 `foundation-leaf`). Moved from the shell in Phase 6 K.
+ */
+export interface KvBootstrapDeps {
+  /** The default theme record `os/theme` (`ThemeManager` defaults). */
+  theme: { themeIdDark: string; themeIdLight: string; colorMode: 'light' | 'dark' | 'auto' };
+  /** The default `os/workspaces` record. */
+  workspaces: unknown;
+  /** D46 step 4: copy per-user preferences into the owner's area. */
+  migrateUserData(kv: ReturnType<typeof defaultKv>, dataDir: string): Promise<{ ran: boolean; prefs: number; appKeys: number; backup?: string | null }>;
+}
 
 interface LegacySettingsState {
   themeIdDark?:  string;
@@ -76,7 +89,9 @@ async function recoverQuarantinedSnapshot(
   // so this stays a cheap no-op even with the quarantine dir left in place.
   if (await kv.exists('os', 'theme')) return;
 
-  const script = fileURLToPath(new URL('../../../../os/migrate-redis-to-valkey.mjs', import.meta.url));
+  // core/src/system and core/dist/system are both four levels below the repo root; a bundled copy falls back to the checkout.
+  const candidates = [fileURLToPath(new URL('../../../../os/migrate-redis-to-valkey.mjs', import.meta.url)), '/workspace/os/migrate-redis-to-valkey.mjs'];
+  const script = candidates.find((f) => existsSync(f)) ?? candidates[0]!;
   if (!existsSync(script)) {
     console.warn(`[KvBootstrap] quarantined snapshot ${parked.join(', ')} found, but ${script} is missing — restore it by hand.`);
     return;
@@ -102,7 +117,8 @@ async function recoverQuarantinedSnapshot(
   }
 }
 
-export async function bootstrapKv(opts: { dataDir?: string } = {}): Promise<void> {
+export async function bootstrapKv(opts: { dataDir?: string; deps: KvBootstrapDeps }): Promise<void> {
+  const { deps } = opts;
   const kv = defaultKv();
   const dataDir = opts.dataDir ?? '/data';
   try {
@@ -124,11 +140,11 @@ export async function bootstrapKv(opts: { dataDir?: string } = {}): Promise<void
       }
 
       const theme = {
-        themeIdDark:  parsed.themeIdDark  ?? ThemeManager.DEFAULT_THEME_ID_DARK,
-        themeIdLight: parsed.themeIdLight ?? ThemeManager.DEFAULT_THEME_ID_LIGHT,
-        colorMode:    parsed.colorMode    ?? ThemeManager.DEFAULT_COLOR_MODE,
+        themeIdDark:  parsed.themeIdDark  ?? deps.theme.themeIdDark,
+        themeIdLight: parsed.themeIdLight ?? deps.theme.themeIdLight,
+        colorMode:    parsed.colorMode    ?? deps.theme.colorMode,
       };
-      const workspaces = parsed.workspaces ?? DEFAULT_WORKSPACE_STATE;
+      const workspaces = parsed.workspaces ?? deps.workspaces;
 
       await kv.set('os', 'theme',       theme);
       await kv.set('os', 'workspaces',  workspaces);
@@ -148,12 +164,8 @@ export async function bootstrapKv(opts: { dataDir?: string } = {}): Promise<void
     }
 
     // Fresh install — no JSON, no KV state.
-    await kv.set('os', 'theme', {
-      themeIdDark:  ThemeManager.DEFAULT_THEME_ID_DARK,
-      themeIdLight: ThemeManager.DEFAULT_THEME_ID_LIGHT,
-      colorMode:    ThemeManager.DEFAULT_COLOR_MODE,
-    });
-    await kv.set('os', 'workspaces', DEFAULT_WORKSPACE_STATE);
+    await kv.set('os', 'theme', { ...deps.theme });
+    await kv.set('os', 'workspaces', deps.workspaces);
     console.log('[KvBootstrap] no settings.json — seeded defaults into the KV');
   } finally {
     // Keymap is seeded independently from theme/workspaces so it survives the
@@ -169,7 +181,7 @@ export async function bootstrapKv(opts: { dataDir?: string } = {}): Promise<void
     }
     // Step 4. The owner keeps the bootstrap id (D47 rule 2), so their area is known before setup.
     try {
-      const done = await migrateUserData(kv, { ownerId: DEFAULT_OWNER_ID, dataDir });
+      const done = await deps.migrateUserData(kv, dataDir);
       if (done.ran) {
         console.log(`[KvBootstrap] per-user data: ${done.prefs} preferences and ${done.appKeys} app keys copied to the owner's area`
           + `${done.backup ? ` (backup ${done.backup})` : ''}; old values kept as the fallback`);

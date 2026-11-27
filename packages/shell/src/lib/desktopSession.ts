@@ -121,9 +121,7 @@ const g = (): SessionGlobal => ((globalThis as { [G_KEY]?: SessionGlobal })[G_KE
 });
 // A state made by an older module copy has no `users` yet.
 const writtenUsers = (): Set<string> => (g().users ??= new Set());
-// server.mjs reaches the signal shutdown through this (it loads the build, not this module).
-const SHUTDOWN_HOOK = Symbol.for('aura.shellShutdown');
-(globalThis as { [SHUTDOWN_HOOK]?: () => Promise<void> })[SHUTDOWN_HOOK] = () => shutdownForSignal();
+// A stop runs `shutdownForSignal` as the kernel shutdown's Web Shell hook (lib/bootHooks.ts, Phase 6 K).
 
 async function withKv<T>(fn: (kv: ReturnType<typeof defaultKv>) => Promise<T>): Promise<T> {
   const kv = defaultKv();

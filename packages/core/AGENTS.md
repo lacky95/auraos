@@ -13,7 +13,7 @@ The kernel decides and owns state. It covers:
 
 It never presents anything, and it never transports anything itself. HTTP lives in `packages/shell` (the server layer); the CLI and the Web Shell are clients.
 
-**It must work with no Web Shell (D73, D78).** Services start in `AppManager.init()` with no session, and from Phase 6 `bootSystem()` boots the kernel eagerly.
+**It must work with no Web Shell (D73, D78).** Services start in `AppManager.init()` with no session, and `bootSystem()` boots the kernel eagerly at process start (Phase 6 K).
 
 ## Sectors (D97, owner-adopted)
 
@@ -34,7 +34,7 @@ presentation-contracts: theme layout keymap
 
 | Sector | Responsibility | Not here |
 |---|---|---|
-| **Foundation** (`types`, `logger`, `ipc`, `system`, `index`) | the manifest schema and shared types, logging, the event-bus primitive (`OsEventBus`), system identity (D47); from Phase 6 the composition root `system/bootstrap.ts` (`bootSystem()`); `index.ts` is the public barrel | any domain logic. **Foundation is leaf-only:** apart from the composition root and the barrel, it imports no other sector |
+| **Foundation** (`types`, `logger`, `ipc`, `system`, `index`) | the manifest schema and shared types, logging, the event-bus primitive (`OsEventBus`), system identity (D47); the composition root `system/bootstrap.ts` (`bootSystem()`) and `system/compose.ts` (Phase 6 K, `system/AGENTS.md`); `index.ts` is the public barrel | any domain logic. **Foundation is leaf-only:** apart from the composition root and the barrel, it imports no other sector |
 | **Execution** (`app-manager`, `scopes`, `runtimes`) | the app, instance and activity lifecycle; supervision, services and pools; intents; sidecars, ports and mounts as runtime capabilities; the ARI and the runtime providers (`ContainerRunner`, `ProotRunner`); the spawn context | window flight and other presentation (debt); install and build policy |
 | **Identity & Security** (`auth`, `permissions`, `approvals`, `security`, `identity`) | users, sessions, principals; grants; the authorizer; the approval state machine; the D64 security options and policy records; the credential vault lives in `context/CredentialVault.ts` | transport-side enforcement, which is `packages/shell/src/lib/access` |
 | **Resource** (`context`, `users`, `homes`) | Context env and secrets (sealed), volumes, per-user data, Private and App Homes | mounts and ports (Execution until 5b G) |
@@ -45,7 +45,7 @@ presentation-contracts: theme layout keymap
 
 ## Dependency direction
 
-- **Foundation** imports only Foundation. The exceptions are `system/bootstrap.ts` (the composition root) and `index.ts` (the barrel).
+- **Foundation** imports only Foundation. The exceptions are the composition root (`system/bootstrap.ts`, the order; `system/compose.ts`, the construction) and `index.ts` (the barrel). Only the barrel imports the composition root.
 - **Kernel sectors** may import Foundation, and other sectors only through those sectors' contracts (leaf `types.ts` or `contracts.ts`, an `index.ts`). There must be no entanglement: if A imports B, then B's chain must not lead back into A.
 - **Nothing in a kernel sector imports presentation contracts at runtime.** Type-only imports are allowed.
 - **Platform services** may use kernel contracts; kernel sectors reach them only through a contract that is handed in.
@@ -69,7 +69,9 @@ presentation-contracts: theme layout keymap
 | `apphost:*`, `hosts:` | `app-hosts` | |
 | `notif:*` | `notifications` | |
 | `os:sidecars` | `app-manager` (`SidecarManager`) | editable through `/api/kv/os/sidecars` |
-| `os:app-enabled` | **unowned (debt):** written by shell routes, hydrated by the middleware | Phase 6 K: AppManager owns it |
+| `os:app-enabled` | `app-manager` (`AppManager`: hydrated in `init()`, persisted by `setEnabled` / `forgetEnabledState`) | Phase 6 K |
+| `os:interfaces` | `interfaces` (`interfaces/custom.ts`) | hydrated by `bootSystem()` (D98 R2) |
+| `/data/aura/boot/status.json` | `system` (`status.ts`) | readiness |
 | Events (`OsEvents` in `ipc/OsEventBus.ts`) | the emitting module | `app:*` events come only from the kernel (G1, 5b). Debt: `activity:*` is also emitted by API routes and `app:restart*` by `shell/lib/appRestart.ts`. Phase 7 adds `event-owner` |
 
 **Singletons pinned on `globalThis`** (two copies of core exist: the Astro SSR bundle and the Node `dist`):
@@ -77,7 +79,7 @@ presentation-contracts: theme layout keymap
 - `LayoutStrategyRegistry`, `KeymapRegistry`, registry logins, the system identity cache;
 - `NotificationService` (plus its hooks and cache).
 
-Each module creates its own lazily today. Add no new one; Phase 6 K moves their creation into `bootSystem()`.
+The composition root constructs them (`system/AGENTS.md`); `auth/services.ts` and `app-hosts/services.ts` are accessors. Add no new pin.
 
 ## Kernel-wide invariants
 
@@ -92,9 +94,6 @@ Each module creates its own lazily today. Add no new one; Phase 6 K moves their 
 
 | Violation | Owner |
 |---|---|
-| G1: `auth/services.ts` composes AppManager, capabilities, security and the identity store (`auth → app-manager, capabilities, security, identity`); AppManager reaches it back by dynamic imports (file cycle `AppManager ↔ auth/services`, `app-manager → auth`) | Phase 6 K: `bootSystem()` composes and hands the services in |
-| `AppManager → app-hosts/services` (fetches the singleton itself) | Phase 6 K |
-| `NotificationService → auth/services`, plus a hidden `globalThis` read of AppManager (`NotificationService.ts:1729`) | Phase 6 K: inject the lookups |
 | `app-hosts/lifecycle.ts → app-manager/AppIdentity` | Phase 7 (contract leaf) |
 | `nexus/removeApp.ts → AppManager` | Phase 7 (removal contract) |
 | `types/manifest.ts → app-hosts/appHosts` (Foundation not a leaf) | Phase 7 (host-name rules into Foundation) |

@@ -188,5 +188,5 @@ The styling rules (classes vs `data-*`, `is:global` for injected rows, Tailwind 
 
 The layers are in "What AuraOS is" above; also `packages/kv-store` (Valkey KV, namespace validation),
 `packages/ui` (shared UI primitives, theme bridge), `apps/<id>` (apps shipped with the OS), `os/` (entrypoint
-shims, bashrc, the home seed). Start points: `packages/shell/src/middleware.ts` (kernel init until Phase 6),
+shims, bashrc, the home seed). Start points: `packages/core/src/system/bootstrap.ts` (`bootSystem()`, the kernel's boot and composition root),
 `packages/core/src/app-manager/` (spawning), `packages/shell/src/pages/api/proxy/[id]/[...path].ts` (the app proxy).

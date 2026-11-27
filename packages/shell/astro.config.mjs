@@ -51,6 +51,54 @@ function sioPlugin() {
   };
 }
 
+/**
+ * The kernel boots eagerly (Phase 6 K, D78), never on a request:
+ *  - dev: at server start, `src/lib/bootHooks.ts` is imported through the SSR
+ *    runner, the same module graph the middleware runs in (never a stale dist);
+ *  - build: the same file is emitted as its own server entry `aura-boot.mjs`,
+ *    which server.mjs imports before it loads the request handler.
+ */
+const BOOT_ENTRY = resolve(__dirname, 'src/lib/bootHooks.ts');
+function bootPlugin() {
+  let system = null;
+  return {
+    name: 'aura-boot',
+    apply: 'serve',
+    configureServer(server) {
+      const ssr = server.environments?.ssr;
+      if (!ssr?.runner) {
+        console.error('[aura-boot] no runnable SSR environment: the kernel is not started');
+        return;
+      }
+      // After the server is up, so the boot never holds Vite's startup.
+      setTimeout(() => {
+        ssr.runner.import(BOOT_ENTRY)
+          // A Vite server restart (config change) keeps the kernel: bootShell is idempotent per process.
+          // SIGTERM / SIGINT run the kernel shutdown (bootSystem handleSignals).
+          .then((m) => { system = m.bootShell('astro-dev'); })
+          .catch((err) => console.error(`[aura-boot] the kernel did not start: ${err?.stack ?? err}`));
+      }, 0);
+    },
+    // Vite's own SIGTERM handler closes the server and exits; closing awaits this hook,
+    // so a signalled kernel shutdown (already running) finishes before the process exits.
+    async closeBundle() {
+      if (system?.status().stoppingAt) await system.shutdown('stop');
+    },
+  };
+}
+
+/** Emit the boot entry next to entry.mjs (the server build only). */
+function bootEntryPlugin() {
+  return {
+    name: 'aura-boot-entry',
+    apply: 'build',
+    applyToEnvironment(env) { return env.name === 'ssr'; },
+    buildStart() {
+      this.emitFile({ type: 'chunk', id: BOOT_ENTRY, fileName: 'aura-boot.mjs' });
+    },
+  };
+}
+
 export default defineConfig({
   output: 'server',
   adapter: node({ mode: 'standalone' }),
@@ -135,6 +183,6 @@ export default defineConfig({
     },
     // tailwindcss() must come before wsProxyPlugin so its content-scanning
     // hooks run on every transformed module.
-    plugins: [tailwindcss(), appHostsPlugin(), wsProxyPlugin(), execBridgePlugin(), sioPlugin()],
+    plugins: [tailwindcss(), appHostsPlugin(), wsProxyPlugin(), execBridgePlugin(), sioPlugin(), bootPlugin(), bootEntryPlugin()],
   },
 });

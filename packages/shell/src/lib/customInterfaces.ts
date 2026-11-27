@@ -1,36 +1,14 @@
+import * as core from '@aura/core';
 import { CustomInterfaceSchema, type AppManager, type CustomInterface } from '@aura/core';
-import { defaultKv } from '@aura/kv-store';
 
 /**
- * User-registered (custom) interfaces — external endpoints the OS lists next
- * to app interfaces. The KV key `os/interfaces` is the only copy; the
- * registry's custom layer is a projection of it, refreshed on boot and after
- * every write.
+ * User-registered (custom) interfaces: the kernel owns `os/interfaces`
+ * (core interfaces/custom.ts); a write refreshes the registry's custom layer.
  */
-const NS = 'os';
-const KEY = 'interfaces';
-
-export async function loadCustomInterfaces(): Promise<CustomInterface[]> {
-  const kv = defaultKv();
-  try {
-    const raw = await kv.getValue<unknown[]>(NS, KEY);
-    // Re-validate on read: a hand-edited or stale entry is skipped, never fatal.
-    return (raw ?? []).flatMap((e) => {
-      const p = CustomInterfaceSchema.safeParse(e);
-      return p.success ? [p.data] : [];
-    });
-  } finally {
-    await kv.close().catch(() => undefined);
-  }
-}
+export const loadCustomInterfaces = core.loadCustomInterfaces;
 
 export async function saveCustomInterfaces(mgr: AppManager, entries: CustomInterface[]): Promise<void> {
-  const kv = defaultKv();
-  try {
-    await kv.set(NS, KEY, entries);
-  } finally {
-    await kv.close().catch(() => undefined);
-  }
+  await core.saveCustomInterfaces(entries);
   mgr.interfaces.setCustom(entries);
 }
 

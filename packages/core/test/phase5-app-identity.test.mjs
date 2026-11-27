@@ -8,6 +8,8 @@
 
 import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+// The composition root (system/compose.ts, Phase 6 K) wires the service accessors when the barrel loads.
+import '../dist/index.js';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync,
