@@ -190,6 +190,9 @@ function dockerExecContainer(instanceId: string, appId: string, cmd?: string, st
     // A one-off `cmd` may be piped (`aura exec … -- cmd | grep`): -t there
     // makes docker refuse with "the input device is not a TTY".
     'exec', cmd && !(process.stdin.isTTY && stdout.isTTY) ? '-i' : '-it',
+    // Root, like the exec bridge (core ExecBridge: `User: "0"`): a 5-apps container runs with --user, and
+    // `docker exec` would otherwise enter as the app uid. Capabilities stay the container's (none for runAs app).
+    '--user', '0',
     '--workdir', appDir,
     '-e', `AURA_HOSTNAME=${appId}`,
     ...termEnv,
