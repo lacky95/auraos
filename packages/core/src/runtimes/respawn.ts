@@ -17,7 +17,9 @@
  * Shutdown: the kernel freezes the record when the shell announces it
  * (`os:shuttingDown`), so processes dying with it do not empty it (a crash
  * before that point is a crash: not respawned, M5). The freeze lapses after
- * `RESPAWN_FREEZE_MS` (a restart that never happened).
+ * `RESPAWN_FREEZE_MS` (a restart that never happened). A shutdown announced
+ * with `restore: false` (no restore asked, or the owner's restore setting
+ * off) empties the record first: nothing comes back (M5).
  */
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';

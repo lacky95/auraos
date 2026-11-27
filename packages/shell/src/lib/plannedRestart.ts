@@ -16,7 +16,7 @@
 // Namespace import: the running shell may cache a core build without newer exports.
 import * as core from '@aura/core';
 import { defaultKv } from '@aura/kv-store';
-import { flushAndFreeze, RESTART_DAEMON_KEY, SKIP_KEY, unfreeze } from './desktopSession.js';
+import { flushAndFreeze, restoreSettingOn, RESTART_DAEMON_KEY, SKIP_KEY, unfreeze } from './desktopSession.js';
 
 export type RestartMode = 'restart' | 'update' | 'rebuild';
 export interface PlannedRestartOpts {
@@ -60,7 +60,8 @@ export async function plannedRestart(opts: PlannedRestartOpts = {}): Promise<Pla
   }
 
   const restore = opts.restore !== false;
-  core.OsEventBus.emit('os:shuttingDown', { restore, graceMs: GRACE_MS });
+  // The kernel's PRoot respawn comes back only when the desktop does (5b RS, M5): asked for and not switched off.
+  core.OsEventBus.emit('os:shuttingDown', { restore: restore && await restoreSettingOn(), graceMs: GRACE_MS });
   await new Promise((r) => setTimeout(r, GRACE_MS));
 
   try {

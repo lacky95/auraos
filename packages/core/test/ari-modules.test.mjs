@@ -186,6 +186,17 @@ test('RS: init respawns through the normal start, emits app:respawned once, maps
   assert.deepEqual(events, [{ from: 'io.p.a-1', to: 'io.p.a-7', appId: 'io.p.a' }]);
 });
 
+test('RS (M5): a shutdown announced without restoring empties the record; one with restoring keeps it', async () => {
+  const mgr = mgrOf();
+  mgr['respawnFromRecord']([]);
+  const entry = { installationId: 'inst-1', appId: 'io.p.a', formerInstanceId: 'io.p.a-1', state: 'resumed' };
+  writeRespawnRecord(mgr.dataDir, { v: 1, entries: [entry] });
+  OsEventBus.emit('os:shuttingDown', { restore: true, graceMs: 0 });
+  assert.deepEqual(readRespawnRecord(mgr.dataDir).entries, [entry], 'a restart that restores brings PRoot work back');
+  OsEventBus.emit('os:shuttingDown', { restore: false, graceMs: 0 });
+  assert.deepEqual(readRespawnRecord(mgr.dataDir).entries, [], 'aura restart os --no-restore (or restore off): nothing comes back');
+});
+
 // ── 5b-2 D: the moved groups, driven by the kernel over the reference mock (no Docker) ─────────────
 
 test('D-X: the exec bridge reads logs through the runtime\'s `logs` and refuses a sidecar session without `workloads` (mock, no engine)', async () => {

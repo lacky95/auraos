@@ -272,10 +272,19 @@ export async function shutdownForSignal(): Promise<void> {
   const st = g();
   if (st.frozen) return;
   if (!st.restored) { st.frozen = true; return; }
-  core.OsEventBus.emit('os:shuttingDown', { restore: true, graceMs: SIGNAL_GRACE_MS });
+  core.OsEventBus.emit('os:shuttingDown', { restore: await restoreSettingOn(), graceMs: SIGNAL_GRACE_MS });
   await new Promise((r) => setTimeout(r, SIGNAL_GRACE_MS));
   const snap = await flushAndFreeze('signal');
   console.log(`[desktop-session] shutdown: saved ${snap.activities.length} activities`);
+}
+
+/**
+ * Whether the owner's `os/restoreSession` lets a restart bring work back (default on). The kernel's PRoot
+ * respawn follows it through `os:shuttingDown.restore` (5b RS, M5). Unreadable: on, as the boot restore reads it.
+ */
+export async function restoreSettingOn(): Promise<boolean> {
+  try { return (await withKv((kv) => kv.getValue<boolean>('os', RESTORE_SETTING_KEY))) !== false; }
+  catch { return true; }
 }
 
 /** Undo `flushAndFreeze` when a planned restart could not start. */

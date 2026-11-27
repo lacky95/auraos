@@ -675,7 +675,16 @@ export class AppManager {
     const settle = new Map<string, (id: string | null) => void>();
     for (const e of entries) this.respawns.set(e.formerInstanceId, new Promise((r) => settle.set(e.formerInstanceId, r)));
     this.respawnArmed = true;
-    OsEventBus.on('os:shuttingDown', () => { this.respawnFrozenUntil = Date.now() + RESPAWN_FREEZE_MS; });
+    OsEventBus.on('os:shuttingDown', (e) => {
+      // A restart without restoring (`aura restart os --no-restore`, the owner's `os/restoreSession` off) brings
+      // nothing back, PRoot instances included (M5, as the desktop restore did before 5b RS): an empty record.
+      if (e?.restore === false) {
+        const empty = { v: 1 as const, entries: [] };
+        if (writeRespawnRecord(this.dataDir, empty)) this.respawnLast = JSON.stringify(empty);
+        else console.warn('[AppManager] respawn record: cannot clear it for a restart without restoring');
+      }
+      this.respawnFrozenUntil = Date.now() + RESPAWN_FREEZE_MS;
+    });
     void (async () => {
       for (const e of entries) {
         let to: string | null = null;
