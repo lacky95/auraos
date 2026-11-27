@@ -7,7 +7,7 @@
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -58,7 +58,7 @@ function dirty(): void {
 
 test('the mode: normal by default (Phase 6), the switch file, AURA_SYSTEM_MODE wins', () => {
   assert.equal(DEFAULT_SYSTEM_MODE, 'normal');
-  assert.deepEqual(systemModeState(), { mode: 'normal', configured: null, env: null, default: 'normal', normalEnforced: false });
+  assert.deepEqual(systemModeState(), { mode: 'normal', configured: null, env: null, default: 'normal', normalEnforced: false, release: null });
   writeSystemMode('normal');
   assert.equal(readFileSync(systemModeFile(), 'utf8'), 'normal\n');
   assert.equal(systemModeState().mode, 'normal');
@@ -224,4 +224,51 @@ test('aura dev rebuild|restart: refused outside Developer Mode, before anyone is
   } as never) as Response;
   assert.equal(r.status, 409);
   assert.equal((await r.json() as { error: string }).error, 'not-developer-mode');
+});
+
+// Phase 6 L: Normal is enforced when AuraOS runs from a release (os/release-entry.sh: /workspace → /releases/<id>).
+function releaseLayout(id = '0.1.0-0123456789ab-cafebabe', record: Record<string, unknown> = {}): string {
+  const rel = join(root, 'data', 'releases', id);
+  mkdirSync(rel, { recursive: true });
+  writeFileSync(join(rel, 'release.json'), JSON.stringify({
+    v: 1, id, version: '0.1.0', commit: '0123456789abcdef0123456789abcdef01234567', channel: 'signed',
+    provenance: 'upstream-signed', meta: { signed: true, keyId: 'abcd1234abcd1234', metaDigest: 'sha256:x', securityUpdate: false }, ...record,
+  }));
+  writeFileSync(join(rel, '.complete'), '');
+  mkdirSync(join(root, 'data', 'aura', 'release'), { recursive: true });
+  writeFileSync(join(root, 'data', 'aura', 'release', 'pointer.json'), JSON.stringify({ v: 1, current: id, previous: '0.0.9-aaaaaaaaaaaa-bbbbbbbb', switchedAt: 'x', jobId: 'y' }));
+  const link = join(root, 'ws-release');
+  symlinkSync(rel, link);
+  process.env['AURA_WORKSPACE_DIR'] = link;
+  return id;
+}
+
+test('Phase 6 L: from a release, Normal is enforced whatever the switch says, with the release shown', () => {
+  writeSystemMode('developer');
+  const id = releaseLayout();
+  const s = systemModeState();
+  assert.equal(s.mode, 'normal', 'a release has no checkout: never Developer Mode');
+  assert.equal(s.configured, 'developer');
+  assert.equal(s.normalEnforced, true);
+  assert.deepEqual(s.release, {
+    id, commit: '0123456789abcdef0123456789abcdef01234567', version: '0.1.0', channel: 'signed', provenance: 'upstream-signed',
+    signed: true, keyId: 'abcd1234abcd1234', previous: '0.0.9-aaaaaaaaaaaa-bbbbbbbb',
+  });
+  assert.equal(systemMode(), 'normal');
+});
+
+test('Phase 6 L: a locally modified release is never shown as signed (D71)', () => {
+  releaseLayout('0.1.0-0123456789ab-11111111', { provenance: 'locally-modified' });
+  assert.equal(systemModeState().release?.signed, false);
+  assert.equal(systemModeState().release?.keyId, 'abcd1234abcd1234');
+});
+
+test('Phase 6 L: a release is not switched to Developer Mode (409 developer-needs-checkout), before any owner step', async () => {
+  releaseLayout('0.1.0-0123456789ab-22222222');
+  const res = await systemModePut({ request: new Request('http://x/api/admin/system-mode', { method: 'PUT', body: JSON.stringify({ mode: 'developer' }) }) } as never);
+  assert.equal(res.status, 409);
+  const body = await res.json() as Record<string, unknown>;
+  assert.equal(body['error'], 'developer-needs-checkout');
+  assert.match(String(body['hint']), /install\.sh --developer/);
+  assert.match(String(body['hint']), /aura system patch/);
 });

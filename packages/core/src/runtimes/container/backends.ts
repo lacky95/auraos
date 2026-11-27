@@ -9,6 +9,8 @@
  * A leaf: types and one constant, no runtime import.
  */
 
+import type { SystemTree } from '../spawn/systemTreeArgs.js';
+
 /** Inside the mount helper container: where the session launcher (its D80 idmap subcommands) is bound. */
 export const IDMAP_HELPER_PATH = '/aura-session-enter';
 
@@ -39,8 +41,10 @@ export interface ContainerPortBackend {
 
 /** The OS coordinates a sidecar container is started with. */
 export interface SidecarRuntimeFacts {
-  dataDir: string; appDataVolume: string; nodeModulesVolume: string; network: string;
-  osApiBase: string; shellHostname: string; workspaceRoot: string; toolsMode: string;
+  dataDir: string; appDataVolume: string; network: string;
+  osApiBase: string; shellHostname: string; toolsMode: string;
+  /** Where its view of the AuraOS tree comes from (runtimes/spawn/systemTreeArgs.ts). */
+  systemTree: SystemTree;
 }
 
 /** What SidecarManager asks of the container runtime. */

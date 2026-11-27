@@ -152,7 +152,7 @@ test('own source read-only: a closed agent workspace (every tool) that serves it
   assert.equal(ownSourceReadOnly({ appDir: dir, sourceMode: 'closed' }, { ...terminal, tools: ['git'] }), false, 'other apps write their own dir');
 
   const mount = ContainerRunner.prototype.buildAppDirMount;
-  const self = { toHostPath: (p) => p, dataDir: '/data' };
+  const self = { systemTree: { kind: 'checkout', hostRoot: '/workspace', nodeModulesVolume: 'nm' }, dataDir: '/data' };
   assert.deepEqual(mount.call(self, '/workspace/apps/com.aura.terminal', 'com.aura.terminal', 'vol', undefined, true),
     ['-v', '/workspace/apps/com.aura.terminal:/workspace/apps/com.aura.terminal:ro']);
   assert.deepEqual(mount.call(self, '/data/scopes/users/default/apps/io.x', 'io.x', 'vol', undefined, true),

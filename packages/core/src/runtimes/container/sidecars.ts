@@ -34,6 +34,7 @@ import { SidecarHomeError, isRootInstallation, sidecarIdentityArgs, verifiedNonR
 import { containerHomeMount } from '../spawn/homeArgs.js';
 import { LOGICAL_HOME_PATH as SHARED_HOME_PATH } from '../../homes/types.js';
 import { MOUNT_ROOT_PATH, MY_TOOLS_PATH } from '../spawn/paths.js';
+import { systemTreeMount, systemTreeNodeModules } from '../spawn/systemTreeArgs.js';
 
 /** What the sidecar mechanism needs of the container runner. */
 export interface ContainerSidecarFacts {
@@ -128,10 +129,10 @@ async function toolArgs(rt: SidecarRuntimeFacts, dirKey: string, image: string):
       ? ['--mount', `type=volume,source=${rt.appDataVolume},target=/aura/all-tools,volume-subpath=aura/toolchain/bin,readonly`]
       : []),
     '--mount', `type=volume,source=${rt.appDataVolume},target=${MY_TOOLS_PATH},volume-subpath=aura/runtime/${dirKey}/tools,readonly`,
-    '-v', `${rt.workspaceRoot}/packages:/workspace/packages:ro`,
-    '--mount', `type=volume,source=${rt.nodeModulesVolume},target=/workspace/node_modules,readonly`,
+    ...systemTreeMount(rt.systemTree, 'packages', '/workspace/packages'),
+    ...systemTreeNodeModules(rt.systemTree),
     '-e', `PATH=${MY_TOOLS_PATH}:${basePath}`,
-    '-v', `${rt.workspaceRoot}/os/bashrc.aura.sh:/etc/profile.d/aura-prompt.sh:ro`,
+    ...systemTreeMount(rt.systemTree, 'os/bashrc.aura.sh', '/etc/profile.d/aura-prompt.sh'),
   ];
 }
 

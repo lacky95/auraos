@@ -26,6 +26,7 @@ import { ensureSystemIdentity } from './systemIdentity.js';
 import { bootstrapKv } from './kvBootstrap.js';
 import { BOOTSTRAP_VERSION, writeBootStatus } from './status.js';
 import { composeKernel } from './compose.js';
+import { runningRelease } from '../runtimes/spawn/systemTreeArgs.js';
 import type {
   BootHook, BootHookContext, BootOptions, BootStatus, Composition, ShutdownReason, SystemHandle,
 } from './types.js';
@@ -91,7 +92,9 @@ export function bootSystem(options: BootOptions): SystemHandle {
   const status: BootStatus = {
     v: 1, bootstrapVersion: BOOTSTRAP_VERSION, pid: process.pid,
     systemId: null, identity: { ok: false },
-    entry: opts.entry, composition, release: null,
+    entry: opts.entry, composition,
+    // Phase 6 L: the release this process serves (os/release-entry.sh's /workspace); null in the Developer layout.
+    release: safe(() => { const r = runningRelease(); return r ? { id: r.id, commit: r.commit ?? '' } : null; }, null),
     systemMode: safe(() => opts.systemMode?.() ?? null, null),
     startedAt: now(), kernelReadyAt: null,
     acceptingWrites: true, acceptingWritesAt: null,

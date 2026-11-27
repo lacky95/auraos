@@ -1,4 +1,4 @@
-// What an app container and an app build see of /workspace (ContainerRunner.workspaceMounts): the
+// What an app container and an app build see of /workspace (runtimes/spawn/systemTreeArgs.ts systemTreeSlice): the
 // packages plus WORKSPACE_ROOT_FILES, read-only. Everything the apps and packages resolve at build time
 // must be inside that slice: Vite 8 (Astro 7) reads the tsconfig of every file it transforms and fails
 // on a missing `extends` — on 2026-11-26 every system app failed its build in the container over
@@ -11,7 +11,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { WORKSPACE_ROOT_FILES } from '../dist/app-manager/ContainerRunner.js';
+import { WORKSPACE_ROOT_FILES } from '../dist/runtimes/spawn/systemTreeArgs.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 

@@ -7,7 +7,7 @@ import { ALL_TOOLS_PATH, MY_TOOLS_PATH, SHARED_HOME_PATH, currentToolsMode, prov
 import { prootHomeBind } from '../runtimes/spawn/homeArgs.js';
 import { prootContextBinds } from '../runtimes/spawn/contextArgs.js';
 import { prootIdentityLaunch, requireProotIdentity, writeIdentityFiles } from '../runtimes/spawn/identityArgs.js';
-import { WORKSPACE_ROOT_FILES } from './ContainerRunner.js';
+import { WORKSPACE_ROOT_FILES } from '../runtimes/spawn/systemTreeArgs.js';
 import type { SpawnIdentity } from '../identity/types.js';
 import type { RuntimeCapabilities, RuntimeSettings } from '../runtimes/types.js';
 import type { SandboxExecOpts, SandboxRunner, SandboxRunnerOpts } from './SandboxRunner.js';
@@ -104,7 +104,7 @@ export interface ProotBindSpec {
  * than a second copy. Returns the sandbox arguments before the entrypoint.
  *
  * Narrowed (Phase 5 R2, Q18b): of `/workspace` only what an app container
- * gets too (ContainerRunner `workspaceMounts`: node_modules, packages, the
+ * gets too (the system tree slice, systemTreeArgs.ts: node_modules, packages, the
  * pnpm root files, the capability registry) plus the app's own dir; no
  * `/run/context`, no Docker socket, the App Home and a per-instance `/tmp`.
  * PRoot binds are writable whatever their intent: what keeps the shared
