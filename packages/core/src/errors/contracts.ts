@@ -39,6 +39,11 @@ export type AuraErrorHolder =
  *   needs-approval       the owner (or the host operator) has to approve this request
  *   unsupported-feature  / unsupported-operation: not something this caller can do here
  *   not-grantable        a policy restriction nobody can grant (owner-only, own instance only, …)
+ *
+ * D109 AF4 (D105 Pass B): a request the caller can fix by itself, before any
+ * policy is asked:
+ *   missing-input        a required input is absent; `missing[]` names each one (`MissingInput`)
+ *   invalid-input        an input is present but not acceptable; `missing[]` may name it, `details` says why
  */
 export type ErrorCategory =
   // D100 §17 (runtime refusals)
@@ -47,7 +52,23 @@ export type ErrorCategory =
   | 'provisioning-failed' | 'enforcement-failed' | 'operation-timeout' | 'operation-cancelled' | 'conflict'
   // access and requests
   | 'not-authenticated' | 'missing-declaration' | 'missing-permission' | 'needs-approval' | 'not-grantable'
-  | 'invalid-request' | 'not-found' | 'unavailable';
+  | 'invalid-request' | 'not-found' | 'unavailable'
+  // inputs (D109 AF4)
+  | 'missing-input' | 'invalid-input';
+
+/**
+ * One input of a `missing-input` / `invalid-input` error (D109 AF4): what the
+ * caller has to supply, and in which form. A machine reader (an agent in the
+ * CLI's agent mode, D109) completes the request from these; a human reads the
+ * `message`.
+ */
+export interface MissingInput {
+  /** The input's name as the caller spells it: a body field (`files`), an argument (`appId`), a flag (`--scope`). */
+  input: string;
+  kind: 'argument' | 'option' | 'field' | 'file';
+  /** What is accepted, in a few words: "reverse-domain id, e.g. com.example.notes". */
+  expects: string;
+}
 
 export interface AuraErrorBody {
   /** Stable closed code (kebab). What clients branch on. */
@@ -67,8 +88,8 @@ export interface AuraErrorBody {
   holder?: AuraErrorHolder;
   /** A capability or tool name ('git'). */
   capability?: string;
-  /** Runtime capabilities that are missing (runtime refusals). */
-  missing?: string[];
+  /** Runtime capabilities that are missing (runtime refusals), or the inputs of a missing-input / invalid-input error. */
+  missing?: Array<string | MissingInput>;
   /** Named alternatives, never picked for the caller (D73). */
   suggest?: string[];
   /** JSON path in app.manifest.json: 'permissions[]', 'composition.view', … */

@@ -4,6 +4,9 @@ import { spawnSync } from 'node:child_process';
 import { join, normalize, dirname, resolve } from 'node:path';
 import { getAppManager, getNexusManager, initRepo } from '@aura/core';
 import { auditOwner, ownerAction } from '../../../lib/approvals/admin.ts';
+import {
+  checkCreateInputs, createRequest, duplicateFile, filesDigest, manifestFromFiles, type CreateFile,
+} from '../../../lib/approvals/appCreate.ts';
 import { handOwnAppSourceToOwner } from '../../../lib/identityReports.ts';
 
 /**
@@ -50,14 +53,8 @@ function resolveScopeAppsDir(scope: ScopeId): string | null {
 // validation alone. Same regex AppManifestSchema uses.
 const APP_ID_RE = /^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/;
 
-interface FileEntry {
-  /** Path relative to apps/<appId>/. Must not escape the app dir. */
-  relPath: string;
-  /** UTF-8 file contents. Binary files aren't supported (scaffolding doesn't need them). */
-  content: string;
-  /** Optional unix mode (e.g. 0o755 for shell scripts). */
-  mode?: number;
-}
+/** relPath: relative to apps/<appId>/, must not escape it; content: UTF-8 (no binaries); mode: optional unix mode. */
+type FileEntry = CreateFile;
 
 interface ScaffoldRequest {
   appId: string;
@@ -69,6 +66,10 @@ interface ScaffoldRequest {
    *  'system' keeps the legacy behaviour — apps go into the monorepo's
    *  apps/ dir + workspace pnpm install runs. */
   scope?: ScopeId;
+  /** D109 AF2: the requester's summary for the owner (Markdown, at most 8 KiB), bound by digest. */
+  summary?: string;
+  /** D109: the creation plan (a JSON object), bound by digest; not interpreted yet. */
+  plan?: unknown;
 }
 
 export const POST: APIRoute = async (ctx) => {
@@ -80,17 +81,24 @@ export const POST: APIRoute = async (ctx) => {
   const { appId, force, files } = body;
   const scope: ScopeId = (body.scope && ALLOWED_SCOPES.includes(body.scope)) ? body.scope : 'user';
   if (!appId || !APP_ID_RE.test(appId)) {
-    return json({ error: 'invalid-app-id', message: `appId must match reverse-domain notation (got ${JSON.stringify(appId)}).` }, 400);
+    return json({
+      error: 'invalid-app-id', category: !appId ? 'missing-input' : 'invalid-input',
+      message: `appId must match reverse-domain notation (got ${JSON.stringify(appId)}).`,
+      missing: [{ input: 'appId', kind: 'field', expects: 'reverse-domain id, e.g. com.example.notes' }],
+    }, 400);
   }
   if (!Array.isArray(files) || files.length === 0) {
-    return json({ error: 'no-files', message: 'files[] is required and must be non-empty.' }, 400);
+    return json({
+      error: 'no-files', category: 'missing-input', message: 'files[] is required and must be non-empty.',
+      missing: [{ input: 'files', kind: 'field', expects: 'the rendered template: [{relPath, content, mode?}]' }],
+    }, 400);
   }
   // Refuse oversized payloads — scaffolding is tiny (the template is ~10
   // files, ~30 KB total). A 1 MB ceiling catches misuse without forcing us
   // to think about streaming.
   const totalBytes = files.reduce((n, f) => n + (f.content?.length ?? 0), 0);
   if (totalBytes > 1_000_000) {
-    return json({ error: 'payload-too-large', bytes: totalBytes }, 413);
+    return json({ error: 'payload-too-large', category: 'invalid-input', bytes: totalBytes }, 413);
   }
 
   // Scope-aware destination: system → workspace's apps/, user/global →
@@ -98,49 +106,61 @@ export const POST: APIRoute = async (ctx) => {
   // already creates these dirs on first access (see ScopeRegistry.ensure()).
   const appsDir = resolveScopeAppsDir(scope);
   if (!appsDir) {
-    return json({ error: 'unknown-scope', message: `Unknown scope '${scope}'. Expected one of: ${ALLOWED_SCOPES.join(', ')}.` }, 400);
+    return json({ error: 'unknown-scope', category: 'invalid-input', message: `Unknown scope '${scope}'. Expected one of: ${ALLOWED_SCOPES.join(', ')}.` }, 400);
   }
+  const dest = join(appsDir, appId);
+
+  // Path traversal guard: every file's resolved path must stay under the
+  // app's own directory. Reject `..` segments, absolute paths, and any
+  // attempt to drop a manifest into a sibling app. Checked before the owner
+  // is asked: the dialog describes exactly these files.
+  for (const f of files) {
+    if (typeof f?.relPath !== 'string' || typeof f.content !== 'string') {
+      return json({ error: 'malformed-file', category: 'invalid-input', file: String(f?.relPath) }, 400);
+    }
+    if (f.relPath.startsWith('/') || f.relPath.includes('\0')) {
+      return json({ error: 'unsafe-path', category: 'invalid-input', file: f.relPath }, 400);
+    }
+    const resolved = normalize(join(dest, f.relPath));
+    if (!resolved.startsWith(dest + '/') && resolved !== dest) {
+      return json({ error: 'path-escape', category: 'invalid-input', file: f.relPath, resolved }, 400);
+    }
+  }
+  // Two entries for one file: the server would read one and write the other.
+  const dup = duplicateFile(files);
+  if (dup !== null) return json({ error: 'duplicate-file', category: 'invalid-input', file: dup, message: `files[] names ${dup} twice.` }, 422);
+  const inputs = checkCreateInputs(body.summary, body.plan);
+  if (inputs) return json(inputs.body, inputs.status);
+  // The facts the owner decides on come from the manifest being written (D109 AF2).
+  const parsed = manifestFromFiles(files, appId);
+  if ('status' in parsed) return json(parsed.body, parsed.status);
+
   // Make sure the scope's apps dir exists — for non-system scopes on first
   // boot it may not have been created yet.
   try { mkdirSync(appsDir, { recursive: true }); } catch { /* best-effort */ }
-  const dest = join(appsDir, appId);
   if (existsSync(dest) && !force) {
     return json({ error: 'exists', message: `${dest} already exists. Pass force=true to overwrite.` }, 409);
   }
-  // Overwriting an EXISTING app replaces the code that runs under its id —
-  // and with it whatever was granted to that id. That is the owner's decision
-  // on exactly these files (D50, lib/approvals/admin.ts). Creating a new app is not.
+  // Creating an app and overwriting one are the owner's decision on exactly
+  // these files (D109 AF2 `app.create`; D50 `admin.change` for an overwrite,
+  // which replaces the code that runs under the id and whatever was granted
+  // to it). The desktop owner and the host operator act directly.
   const replacing = existsSync(dest) && !!force;
   // A built-in app's code is the AuraOS repo's: never overwritten by a scaffold (D1).
   if (replacing && scope === 'system') {
     return json({ error: 'system-app', message: `${appId} is in the system scope (the AuraOS repo): a scaffold does not overwrite it. Use --scope user.` }, 409);
   }
-  if (replacing) {
-    const admin = await ownerAction(ctx, {
-      action: 'admin.change', level: 'session', payload: { op: 'scaffold.overwrite', appId, scope, files },
-      title: `Overwrite ${appId} with a new scaffold`,
-      details: [`Scope: ${scope}`, `Files: ${files.length}`, 'The code that runs under that app id is replaced.',
-        'Its grants are revoked; its files and data go to trash (data a kept uninstall left is set aside for that app).'],
-    });
-    if (admin instanceof Response) return admin;
-    await auditOwner(admin, 'app.scaffold-overwrite', { target: `app:${appId}`, detail: { scope } });
-  }
-
-  // Path traversal guard: every file's resolved path must stay under the
-  // app's own directory. Reject `..` segments, absolute paths, and any
-  // attempt to drop a manifest into a sibling app.
-  for (const f of files) {
-    if (typeof f.relPath !== 'string' || typeof f.content !== 'string') {
-      return json({ error: 'malformed-file', file: String(f?.relPath) }, 400);
-    }
-    if (f.relPath.startsWith('/') || f.relPath.includes('\0')) {
-      return json({ error: 'unsafe-path', file: f.relPath }, 400);
-    }
-    const resolved = normalize(join(dest, f.relPath));
-    if (!resolved.startsWith(dest + '/') && resolved !== dest) {
-      return json({ error: 'path-escape', file: f.relPath, resolved }, 400);
-    }
-  }
+  const target = {
+    via: 'scaffold' as const, appId, scope, dest, replaces: replacing,
+    files: { digest: filesDigest(files), count: files.length, bytes: totalBytes },
+    ...(body.summary !== undefined ? { summary: body.summary } : {}),
+    ...(body.plan !== undefined ? { plan: body.plan } : {}),
+  };
+  const admin = await ownerAction(ctx, createRequest(parsed.manifest, target));
+  if (admin instanceof Response) return admin;
+  await auditOwner(admin, replacing ? 'app.scaffold-overwrite' : 'app.create', {
+    target: `app:${appId}`, detail: { scope, via: 'scaffold', filesDigest: target.files.digest },
+  });
 
   // Replace, never merge (B2/S2): the old app's instances stop, its grants are
   // revoked, its tree goes to trash with its install record, and data a

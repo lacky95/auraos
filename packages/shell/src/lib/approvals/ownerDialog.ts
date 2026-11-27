@@ -27,6 +27,8 @@ import {
   passwordTransportNote, secretTransportNotice,
   type ApprovalDialogView, type ApprovalOutcome, type ApprovalWaiterKind,
 } from './dialogClient.ts';
+import { renderMarkdown } from '../../components/shell/notifications/MarkdownField.ts';
+import { visibleText } from './visibleText.ts';
 
 interface Policy { minLength: number; requiredClasses: number; differFromUsername: boolean }
 type Mode = 'password' | 'policy';
@@ -105,6 +107,8 @@ export function initOwnerDialog(): void {
   const riskList = $<HTMLUListElement>('aura-owner-password-risk-list');
   const reasonBox = $('aura-owner-password-reason');
   const reasonText = $('aura-owner-password-reason-text');
+  const explanationBox = $('aura-owner-password-explanation');
+  const explanationBody = $('aura-owner-password-explanation-body');
   const currentLabel = $('aura-owner-password-current-label');
   const currentCaption = $('aura-owner-password-current-caption');
   const currentNote = $('aura-owner-password-current-note');
@@ -154,6 +158,8 @@ export function initOwnerDialog(): void {
   /** The password and policy modes' own layout (the approval mode changes it). */
   function setPasswordMode(): void {
     if (reasonBox) reasonBox.hidden = true;
+    if (explanationBox) explanationBox.hidden = true;
+    explanationBody?.replaceChildren();
     if (riskBox) riskBox.hidden = true;
     if (blockBtn) blockBtn.hidden = true;
     if (laterBtn) laterBtn.hidden = true;
@@ -286,6 +292,12 @@ export function initOwnerDialog(): void {
     if (riskBox) riskBox.hidden = risks.length === 0;
     reasonText.textContent = view.display.reason ?? '';
     reasonBox.hidden = !view.display.reason;
+    // D109 AF2: the requester's summary as safe Markdown (no HTML node, links and images as text, nothing
+    // loaded), cleaned of invisible and bidi characters again here, in its own scroll box below the facts.
+    const explanation = view.display.explanation?.text;
+    explanationBody?.replaceChildren(...(explanation ? [renderMarkdown(visibleText(explanation), { links: 'text' })] : []));
+    if (explanationBody) explanationBody.scrollTop = 0;
+    if (explanationBox) explanationBox.hidden = !explanation;
     newFields.hidden = true;
     // D18, D63: the server says how a fresh approval is given here. `operator`: the
     // owner requires HTTPS and this is HTTP, so the password is never sent.

@@ -9,6 +9,7 @@ import {
   type ManifestPatch, type ScopeDefinition, type ScopeId,
 } from '@aura/core';
 import { auditOwner, ownerAction } from '../../../lib/approvals/admin.ts';
+import { checkCreateInputs, createRequest, manifestFromDir, treeDigest } from '../../../lib/approvals/appCreate.ts';
 import { handOwnAppSourceToOwner } from '../../../lib/identityReports.ts';
 
 /**
@@ -59,6 +60,10 @@ interface CloneRequest {
   withData?:     boolean;
   force?:        boolean;
   dryRun?:       boolean;
+  /** D109 AF2: the requester's summary for the owner (Markdown, at most 8 KiB), bound by digest. */
+  summary?:      string;
+  /** D109: the creation plan (a JSON object), bound by digest; not interpreted yet. */
+  plan?:         unknown;
 }
 
 export const POST: APIRoute = async (ctx) => {
@@ -73,14 +78,20 @@ export const POST: APIRoute = async (ctx) => {
 
   for (const [field, value] of [['sourceAppId', sourceAppId], ['targetAppId', targetAppId]] as const) {
     if (!value || !APP_ID_RE.test(value)) {
-      return json({ error: 'invalid-app-id', field, message: `${field} must match reverse-domain notation (got ${JSON.stringify(value)}).` }, 400);
+      return json({
+        error: 'invalid-app-id', category: !value ? 'missing-input' : 'invalid-input', field,
+        message: `${field} must match reverse-domain notation (got ${JSON.stringify(value)}).`,
+        missing: [{ input: field, kind: 'field', expects: 'reverse-domain id, e.g. com.example.notes' }],
+      }, 400);
     }
   }
+  const inputs = checkCreateInputs(body.summary, body.plan);
+  if (inputs) return json(inputs.body, inputs.status);
   if (body.manifest?.version != null && !SEMVER_RE.test(body.manifest.version)) {
-    return json({ error: 'invalid-version', message: `version must be x.y.z (got ${JSON.stringify(body.manifest.version)}).` }, 400);
+    return json({ error: 'invalid-version', category: 'invalid-input', message: `version must be x.y.z (got ${JSON.stringify(body.manifest.version)}).` }, 400);
   }
   if (body.manifest?.icon != null && (body.manifest.icon.length < 1 || body.manifest.icon.length > 3)) {
-    return json({ error: 'invalid-icon', message: 'icon must be 1–3 characters.' }, 400);
+    return json({ error: 'invalid-icon', category: 'invalid-input', message: 'icon must be 1–3 characters.' }, 400);
   }
 
   let mgr: ReturnType<typeof getAppManager>;
@@ -141,22 +152,10 @@ export const POST: APIRoute = async (ctx) => {
   if (destExists && !body.force) {
     return json({ error: 'exists', message: `${dest} already exists. Pass force=true to overwrite.` }, 409);
   }
-  // Overwriting an EXISTING app replaces the code that runs under its id: the
-  // owner's decision (D50, lib/approvals/admin.ts). Its grants are revoked
-  // (Hotfix 2, S1): the copy earns them again.
-  // New clones — including same-id shadows in another scope, which don't
-  // inherit scope-pinned grants — need nothing.
-  if (destExists && body.force) {
-    const admin = await ownerAction(ctx, {
-      action: 'admin.change', level: 'session',
-      payload: { op: 'clone-app.overwrite', sourceAppId, sourceScope, targetAppId, scope: targetScopeId },
-      title: `Overwrite ${targetAppId} with a copy of ${sourceAppId}`,
-      details: [`Into scope: ${targetScopeId}`, `From scope: ${sourceScope}`, 'The code that runs under that app id is replaced.',
-        'Its grants are revoked; its files and data go to trash (data a kept uninstall left is set aside for that app).'],
-    });
-    if (admin instanceof Response) return admin;
-    await auditOwner(admin, 'app.clone-overwrite', { target: `app:${targetAppId}`, detail: { sourceAppId, scope: targetScopeId } });
-  }
+  // Creating the copy (D109 AF2 `app.create`) and overwriting an existing app
+  // (D50 `admin.change`: its grants are revoked, Hotfix 2 S1) are the owner's
+  // decision, asked once the copy is staged so the dialog shows the manifest
+  // that will land (below). A dry run writes nothing and asks nobody.
 
   // A clone that lands on an id already present in a LOWER-priority scope
   // masks it (AppRegistry picks the highest priority). That's a legitimate
@@ -224,6 +223,24 @@ export const POST: APIRoute = async (ctx) => {
         dest, fileCount, bytes, ported, rewrittenFiles, strippedFields, shadows, warnings,
       });
     }
+
+    // The owner decides on the staged copy: its manifest's facts, bound to the
+    // digest of the tree that lands (its fresh originId left out).
+    const parsed = manifestFromDir(staging, targetAppId);
+    if ('status' in parsed) return json(parsed.body, parsed.status);
+    const tree = treeDigest(staging);
+    const admin = await ownerAction(ctx, createRequest(parsed.manifest, {
+      via: 'clone', appId: targetAppId, scope: targetScopeId, dest, replaces: destExists,
+      files: { digest: tree.digest, count: tree.fileCount, bytes: tree.bytes },
+      source: { appId: sourceAppId, scope: sourceScope },
+      ...(body.withData ? { withData: true } : {}),
+      ...(body.summary !== undefined ? { summary: body.summary } : {}),
+      ...(body.plan !== undefined ? { plan: body.plan } : {}),
+    }));
+    if (admin instanceof Response) return admin;
+    await auditOwner(admin, destExists ? 'app.clone-overwrite' : 'app.create', {
+      target: `app:${targetAppId}`, detail: { sourceAppId, scope: targetScopeId, via: 'clone', filesDigest: tree.digest },
+    });
 
     // ─── Land it ───────────────────────────────────────────────────────────
     if (destExists) {

@@ -359,6 +359,9 @@ aura dev new com.example.hello --name Hello --sandbox container --non-interactiv
 aura dev validate --all
 ```
 
+Creating an app from a sandbox (the System Terminal, `aura dev new` and `aura dev clone`) asks
+the owner first; the CLI waits for the decision in the desktop. See [Approvals](/docs/approvals).
+
 ## Settings
 
 | Command | What it does | Key flags |
@@ -432,7 +435,8 @@ sc; table/wide only). `aura describe` prints YAML, or JSON with `-o json`.
 |---|---|
 | `--shell-url <url>` | Override the shell URL (default `$OS_API_BASE`, else `http://127.0.0.1:3000`). |
 | `-V, --version` | CLI version. |
-| `-h, --help` | The main help, or one command's usage with `aura <command> --help`. |
+| `-h, --help` | The main help, or one command's usage with `aura <command> --help`. It never runs the command. |
+| `--agent` | Reserved for the agent interface. This version answers it with a usage error (exit code 2) and runs nothing. A literal `--agent` after `--` or as an option's value is passed on unchanged. |
 
 Extra positional arguments are an error, not silently ignored.
 

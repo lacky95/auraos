@@ -376,3 +376,50 @@ test('D102: Later on a credential request clears the typed secret; Review starts
   await closed();
   decisions.splice(0);
 });
+
+test('D109 AF2: the requester\'s summary is safe Markdown in its own box below the facts; nothing in it runs, links or loads', async () => {
+  const corpus = [
+    '# Plan', 'A **notes** app with `astro` and [docs](https://docs.example/x).',
+    '<script>window.__pwned = 1</script>', '<img src=x onerror="window.__pwned=2">',
+    '[click](javascript:window.__pwned=3)', '![beacon](https://evil.example/t.png)',
+    '<iframe src="https://evil.example"></iframe>', 'safe\u202eexe.txt and zero\u200bwidth',
+    '- one', '- two', '', '```', 'rm -rf /', '```',
+    ...Array.from({ length: 200 }, (_, i) => `line ${i} of a very long summary`),
+  ].join('\n\n');
+  const view = approval({
+    action: 'app.create', class: 'forced',
+    display: { title: 'CREATE THE APP NOTES', details: ['App: com.example.notes'], requestedBy: 'Terminal', explanation: { format: 'markdown', text: corpus } },
+  });
+  await serve(view);
+  const box = $('aura-owner-password-explanation');
+  const body = $('aura-owner-password-explanation-body');
+  assert.equal(box.hidden, false);
+  assert.match($('aura-owner-password-explanation-label').textContent ?? '', /Not checked by AuraOS/);
+  // Nothing executable, followable or loadable was created.
+  for (const sel of ['script', 'img', 'iframe', 'a', 'style', 'object', 'embed', 'link', '[onerror]', '[href]', '[src]']) {
+    assert.equal(body.querySelectorAll(sel).length, 0, sel);
+  }
+  assert.equal((globalThis as Record<string, unknown>)['__pwned'], undefined);
+  const text = body.textContent ?? '';
+  assert.match(text, /<script>window.__pwned = 1<\/script>/, 'raw HTML is shown as text');
+  assert.match(text, /docs <https:\/\/docs\.example\/x>/, 'a link is text with its address visible');
+  assert.match(text, /beacon, not loaded\] <https:\/\/evil\.example\/t\.png>/);
+  assert.doesNotMatch(text, /[\u202e\u200b]/, 'bidi and zero-width characters are gone');
+  assert.ok(body.querySelector('h1') && body.querySelector('strong') && body.querySelector('ul') && body.querySelector('pre'), 'the Markdown is rendered');
+  // Apart from the facts: after the details list, never containing the answers; bounded and scrolling inside.
+  const changes = $('aura-owner-password-changes');
+  assert.ok(changes.compareDocumentPosition(box as never) & 4, 'below the facts');
+  assert.equal(box.contains(approve as never) || box.contains(cancel as never), false);
+  assert.match(styles, /#aura-owner-password-explanation-body \{[^}]*max-height: 12em; overflow: auto;/);
+  key('Escape');
+  await closed();
+  decisions.splice(0);
+  // The next request without one hides the box and clears it.
+  const plain = approval();
+  await serve(plain);
+  assert.equal(box.hidden, true);
+  assert.equal(body.childNodes.length, 0);
+  key('Escape');
+  await closed();
+  decisions.splice(0);
+});
