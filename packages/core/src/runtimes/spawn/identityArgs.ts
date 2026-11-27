@@ -180,6 +180,16 @@ export function containerIdentityArgs(identity: SpawnIdentity | undefined, opts?
   ];
 }
 
+/**
+ * B12: the user an `inheritHome` sidecar runs as (`uid:gid`), or null when it
+ * keeps its image user (a root installation). A template `user` other than
+ * this conflicts and is refused.
+ */
+export function inheritHomeUser(parent: SpawnIdentity | null | undefined): string | null {
+  if (isApprovedRootIdentity(parent) || isNonRootIdentity(parent)) return `${parent!.uid}:${parent!.gid}`;
+  return null;
+}
+
 /** What the sidecar policy needs to know about a sidecar spec. */
 export interface SidecarIdentitySpec {
   image: string;
@@ -188,19 +198,29 @@ export interface SidecarIdentitySpec {
 }
 
 /**
- * A sidecar's identity (P5-3): it keeps its image user, or the manifest's
- * `services[].user`. The one exception by construction is an `aura-base`
- * sidecar that inherits the app's home (the Board supervisor): it is the
- * app's own code, so it runs as the app's identity, with the same flags.
+ * A sidecar's identity (P5-3; B12, D107). A sidecar without the app's home
+ * keeps its image user, or the manifest's `services[].user`. A sidecar that
+ * inherits the app's home (`inheritHome`) works on the app's files, whatever
+ * its image, so it runs as the app's own identity, never more:
+ *   - an app identity (non-root): that uid:gid, no capabilities,
+ *     no-new-privileges; an `aura-base` image also gets the identity files
+ *     (a foreign image keeps its own /etc/passwd);
+ *   - an approved root request: uid 0 without capabilities, like the app;
+ *   - a root installation (legacy, no app identity yet): the image's own user,
+ *     without capabilities and with no-new-privileges.
+ * A template `user` that conflicts with it is refused by the kernel before
+ * this runs (SidecarManager, D105). An image that can't run under the
+ * identity fails its start with its own words: never retried as root.
  */
 export function sidecarIdentityArgs(
   spec: SidecarIdentitySpec, parent: SpawnIdentity | null | undefined, opts: ContainerIdentityOpts & { baseImage: string },
 ): string[] {
-  if (spec.user || !spec.inheritHome || spec.image !== opts.baseImage) return [];
-  // The app's own code under an approved root request: uid 0 without capabilities, like the app.
+  if (!spec.inheritHome) return [];
+  // Under an approved root request: uid 0 without capabilities, like the app.
   if (isApprovedRootIdentity(parent)) return processIdentityFlags(parent!);
-  if (!isNonRootIdentity(parent)) return [];
-  return [...processIdentityFlags(parent), ...identityFileMounts(opts.appDataVolume, opts.instanceId)];
+  // A root installation: never more than root without capabilities (its image user, nothing granted).
+  if (!isNonRootIdentity(parent)) return ['--cap-drop', 'ALL', '--security-opt', 'no-new-privileges'];
+  return [...processIdentityFlags(parent), ...(spec.image === opts.baseImage ? identityFileMounts(opts.appDataVolume, opts.instanceId) : [])];
 }
 
 /**

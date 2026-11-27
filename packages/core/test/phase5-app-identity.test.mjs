@@ -27,7 +27,7 @@ import { buildOwnershipReport } from '../dist/identity/ownershipReport.js';
 import { APP_MIGRATION, buildPrivilegeReview, manifestPrivilegeNeeds } from '../dist/identity/privilegeReview.js';
 import { newInstallationRunAs } from '../dist/identity/types.js';
 import {
-  containerIdentityArgs, identityFilesSubpath, renderIdentityFiles, sidecarIdentityArgs, writeIdentityFiles,
+  containerIdentityArgs, identityFilesSubpath, inheritHomeUser, renderIdentityFiles, sidecarIdentityArgs, writeIdentityFiles,
 } from '../dist/runtimes/spawn/identityArgs.js';
 import {
   ASTRO_START_SHELL, BUILDER_CACHE_PATH, RAW_START_SHELL, builderProvisionEnv, builderProvisionShell, PROVISION_BEGIN,
@@ -190,14 +190,22 @@ test('identity files: deterministic, the app account with pw_dir /home/aura, wri
   assert.equal(statSync(join(out, 'passwd')).mode & 0o777, 0o644);
 });
 
-test('sidecars keep their image user; only an aura-base inheritHome sidecar of an app runs as the app', () => {
+test('sidecars keep their image user; every inheritHome sidecar runs as its app, whatever the image (B12)', () => {
   const opts = { appDataVolume: 'vol', instanceId: 'org.b.board', baseImage: 'aura-base' };
-  assert.deepEqual(sidecarIdentityArgs({ image: 'trilium', inheritHome: false }, APP, opts), [], 'foreign image');
-  assert.deepEqual(sidecarIdentityArgs({ image: 'canvas', inheritHome: false, user: '0:0' }, APP, opts), [], 'explicit user wins');
+  const NO_PRIV = ['--cap-drop', 'ALL', '--security-opt', 'no-new-privileges'];
+  assert.deepEqual(sidecarIdentityArgs({ image: 'trilium', inheritHome: false }, APP, opts), [], 'foreign image without the home');
+  assert.deepEqual(sidecarIdentityArgs({ image: 'canvas', inheritHome: false, user: '0:0' }, APP, opts), [], 'explicit user wins without the home');
   assert.deepEqual(sidecarIdentityArgs({ image: 'aura-base', inheritHome: false }, APP, opts), [], 'aura-base without the home');
-  assert.deepEqual(sidecarIdentityArgs({ image: 'aura-base', inheritHome: true }, { uid: 0, gid: 0, range: 'root' }, opts), [], 'root parent');
+  // B12: a root installation's home sidecar keeps its image user, never with capabilities.
+  assert.deepEqual(sidecarIdentityArgs({ image: 'aura-base', inheritHome: true }, { uid: 0, gid: 0, range: 'root' }, opts), NO_PRIV, 'root parent');
+  assert.deepEqual(sidecarIdentityArgs({ image: 'ghcr.io/x/webui:1', inheritHome: true }, undefined, opts), NO_PRIV, 'root parent, foreign image');
   const s = sidecarIdentityArgs({ image: 'aura-base', inheritHome: true }, APP, opts);
-  assert.deepEqual(s.slice(0, 6), ['--user', '200007:200007', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges']);
+  assert.deepEqual(s.slice(0, 6), ['--user', '200007:200007', ...NO_PRIV]);
+  assert.ok(s.some((a) => a.includes('target=/etc/passwd')), 'aura-base: the identity files');
+  // B12: a foreign image with the home runs as the app too (its own /etc/passwd stays).
+  assert.deepEqual(sidecarIdentityArgs({ image: 'ghcr.io/x/webui:1', inheritHome: true }, APP, opts), ['--user', '200007:200007', ...NO_PRIV]);
+  assert.equal(inheritHomeUser(APP), '200007:200007');
+  assert.equal(inheritHomeUser({ uid: 0, gid: 0, range: 'root' }), null);
 });
 
 test('adoption keeps the latched identity from Config.User (D77)', () => {
