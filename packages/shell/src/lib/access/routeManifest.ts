@@ -115,6 +115,8 @@ const groups: RouteAccessManifest['groups'] = {
   os:            rule(OWNER, 'system'),
   proxy:         rule(OWNER, 'proxy-upstream'),
   scopes:        rule(OWNER, 'system'),
+  // D108: an app's own setup values, by its instance token (/api/setup/self).
+  setup:         rule(['own-instance'], 'system', { credentials: ['instance-token'] }),
   // The owner's System Terminal, for apps the owner granted (D25, D29).
   terminal:      rule(APP_PERMISSION, 'app', { permissions: ['terminal.embed'] }),
   user:          rule(OWNER, 'system'),
@@ -124,6 +126,11 @@ const groups: RouteAccessManifest['groups'] = {
 
 /** The owner, or the System Terminal asking for the owner's approval (D29, D31). */
 const TERMINAL_ASKS = rule(INSTANCE, 'app', { systemApp: TERMINAL_APP_ID });
+
+/** D108 setup reads (state, profiles, plan, values): the owner, and the System Terminal (the CLI) by its own token. */
+const SETUP_READ = rule(INSTANCE, 'app', { systemApp: TERMINAL_APP_ID, guard: 'rule' });
+/** D108 setup changes: the same callers; the handler asks the owner's approval where privileges grow. */
+const SETUP_CHANGE = rule(INSTANCE, 'app', { systemApp: TERMINAL_APP_ID, guard: 'rule' });
 
 /** TerminalX's agent watch (D29): the owner, the System Terminal, an app holding the list grant. */
 const TERMINAL_AGENTS = rule(APP_PERMISSION, 'app', { permissions: ['terminal.sessions.list'], guard: 'rule' });
@@ -694,6 +701,30 @@ const routes: RouteAccessManifest['routes'] = {
   '/api/apps/[id]/preview': { methods: { POST: TERMINAL_ASKS, DELETE: TERMINAL_ASKS } },
   '/api/apps/[id]/source-mode': { methods: { POST: TERMINAL_ASKS } },
   '/api/nexus/update/[id]': { methods: { POST: TERMINAL_ASKS } },
+
+  // D108 app setup (setup/contracts.ts; lib/setup). Reads: the owner (the
+  // desktop wizard, Settings through D45, the CLI through the trusted
+  // Terminal). Changes: the owner or the System Terminal, which asks: a
+  // privilege-adding apply creates the owner's `app.setup.apply` approval
+  // (D102, never bypassable, an agent gets 202/on hold); a plain-value change
+  // needs none. Every other app is refused, in every mode.
+  '/api/apps/[id]/setup': { methods: { GET: SETUP_READ } },
+  '/api/apps/[id]/setup/profiles': { methods: { GET: SETUP_READ } },
+  '/api/apps/[id]/setup/plan': { methods: { GET: SETUP_READ, POST: SETUP_READ } },
+  '/api/apps/[id]/setup/values': { methods: { GET: SETUP_READ, PUT: SETUP_CHANGE } },
+  '/api/apps/[id]/setup/apply': { methods: { POST: SETUP_CHANGE } },
+  '/api/apps/[id]/setup/resume': { methods: { POST: SETUP_CHANGE } },
+  '/api/apps/[id]/setup/repair': { methods: { POST: SETUP_CHANGE } },
+  '/api/apps/[id]/setup/reconfigure': { methods: { POST: SETUP_CHANGE } },
+  // D108 value delivery: the app's own server reads its own effective setup
+  // values by its instance token (SDK osClient.setup.config()); never a page,
+  // never another installation's or user's values; secrets as handles only.
+  '/api/setup/self': {
+    methods: {
+      GET: rule(['own-instance'], 'system', { credentials: ['instance-token'], guard: 'rule', ...why(
+        'The calling app instance reads its own installation\'s effective setup values (D108 P4) with its instance token; secrets arrive as D56 handles, read with credentials.get.') }),
+    },
+  },
 
   '/api/nexus/assets/[source]/[appId]/[digest]': {
     methods: {

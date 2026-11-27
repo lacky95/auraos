@@ -10,7 +10,7 @@ import { RESOURCES, findResource, resourcesFor, shortName, sidecarId, sidecarMat
 import { renderObjects, parseOutput } from '../src/lib/output.js';
 import { table, visibleWidth } from '../src/lib/format.js';
 import { matchInstance, ownersOf } from '../src/lib/resolve.js';
-import { LEGACY_GROUPS, LEGACY_HINTS } from '../src/lib/deprecate.js';
+import { CURRENT_SUBCOMMANDS, LEGACY_GROUPS, LEGACY_HINTS } from '../src/lib/deprecate.js';
 import { buildProgram, completions, HELP_SECTIONS, isVersionRequest, RESOURCE_VERBS } from '../src/program.js';
 
 const hidden = (c: Command) => Boolean((c as unknown as { _hidden?: boolean })._hidden);
@@ -133,6 +133,7 @@ test('legacy groups stay registered but hidden; every legacy subcommand has a hi
     assert.ok(hidden(cmd!), `${g} not hidden`);
     if (g === 'sdk') continue; // silent on purpose: runs on every app boot
     const walk = (c: Command, path: string[]): void => {
+      if (path.length === 2 && CURRENT_SUBCOMMANDS[path[0]!]?.includes(path[1]!)) return; // current, no hint (D108)
       if (c.commands.length === 0) {
         const key = path.length > 2 ? path.slice(-2).join(' ') : path.join(' ');
         assert.ok(LEGACY_HINTS[key], `no deprecation hint for 'aura ${path.join(' ')}'`);

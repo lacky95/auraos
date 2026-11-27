@@ -23,6 +23,8 @@ export { ContextApi } from './aura-context.js';
 export { ApprovalsApi, APPROVAL_HEADER, approvalHeader } from './approvals.js';
 export { CredentialsApi } from './credentials.js';
 export type { CredentialRequest, CredentialResult } from './credentials.js';
+// D108 app setup: the app-facing types (osClient.setup, the setup hooks).
+export type { SetupConfig, SetupConfigValue, SetupDegraded, SetupHookInput, SetupReason, ValidateResult, MigrateConfigInput, MigrateConfigResult } from './setup-types.js';
 export type { ApprovalAsk, ApprovalLevel, ApprovalOutcome, ApprovalResult, ApprovalWaitOptions } from './approvals.js';
 export { PermissionsApi } from './permissions.js';
 export { ThemeApi } from './theme.js';

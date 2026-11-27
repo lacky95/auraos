@@ -46,6 +46,13 @@ export const LEGACY_HINTS: Record<string, string> = {
   'whereami':         'aura info',
 };
 
+/**
+ * Subcommands of a legacy group that are current, not deprecated: they have
+ * no kubectl verb form and print no hint. D108 app setup is `aura app setup |
+ * config | profile` (the form its acceptance names); the main help lists it.
+ */
+export const CURRENT_SUBCOMMANDS: Readonly<Record<string, readonly string[]>> = { app: ['setup', 'config', 'profile'] };
+
 /** Groups that are hidden. `sdk` is hidden but silent — it runs on every app boot. */
 export const LEGACY_GROUPS = ['app', 'inst', 'activity', 'service', 'theme', 'scope', 'sdk', 'whereami'] as const;
 const SILENT = new Set(['sdk']);

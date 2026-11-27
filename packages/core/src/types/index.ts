@@ -5,3 +5,4 @@ export * from './activity.js';
 export * from './view.js';
 export * from './layout.js';
 export * from './workspace.js';
+export * from './setupManifest.js';

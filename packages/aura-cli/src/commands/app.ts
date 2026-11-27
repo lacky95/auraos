@@ -5,6 +5,7 @@ import { api, type ShellError } from '../lib/client.js';
 import { color, fail, info, ok, table, warn } from '../lib/format.js';
 import { promptChoice, promptConfirm, promptMultiSelect, BACK, PromptCancelled } from '../lib/prompts.js';
 import { BUILTIN_PERMISSIONS, ENFORCED_PERMISSIONS as CORE_ENFORCED } from '@aura/core';
+import { registerAppSetup } from './app-setup.js';
 
 /** Concrete array form of the core const (typed as a readonly tuple there). */
 const BUILTIN_PERMISSIONS_LIST: string[] = [...BUILTIN_PERMISSIONS];
@@ -59,6 +60,7 @@ interface AppDto {
 
 export function registerApp(program: Command): void {
   const app = program.command('app').description('Manage installed apps.');
+  registerAppSetup(app);
 
   app
     .command('list')

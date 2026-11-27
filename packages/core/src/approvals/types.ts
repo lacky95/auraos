@@ -20,6 +20,7 @@
  */
 import type { AccessPrincipal } from '../auth/types.js';
 import type { AuraApprovalLevel } from '../app-hosts/auraChannel.js';
+import { setupApplyClass } from '../setup/contracts.js';
 
 /**
  * How long an open request waits for the owner, and how long an approval can
@@ -102,12 +103,20 @@ export type ApprovalClass = (typeof APPROVAL_CLASSES)[number];
  *                      its rollback tree (`/api/apps/<id>/activate`)
  *   app.source.open    open an installed app's source for direct development
  *                      (`/api/apps/<id>/source-mode`, `aura dev open`)
+ *
+ * App setup (D108, decision 9):
+ *   app.setup.apply    apply an app's setup or profile change: bound to its
+ *                      `grantDigest` and `configDigest` (setup/contracts.ts);
+ *                      its class is the strictest contained part
+ *                      (`setupApplyClass`): forced with the Private Home, a
+ *                      home sidecar or root, else deferrable. A change of
+ *                      plain values only needs no approval at all
  */
 export const APPROVAL_ACTIONS = [
   'nexus.install', 'nexus.update', 'os.context.write', 'user.confirm', 'app.adapter-change',
   'credential.store', 'credential.read',
   'admin.grant', 'admin.revoke', 'admin.api-key', 'admin.manifest-edit', 'admin.read', 'admin.change',
-  'app.patch.activate', 'app.source.open',
+  'app.patch.activate', 'app.source.open', 'app.setup.apply',
 ] as const;
 export type ApprovalAction = (typeof APPROVAL_ACTIONS)[number];
 
@@ -134,6 +143,8 @@ export const APPROVAL_CLASS: Readonly<Record<ApprovalAction, ApprovalClass>> = {
   'admin.manifest-edit': 'deferrable',
   'admin.read': 'deferrable',
   'app.source.open': 'deferrable',
+  // Per request (approvalClassOf → setupApplyClass); forced is the fallback.
+  'app.setup.apply': 'forced',
 };
 
 /**
@@ -151,6 +162,7 @@ export const DEFERRABLE_ADMIN_CHANGES: ReadonlySet<string> = new Set([
 /** The class of one request: the action's, and for `admin.change` its operation's. */
 export function approvalClassOf(action: ApprovalAction, payload: unknown): ApprovalClass {
   const base = APPROVAL_CLASS[action] ?? 'forced';
+  if (action === 'app.setup.apply') return setupApplyClass(payload);
   if (action !== 'admin.change') return base;
   const op = payload && typeof payload === 'object' ? (payload as Record<string, unknown>)['op'] : undefined;
   return typeof op === 'string' && DEFERRABLE_ADMIN_CHANGES.has(op) ? 'deferrable' : 'forced';

@@ -3,19 +3,15 @@
  * Schema subset that Settings → Runtimes renders as a form (ARI §9.8) and
  * the kernel validates writes against. Supported field types: `boolean`,
  * `integer`, `string` (optionally an `enum`) and `string[]`.
+ *
+ * The field model itself is the one of config/schema.ts (D108 decision 6,
+ * D36: one field model for runtime settings and app setup fields); this file
+ * keeps the runtime API and its error.
  */
+import { fieldDefaults, fieldValue, type SettingsSchema } from '../config/schema.js';
 import type { RuntimeSettings } from './types.js';
 
-export type SettingsField =
-  | { type: 'boolean'; title: string; description?: string; default?: boolean }
-  | { type: 'integer'; title: string; description?: string; default?: number; minimum?: number; maximum?: number }
-  | { type: 'string'; title: string; description?: string; default?: string; enum?: string[]; enumTitles?: Record<string, string> }
-  | { type: 'array'; items: { type: 'string' }; title: string; description?: string; default?: string[] };
-
-export interface SettingsSchema {
-  type: 'object';
-  properties: Record<string, SettingsField>;
-}
+export type { SettingsField, SettingsSchema } from '../config/schema.js';
 
 export class RuntimeSettingsError extends Error {
   override readonly name = 'RuntimeSettingsError';
@@ -24,32 +20,7 @@ export class RuntimeSettingsError extends Error {
 
 /** Every field at its default. */
 export function settingsDefaults(schema: SettingsSchema): RuntimeSettings {
-  const out: RuntimeSettings = {};
-  for (const [k, f] of Object.entries(schema.properties)) if (f.default !== undefined) out[k] = f.default;
-  return out;
-}
-
-/** One field's value from untrusted input (form strings included), or undefined when invalid. */
-function fieldValue(f: SettingsField, raw: unknown): unknown {
-  switch (f.type) {
-    case 'boolean':
-      if (typeof raw === 'boolean') return raw;
-      if (raw === 'true' || raw === 'false') return raw === 'true';
-      return undefined;
-    case 'integer': {
-      const n = typeof raw === 'number' ? raw : typeof raw === 'string' && /^-?\d+$/.test(raw.trim()) ? Number(raw) : NaN;
-      if (!Number.isInteger(n)) return undefined;
-      if ((f.minimum !== undefined && n < f.minimum) || (f.maximum !== undefined && n > f.maximum)) return undefined;
-      return n;
-    }
-    case 'string':
-      if (typeof raw !== 'string') return undefined;
-      return f.enum && !f.enum.includes(raw) ? undefined : raw;
-    case 'array': {
-      const list = typeof raw === 'string' ? raw.split(',').map((s) => s.trim()).filter(Boolean) : raw;
-      return Array.isArray(list) && list.every((s) => typeof s === 'string') ? list : undefined;
-    }
-  }
+  return fieldDefaults(schema.properties);
 }
 
 /**

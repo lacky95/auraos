@@ -214,9 +214,10 @@ const gateWorld = async (apps) => {
 test('D108 A1: setup and profiles are reserved in the schema (kept, never dropped) and refused with a D105 body', async () => {
   const { operationalBlock, declaredSetupKeys, operationalBlockOf, OperationalBlockError, RESERVED_SETUP_KEYS } = await import('../dist/contract/types.js');
   assert.deepEqual([...RESERVED_SETUP_KEYS], ['setup', 'profiles']);
-  const m = parse({ setup: { fields: [{ id: 'url' }] }, profiles: [{ id: 'personal' }] });
-  assert.deepEqual(m.setup, { fields: [{ id: 'url' }] }, 'kept as declared');
-  assert.deepEqual(m.profiles, [{ id: 'personal' }]);
+  // P0 (7c): the real schema replaced the opaque reservation; the blocks are still kept, never dropped.
+  const m = parse({ setup: { fields: { url: { type: 'string', title: 'URL' } } }, profiles: [{ id: 'personal', title: 'Personal' }] });
+  assert.deepEqual(m.setup.fields, { url: { type: 'string', title: 'URL' } }, 'kept as declared');
+  assert.deepEqual(m.profiles.map((p) => p.id), ['personal']);
   assert.deepEqual(declaredSetupKeys(m), ['setup', 'profiles']);
   const b = operationalBlock(m);
   assert.deepEqual({ ...b, message: undefined, hint: undefined }, {
@@ -224,7 +225,8 @@ test('D108 A1: setup and profiles are reserved in the schema (kept, never droppe
   });
   assert.match(b.message, /declares setup and profiles .*D108.*does not start the app unconfigured/);
   assert.match(b.hint, /without setup\/profiles, or update AuraOS/);
-  assert.equal(operationalBlock(parse({ profiles: [] }))?.manifestField, 'profiles', 'an empty list is still a declaration');
+  assert.equal(operationalBlock({ id: 'com.example.notes', profiles: [] })?.manifestField, 'profiles', 'an empty list is still a declaration');
+  assert.equal(AppManifestSchema.safeParse({ ...base, profiles: [] }).success, false, 'P0: an empty profiles list is a schema error');
   // A newer contract wins (it says more), with the same body shape.
   assert.deepEqual([operationalBlock(parse({ auraContract: 2, setup: {} }))?.error, operationalBlock(parse({ auraContract: 2 }))?.category], ['contract-unsupported', 'unsupported-operation']);
   const err = new OperationalBlockError(b);
@@ -255,7 +257,7 @@ test('D108 A2: the gate in spawnContext refuses every spawn; registry lists and 
   const { AppRegistry } = await import('../dist/app-manager/AppRegistry.js');
   const w = await gateWorld({
     'io.future.app': { auraContract: AURA_CONTRACT + 1, instanceMode: 'multi', warmPool: 1 },
-    'io.setup.app': { setup: { fields: [] }, componentType: 'service', instanceMode: 'single' },
+    'io.setup.app': { setup: {}, componentType: 'service', instanceMode: 'single' },
   });
   // Registry: listed, the hook (the kernel's audit row) gets the body.
   const blocked = [];
@@ -286,7 +288,7 @@ test('install, update and patch activation refuse setup/profiles before anyone i
   const mgr = new NexusManager({ scopes, rootDataDir: join(root, 'root') });
   const dir = join(root, 'tree');
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, 'app.manifest.json'), JSON.stringify({ ...base, id: 'io.shop.app', auraContract: 1, profiles: [{ id: 'team' }] }));
+  writeFileSync(join(dir, 'app.manifest.json'), JSON.stringify({ ...base, id: 'io.shop.app', auraContract: 1, profiles: [{ id: 'team', title: 'Team' }] }));
   const asked = [];
   const events = [];
   const it = mgr.install({ ref: dir, scope: 'user', approval: async (b) => { asked.push(b); return true; } });

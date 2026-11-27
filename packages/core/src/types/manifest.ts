@@ -1,5 +1,8 @@
 import { HOST_NAME_RE, RESERVED_HOST_NAMES, isValidHostName } from '../app-hosts/appHosts.js';
 import { z } from 'zod';
+import {
+  EnvValueSchema, HomeEnvironmentsSchema, ProfileDeclarationSchema, SetupDeclarationSchema, SIDECAR_HOMES, setupManifestIssues,
+} from './setupManifest.js';
 
 /**
  * Permission strings. Accepts built-in well-known values (storage.read, etc.) AND
@@ -463,14 +466,25 @@ export const AppManifestSchema = z.object({
    */
   auraContract: z.number().int().min(1).optional(),
   /**
-   * Reserved for D108 (app setup and operating profiles): kept as declared,
-   * never interpreted. Until AuraOS has the setup engine an app declaring
-   * either is refused at install and never started (contract/types.ts
-   * `operationalBlock`), instead of running unconfigured. Apps without them
-   * are unaffected.
+   * D108 app setup (types/setupManifest.ts): typed fields (the one field
+   * model, config/schema.ts), requirements, init and readiness. Optional;
+   * an app without it has no setup record and launches exactly as before.
+   * Until the setup engine gates starts, an app declaring it (or `profiles`)
+   * is refused at install and never started (contract/types.ts
+   * `operationalBlock`), instead of running unconfigured.
    */
-  setup: z.record(z.string(), z.unknown()).optional(),
-  profiles: z.array(z.unknown()).optional(),
+  setup: SetupDeclarationSchema.optional(),
+  /**
+   * D108 operating profiles: overlays on an allowlist of keys (decision 4).
+   * Optional and independent of `setup`; no default profile is required.
+   */
+  profiles: z.array(ProfileDeclarationSchema).min(1).optional(),
+  /**
+   * D107: which home environments the app supports (`app` always; `private`
+   * = the user's Private Home). A declaration, never a grant: the user's
+   * `home.private` grant authorizes it, the setup record selects it.
+   */
+  homeEnvironments: HomeEnvironmentsSchema.optional(),
   /**
    * The Aura Context keys this app reads with `osClient.context.get(key)`
    * (D48). Only these are handed to it; reading another key is refused and
@@ -846,8 +860,12 @@ export const AppManifestSchema = z.object({
     port: z.number().int().min(1).max(65535).optional(),
     /** When true, this service's `port` is what the app window renders. */
     proxyDashboard: z.boolean().default(false),
-    /** Extra env passed to the service container (`-e KEY=VALUE`). */
-    env: z.record(z.string(), z.string()).default({}),
+    /**
+     * Extra env passed to the service container (`-e KEY=VALUE`). A value is
+     * a literal or a D108 reference resolved at spawn (`{ fromSetup, map? }`,
+     * `{ fromSecret }`; types/setupManifest.ts), never a template string.
+     */
+    env: z.record(z.string(), EnvValueSchema).default({}),
     /** Named volumes mounted into the service; volume = `aura-<appId>-<name>`. */
     volumes: z.array(z.object({
       name:   z.string().regex(/^[a-z][a-z0-9-]*$/),
@@ -884,6 +902,13 @@ export const AppManifestSchema = z.object({
      * permission.
      */
     inheritHome: z.boolean().optional(),
+    /**
+     * D107 §4: the sidecar's home. `none`; `app` (= `inheritHome: true`, the
+     * alias); `owner-environment`: the same home and identity as the app
+     * process (the Private Home under the user's uid when the instance is
+     * `private`, which needs the grant `home.private.sidecar:<name>`).
+     */
+    home: z.enum(SIDECAR_HOMES).optional(),
     /** The app's cross-app mounts at /mnt/aura (live). */
     inheritMounts: z.boolean().optional(),
     /**
@@ -970,7 +995,10 @@ export const AppManifestSchema = z.object({
   // R2: PRoot runs an app only under its own app identity (a root tracee reaches the master).
   (m) => !(m.execution && m.sandbox === 'proot'),
   { message: 'execution.runAs root can\'t run on the proot runtime (it runs apps only under their own app identity): use sandbox container', path: ['execution'] },
-);
+).superRefine((m, ctx) => {
+  // D108: profiles, fields, `when` and env references must agree (types/setupManifest.ts).
+  for (const i of setupManifestIssues(m)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: i.path, message: i.message });
+});
 
 export type AppManifest = z.infer<typeof AppManifestSchema>;
 

@@ -22,12 +22,12 @@ Sectors are logical groups over the existing directories. There is no sector dir
 `tools/dep-check.mjs` reads the block below. Adding, removing or renaming a module without updating it fails `pnpm arch`.
 
 ```text dep-check:sectors
-foundation: types logger ipc system index
+foundation: types logger ipc system index config
 execution: app-manager scopes runtimes
 identity-security: auth permissions approvals security identity
 resource: context users homes
 communication: interfaces app-hosts content
-system-management: nexus patches updater contract capabilities
+system-management: nexus patches updater contract capabilities setup
 platform-services: notifications
 presentation-contracts: theme layout keymap
 ```

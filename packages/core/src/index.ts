@@ -63,6 +63,9 @@ export * from './runtimes/ari.js';
 export * from './runtimes/requirements.js';
 export * from './runtimes/registry.js';
 export * from './runtimes/settingsSchema.js';
+// D108: the one field model and the setup module's surface (contracts first; packages add named exports in setup/index.ts).
+export * from './config/schema.js';
+export * from './setup/index.js';
 export * from './runtimes/settingsStore.js';
 export * from './runtimes/migrateLegacy.js';
 export * from './runtimes/container/index.js';

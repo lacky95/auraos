@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { AppManifest } from '../types/manifest.js';
 import { SHARED_HOME_PATH } from './tool-provision.js';
+import { isEnvValueRef, type EnvValue } from '../types/setupManifest.js';
 
 /**
  * What an app may ask the OS to start, and what it gets. Pure — every rule
@@ -263,7 +264,7 @@ export function resolveSidecarSpec(req: SidecarSpawnRequest, ctx: ResolveContext
     template: tpl.name,
     image: req.image ?? tpl.image,
     command: req.command ?? tpl.command ?? [],
-    env: { ...(tpl.env ?? {}), ...(req.env ?? {}) },
+    env: { ...literalEnv(tpl.name, tpl.env ?? {}), ...(req.env ?? {}) },
     envInherit: [...new Set([...(tpl.envInherit ?? []), ...(req.envInherit ?? [])])],
     ...(tpl.port !== undefined ? { port: tpl.port } : {}),
     restart: tpl.restart ?? 'unless-stopped',
@@ -289,6 +290,21 @@ export function resolveSidecarSpec(req: SidecarSpawnRequest, ctx: ResolveContext
 }
 
 /** JSON with object keys sorted at every level — stable across key order. */
+/**
+ * A template's env as literals. A D108 reference (`fromSetup`/`fromSecret`)
+ * is resolved by the setup module's value delivery at spawn (D108 P4); until
+ * a resolver is wired in, a reference refuses the sidecar instead of
+ * starting it without the value (fail closed, never an empty or raw value).
+ */
+function literalEnv(template: string, env: Record<string, EnvValue>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(env)) {
+    if (isEnvValueRef(v)) throw new SpecError(409, `template '${template}' env ${k} references a setup value; it needs the app's completed setup (D108)`);
+    out[k] = v;
+  }
+  return out;
+}
+
 function canonical(v: unknown): string {
   if (Array.isArray(v)) return `[${v.map(canonical).join(',')}]`;
   if (v && typeof v === 'object') {

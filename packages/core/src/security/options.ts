@@ -206,6 +206,18 @@ export const SECURITY_OPTIONS: readonly SecurityOption[] = Object.freeze([
     restartRequired: false, change: 'fresh', since: '2026-11-26', phase: '5 (5-main, root requests)',
   },
   {
+    id: 'app-private-home',
+    title: 'Apps with your Private Home',
+    description: 'Whether an app may run with a user\'s Private Home (D107, through an app\'s setup: home environment "private"). '
+      + 'grant (default): only with that user\'s own explicit, revocable grant for that app installation (`home.private`, and '
+      + '`home.private.sidecar:<name>` per sidecar), approved with the password; the app then runs as that user, never as root, '
+      + 'never in PRoot, and never while one of its sidecars listens on the shared app network. Revoking the grant stops the app '
+      + 'and its sidecars and marks its setup blocked; it never falls back to the App Home by itself. off: no app runs with a '
+      + 'Private Home; such a setup is blocked with this option named (D108).',
+    type: 'enum', values: ['off', 'grant'], default: 'grant', source: 'policy',
+    restartRequired: false, change: 'fresh', since: '2026-11-27', phase: '7c (D108 P9, D107-a owner subset)',
+  },
+  {
     id: PROOT_HOST,
     title: 'PRoot on this host',
     description: 'Whether the proot runtime can run apps at all. true (set in docker-compose): PRoot apps run wrapped in PRoot '
