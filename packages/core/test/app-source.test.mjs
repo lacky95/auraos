@@ -20,6 +20,7 @@ import {
 } from '../dist/nexus/AppSource.js';
 import { AppManifestSchema } from '../dist/types/manifest.js';
 import { buildStoreAnnotations, parseStoreAnnotations } from '../dist/nexus/ociMetadata.js';
+import { publishFileList } from '../dist/nexus/PublishFiles.js';
 
 const git = (cwd, ...args) => execFileSync('git', ['-C', cwd, '-c', 'user.name=t', '-c', 'user.email=t@t', ...args],
   { stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim();
@@ -96,6 +97,30 @@ test('readAppSource records repo, branch, commit and uncommitted changes', () =>
   assert.deepEqual(readAppSource(plain, manifestOf()), {});
   assert.deepEqual(readAppSource(plain, manifestOf({ repository: { url: 'gitlab.com/o/r', branch: 'dev' } })),
     { repository: 'https://gitlab.com/o/r.git', branch: 'dev' });
+});
+
+test('an author\'s tree owned by the author (5-main): the root shell reads it as that owner, never runs its config as root', { skip: process.getuid?.() !== 0 && 'needs root' }, () => {
+  const f = fixture();
+  const head = git(f.author, 'rev-parse', 'HEAD');
+  // The tree's own config asks git to run a command (status runs fsmonitor): it must never run as root.
+  const probe = join(f.root, 'fsmonitor-uid');
+  const hook = join(f.root, 'fsmonitor.sh');
+  writeFileSync(hook, `#!/bin/sh\nid -u > ${probe}\n`, { mode: 0o755 });
+  git(f.author, 'config', 'core.fsmonitor', hook);
+  writeFileSync(join(f.author, 'index.js'), 'changed\n');
+  execFileSync('chmod', ['755', f.root]);
+  execFileSync('chown', ['-R', '1000:1000', f.root]);
+  // Root's own git refuses the tree (dubious ownership): before, publish recorded no commit (trackp patch start failed).
+  assert.throws(() => execFileSync('git', ['-C', f.author, 'rev-parse', 'HEAD'], { stdio: 'pipe' }));
+  const src = readAppSource(f.author, manifestOf({ repository: { url: f.url } }));
+  assert.deepEqual(src, { repository: f.url, branch: 'main', commit: head, dirty: true });
+  if (existsSync(probe)) assert.equal(readFileSync(probe, 'utf-8').trim(), '1000');
+  // The publish file list is git's view too (.gitignore honoured), read the same way.
+  mkdirSync(join(f.author, 'node_modules'));
+  writeFileSync(join(f.author, 'node_modules', 'x.js'), '1');
+  execFileSync('chown', ['-R', '1000:1000', f.author]);
+  const list = publishFileList(f.author, { appId: 'io.test.app' });
+  assert.ok(list.files.includes('index.js') && !list.files.some((x) => x.startsWith('node_modules/')), list.files.join(','));
 });
 
 test('the release source rides on OCI annotations and back', () => {

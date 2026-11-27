@@ -17,7 +17,7 @@
  * Paths are relative to the app dir, `/`-separated, files and symlinks only.
  */
 import { execFileSync } from 'node:child_process';
-import { lstatSync, readdirSync, readFileSync } from 'node:fs';
+import { lstatSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 export const DEFAULT_PUBLISH_IGNORE = ['node_modules', '.next', 'dist', '.astro', '.turbo', '.cache'];
@@ -87,14 +87,34 @@ function ignoredByManifest(rel: string, ignore: string[]): boolean {
   return false;
 }
 
+/**
+ * How the shell runs read-only git in an author's tree. Since 5-main an author's app (user scope, `aura dev new`)
+ * belongs to the author's uid, not root, and git refuses a repo another user owns ("dubious ownership"). Lifting
+ * that check as root would let the tree's own `.git/config` (core.fsmonitor, filter drivers, ...) run commands as
+ * root. So git runs as the tree's owner: it can only do what that user could do anyway. No system or global config
+ * (root's home is not theirs to read, and its settings are not the author's). A root-owned tree, or a shell not
+ * running as root, keeps plain git.
+ */
+export function authorGitOptions(dir: string): { cwd: string; uid?: number; gid?: number; env?: NodeJS.ProcessEnv } {
+  let owner: { uid: number; gid: number };
+  try { owner = statSync(dir); } catch { return { cwd: dir }; }
+  if (process.getuid?.() !== 0 || owner.uid === 0) return { cwd: dir };
+  const { XDG_CONFIG_HOME: _xdg, ...env } = process.env;
+  return {
+    cwd: dir, uid: owner.uid, gid: owner.gid,
+    env: { ...env, HOME: '/nonexistent', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0' },
+  };
+}
+
 /** Git's view of the dir, or null when it is not inside a work tree. */
 function gitCandidates(appPath: string): string[] | null {
+  const as = authorGitOptions(appPath);
   try {
     const inside = execFileSync('git', ['-C', appPath, 'rev-parse', '--is-inside-work-tree'],
-      { stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 }).toString().trim();
+      { ...as, stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 }).toString().trim();
     if (inside !== 'true') return null;
     const out = execFileSync('git', ['-C', appPath, 'ls-files', '-z', '--cached', '--others', '--exclude-standard'],
-      { stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000, maxBuffer: 256 * 1024 * 1024 }).toString();
+      { ...as, stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000, maxBuffer: 256 * 1024 * 1024 }).toString();
     return out.split('\0').filter(Boolean);
   } catch { return null; }
 }
