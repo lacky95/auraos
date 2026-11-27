@@ -26,6 +26,9 @@ export interface ExecCreateSpec {
   WorkingDir?: string;
 }
 
+/** A terminal's size in character cells. */
+export interface TerminalSize { cols: number; rows: number }
+
 export interface ExecInspect {
   Running: boolean;
   ExitCode: number | null;
@@ -51,7 +54,8 @@ export interface LogsQuery {
 /** The part of the client the exec bridge uses (tests pass a fake). */
 export interface EngineClient {
   execCreate(container: string, spec: ExecCreateSpec): Promise<string>;
-  execStart(id: string, tty: boolean): Promise<Duplex>;
+  /** `size`: a TTY's initial size (the engine's ConsoleSize), so the process never starts with a 0x0 terminal. */
+  execStart(id: string, tty: boolean, size?: TerminalSize): Promise<Duplex>;
   execResize(id: string, cols: number, rows: number): Promise<void>;
   execInspect(id: string): Promise<ExecInspect>;
   containerInspect(container: string): Promise<ContainerInspect>;
@@ -101,11 +105,14 @@ export class DockerApi implements EngineClient {
   /**
    * Start an exec and take over its connection: stdin is written to the
    * returned stream, stdout/stderr come back on it (raw with a TTY, else in
-   * the engine's 8-byte frames, see `EngineDemux`).
+   * the engine's 8-byte frames, see `EngineDemux`). A TTY starts at `size`
+   * (ConsoleSize, API 1.42+; an older engine ignores it and the caller's
+   * first resize sets it): a process that reads its size at once (a session
+   * launcher, `stty size`) never sees 0x0.
    */
-  execStart(id: string, tty: boolean): Promise<Duplex> {
+  execStart(id: string, tty: boolean, size?: TerminalSize): Promise<Duplex> {
     return new Promise((resolve, reject) => {
-      const payload = JSON.stringify({ Detach: false, Tty: tty });
+      const payload = JSON.stringify({ Detach: false, Tty: tty, ...(tty && size ? { ConsoleSize: [size.rows, size.cols] } : {}) });
       const req = http.request({
         socketPath: this.socketPath, method: 'POST', path: `/exec/${encodeURIComponent(id)}/start`,
         headers: {

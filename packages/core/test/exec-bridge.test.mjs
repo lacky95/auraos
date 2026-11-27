@@ -11,6 +11,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import { Duplex } from 'node:stream';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { writeFileSync } from 'node:fs';
@@ -18,7 +19,7 @@ import { join } from 'node:path';
 import { DockerApi, EngineDemux } from '../dist/app-manager/DockerApi.js';
 import {
   ExecBridge, ExecBridgeError, parseSessionOpen, parseSince, parseTail, execAudit, DEFAULT_JUMP_ARGV,
-  sessionCallerOf,
+  sessionCallerOf, engineSession,
 } from '../dist/app-manager/ExecBridge.js';
 import { SessionBroker } from '../dist/app-manager/SessionBroker.js';
 import { HomeDeniedError } from '../dist/homes/types.js';
@@ -86,6 +87,16 @@ async function fakeEngine(t, { tty = false, logsFollowExtra = null } = {}) {
     const id = /^\/exec\/([^/]+)\/start$/.exec(req.url)?.[1];
     calls.push(`UPGRADE ${req.url}`);
     const e = execs.get(id);
+    // The start body (Detach, Tty, ConsoleSize), as the engine reads it.
+    const startLen = Number(req.headers['content-length'] ?? 0);
+    let startBody = Buffer.alloc(0);
+    const capture = (d) => {
+      if (startBody.length >= startLen) return;
+      startBody = Buffer.concat([startBody, d.subarray(0, startLen - startBody.length)]);
+      if (startBody.length === startLen) e.start = JSON.parse(startBody.toString());
+    };
+    capture(Buffer.from(head));
+    socket.on('data', capture);
     let pending = Buffer.from(head);
     let bodyLeft = Number(req.headers['content-length'] ?? 0);
     socket.write('HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.raw-stream\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n');
@@ -94,6 +105,8 @@ async function fakeEngine(t, { tty = false, logsFollowExtra = null } = {}) {
     // The session broker's launcher: its input is the kernel's spec; end/reap answer at once.
     if (argv[1] === 'end' || argv[1] === 'reap') return finish(0);
     if (argv[1] === 'enter') { e.enter = JSON.parse(argv[2]); argv = e.enter.argv; }
+    // A process that writes nothing: it ends at once, its stream with it (before the shell read the launcher's pid).
+    if (argv[0] === 'silent') return finish(3);
     if (!e.spec.Tty) {
       socket.write(frame(1, `ran ${argv.join(' ')}\n`));
       socket.write(frame(2, 'to stderr\n'));
@@ -212,6 +225,7 @@ test('TTY session: in the running app as the user, with the Private Home (D74, J
   assert.deepEqual(bridge.broker.sessions().map((r) => [r.kind, r.home, r.launcherPid, r.userId]), [['user', 'private', 4242, 'u1']]);
   await until(() => e.resized);
   assert.deepEqual(e.resized, [120, 40]);
+  assert.deepEqual(e.start, { Detach: false, Tty: true, ConsoleSize: [40, 120] }, 'the TTY starts at the caller\'s size, never 0x0');
   s.resize(100, 30);
   await until(() => e.resized[0] === 100);
   assert.equal(s.signal('INT'), true);
@@ -246,6 +260,32 @@ test('non-TTY session keeps stdout and stderr apart; stdin EOF; exit code', asyn
   assert.equal(got[1], 'ran false x\nstdin:hello');
   assert.equal(got[2], 'to stderr\n');
   assert.equal(enterOf(eng).resized, undefined, 'no resize without a TTY');
+});
+
+test('a session whose process writes nothing ends with its exit code (its stream ends before the launcher pid is read)', async (t) => {
+  const eng = await fakeEngine(t);
+  const bridge = bridgeOver(eng.api);
+  for (const tty of [false, true]) {
+    let out = '';
+    const s = await bridge.openSession('io.test.app-1', parseSessionOpen({ op: 'open', kind: 'exec', argv: ['silent'], tty, cols: 90, rows: 30 }), (_ch, d) => { out += d; }, owner);
+    const started = Date.now();
+    assert.equal(await s.exited, 3, `tty=${tty}`);
+    assert.ok(Date.now() - started < 3000, `tty=${tty}: ended in ${Date.now() - started} ms`);
+    assert.equal(out, '');
+    const e = [...eng.execs.values()].filter((x) => x.spec.Cmd[1] === 'enter').at(-1);
+    assert.deepEqual(e.start, tty ? { Detach: false, Tty: true, ConsoleSize: [30, 90] } : { Detach: false, Tty: false });
+  }
+  const r = await bridge.run('io.test.app-1', { cmd: ['silent'], timeoutMs: 10_000 }, { caller: owner });
+  assert.deepEqual(r, { exitCode: 3, stdout: '', stderr: '', truncated: false, timedOut: false });
+  await until(() => bridge.broker.sessions().length === 0);
+});
+
+test('a stream that closed before the session took it over still ends the session', async () => {
+  const sock = new Duplex({ read() {}, write(_c, _e, cb) { cb(); } });
+  sock.destroy();
+  await new Promise((r) => setImmediate(r));
+  const engine = { execInspect: async () => ({ Running: false, ExitCode: 3 }), execResize: async () => {} };
+  assert.equal(await engineSession(engine, 'e1', sock, { tty: false, cols: 80, rows: 24 }, () => {}).exited, 3);
 });
 
 test('a closed session ends its launcher in the broker (disconnect, End, timeout)', async (t) => {

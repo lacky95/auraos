@@ -303,6 +303,11 @@ export async function engineExitCode(engine: EngineClient, id: string): Promise<
  * sidecar exec here and the container runtime's session broker share it.
  * `onEnd` runs once when the session is closed by the caller (not when the
  * process exits by itself): the broker ends the session's processes there.
+ *
+ * Hand it the stream as soon as `execStart` resolves: the session ends on the
+ * stream's `end`/`close`, and a process that wrote nothing ends its stream at
+ * once (Node emits both on an empty stream with nobody reading). A stream
+ * that already ended is taken as ended.
  */
 export function engineSession(
   engine: EngineClient, id: string, sock: Duplex,
@@ -326,6 +331,7 @@ export function engineSession(
     sock.once('end', finish);
     sock.once('close', finish);
     sock.once('error', finish);
+    if (sock.destroyed || sock.readableEnded) finish();
   });
   let ended = false;
   const close = () => {
@@ -413,7 +419,7 @@ export class ExecBridge {
         const id = await engine.execCreate(t.container, {
           Cmd: open.argv ?? DEFAULT_JUMP_ARGV, Tty: open.tty, Env: env, ...(open.cwd ? { WorkingDir: open.cwd } : {}),
         });
-        return engineSession(engine, id, await engine.execStart(id, open.tty), open, onOutput);
+        return engineSession(engine, id, await engine.execStart(id, open.tty, { cols: open.cols, rows: open.rows }), open, onOutput);
       } catch (err) {
         throw engineError(err);
       }
