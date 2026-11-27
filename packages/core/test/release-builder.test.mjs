@@ -374,3 +374,23 @@ test('the system apps declare their release builds (Docs, Registry; Console serv
   const builder = readFileSync(join(ROOT, 'os/release/build-apps.mjs'), 'utf8');
   assert.doesNotMatch(builder, /com\.aura\./, 'no app-specific code in the builder');
 });
+
+test('stage: git archive | tar waits for both processes (git exiting after tar finished is no failure; a failing git is)', async () => {
+  // The flaky "extracting <sha> failed:" (empty stderr): tar closed before git's exit was seen. A git that closes
+  // its output and exits a moment later makes that order certain.
+  const real = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
+  const bin = tmp('aura-slowgit-');
+  writeFileSync(join(bin, 'git'), `#!/bin/sh\n${real} "$@"\nrc=$?\nexec >&- 2>&-\nsleep 1\nexit $rc\n`);
+  (await import('node:fs')).chmodSync(join(bin, 'git'), 0o755);
+  const { dir: repo } = auraSource(throwawayKey());
+  const commit = git(repo, 'rev-parse', 'HEAD').trim();
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}` };
+  const out = tmp('aura-stage-');
+  const r = await B.archiveInto(repo, commit, out, env);
+  assert.deepEqual(r, { ok: true, err: '' });
+  assert.ok(existsSync(join(out, 'package.json')));
+  const bad = await B.archiveInto(repo, '0'.repeat(40), tmp('aura-stage-'), env);
+  assert.equal(bad.ok, false);
+  assert.match(bad.err, /git archive exit 128/);
+});
+
