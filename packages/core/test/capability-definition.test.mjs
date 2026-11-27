@@ -64,6 +64,16 @@ test('writes stay under the write roots; no traversal; a root is never replaced'
   assert.ok(parseCapabilityDefinition('x1', { source: 'steps', binary_path: '/usr/local/bin/x1', steps: [{ extract: { url: 'https://e.com/a.tgz', sha256: SHA, format: 'tar.gz', members: ['x1'], to: '/usr/local/bin' } }] }));
 });
 
+test('package_root: an absolute path that contains the binary', () => {
+  const root = '/usr/local/lib/node_modules/@openai/codex/vendor/x86_64';
+  const def = parseCapabilityDefinition('codex', { source: 'npm', package: '@openai/codex', binary_path: `${root}/bin/codex`, package_root: root });
+  assert.equal(def.package_root, root);
+  bad('codex', { source: 'npm', package: '@openai/codex', binary_path: '/usr/local/bin/codex', package_root: root });
+  bad('codex', { source: 'npm', package: '@openai/codex', binary_path: `${root}x/bin/codex`, package_root: root });
+  bad('codex', { source: 'npm', package: '@openai/codex', package_root: 'vendor/x86_64' });
+  bad('codex', { source: 'npm', package: '@openai/codex', package_root: '/usr/local/../etc' });
+});
+
 test('the digest binds the whole definition, independent of key order', () => {
   const a = parseCapabilityDefinition('x1', { source: 'apt', package: 'nano', binary: 'nano' });
   const b = parseCapabilityDefinition('x1', { binary: 'nano', package: 'nano', source: 'apt' });

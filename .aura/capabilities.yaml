@@ -13,6 +13,9 @@ capabilities:
     package: "@openai/codex"
     binary: codex
     binary_path: /usr/local/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex
+    # Codex finds codex-package.json, codex-resources/bwrap and codex-path/rg
+    # next to its own executable: grant the whole platform package.
+    package_root: /usr/local/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl
     description: OpenAI Codex CLI
   copilot:
     source: npm

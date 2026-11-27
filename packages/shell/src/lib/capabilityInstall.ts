@@ -21,7 +21,8 @@ import { delimiter, dirname, join } from 'node:path';
 import {
   detectSidecars, readSidecarMap, setSidecars,
   readLinkage, stageLibs, stageIntoRootfs, setLibs, readLibMap, orphanedLibs, conflictingLibs,
-  toolchainLibFor, toolchainMirrorLib, type CapabilityDefinition, type CapabilityStep, type LibDep,
+  toolchainLibFor, toolchainMirrorLib, packageEntry, stagePackage, removePackage, setPackage,
+  type CapabilityDefinition, type CapabilityStep, type LibDep,
 } from '@aura/core';
 import { aptInstallArgv, aptUpdateArgv, type RunCommand } from './privilegedExec.ts';
 
@@ -120,10 +121,24 @@ const TOOLCHAIN_LIB_DIRS = [
 function installWithSidecars(
   src: string,
   binaryName: string,
-  entry: { sidecars?: string[] },
+  entry: { sidecars?: string[]; package_root?: string },
   baseRootfs: string,
   force = false,
 ): { libsCopied: number; libs: LibDep[]; sidecars: string[] } {
+  // A package-tree tool (tool-packages.ts) gets its whole package in both
+  // stores, staged before anything records it. The flat binary below stays as
+  // it always was: it is what makes the name grantable and listable.
+  if (entry.package_root) {
+    const rel = packageEntry(entry.package_root, src);
+    stagePackage(entry.package_root, TOOLCHAIN_BIN_DIRS, binaryName);
+    setPackage(TOOLCHAIN_BIN_DIRS, binaryName, rel);
+    console.log(`[cap] ${binaryName}: package ${entry.package_root} (runs ${rel})`);
+  } else {
+    // Same rule as the sidecar map: a tool that stopped shipping a package
+    // must not keep a stale one.
+    setPackage(TOOLCHAIN_BIN_DIRS, binaryName, null);
+    removePackage(TOOLCHAIN_BIN_DIRS, binaryName);
+  }
   installBinary(src, join(TOOLCHAIN_BIN, binaryName), force);
 
   const found = detectSidecars({ binaryPath: src, binaryName, declared: entry.sidecars });
@@ -362,6 +377,8 @@ function removeToolchainEntry(name: string, def: CapabilityDefinition, run: RunC
   // Deliberately NOT un-staged from /os/base-rootfs: that tree has no
   // ownership model, and a stale .so there is inert.
   setSidecars(TOOLCHAIN_BIN_DIRS, binaryName, []);
+  setPackage(TOOLCHAIN_BIN_DIRS, binaryName, null);
+  removePackage(TOOLCHAIN_BIN_DIRS, binaryName);
   if (def.source === 'apt' && def.package) {
     try { run('apt-get', ['remove', '-y', '-q', '--', def.package], { timeoutMs: 300_000 }); } catch { /* ignore */ }
   } else if (def.source === 'npm' && def.package) {

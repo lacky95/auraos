@@ -27,6 +27,7 @@ import { AppRegistry } from './AppRegistry.js';
 import { toolsTrackInstalledCaps } from './tool-allowlist.js';
 import { SHARED_HOME_PATH, toolchainMirrorBin } from './tool-provision.js';
 import { readLibMap, replaceLibFile, restoreLibsFromStore, toolchainLibFor, toolchainMirrorLib } from './tool-libs.js';
+import { PACKAGE_DIR, syncPackages } from './tool-packages.js';
 import { legacySharedHomeDir, masterHomeDir, userHomeDir } from '../scopes/home.js';
 import { PortAllocator } from './PortAllocator.js';
 import { LifecycleStateMachine } from './LifecycleStateMachine.js';
@@ -678,6 +679,8 @@ export class AppManager {
       try { mkdirSync(srcBin, { recursive: true }); }
       catch (err) { console.warn(`[AppManager] could not create ${srcBin}: ${(err as Error).message}`); }
       for (const name of existsSync(srcBin) ? readdirSync(srcBin) : []) {
+        // Package trees are directories; syncPackages below handles them.
+        if (name === PACKAGE_DIR) continue;
         const src = join(srcBin, name);
         const dst = join(mirrorBin, name);
         let needsCopy = true;
@@ -707,6 +710,7 @@ export class AppManager {
       // that hardlink-mode instances still get.
       const restored: string[] = [];
       for (const name of readdirSync(mirrorBin)) {
+        if (name === PACKAGE_DIR) continue;
         const dst = join(srcBin, name);
         if (existsSync(dst)) continue;
         try {
@@ -722,6 +726,13 @@ export class AppManager {
           `[AppManager] restored ${restored.length} lost toolchain binaries from the mirror ` +
           `(${restored.join(', ')})`,
         );
+      }
+      // Package trees (tool-packages.ts) both ways, adding only what is absent —
+      // the same rule as the binary passes above.
+      syncPackages(srcBin, mirrorBin);
+      const restoredPkgs = syncPackages(mirrorBin, srcBin);
+      if (restoredPkgs.length) {
+        console.log(`[AppManager] restored ${restoredPkgs.length} lost toolchain package(s) from the mirror (${restoredPkgs.join(', ')})`);
       }
       this.syncToolchainLibs(srcBin, mirrorBin);
 
