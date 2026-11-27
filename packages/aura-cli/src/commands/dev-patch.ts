@@ -31,6 +31,7 @@ import type { Command } from 'commander';
 import { execFileSync } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { TERMINAL_APP_ID } from '@aura/core/system-apps';
 import {
   applySeries, baseCommitIn, buildTree, exportPatches, gitError, readPatches, readSeries, safeDirectoryArgs, saveSeries,
   SeriesError, type ApplyResult, type Series, type SeriesBase,
@@ -318,8 +319,8 @@ export async function installWorkspace(v: AppSourceView, n: number, rev: string)
   // Installed: a preview of it has done its job.
   await stopPreview(v.appId);
   if (!res.running?.length) return { status: 'installed', rev, restarted: null, workspace: n };
-  if (v.appId === 'com.aura.terminal' && process.env['APP_ID'] === 'com.aura.terminal') {
-    warn('restarting the Terminal ends this session — run `aura restart app com.aura.terminal` when ready');
+  if (v.appId === TERMINAL_APP_ID && process.env['APP_ID'] === TERMINAL_APP_ID) {
+    warn(`restarting the Terminal ends this session — run \`aura restart app ${TERMINAL_APP_ID}\` when ready`);
     return { status: 'installed', rev, restarted: null, workspace: n };
   }
   try {

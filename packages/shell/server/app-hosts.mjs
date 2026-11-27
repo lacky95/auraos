@@ -30,6 +30,7 @@ import {
   parseAppHost,
 } from '@aura/core/host-rules';
 import { RELAY_CLAIM_HEADER } from '@aura/core/relay-claim';
+import { TERMINAL_APP_ID } from './session-hosts.mjs';
 import {
   SESSION_COOKIES, countSurfaceEvent, followIdentity, gatedHttpSurface, internalServiceHeaders, observeHttpSurface,
   relayClaimOf, reportSurface, requestIdentity, surfaceGate,
@@ -71,7 +72,7 @@ const EXACT_ORIGIN_RE = /^https?:\/\/[a-z0-9.-]+(?::\d{1,5})?$/;
  * same-site sibling page can send this host's cookie. A navigation may still
  * arrive from the Shell or an embedder; `frame-ancestors` decides where it shows.
  */
-const OWN_ORIGIN_ONLY_APPS = new Set(['com.aura.terminal']);
+const OWN_ORIGIN_ONLY_APPS = new Set([TERMINAL_APP_ID]);
 
 
 /**

@@ -374,15 +374,22 @@ export class ContainerRunner implements SandboxRunner {
   public capabilities(): RuntimeCapabilities {
     return {
       isolation: 'namespace',
+      network: 'bridge',
+      appHome: true,
       privateHomeSession: true,
       sessionExec: true,
       identity: 'enforced',
       readOnlyBinds: true,
+      hostFilesystem: true,
       mounts: true,
+      // D80: until 5b G's idmapped-bind probe lands, cross-uid writable mounts are refused, never downgraded.
+      idmappedMounts: false,
       portExpose: true,
       sidecars: true,
       warmPool: true,
       survivesShellRestart: true,
+      usage: true,
+      gpu: false,
     };
   }
 

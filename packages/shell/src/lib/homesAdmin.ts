@@ -37,6 +37,7 @@ function denied(err: unknown): Response {
   if (err instanceof core.HomeDeniedError) return json({ error: err.reason, message: err.message }, 409);
   if (err instanceof core.RuntimeCapabilityError) return json({ error: err.code, message: err.message }, 409);
   if (err instanceof core.AppHomeAdminError) return json({ error: err.code, message: err.message }, err.code === 'not-found' ? 404 : 400);
+  if (err instanceof core.HomeImportMarkersError) return json({ error: err.code, message: err.message }, 503);
   return json({ error: 'failed', message: (err as Error).message }, 500);
 }
 
@@ -149,7 +150,10 @@ export async function postHomesImport(ctx: Ctx): Promise<Response> {
     if (apply && running.length) {
       return json({ error: 'running', message: `Stop ${t.appId} first (${running.join(', ')}): its App Home is in use.` }, 409);
     }
-    const r = core.importIntoAppHome({ source, target: home.hostPath!, paths: paths as string[], owner: { uid: home.uid, gid: home.gid }, apply, includePersonal });
+    const r = core.importIntoAppHome({
+      source, target: home.hostPath!, paths: paths as string[], owner: { uid: home.uid, gid: home.gid }, apply, includePersonal,
+      markers: core.loadHomeImportMarkers(),
+    });
     if (apply) {
       await auditOwner(actor as OwnerActor, core.HOME_AUDIT_ACTIONS.imported, {
         target: `installation:${installationId}`,

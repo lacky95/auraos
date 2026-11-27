@@ -38,12 +38,12 @@ import { parentOfConsumer } from './MountManager.js';
 import type { InstanceSpawnContext, SandboxExecOpts, SandboxRunner } from './SandboxRunner.js';
 import type { RuntimeCapabilities } from '../runtimes/types.js';
 import { RuntimeRegistry, type ResolvedRuntime, type RuntimeModule } from '../runtimes/registry.js';
-import { containerRuntime } from '../runtimes/builtins/container.js';
-import { prootRuntime } from '../runtimes/builtins/proot.js';
+import { BUILTIN_RUNTIMES } from '../runtimes/builtins/index.js';
 import { RUNTIME_AUDIT_ACTIONS, RuntimeSettingsStore } from '../runtimes/settingsStore.js';
 import { migrateLegacyRuntimes, processLegacyEnv, type MigrationApp } from '../runtimes/migrateLegacy.js';
 import { defaultRedis } from '@aura/kv-store';
 import { AdminAudit } from '../auth/AdminAudit.js';
+import type { AuthServices } from '../auth/services.js';
 import { defaultIdentityKeyFile } from '../auth/identityKey.js';
 import { HomeDeniedError, type HomeResolver, type ResolvedHome } from '../homes/types.js';
 import { kernelHomeResolver } from '../homes/HomeResolver.js';
@@ -67,7 +67,7 @@ import { runAsMigrationBlock, type RunAsOwnershipInput } from '../identity/runAs
 import { installationAppHomes } from '../homes/appHomeAdmin.js';
 import type { AppInstallation, AppRunAsMigration } from '../app-hosts/contracts.js';
 import type { AppGrantBinding } from '../auth/types.js';
-import { RuntimeCapabilityError } from '../runtimes/types.js';
+import { RuntimeCapabilityError, RuntimeModuleError } from '../runtimes/types.js';
 import { BASE_GROUP, BASE_PASSWD, identityAccountName, isNonRootIdentity, isSessionIdentity } from './spawn/identityArgs.js';
 import { renderGroup, renderPasswd, type PasswdEntry } from '../identity/passwd.js';
 import type { SessionCaller, SessionContext } from './ExecBridge.js';
@@ -174,6 +174,9 @@ export function adoptedIdentity(user: string | undefined): Pick<AppInstance, 'ru
   return { runAs: range === 'owner' || range === 'user' ? 'user' : 'app', uid, gid };
 }
 
+/** The auth services the kernel uses, as the composition point hands them in. */
+export type KernelAuthServices = Pick<AuthServices, 'grants' | 'identity' | 'users' | 'audit' | 'securityPolicy'>;
+
 export class AppManager {
   // Public so the manifest-edit endpoint can call reloadFromDisk(appId)
   // after writing — chokidar's lag would otherwise let refreshInstanceTools
@@ -195,6 +198,13 @@ export class AppManager {
   /** Phase 5 spawn seams, used only by `spawnContext`. */
   private readonly homes: HomeResolver;
   private readonly identities: SpawnIdentityProvider;
+  /**
+   * The identity, user, grant and audit services, handed in by the
+   * composition point (the shell's kernel init; Phase 6 `bootSystem()`), so
+   * Execution never imports `auth/services` (5b K: the AppManager <-> auth
+   * cycle is gone). Absent (unit tests): any use is a clear error.
+   */
+  private readonly auth: () => KernelAuthServices;
   /** Stream C: which Context keys a start gets (declared AND granted, context/grantedContext.ts). */
   private readonly context: GrantedContextDeps;
   /** Stream C: the Context migration's app-source scanner, from the composition point (opts.contractScan). */
@@ -282,12 +292,19 @@ export class AppManager {
     contractScan?: (appDir: string, manifest: AppManifest, keys: readonly string[]) => ReturnType<ContextMigrationDeps['scan']>;
     /** The D64 switch `app-root-execution`; default: the owner's security policy record. */
     rootExecutionPolicy?: () => Promise<AppRootExecutionPolicy>;
+    /**
+     * The identity, user, grant and audit services (`getAuthServices` from the
+     * composition point). Passed in, never imported: auth/services builds its
+     * services from AppManager (D97, 5b K).
+     */
+    auth?: () => KernelAuthServices;
     /** More runtimes next to the built-in ones (ARI; tests register a fake one). */
     runtimes?: RuntimeModule[];
     /** The Runtime Settings store; default: the sealed record in Valkey. */
     runtimeSettings?: RuntimeSettingsStore;
   }) {
     this.dataDir = opts.dataDir;
+    this.auth = opts.auth ?? (() => { throw new Error('AppManager: no auth services were handed in (initAppManager opts.auth)'); });
     this.toolchainDir = opts.toolchainDir;
     this.baseRootfs = opts.baseRootfs;
     this.scopeRegistry = new ScopeRegistry({ systemAppsDir: opts.appsDir, dataDir: opts.dataDir });
@@ -311,10 +328,26 @@ export class AppManager {
     this.container = new ContainerRunner(runnerOpts);
     // M6: while adoption is pending a spawn never removes a running survivor by name.
     this.container.survivorsUnknown = () => this.adoptionPending;
-    this.runtimes = new RuntimeRegistry();
-    this.runtimes.register(containerRuntime(this.container));
-    this.runtimes.register(prootRuntime(new ProotRunner(runnerOpts), { baseRootfs: opts.baseRootfs }));
-    for (const m of opts.runtimes ?? []) this.runtimes.register(m);
+    const runtimeAudit = (action: string, runtime: string, detail: Record<string, unknown>) => {
+      void new AdminAudit(() => defaultRedis()).record({ by: { kind: 'system' }, action, target: `runtime:${runtime}`, outcome: 'failed', detail })
+        .catch(() => undefined);
+    };
+    this.runtimes = new RuntimeRegistry({
+      // ARI §4.3: never guessed values; the runtime is disabled with this error until the owner fixes its settings.
+      onSettingsInvalid: (runtime, reason) => {
+        console.warn(`[AppManager] runtime ${runtime} is disabled: ${reason}`);
+        runtimeAudit(RUNTIME_AUDIT_ACTIONS.settingsInvalid, runtime, { reason });
+      },
+    });
+    const builtinDeps = { container: this.container, proot: new ProotRunner(runnerOpts), baseRootfs: opts.baseRootfs };
+    for (const module of [...BUILTIN_RUNTIMES.map((b) => b.create(builtinDeps)), ...(opts.runtimes ?? [])]) {
+      try { this.runtimes.register(module); } catch (err) {
+        // A refused module is not loaded: an app naming it gets the Q17 `runtime-not-installed` error.
+        if (!(err instanceof RuntimeModuleError)) throw err;
+        console.warn(`[AppManager] runtime module refused: ${err.message}`);
+        runtimeAudit(RUNTIME_AUDIT_ACTIONS.moduleRefused, err.runtime, { code: err.code, reason: err.message });
+      }
+    }
     this.runtimeSettings = opts.runtimeSettings ?? new RuntimeSettingsStore({
       identityKeyFile: defaultIdentityKeyFile(opts.dataDir),
       redis: () => defaultRedis(),
@@ -328,30 +361,30 @@ export class AppManager {
     // D65: the kernel Home Resolver. App Homes for app processes, a Private Home only for a user's own session.
     this.homes      = opts.homes ?? kernelHomeResolver({
       dataDir: opts.dataDir,
-      userIdentity: async (userId) => (await import('../auth/services.js')).getAuthServices().identity.getUser(userId)
+      userIdentity: async (userId) => this.auth().identity.getUser(userId)
         .then((r) => (r && r.state === 'active' ? { uid: r.uid, gid: r.gid } : null)),
-      mayJumpApp: async (p, installationId) => !!(await (await import('../auth/services.js')).getAuthServices().grants
+      mayJumpApp: async (p, installationId) => !!(await this.auth().grants
         .get({ kind: 'user', id: p.userId }, appJumpPermission(installationId))),
     });
     // The installation's runAs decides (P5-3): root as today, or its app identity from the one registry.
     // A System Terminal instance is its user's session host instead (stream T, D69): that user's uid.
     this.identities = opts.identities ?? sessionHostIdentityProvider(
-      appIdentityProvider(async () => (await import('../auth/services.js')).getAuthServices().identity),
+      appIdentityProvider(async () => this.auth().identity),
       {
         sessionApps: TERMINAL_SESSION_APPS,
         ownerId: DEFAULT_OWNER_ID,
-        account: async (userId) => (await import('../auth/services.js')).getAuthServices().users.getUser(userId),
-        identity: async (userId) => (await import('../auth/services.js')).getAuthServices().identity.ensureUser(userId),
+        account: async (userId) => this.auth().users.getUser(userId),
+        identity: async (userId) => this.auth().identity.ensureUser(userId),
       },
     );
     this.rootExecutionPolicy = opts.rootExecutionPolicy ?? (async () => {
-      const store = (await import('../auth/services.js')).getAuthServices().securityPolicy;
+      const store = this.auth().securityPolicy;
       return securityPolicyValue(await store.get(), APP_ROOT_EXECUTION_OPTION) === 'refuse' ? 'refuse' : 'approve';
     });
     // Stream C (Q7): only declared AND granted Context keys reach an app; personal keys from its user's vault (D56).
     this.contractScan = opts.contractScan ?? null;
     this.context = opts.context ?? (() => {
-      const auth = async () => (await import('../auth/services.js')).getAuthServices();
+      const auth = async () => this.auth();
       return liveGrantedContextDeps({
         grants: { get: async (...a) => (await auth()).grants.get(...a) },
         appBinding: (appId) => this.appGrantBinding(appId),
@@ -714,7 +747,7 @@ export class AppManager {
       return;
     }
     try {
-      const auth = (await import('../auth/services.js')).getAuthServices();
+      const auth = this.auth();
       const hosts = getAppHostServices().registry;
       const pinned = await auth.grants.attachInstallations(async (appId, appScope) => {
         const scope = appScope ?? this.registry.getScopeId(appId);
@@ -754,7 +787,7 @@ export class AppManager {
       return;
     }
     try {
-      const auth = (await import('../auth/services.js')).getAuthServices();
+      const auth = this.auth();
       const apps: ContextMigrationApp[] = [];
       for (const m of this.registry.getAll()) {
         apps.push({
@@ -988,7 +1021,6 @@ export class AppManager {
     const r = seedHomeAs(seedDir, target, (msg) => console.warn(`[AppManager] ${msg}`));
     if (r.copied.length) console.log(`[AppManager] seeded Private Home ${target} (${r.copied.join(', ')})`);
     if (r.appended.length) console.log(`[AppManager] ${target}/AGENTS.md: added section(s) ${r.appended.join(', ')}`);
-    if (r.removedLegacyClaudeMd) console.log(`[AppManager] removed ${target}/CLAUDE.md: ~/.claude/CLAUDE.md loads AGENTS.md in every directory`);
   }
 
   /**
@@ -2222,7 +2254,7 @@ export class AppManager {
 
   /** A human user's active D70 identity and its account name (the username, stream T), or null. */
   private async userLinuxIdentity(userId: string): Promise<{ uid: number; gid: number; account?: string } | null> {
-    const auth = (await import('../auth/services.js')).getAuthServices();
+    const auth = this.auth();
     const r = await auth.identity.getUser(userId);
     if (!r || r.state !== 'active') return null;
     const account = await auth.users.getUser(userId).catch(() => null);
@@ -2246,7 +2278,7 @@ export class AppManager {
 
   /** D79/D82: a member's `app.jump:<installationId>` grant (the owner needs none). */
   private async mayJumpApp(userId: string, installationId: string): Promise<boolean> {
-    return !!(await (await import('../auth/services.js')).getAuthServices().grants.get({ kind: 'user', id: userId }, appJumpPermission(installationId)));
+    return !!(await this.auth().grants.get({ kind: 'user', id: userId }, appJumpPermission(installationId)));
   }
 
   /** The home each running instance was started with (shell view; never in a public API). */

@@ -46,20 +46,6 @@ export function liveRuntimesDeps(): RuntimesDeps {
 
 const A = core.RUNTIME_AUDIT_ACTIONS;
 
-/** What a check may ask for by name, besides the capability names themselves. */
-const NEED_ALIASES: Record<string, Partial<RuntimeCapabilities>> = {
-  // D74/D67: a jump with the Private Home is an isolated session inside the instance.
-  jump: { sessionExec: true, privateHomeSession: true },
-  mount: { mounts: true },
-  closed: { readOnlyBinds: true },
-  sidecars: { sidecars: true },
-  'port-expose': { portExpose: true },
-};
-
-const CAPABILITY_KEYS: ReadonlyArray<keyof RuntimeCapabilities> = [
-  'isolation', 'privateHomeSession', 'sessionExec', 'identity', 'readOnlyBinds', 'mounts', 'portExpose', 'sidecars', 'warmPool', 'survivesShellRestart',
-];
-
 async function readBody(ctx: Ctx): Promise<Record<string, unknown> | Response> {
   try {
     const b = await ctx.request.json();
@@ -100,17 +86,21 @@ export async function getRuntimes(_ctx: Ctx, deps: RuntimesDeps = liveRuntimesDe
   const instances = deps.mgr.getAllInstances();
   const runtimes = deps.mgr.runtimes.list().map((m) => {
     const id = m.descriptor.id;
-    const settings = deps.mgr.runtimes.settingsOf(id, record);
-    const unavailable = m.unavailable(settings);
+    const state = deps.mgr.runtimes.settingsState(id, record);
+    const settings = state.ok ? state.settings : core.settingsDefaults(m.descriptor.settingsSchema);
+    const health = deps.mgr.runtimes.healthOf(id, record);
+    const refusal = core.healthRefusal(health);
     return {
       id, title: m.descriptor.title, description: m.descriptor.description, builtIn: m.descriptor.builtIn,
+      version: m.descriptor.version, ari: m.descriptor.ari, settingsVersion: m.descriptor.settingsVersion,
       alwaysEnabled: Boolean(m.descriptor.alwaysEnabled),
       enabled: deps.mgr.runtimes.isEnabled(id, record),
       isDefault: record.default === id,
       settingsSchema: m.descriptor.settingsSchema,
       settings,
       capabilities: m.capabilities(settings),
-      health: unavailable ? { status: 'unavailable' as const, detail: unavailable } : { status: 'ok' as const },
+      // `detail` stays for the clients that read it (Settings, `aura runtime show`); `checks` is the ARI shape.
+      health: { status: health.status, checks: health.checks, ...(refusal ? { detail: refusal } : {}) },
       instances: instances.filter((i) => i.sandbox === id && i.state !== 'destroyed')
         .map((i) => ({ instanceId: i.instanceId, appId: i.appId, state: i.state, ...(i.runtimeSource ? { source: i.runtimeSource } : {}) })),
     };
@@ -166,7 +156,9 @@ export async function putSettings(ctx: Ctx, id: string | undefined, deps: Runtim
   const body = await readBody(ctx);
   if (body instanceof Response) return body;
   const input = body['settings'] && typeof body['settings'] === 'object' ? body['settings'] : body;
-  const before = deps.mgr.runtimes.settingsOf(rid, await deps.mgr.runtimeSettings.get());
+  // Settings that failed to migrate show as stored; the write replaces them (ARI §4.3).
+  const state = deps.mgr.runtimes.settingsState(rid, await deps.mgr.runtimeSettings.get());
+  const before = state.ok ? state.settings : {};
   const shown = Object.entries(input as Record<string, unknown>).map(([k, v]) => `${k}: ${JSON.stringify(before[k] ?? null)} → ${JSON.stringify(v)}`).join(', ');
   const actor = await act(ctx, deps, `Runtime ${rid} settings: ${shown || '(none)'}`, { settings: rid, value: input });
   if (actor instanceof Response) return actor;
@@ -176,7 +168,10 @@ export async function putSettings(ctx: Ctx, id: string | undefined, deps: Runtim
   if (r.changed) {
     await deps.audit(actor, A.settingsChanged, { target: `runtime:${rid}`, detail: { from: r.previous.settings[rid] ?? null, to: r.record.settings[rid] } });
   }
-  return json({ ok: true, changed: r.changed, settings: deps.mgr.runtimes.settingsOf(rid, r.record) });
+  const settings = deps.mgr.runtimes.settingsOf(rid, r.record);
+  // ARI module hook: new settings apply to new starts; a module says whether running instances are affected.
+  const applied = r.changed ? await deps.mgr.runtimes.require(rid).applySettings?.(settings, before) : undefined;
+  return json({ ok: true, changed: r.changed, settings, ...(applied ? { affectsRunning: applied.affectsRunning } : {}) });
 }
 
 /** POST :id/enable | :id/disable. */
@@ -210,6 +205,14 @@ export async function postEnabled(ctx: Ctx, id: string | undefined, on: boolean,
   const stopped: string[] = [];
   for (const inst of running) {
     try { await deps.mgr.stop(inst); stopped.push(inst); } catch (err) { console.warn(`[runtimes] stop ${inst} failed: ${(err as Error).message}`); }
+  }
+  // ARI module hooks (no-ops for the built-ins); `disable` only once no instance runs on it.
+  if (r.changed) {
+    const module = deps.mgr.runtimes.require(rid);
+    try {
+      if (on) await module.enable?.(deps.mgr.runtimes.settingsOf(rid, r.record));
+      else if (stopped.length === running.length) await module.disable?.();
+    } catch (err) { console.warn(`[runtimes] ${rid} ${on ? 'enable' : 'disable'} hook failed: ${(err as Error).message}`); }
   }
   return json({ ok: true, changed: r.changed, enabled: r.record.enabled, ...(stopped.length ? { stopped } : {}) });
 }
@@ -265,10 +268,14 @@ export async function postMigrate(ctx: Ctx, deps: RuntimesDeps = liveRuntimesDep
 }
 
 /**
- * POST check `{runtime, appId?, needs?: string[]}`: would this run there?
- * Read-only (ARI §5.1): the capabilities `needs` names (capability names or
- * `jump`, `mount`, `closed`, `sidecars`, `port-expose`) plus, with `appId`,
- * what that app's manifest needs. Answers `capability-missing` with the list.
+ * POST check `{runtime, appId?, needs?: string[], requirements?}`: would this
+ * run there? Read-only (ARI §5.1): the capabilities `needs` names (capability
+ * names or request kinds: `jump`, `home-private|app|ephemeral`, `mount`,
+ * `idmap-mount`, `closed`, `sidecars`, `port-expose`, `host-filesystem`), plus
+ * an app's `requirements` (core `requirementsOf`, D85 A5: what `aura dev
+ * validate` sends), plus, with `appId`, what that installed app needs. One
+ * derivation (core runtimes/requirements.ts). Answers `capability-missing`
+ * with the list and `suggest`: the enabled runtimes that could run it (D73).
  */
 export async function postCheck(ctx: Ctx, deps: RuntimesDeps = liveRuntimesDeps()): Promise<Response> {
   const body = await readBody(ctx);
@@ -279,25 +286,36 @@ export async function postCheck(ctx: Ctx, deps: RuntimesDeps = liveRuntimesDeps(
   const names = Array.isArray(body['needs']) ? body['needs'] : [];
   for (const n of names) {
     if (typeof n !== 'string') return json({ error: 'invalid-request', message: 'needs are strings' }, 400);
-    if (NEED_ALIASES[n]) Object.assign(needs, NEED_ALIASES[n]);
-    else if ((CAPABILITY_KEYS as readonly string[]).includes(n) && n !== 'isolation' && n !== 'identity') (needs as Record<string, boolean>)[n] = true;
+    if (core.isRequestKind(n)) Object.assign(needs, core.requestNeeds(n));
+    else if (core.RUNTIME_BOOLEAN_CAPABILITIES.includes(n as keyof RuntimeCapabilities)) (needs as Record<string, boolean>)[n] = true;
     else return json({ error: 'invalid-request', message: `unknown need: ${n}` }, 400);
+  }
+  const req = body['requirements'];
+  if (req !== undefined) {
+    const given = req && typeof req === 'object' && !Array.isArray(req) ? (req as { needs?: unknown }).needs : undefined;
+    if (!given || typeof given !== 'object' || Array.isArray(given)) return json({ error: 'invalid-request', message: 'requirements.needs is an object' }, 400);
+    for (const [k, v] of Object.entries(given as Record<string, unknown>)) {
+      if (!(core.RUNTIME_CAPABILITY_KEYS as readonly string[]).includes(k)) return json({ error: 'invalid-request', message: `unknown capability: ${k}` }, 400);
+      (needs as Record<string, unknown>)[k] = v;
+    }
   }
   if (typeof body['appId'] === 'string') {
     const app = (await deps.mgr.runtimeApps()).find((a) => a.appId === body['appId']);
     if (!app) return json({ error: 'not-found', message: `unknown app: ${String(body['appId'])}` }, 404);
-    Object.assign(needs, core.runtimeNeeds(app.manifest, app.sourceMode));
+    Object.assign(needs, core.requirementsOf(app.manifest, { sourceMode: app.sourceMode }).needs);
   }
   const record = await deps.mgr.runtimeSettings.get();
-  const settings = deps.mgr.runtimes.settingsOf(rid, record);
   const module = deps.mgr.runtimes.require(rid);
+  const state = deps.mgr.runtimes.settingsState(rid, record);
+  const settings = state.ok ? state.settings : core.settingsDefaults(module.descriptor.settingsSchema);
   const capabilities = module.capabilities(settings);
   const missing = core.missingCapabilities(capabilities, needs);
-  const unavailable = module.unavailable(settings);
+  const unavailable = core.healthRefusal(deps.mgr.runtimes.healthOf(rid, record));
   const enabled = deps.mgr.runtimes.isEnabled(rid, record);
+  const suggest = missing.length ? deps.mgr.runtimes.suggest(needs, record, rid) : [];
   return json({
     runtime: rid, ok: missing.length === 0 && enabled && !unavailable, enabled, needs, capabilities, missing,
-    ...(missing.length ? { code: 'capability-missing' } : {}),
+    ...(missing.length ? { code: 'capability-missing', suggest } : {}),
     ...(unavailable ? { unavailable } : {}),
   });
 }

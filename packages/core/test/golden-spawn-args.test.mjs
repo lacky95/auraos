@@ -64,6 +64,7 @@ const { AppManifestSchema } = await import('../dist/types/manifest.js');
 const { ContainerRunner } = await import('../dist/app-manager/ContainerRunner.js');
 const { ProotRunner } = await import('../dist/app-manager/ProotRunner.js');
 const { prootRuntime } = await import('../dist/runtimes/builtins/proot.js');
+const { healthRefusal } = await import('../dist/runtimes/ari.js');
 
 const TMP = mkdtempSync(join(tmpdir(), 'aura-golden-'));
 const dataDir = join(TMP, 'data');
@@ -237,7 +238,7 @@ async function prootLaunch(fx, { ctx: extra = {}, env: hostEnv = { AURA_USE_PROO
 /** The pool placement: refused before any start (not built in this release), never the master's argv. */
 function prootPool() {
   const runtime = prootRuntime(new ProotRunner(opts), { baseRootfs: rootfs, env: { AURA_USE_PROOT: 'true' } });
-  return { refused: runtime.unavailable({ placement: 'pool' }) };
+  return { refused: healthRefusal(runtime.health({ placement: 'pool' })) };
 }
 
 test('spawn args match the golden file (container argv; proot master launch and env; proot pool)', async () => {
@@ -313,4 +314,16 @@ test('R2: the master placement is narrowed (no /workspace, /run/context, socket 
   const st = statSync(join(dataDir, 'aura', 'runtime', 'org.golden.user-1', 'tmp'));
   assert.equal(st.mode & 0o777, 0o700);
   if (process.getuid?.() === 0) assert.deepEqual([st.uid, st.gid], [200099, 200099], 'the tmp dir belongs to the app identity');
+});
+
+test('audit N4: every AURA_* variable the spawn args set is on exactly one kernel list (server-only or session-visible)', async () => {
+  const { SERVER_ONLY_ENV, SESSION_VISIBLE_ENV } = await import('../dist/runtimes/workloadEnv.js');
+  const golden = readFileSync(GOLDEN, 'utf-8');
+  const set = new Set(golden.match(/AURA_[A-Z0-9_]+(?==)|(?<=")AURA_[A-Z0-9_]+(?=":)/g) ?? []);
+  assert.ok(set.size >= 10, `the golden file sets the AURA_* variables (${[...set].join(', ')})`);
+  for (const name of set) {
+    const n = Number(SERVER_ONLY_ENV.includes(name)) + Number(SESSION_VISIBLE_ENV.includes(name));
+    assert.equal(n, 1, `${name}: add it to SERVER_ONLY_ENV (a session must not see it) or SESSION_VISIBLE_ENV (runtimes/workloadEnv.ts)`);
+  }
+  for (const name of SERVER_ONLY_ENV) assert.ok(!SESSION_VISIBLE_ENV.includes(name), name);
 });

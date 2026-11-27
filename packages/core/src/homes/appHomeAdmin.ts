@@ -27,7 +27,7 @@ import {
 } from 'node:fs';
 import { join, posix } from 'node:path';
 import { APP_HOMES_SUBPATH } from './plan.js';
-import { isPersonalHomePath } from './importReport.js';
+import { isPersonalHomePath, type HomeImportMarkers } from './importMarkers.js';
 import type { LinuxIdentity } from '../identity/types.js';
 
 const DIR_FLAGS = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
@@ -101,6 +101,7 @@ interface CopyCtx {
   apply: boolean;
   owner: LinuxIdentity;
   includePersonal: boolean;
+  markers: Pick<HomeImportMarkers, 'personal'>;
   item: ImportItem;
   budget: { files: number; bytes: number };
 }
@@ -140,7 +141,7 @@ function copyDirAt(srcFd: number, dstFd: number | null, rel: string, ctx: CopyCt
   try { names = readdirSync(`/proc/self/fd/${srcFd}`).sort(); } catch { ctx.item.skipped.push(`${rel}: cannot list`); return; }
   for (const name of names) {
     const r = `${rel}/${name}`;
-    if (!ctx.includePersonal && isPersonalHomePath(r)) { ctx.item.skipped.push(`${r}: a personal login (not asked for)`); continue; }
+    if (!ctx.includePersonal && isPersonalHomePath(r, ctx.markers)) { ctx.item.skipped.push(`${r}: a personal login (not asked for)`); continue; }
     let st;
     try { st = lstatSync(`/proc/self/fd/${srcFd}/${name}`); } catch { continue; }
     if (st.isSymbolicLink()) { ctx.item.skipped.push(`${r}: a symbolic link, not copied`); continue; }
@@ -165,6 +166,8 @@ function copyDirAt(srcFd: number, dstFd: number | null, rel: string, ctx: CopyCt
  */
 export function importIntoAppHome(opts: {
   source: string; target: string; paths: readonly string[]; owner: LinuxIdentity; apply: boolean; includePersonal?: boolean;
+  /** The personal-login markers (importMarkers.ts, data): what is skipped unless `includePersonal`. */
+  markers: Pick<HomeImportMarkers, 'personal'>;
 }): ImportResult {
   const rels = [...new Set(opts.paths.map(normalizeHomePath))].sort();
   const out: ImportResult = { apply: opts.apply, source: opts.source, target: opts.target, items: [], copiedFiles: 0, copiedBytes: 0 };
@@ -179,7 +182,7 @@ export function importIntoAppHome(opts: {
     for (const rel of rels) {
       const item: ImportItem = { path: rel, action: 'copy', files: 0, bytes: 0, skipped: [] };
       out.items.push(item);
-      if (!opts.includePersonal && isPersonalHomePath(rel)) { item.action = 'personal'; continue; }
+      if (!opts.includePersonal && isPersonalHomePath(rel, opts.markers)) { item.action = 'personal'; continue; }
       const parent = posix.dirname(rel) === '.' ? '' : posix.dirname(rel);
       const name = posix.basename(rel);
       let sp: number | null;
@@ -201,7 +204,7 @@ export function importIntoAppHome(opts: {
           let exists = false;
           if (dpFd !== null) { try { lstatSync(`/proc/self/fd/${dpFd}/${name}`); exists = true; } catch { exists = false; } }
           if (exists && item.type === 'file') { item.action = 'exists'; continue; }
-          const ctx: CopyCtx = { apply: opts.apply, owner: opts.owner, includePersonal: !!opts.includePersonal, item, budget };
+          const ctx: CopyCtx = { apply: opts.apply, owner: opts.owner, includePersonal: !!opts.includePersonal, markers: opts.markers, item, budget };
           if (item.type === 'file') { copyFileAt(spFd, dpFd, name, rel, ctx); continue; }
           if (exists) item.action = 'exists'; // copies only what the App Home lacks inside it
           let src: number;

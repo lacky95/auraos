@@ -76,7 +76,7 @@ const CONTEXT_Q31 = decide(5,
   'Holds secrets and is never public. The Settings app manages it from an app context today; Q31 gives other apps only keys approved per instance.');
 
 const PROXY_ACCESS = why(
-  'D89 B6: the owner, and any app instance by its own token (Claude Code and Codex MCP entries send `Bearer ${AURA_INSTANCE_TOKEN}` by reference, B5; the Terminal\'s session calls and agent hooks send it too). An address is no caller any more (D28 removed), and a gateway call or an API key stays refused. An owner agent\'s upstream (Terminal, aurashelld) takes the owner only (decide.ts), and a Terminal instance only its own user (D69). Caller-scoped grants are later.');
+  'D89 B6: the owner, and any app instance by its own token (the agent clients\' MCP entries the home seed writes send `Bearer ${AURA_INSTANCE_TOKEN}` by reference, B5; the Terminal\'s session calls and session hooks send it too). An address is no caller any more (D28 removed), and a gateway call or an API key stays refused. An owner agent\'s upstream (Terminal, aurashelld) takes the owner only (decide.ts), and a Terminal instance only its own user (D69). Caller-scoped grants are later.');
 
 /** D89 B6: the credentials a machine call through /api/proxy may present (no gateway claim, no API key). */
 const PROXY_CREDENTIALS = ['login-session', 'operator-ticket', 'instance-token'] as const;
@@ -601,7 +601,7 @@ const routes: RouteAccessManifest['routes'] = {
       // D69: a Terminal instance finds its user's others (the session router); the route lists the caller's user's only.
       id: 'terminal-instances',
       methods: ['GET'],
-      match: { on: 'param', name: 'id', equals: 'com.aura.terminal' },
+      match: { on: 'param', name: 'id', equals: TERMINAL_APP_ID },
       rule: rule(['own-instance', 'app-permission', 'owner'], 'app', { permissions: ['terminal.sessions.list'] }),
     }],
   },

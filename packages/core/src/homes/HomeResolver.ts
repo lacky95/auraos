@@ -42,6 +42,7 @@ import { chmodSync, chownSync, lstatSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { LinuxIdentity } from '../identity/types.js';
 import { RuntimeCapabilityError, missingCapabilities, type RuntimeCapabilities, type RuntimeCapability } from '../runtimes/types.js';
+import { requestNeeds } from '../runtimes/requirements.js';
 import { APP_HOMES_SUBPATH, planHomeTarget } from './plan.js';
 import { HOMES_ROOT_SUBPATH } from '../scopes/home.js';
 import { HomeDeniedError, LOGICAL_HOME_PATH, type ExecutionContext, type HomeRequest, type HomeResolver, type JumpHomeMode, type ResolvedHome } from './types.js';
@@ -91,13 +92,9 @@ export interface HomeRequirements {
 export function homeRequirements(req: { executionContext: ExecutionContext; jumpHomeMode?: JumpHomeMode }): HomeRequirements {
   const ctx = req.executionContext;
   const mode = ctx === 'jump' ? req.jumpHomeMode ?? 'private' : undefined;
-  const capabilities: Partial<RuntimeCapabilities> = {};
-  // The Terminal instance is the user's session context: a namespace boundary at least (PRoot never, D65 §11).
-  if (ctx === 'terminal-session') capabilities.isolation = 'namespace';
-  if (ctx === 'jump') {
-    capabilities.sessionExec = true;
-    if (mode !== 'app') capabilities.privateHomeSession = true;
-  }
+  // The one needs derivation (runtimes/requirements.ts, D85 A5): a Terminal instance is a user's session
+  // context, a namespace boundary at least (PRoot never, D65 §11); a jump is a session inside the instance.
+  const capabilities: Partial<RuntimeCapabilities> = requestNeeds(ctx, mode ? { jumpHomeMode: mode } : {});
   return {
     executionContext: ctx, ...(mode ? { jumpHomeMode: mode } : {}), capabilities,
     installation: ctx === 'application' || ctx === 'sidecar' || mode === 'app',

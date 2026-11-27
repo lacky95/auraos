@@ -208,24 +208,29 @@ export type ProotPlacement = 'master' | 'pool';
  * kernel enforces (D70); neither enforces read-only binds, so closed apps
  * fail closed (ARI-4); neither opens an isolated session or is a Private Home
  * boundary (D65, J.5); no mounts, port expose or sidecars; processes end with
- * the shell (D77). They differ only in their network (the shell's namespace
- * vs `aura-net`), which this contract does not carry yet (5b).
+ * the shell (D77). They differ only in their network: the shell's namespace
+ * (`shell-netns`) vs `aura-net` (`bridge`).
  */
-const PTRACE_CAPABILITIES: RuntimeCapabilities = Object.freeze({
+const PTRACE_CAPABILITIES: Omit<RuntimeCapabilities, 'network'> = Object.freeze({
   isolation: 'ptrace',
+  appHome: true,
   privateHomeSession: false,
   sessionExec: false,
   identity: 'enforced',
   readOnlyBinds: false,
+  hostFilesystem: true,
   mounts: false,
+  idmappedMounts: false,
   portExpose: false,
   sidecars: false,
   warmPool: true,
   survivesShellRestart: false,
+  usage: false,
+  gpu: false,
 });
 export const PROOT_CAPABILITIES: Readonly<Record<ProotPlacement, RuntimeCapabilities>> = Object.freeze({
-  master: PTRACE_CAPABILITIES,
-  pool: PTRACE_CAPABILITIES,
+  master: Object.freeze({ ...PTRACE_CAPABILITIES, network: 'shell-netns' as const }),
+  pool: Object.freeze({ ...PTRACE_CAPABILITIES, network: 'bridge' as const }),
 });
 
 const execFileAsync = promisify(execFile);

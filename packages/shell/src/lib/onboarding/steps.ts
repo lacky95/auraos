@@ -4,6 +4,8 @@
  * step states in and send what these functions return as notifications.
  */
 
+import { SETTINGS_APP_ID, TERMINAL_APP_ID } from '../../../server/session-hosts.mjs';
+
 // ─── Setup card ──────────────────────────────────────────────────────────
 
 export type SetupStepId = 'image' | 'sdk' | 'docs';
@@ -146,8 +148,8 @@ export const WELCOME_STEPS: WelcomeStep[] = [
 ];
 
 export const TARGET_APP: Record<WelcomeTarget, string> = {
-  terminal: 'com.aura.terminal',
-  settings: 'com.aura.settings',
+  terminal: TERMINAL_APP_ID,
+  settings: SETTINGS_APP_ID,
   docs:     'com.aura.docs',
 };
 

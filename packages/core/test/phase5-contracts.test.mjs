@@ -71,19 +71,22 @@ test('runner capabilities declare today honestly', () => {
   const proot = runner.capabilities();
   // R2: app processes run under their app uid (setpriv), which the kernel enforces.
   assert.deepEqual(proot, {
-    isolation: 'ptrace', privateHomeSession: false, sessionExec: false, identity: 'enforced', readOnlyBinds: false,
-    mounts: false, portExpose: false, sidecars: false, warmPool: true, survivesShellRestart: false,
+    isolation: 'ptrace', network: 'shell-netns', appHome: true, privateHomeSession: false, sessionExec: false, identity: 'enforced',
+    readOnlyBinds: false, hostFilesystem: true, mounts: false, idmappedMounts: false, portExpose: false, sidecars: false,
+    warmPool: true, survivesShellRestart: false, usage: false, gpu: false,
   });
-  // Placement-aware (ARI-1, 5b P-3): master is the default; the pool declares the same flags (Phase 5 plan R2).
+  // Placement-aware (ARI-1, 5b P-3): master is the default; the pool differs only in its network (5b K).
   assert.deepEqual(runner.capabilities({ placement: 'master' }), proot);
-  assert.deepEqual(runner.capabilities({ placement: 'pool' }), proot);
+  assert.deepEqual(runner.capabilities({ placement: 'pool' }), { ...proot, network: 'bridge' });
   // capabilities() reads no instance state: call it without constructing (no docker).
   const container = ContainerRunner.prototype.capabilities.call({});
   assert.deepEqual(container, {
     // Stream A (P5-3): --user, cap-drop ALL, no-new-privileges for runAs: app.
     // Stream J (D74): sessions inside the running container, the Private Home in the session's namespace only.
-    isolation: 'namespace', privateHomeSession: true, sessionExec: true, identity: 'enforced', readOnlyBinds: true,
-    mounts: true, portExpose: true, sidecars: true, warmPool: true, survivesShellRestart: true,
+    // 5b K: A4 hostFilesystem; D80 idmappedMounts false until 5b G's probe.
+    isolation: 'namespace', network: 'bridge', appHome: true, privateHomeSession: true, sessionExec: true, identity: 'enforced',
+    readOnlyBinds: true, hostFilesystem: true, mounts: true, idmappedMounts: false, portExpose: true, sidecars: true,
+    warmPool: true, survivesShellRestart: true, usage: true, gpu: false,
   });
 });
 
@@ -151,8 +154,8 @@ test('AppManager spawn seam: homes and identities are asked, with the runner cap
 test('AppManager runner selection: a latched runtime id that is not installed is a Q17 error, never PRoot', () => {
   const runtimes = new RuntimeRegistry();
   const p = { id: 'p' }, c = { id: 'c' };
-  runtimes.register({ descriptor: { id: 'proot', settingsSchema: { type: 'object', properties: {} } }, runner: p });
-  runtimes.register({ descriptor: { id: 'container', settingsSchema: { type: 'object', properties: {} } }, runner: c });
+  runtimes.register({ descriptor: { id: 'proot', version: '1.0.0', ari: 1, settingsVersion: 1, settingsSchema: { type: 'object', properties: {} } }, runner: p });
+  runtimes.register({ descriptor: { id: 'container', version: '1.0.0', ari: 1, settingsVersion: 1, settingsSchema: { type: 'object', properties: {} } }, runner: c });
   const self = { runtimes, instances: new Map([['a-1', { sandbox: 'proot' }], ['b-1', { sandbox: 'container' }], ['g-1', { sandbox: 'gvisor' }], ['n-1', {}]]) };
   assert.equal(AppManager.prototype.runnerOf.call(self, 'a-1'), p);
   assert.equal(AppManager.prototype.runnerOf.call(self, 'b-1'), c);
@@ -160,4 +163,13 @@ test('AppManager runner selection: a latched runtime id that is not installed is
     (e) => e instanceof RuntimeUnavailableError && e.code === 'runtime-not-installed' && e.runtime === 'gvisor');
   assert.throws(() => AppManager.prototype.runnerOf.call(self, 'n-1'), /has no runtime/, 'no latched runtime: no fallback');
   assert.throws(() => AppManager.prototype.runnerOf.call(self, 'unknown-1'), /has no runtime/);
+});
+
+test('R10: system.provider.* is reserved; no built-in or grantable permission is in it', async () => {
+  const { RESERVED_PERMISSION_NAMESPACES, BUILTIN_PERMISSIONS } = await import('../dist/types/manifest.js');
+  const { GRANTABLE_PERMISSIONS } = await import('../dist/auth/GrantStore.js');
+  assert.deepEqual([...RESERVED_PERMISSION_NAMESPACES], ['system.provider.']);
+  for (const p of [...BUILTIN_PERMISSIONS, ...GRANTABLE_PERMISSIONS]) {
+    assert.ok(!RESERVED_PERMISSION_NAMESPACES.some((ns) => p.startsWith(ns)), p);
+  }
 });

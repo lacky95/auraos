@@ -256,6 +256,8 @@ ENV PATH=$PATH:/data/aura/toolchain/bin
 COPY os/toolchain-path.sh /etc/profile.d/aura-toolchain.sh
 # Onboarding files seeded into the user home (AppManager.seedUserHome).
 COPY os/home-seed/ /os/home-seed/
+# The home import markers (data, audit #11): read by core homes/importMarkers.ts.
+COPY os/home-import/ /os/home-import/
 
 # See the development stage: one persistent home per identity — the master's
 # own (system scope) here, the user's at /home/aura for the apps it spawns.

@@ -13,7 +13,7 @@
 import type { Redis } from '@aura/kv-store';
 import { SealedPolicyRecord } from '../security/SealedPolicyRecord.js';
 import { builtInRuntimeRecord, type RuntimeRegistry } from './registry.js';
-import { RuntimeSettingsError, validateSettings } from './settingsSchema.js';
+import { RuntimeSettingsError, settingsDefaults, validateSettings } from './settingsSchema.js';
 import {
   RUNTIME_ID_PATTERN, type RuntimeMigrationPending, type RuntimeOverride, type RuntimeSettingsRecord,
 } from './types.js';
@@ -30,6 +30,10 @@ export const RUNTIME_AUDIT_ACTIONS = {
   migrationDecided: 'runtime.migration-decided',
   migrationRecorded: 'runtime.migration-recorded',
   policyTampered: 'runtime.policy-tampered',
+  /** ARI §4.3: a runtime's stored settings failed to migrate; it is disabled until they are fixed (kernel, once). */
+  settingsInvalid: 'runtime.settings-invalid',
+  /** ARI §4.3: a runtime module was refused at registration (ARI version, id, descriptor; kernel). */
+  moduleRefused: 'runtime.module-refused',
 } as const;
 
 const isObj = (v: unknown): v is Record<string, unknown> => Boolean(v) && typeof v === 'object' && !Array.isArray(v);
@@ -62,6 +66,8 @@ export function parseRuntimeRecord(raw: unknown): RuntimeSettingsRecord | null {
   if (raw['pending'] !== undefined && (!isObj(raw['pending']) || !Object.values(raw['pending']).every((p) => parsePending(p)))) return null;
   if (raw['migrations'] !== undefined && (!isObj(raw['migrations'])
     || (raw['migrations']['d75'] !== undefined && typeof raw['migrations']['d75'] !== 'string'))) return null;
+  if (raw['settingsVersions'] !== undefined && (!isObj(raw['settingsVersions'])
+    || !Object.values(raw['settingsVersions']).every((n) => Number.isInteger(n) && (n as number) >= 1))) return null;
   return raw as unknown as RuntimeSettingsRecord;
 }
 
@@ -169,14 +175,21 @@ export class RuntimeSettingsStore {
       const module = this.registry.get(id)!;
       let settings;
       try {
-        settings = validateSettings(module.descriptor.settingsSchema, { ...this.registry.settingsOf(id, cur), ...(isObj(input) ? input : {}) });
+        // Settings that failed to migrate are replaced, never merged into (ARI §4.3).
+        const state = this.registry.settingsState(id, cur);
+        const base = state.ok ? state.settings : settingsDefaults(module.descriptor.settingsSchema);
+        settings = validateSettings(module.descriptor.settingsSchema, { ...base, ...(isObj(input) ? input : {}) });
         if (!isObj(input)) throw new RuntimeSettingsError('settings must be an object');
         module.checkSettings?.(settings);
       } catch (err) {
         if (err instanceof RuntimeSettingsError) throw new RuntimeChangeError('invalid-settings', err.message);
         throw err;
       }
-      return { next: { ...cur, settings: { ...cur.settings, [id]: settings } } };
+      // Written at the module's settings version, so the next read needs no migration (absent means 1).
+      const v = module.descriptor.settingsVersion;
+      const next: RuntimeSettingsRecord = { ...cur, settings: { ...cur.settings, [id]: settings } };
+      if ((cur.settingsVersions?.[id] ?? 1) !== v) next.settingsVersions = { ...cur.settingsVersions, [id]: v };
+      return { next };
     });
   }
 

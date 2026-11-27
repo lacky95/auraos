@@ -5,8 +5,10 @@
 import { DEFAULT_OWNER_ID } from '../../auth/identityContracts.js';
 import { TERM_NETWORK_CONTAINER_LABEL, type TermNetwork } from '../TermNetworks.js';
 
-/** The System Terminal: the one app whose servers listen on a private network (D58). */
-export const TERMINAL_APP_ID = 'com.aura.terminal';
+import { TERMINAL_APP_ID } from '../../system/systemApps.js';
+
+/** The System Terminal: the one app whose servers listen on a private network (D58). One id: system/systemApps.ts. */
+export { TERMINAL_APP_ID };
 
 /**
  * The user whose private network a container joins, or null for every other

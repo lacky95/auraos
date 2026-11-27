@@ -51,11 +51,11 @@ presentation-contracts: theme layout keymap
 - **Platform services** may use kernel contracts; kernel sectors reach them only through a contract that is handed in.
 - **Core never imports** `@aura/shell`, `@aura/ui`, `@aura/app-sdk`, `@aura/cli`, Astro, React or socket.io.
 
-**Enforced by `pnpm arch`:** `core-cycle`, `core-module-cycle`, `core-forbidden`, `foundation-leaf`, `kernel-presentation` and `agent-agnostic`. Planned rules, each with a baseline: `contract-leaf` and `runtime-no-bus` (5b), `core-deep-import` and `event-owner` (Phase 7), `kv-owner` (Phase 7–8).
+**Enforced by `pnpm arch`:** `core-cycle`, `core-module-cycle`, `core-forbidden`, `foundation-leaf`, `kernel-presentation`, `contract-leaf` (5b) and `agent-agnostic`. Planned: `runtime-no-bus` (5b-2), `core-deep-import` and `event-owner` (Phase 7), `kv-owner` (Phase 7–8).
 
 ## Public contract
 
-- **Today:** other packages import the root `@aura/core` (`src/index.ts`, 78 `export *` lines) or the declared leaf subpaths in `package.json` `exports`: `theme`, `keymap`, `setup-tickets`, `system-identity`, `logger`, `host-rules`, `aura-channel`.
+- **Today:** other packages import the root `@aura/core` (`src/index.ts`, 78 `export *` lines) or the declared leaf subpaths in `package.json` `exports`: `theme`, `keymap`, `setup-tickets`, `system-identity`, `system-apps`, `workload-env`, `logger`, `host-rules`, `aura-channel`.
 - **Don't widen the barrel with implementation classes.** Phase 8 narrows it.
 - **Inside core**, cross-module imports go straight to implementation files today (131 imports, none through an `index.ts`). New code imports another module's leaf contract file or its `index.ts`. Phase 7 adds the `core-deep-import` rule with a baseline.
 
@@ -100,7 +100,7 @@ Each module creates its own lazily today. Add no new one; Phase 6 K moves their 
 | `types/manifest.ts → app-hosts/appHosts` (Foundation not a leaf) | Phase 7 (host-name rules into Foundation) |
 | `AppManager → keymap/KeymapRegistry` (kernel uses presentation) | Phase 8 (AppManager decomposition) |
 | `app-manager ↔ runtimes` (`runtimes/builtins/proot.ts → ProotRunner`, R2) | Phase 5b CR + PR |
-| `agent-agnostic`: home seeder, import markers, privilege table (audit #2, #10/#11, N1); approval text (#1) | Phase 5b |
+| `agent-agnostic`: the privilege table (N1: one-shot install data) | 5-post (deleted after the migration) |
 | `agent-agnostic`: the `claude-code` alias, onboarding probes, screen scraping (#4–#6) | Phase 6 |
 
 **Phase 8 (committed):** AppManager is decomposed behind a compatibility facade into real modules. Each gets its own responsibility, state, contract and tests: activities and navigation, the service supervisor, previews, build and tools.

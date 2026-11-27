@@ -1,7 +1,6 @@
 /**
- * The runtime registry (ARI §9.1, §9.2, §9.9; Phase 5 stream R): runtimes by
- * string id, and the one resolver that picks an app's runtime. Replaces the
- * closed `Record<'proot'|'container'>` and its silent PRoot fallbacks.
+ * The runtime registry (ARI §9.1, §9.2, §9.9; Phase 5 stream R, 5b stream K):
+ * runtimes by string id, and the one resolver that picks an app's runtime.
  *
  * Resolution, first match wins (ARI §5.3, §11.2):
  *   1. a per-installation override (ARI-3) or D75 migration override (a
@@ -10,57 +9,29 @@
  *   2. the manifest's `sandbox`;
  *   3. the Runtime Settings default.
  * An open D75 decision stops it (`runtime-decision-needed`). Then the runtime
- * must be installed, enabled and available, and must have every capability
- * the app needs (derived from its manifest, ARI §5.3). Every miss is a clear
- * error; nothing falls back to another runtime (Q17), and `useProot` is
- * never read.
+ * must be installed, enabled and healthy, its stored settings must be valid
+ * (migrated when older, ARI §4.3), and it must have every capability the app
+ * needs (`requirementsOf`, the one derivation). Every miss is a clear error
+ * with a `code`; a capability miss names the runtimes that could run it
+ * (`suggest`, D73) but nothing falls back to another runtime (Q17), and
+ * `useProot` is never read.
+ *
+ * Registration refuses a module this kernel must not load (`ariRefusal`:
+ * an ARI above `ARI_VERSION`, a bad id or descriptor, a duplicate id).
  */
-import type { AppManifest } from '../types/manifest.js';
+import { ariRefusal, healthRefusal, type RuntimeDescriptor, type RuntimeHealth, type RuntimeModule } from './ari.js';
 import type { SandboxRunner } from '../app-manager/SandboxRunner.js';
-import { settingsDefaults, validateSettings, type SettingsSchema } from './settingsSchema.js';
+import { requirementsOf, type RequirementsManifest } from './requirements.js';
+import { RuntimeSettingsError, settingsDefaults, validateSettings } from './settingsSchema.js';
 import {
-  missingCapabilities, RuntimeCapabilityError, RuntimeResolutionError, RuntimeUnavailableError,
+  missingCapabilities, RuntimeCapabilityError, RuntimeModuleError, RuntimeResolutionError, RuntimeUnavailableError, suggestText,
   type RuntimeCapabilities, type RuntimeSettings, type RuntimeSettingsRecord, type RuntimeSource,
 } from './types.js';
 
-/** What a runtime module declares (ARI §2.1, the Phase 5 subset). */
-export interface RuntimeDescriptor {
-  id: string;
-  title: string;
-  description: string;
-  builtIn: boolean;
-  /** Never disabled, so an app naming it always resolves (`container`, ARI §4.4). */
-  alwaysEnabled?: boolean;
-  settingsSchema: SettingsSchema;
-}
-
-export interface RuntimeModule {
-  readonly descriptor: RuntimeDescriptor;
-  readonly runner: SandboxRunner;
-  capabilities(settings: RuntimeSettings): RuntimeCapabilities;
-  /** Why the runtime cannot run anything under these settings now, or null. Fails closed. */
-  unavailable(settings: RuntimeSettings): string | null;
-  /** Extra checks on top of the schema (e.g. a placement this release cannot run). Throws. */
-  checkSettings?(settings: RuntimeSettings): void;
-}
+export type { RuntimeDescriptor, RuntimeModule };
 
 /** The manifest fields the needs are derived from. */
-export type RuntimeManifest = Pick<AppManifest, 'id' | 'sandbox' | 'services' | 'ports' | 'warmPool'>;
-
-/**
- * The capabilities an app needs, from its manifest (ARI §5.3; no new manifest
- * field, D57): `services[]` needs sidecars, `ports.exposes` port expose, a
- * warm pool the warm pool, and a closed source enforced read-only binds
- * (ARI-4: a closed app never runs where its source would be writable).
- */
-export function runtimeNeeds(m: RuntimeManifest, sourceMode: 'open' | 'closed'): Partial<RuntimeCapabilities> {
-  const needs: Partial<RuntimeCapabilities> = {};
-  if (m.services?.length) needs.sidecars = true;
-  if (m.ports?.exposes?.length) needs.portExpose = true;
-  if (m.warmPool > 0) needs.warmPool = true;
-  if (sourceMode === 'closed') needs.readOnlyBinds = true;
-  return needs;
-}
+export type RuntimeManifest = RequirementsManifest;
 
 /** One app's resolved runtime, latched on the instance at spawn. */
 export interface ResolvedRuntime {
@@ -78,6 +49,20 @@ export interface ResolveInput {
   sourceMode: 'open' | 'closed';
   /** The Runtime Settings; null when they cannot be read. */
   record: RuntimeSettingsRecord | null;
+  /** The installation's recorded runAs, when known (an installation fact of `requirementsOf`). */
+  runAs?: 'app' | 'root';
+}
+
+/** A runtime's stored settings, read: valid (migrated when older), or why not (the runtime is then disabled). */
+export type RuntimeSettingsState = { ok: true; settings: RuntimeSettings; migratedFrom?: number } | { ok: false; reason: string };
+
+export interface RuntimeRegistryOptions {
+  /**
+   * A runtime's stored settings failed to validate or migrate (ARI §4.3), once
+   * per runtime and reason: the caller logs and audits it
+   * (`runtime.settings-invalid`).
+   */
+  onSettingsInvalid?(runtime: string, reason: string): void;
 }
 
 /** The record a fresh system, or a missing or tampered one, means (Q18, Q18b). */
@@ -94,11 +79,21 @@ export function builtInRuntimeRecord(registry: RuntimeRegistry): RuntimeSettings
 
 export class RuntimeRegistry {
   private readonly modules = new Map<string, RuntimeModule>();
+  private readonly reported = new Set<string>();
 
-  /** Adds a runtime. Ids are unique; a second one with the same id is refused. */
+  constructor(private readonly opts: RuntimeRegistryOptions = {}) {}
+
+  /**
+   * Adds a runtime. Refused, with a `RuntimeModuleError` and its code: a
+   * module whose ARI is above this kernel's ("runtime X needs ARI n"), an id
+   * outside `RUNTIME_ID_PATTERN`, a descriptor without a semver version or a
+   * settings version, and a second module with the same id.
+   */
   register(module: RuntimeModule): void {
+    const refused = ariRefusal(module.descriptor);
+    if (refused) throw refused;
     const id = module.descriptor.id;
-    if (this.modules.has(id)) throw new Error(`runtime ${id} is already registered`);
+    if (this.modules.has(id)) throw new RuntimeModuleError('runtime-duplicate', id, `runtime ${id} is already registered`);
     this.modules.set(id, module);
   }
 
@@ -122,16 +117,83 @@ export class RuntimeRegistry {
     return Boolean(this.modules.get(id)?.descriptor.alwaysEnabled) || record.enabled.includes(id);
   }
 
-  /** A runtime's stored settings, completed with the schema's defaults. */
-  settingsOf(id: string, record: RuntimeSettingsRecord | null): RuntimeSettings {
+  /**
+   * A runtime's stored settings, completed with the schema's defaults (ARI
+   * §4.3): settings written at an older `settingsVersion` go through the
+   * module's `migrateSettings` first. Settings that fail to migrate or
+   * validate are reported (once) and never replaced by guessed values: the
+   * runtime is disabled with that error until the owner fixes its settings.
+   * A missing or tampered record still means the built-in defaults.
+   */
+  settingsState(id: string, record: RuntimeSettingsRecord | null): RuntimeSettingsState {
     const m = this.require(id);
-    try { return validateSettings(m.descriptor.settingsSchema, record?.settings[id] ?? {}); }
-    catch { return settingsDefaults(m.descriptor.settingsSchema); }
+    const d = m.descriptor;
+    const stored = record?.settings[id];
+    if (stored === undefined) return { ok: true, settings: settingsDefaults(d.settingsSchema) };
+    const from = record?.settingsVersions?.[id] ?? 1;
+    try {
+      let raw: unknown = stored;
+      if (from !== d.settingsVersion) {
+        if (from > d.settingsVersion) throw new RuntimeSettingsError(`they were written by a newer version (settings ${from}, this module reads ${d.settingsVersion})`);
+        if (!m.migrateSettings) throw new RuntimeSettingsError(`no migration from settings version ${from} to ${d.settingsVersion}`);
+        raw = m.migrateSettings(from, structuredClone(stored));
+      }
+      const settings = validateSettings(d.settingsSchema, raw);
+      m.checkSettings?.(settings);
+      return { ok: true, settings, ...(from !== d.settingsVersion ? { migratedFrom: from } : {}) };
+    } catch (err) {
+      const reason = `its settings failed to migrate: ${(err as Error).message}`;
+      const key = `${id}\0${reason}`;
+      if (!this.reported.has(key)) {
+        this.reported.add(key);
+        try { this.opts.onSettingsInvalid?.(id, reason); } catch { /* reporting never decides */ }
+      }
+      return { ok: false, reason };
+    }
+  }
+
+  /** A runtime's valid settings; invalid ones are the `runtime-disabled` error (never guessed values). */
+  settingsOf(id: string, record: RuntimeSettingsRecord | null): RuntimeSettings {
+    const s = this.settingsState(id, record);
+    if (!s.ok) throw new RuntimeUnavailableError('runtime-disabled', id, `runtime ${id} is disabled: ${s.reason}`);
+    return s.settings;
   }
 
   /** The capabilities of a runtime under its current settings. */
   capabilitiesOf(id: string, record: RuntimeSettingsRecord | null): RuntimeCapabilities {
     return this.require(id).capabilities(this.settingsOf(id, record));
+  }
+
+  /**
+   * A runtime's health under its current settings (ARI §2.3): the module's own
+   * checks, or `unavailable` when its stored settings are invalid. One
+   * mechanism: `resolve` refuses exactly what this reports as unavailable.
+   */
+  healthOf(id: string, record: RuntimeSettingsRecord | null, settings?: RuntimeSettings): RuntimeHealth {
+    if (!settings) {
+      const s = this.settingsState(id, record);
+      if (!s.ok) return { status: 'unavailable', checks: [{ id: 'settings', ok: false, detail: s.reason }] };
+      settings = s.settings;
+    }
+    return this.require(id).health(settings);
+  }
+
+  /**
+   * The enabled, healthy runtimes whose capabilities meet `needs` (D73
+   * `suggest`): for the message and the owner's decision only, never picked
+   * automatically (Q17).
+   */
+  suggest(needs: Partial<RuntimeCapabilities>, record: RuntimeSettingsRecord | null, except?: string): string[] {
+    if (!record) return [];
+    const out: string[] = [];
+    for (const m of this.modules.values()) {
+      const id = m.descriptor.id;
+      if (id === except || !this.isEnabled(id, record)) continue;
+      const s = this.settingsState(id, record);
+      if (!s.ok || healthRefusal(m.health(s.settings))) continue;
+      if (missingCapabilities(m.capabilities(s.settings), needs).length === 0) out.push(id);
+    }
+    return out.sort();
   }
 
   /** The override that applies: the owner's always; a migration one only while the manifest names no runtime. */
@@ -175,17 +237,19 @@ export class RuntimeRegistry {
     const record = input.record;
     if (record && !this.isEnabled(runtime, record)) throw new RuntimeUnavailableError('runtime-disabled', runtime);
     const override = input.installationId && record ? this.overrideFor(input.manifest, input.installationId, record) : undefined;
-    const settings = override?.settings && override.runtime === runtime
-      ? { ...this.settingsOf(runtime, record), ...override.settings }
-      : this.settingsOf(runtime, record);
-    const why = module.unavailable(settings);
+    const base = this.settingsOf(runtime, record);
+    const settings = override?.settings && override.runtime === runtime ? { ...base, ...override.settings } : base;
+    const why = healthRefusal(module.health(settings));
     if (why) throw new RuntimeUnavailableError('runtime-not-installed', runtime, `runtime ${runtime} is not available: ${why}`);
     const capabilities = module.capabilities(settings);
-    const missing = missingCapabilities(capabilities, runtimeNeeds(input.manifest, input.sourceMode));
+    const { needs } = requirementsOf(input.manifest, { sourceMode: input.sourceMode, ...(input.runAs ? { runAs: input.runAs } : {}) });
+    const missing = missingCapabilities(capabilities, needs);
     if (missing.length) {
+      const suggest = this.suggest(needs, record, runtime);
       throw new RuntimeCapabilityError(runtime, missing,
         `${input.manifest.id} cannot run on ${runtime}: missing ${missing.join(', ')}`
-        + (missing.includes('readOnlyBinds') ? ' (a closed app needs enforced read-only binds, ARI-4)' : ''));
+        + (missing.includes('readOnlyBinds') ? ' (a closed app needs enforced read-only binds, ARI-4)' : '')
+        + (record ? suggestText(suggest) : ''), record ? suggest : undefined);
     }
     return { runtime, source, module, settings, capabilities };
   }

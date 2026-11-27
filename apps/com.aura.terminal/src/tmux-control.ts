@@ -24,6 +24,7 @@ import { tmpdir, userInfo } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HOOK_TOKEN_ENV, hookToken } from './hook-token.ts';
+import { SERVER_ONLY_ENV as KERNEL_SERVER_ONLY_ENV } from '@aura/app-sdk/workload-env';
 
 // The host this terminal physically lives on — the AuraOS master ("aura-shell"
 // by default, overridable via AURA_SHELL_HOSTNAME, which ContainerRunner
@@ -80,15 +81,12 @@ export function tmuxSocketArgs(env: NodeJS.ProcessEnv = process.env, uid: number
 export const TMUX_SOCKET_ARGS: readonly string[] = tmuxSocketArgs();
 
 /**
- * Variables of this server that a session never gets (stream T; the D28
- * review: `AURA_LIFECYCLE_TOKEN` keys the shell's relay claims and hook
- * tokens), plus the server's own listen and build settings.
+ * Variables of this server that a session never gets: the kernel's list
+ * (`SERVER_ONLY_ENV` from the SDK, audit N4: `AURA_LIFECYCLE_TOKEN` keys the
+ * shell's relay claims and hook tokens), plus the server's own listen and
+ * build settings.
  */
-const SERVER_ONLY_ENV = new Set([
-  'AURA_LIFECYCLE_TOKEN', 'AURA_LIFECYCLE_TOKEN_FILE', 'AURA_SESSION_HOST', 'AURA_RELAY_STRICT', 'AURA_LISTEN_SUBNET', 'AURA_SHELL_PEERS', 'AURA_SERVE',
-  'AURA_TERM_LAUNCH', 'AURA_TERM_TMUX_BIN', 'AURA_TERM_TAP_DIR',
-  'PORT', 'APP_PORT', 'HOST', 'NODE_ENV', 'ASTRO_NODE_AUTOSTART',
-]);
+const SERVER_ONLY_ENV = new Set([...KERNEL_SERVER_ONLY_ENV, 'PORT', 'APP_PORT', 'HOST', 'NODE_ENV', 'ASTRO_NODE_AUTOSTART']);
 const SERVER_ONLY_PREFIXES = ['npm_', 'ASTRO_', 'VITE_', 'PNPM_'];
 
 /**
