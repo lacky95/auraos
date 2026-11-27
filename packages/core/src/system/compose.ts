@@ -196,7 +196,7 @@ function setupStore(): SetupConfigStore {
       console.warn(`[setup] a desired-configuration record of installation ${ref.installationId} failed its integrity check; the app needs setup again`);
       void new AdminAudit(redis).record(tamperAuditInput(ref)).catch(() => undefined);
     },
-    revokeHandle: vaultHandleRevoker(new CredentialVault()),
+    revokeHandle: vaultHandleRevoker(new CredentialVault(), { audit: (e) => new AdminAudit(redis).record(e) }),
   });
   return sharedSetupStore;
 }

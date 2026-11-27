@@ -447,8 +447,10 @@ export class SidecarManager {
       const tools = spec.ownTools ? this.provisionTools(instanceId, spec.name, inst.appId, spec.template) : null;
 
       let env: Record<string, string>;
-      try { env = await this.environment(instanceId, inst.appId, spec, setupValues); } catch (err) { undoTools(); throw err; }
-      if (spec.seed) await this.seed(instanceId, spec, appDataSubpath, env);
+      let secretEnv: Record<string, string>;
+      try { ({ env, secretEnv } = await this.environment(instanceId, inst.appId, spec, setupValues)); } catch (err) { undoTools(); throw err; }
+      const secrets = Object.keys(secretEnv).length ? { secretEnv } : {};
+      if (spec.seed) await this.seed(instanceId, spec, appDataSubpath, env, secrets);
 
       // The sidecar acts for the instance's owner (5.8).
       const token = spec.inheritIdentity ? this.opts.tokens.mint(instanceId, spec.name, inst.owner) : null;
@@ -476,7 +478,7 @@ export class SidecarManager {
       const parentIdentity = this.opts.instance(instanceId)?.identity;
       const id = await this.wl().create({
         instanceId, appId: inst.appId, spec, record: JSON.stringify(record), ...(record.owner ? { owner: record.owner } : {}),
-        env, token: token?.token ?? null, home,
+        env, ...secrets, token: token?.token ?? null, home,
         ...(parentIdentity ? { parentIdentity } : {}),
         ...(permissions ? { permissions } : {}),
       });
@@ -557,11 +559,13 @@ export class SidecarManager {
    * sidecar never sees more than its app); any other name from the app
    * container's env. A setup secret (D108 `secretEnv`) is read here, at
    * create, through the app's own handle; one that can't be read refuses the
-   * sidecar (the error names the variable and field, never a value).
+   * sidecar (the error names the variable and field, never a value). The
+   * secrets come back apart from `env` (they win over it): the runtime keeps
+   * them off every process argument line (owner decision 3).
    */
   private async environment(
     instanceId: string, appId: string, spec: ResolvedSidecarSpec, setupValues: SidecarSetupValues | null = null,
-  ): Promise<Record<string, string>> {
+  ): Promise<{ env: Record<string, string>; secretEnv: Record<string, string> }> {
     const env: Record<string, string> = {};
     if (spec.envInherit.length) {
       const ctx = await this.opts.context(instanceId).catch(() => ({ env: {} as Record<string, string>, known: null }));
@@ -576,13 +580,15 @@ export class SidecarManager {
     }
     const secrets: Record<string, string> = {};
     for (const [k, ref] of Object.entries(spec.secretEnv ?? {})) {
-      const value = setupValues ? await setupValues.readSecret(ref.handle) : null;
+      const value = setupValues ? await setupValues.readSecret(ref) : null;
       if (value === null) {
         throw new SpecError(409, `template '${spec.template}' env ${k}: the secret of setup field ${ref.field} can't be read for ${appId} (unknown or revoked handle, or no credential.read grant)`);
       }
       secrets[k] = value;
     }
-    return { ...env, ...spec.env, ...secrets };
+    const plain: Record<string, string> = { ...env, ...spec.env };
+    for (const k of Object.keys(secrets)) delete plain[k];
+    return { env: plain, secretEnv: secrets };
   }
 
   /**
@@ -606,7 +612,9 @@ export class SidecarManager {
    * One-shot init run before the first start, through the image's own
    * entrypoint (like `command`); see seedMarker for when it counts as done.
    */
-  private async seed(instanceId: string, spec: ResolvedSidecarSpec, appDataSubpath: string, env: Record<string, string>): Promise<void> {
+  private async seed(
+    instanceId: string, spec: ResolvedSidecarSpec, appDataSubpath: string, env: Record<string, string>, secrets: { secretEnv?: Record<string, string> },
+  ): Promise<void> {
     const rt = this.opts.runner.sidecarRuntime();
     const marker = SidecarManager.seedMarker(rt.dataDir, appDataSubpath, spec);
     if (marker === null) return;
@@ -615,7 +623,7 @@ export class SidecarManager {
     // Serialised per marker: two sidecars on the same shared data seed once.
     return this.locked(`seed:${marker}`, async () => {
     if (existsSync(marker) || existsSync(before)) return;
-    await this.wl().seed({ instanceId, spec, env });
+    await this.wl().seed({ instanceId, spec, env, ...secrets });
     mkdirSync(dirname(marker), { recursive: true });
     writeFileSync(marker, new Date().toISOString());
     });

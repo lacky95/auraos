@@ -8,6 +8,12 @@
  * and identity, the tools dir, the mount root), the readiness of the image,
  * the boot check and the throwaway seed container.
  *
+ * Setup secrets (D108 `secretEnv`) never go on an argv (owner decision 3:
+ * `ps` in the shell would show them): they go into an env file, 0600 in a
+ * private 0700 dir unique to the call, passed with `--env-file` and removed
+ * as soon as the docker call returns, whether it succeeded or not
+ * (`withEnvFile`). Every other variable stays `-e` exactly as before.
+ *
  * Labels (the actual state, re-learned by `docker ps` after a restart):
  *
  *   aura.parent=<instanceId>  aura.app=<appId>  aura.service=<name>
@@ -23,6 +29,9 @@
  * The runner's facts are handed in (no runtime import of app-manager, D97).
  */
 import { execFile } from 'node:child_process';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type {
   RuntimeManagedWorkload, RuntimePullCredential, RuntimeWorkloadCreate, RuntimeWorkloadRun, RuntimeWorkloadRunResult, RuntimeWorkloadState, RuntimeWorkloads,
 } from '../ari.js';
@@ -109,6 +118,63 @@ async function pullImage(image: string, cred: RuntimePullCredential | null): Pro
   }
 }
 
+/** A variable name docker's env file takes as is. */
+const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * Run `fn` with `vars` in a throwaway env file (owner decision 3), or with
+ * none when there are no vars. The file is `KEY=value` lines (docker reads
+ * them verbatim, no quoting), 0600, in a fresh 0700 dir; both are removed in
+ * `finally`. A value docker's format can't carry (a line break, NUL) is
+ * refused, naming the variable only: never truncated, never on an argv.
+ */
+export async function withEnvFile<T>(vars: Record<string, string> | undefined, fn: (file: string | undefined) => Promise<T>): Promise<T> {
+  const entries = Object.entries(vars ?? {});
+  if (!entries.length) return fn(undefined);
+  const lines: string[] = [];
+  for (const [k, v] of entries) {
+    if (!ENV_NAME_RE.test(k)) throw new Error(`env ${JSON.stringify(k.slice(0, 64))}: not a variable name an env file can carry`);
+    if (/[\r\n\0]/.test(v)) throw new Error(`env ${k}: the secret value has a line break or NUL, which an env file can't carry; not created`);
+    lines.push(`${k}=${v}`);
+  }
+  const dir = mkdtempSync(join(tmpdir(), 'aura-sidecar-env-'));
+  try {
+    chmodSync(dir, 0o700);
+    const file = join(dir, 'env');
+    writeFileSync(file, lines.join('\n') + '\n', { mode: 0o600, flag: 'wx' });
+    return await fn(file);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The env of one sidecar create: `argv` goes on the command line as `-e`
+ * (the request's env, HOME, the identity: unchanged for a spec without
+ * secrets), `file` into the env file (the setup secrets no argv variable
+ * replaces; an argv `-e` would win over the file anyway).
+ */
+export function sidecarCreateEnv(req: RuntimeWorkloadCreate, rt: SidecarRuntimeFacts): { argv: Record<string, string>; file: Record<string, string> } {
+  const { instanceId, appId, spec } = req;
+  const identity: Record<string, string> = spec.inheritIdentity ? {
+    AURA_APP_ID: appId,
+    AURA_INSTANCE_ID: instanceId,
+    AURA_SIDECAR_NAME: spec.name,
+    AURA_OS_URL: rt.osApiBase,
+    OS_API_BASE: rt.osApiBase,
+    AURA_SHELL_HOSTNAME: rt.shellHostname,
+    ...(req.token ? { AURA_INSTANCE_TOKEN: req.token } : {}),
+  } : {};
+  const secret = req.secretEnv ?? {};
+  const plain = Object.fromEntries(Object.entries(req.env).filter(([k]) => !Object.prototype.hasOwnProperty.call(secret, k)));
+  // HOME after the template env (a template can't point it elsewhere while
+  // the mount is there); identity last: a template env key can't replace
+  // the OS's own values.
+  const argv = { ...plain, ...(spec.inheritHome ? { HOME: SHARED_HOME_PATH } : {}), ...identity };
+  const file = Object.fromEntries(Object.entries(secret).filter(([k]) => !Object.prototype.hasOwnProperty.call(argv, k)));
+  return { argv, file };
+}
+
 function volumeArgs(spec: ResolvedSidecarSpec): string[] {
   return spec.volumes.flatMap((v) => ['--mount',
     `type=volume,source=${v.source},target=${v.target}${v.subpath ? `,volume-subpath=${v.subpath}` : ''}`]);
@@ -137,20 +203,12 @@ async function toolArgs(rt: SidecarRuntimeFacts, dirKey: string, image: string):
 
 /** The `docker create` argv of one OS sidecar (golden: test/golden-workload-args.test.mjs). */
 export async function sidecarCreateArgs(
-  req: RuntimeWorkloadCreate, rt: SidecarRuntimeFacts, facts: { mountRootSubpath(consumer: string): string; baseImage: string; network?: string },
+  req: RuntimeWorkloadCreate, rt: SidecarRuntimeFacts,
+  facts: { mountRootSubpath(consumer: string): string; baseImage: string; network?: string; envFile?: string },
 ): Promise<string[]> {
   const { instanceId, appId, spec } = req;
   const container = sidecarContainerName(instanceId, spec.name);
   const consumer = `${instanceId}--${spec.name}`;
-  const identity: Record<string, string> = spec.inheritIdentity ? {
-    AURA_APP_ID: appId,
-    AURA_INSTANCE_ID: instanceId,
-    AURA_SIDECAR_NAME: spec.name,
-    AURA_OS_URL: rt.osApiBase,
-    OS_API_BASE: rt.osApiBase,
-    AURA_SHELL_HOSTNAME: rt.shellHostname,
-    ...(req.token ? { AURA_INSTANCE_TOKEN: req.token } : {}),
-  } : {};
   // inheritHome: the parent's App Home (D65) the kernel resolved; never a Private Home.
   const homeMount = spec.inheritHome && req.home ? containerHomeMount({ appDataVolume: rt.appDataVolume, home: req.home }) : [];
   const a: string[] = [
@@ -170,11 +228,9 @@ export async function sidecarCreateArgs(
     ...volumeArgs(spec),
     // inheritHome: the app's own App Home (spawn/homeArgs.ts): the sidecar doesn't exceed its app.
     ...homeMount,
-    // HOME after the template env (a template can't point it elsewhere while
-    // the mount is there); identity last: a template env key can't replace
-    // the OS's own values.
-    ...Object.entries({ ...req.env, ...(spec.inheritHome ? { HOME: SHARED_HOME_PATH } : {}), ...identity })
-      .flatMap(([k, v]) => ['-e', `${k}=${v}`]),
+    // The env order and precedence: sidecarCreateEnv. Setup secrets only by file (owner decision 3).
+    ...Object.entries(sidecarCreateEnv(req, rt).argv).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
+    ...(facts.envFile ? ['--env-file', facts.envFile] : []),
     ...spec.capabilities.flatMap((c) => ['--cap-add', c]),
     ...spec.devices.flatMap((d) => ['--device', d]),
     ...(spec.privileged ? ['--privileged'] : []),
@@ -263,26 +319,33 @@ export function containerSidecars(runner: ContainerSidecarFacts, opts: { baseIma
       }
       return env;
     },
-    async seed({ instanceId, spec, env }) {
+    async seed({ instanceId, spec, env, secretEnv }) {
       const rt = { ...runner.sidecarRuntime(), ...(spec.network === 'instance' ? { network: runner.isolatedNetwork(instanceId) } : {}) };
       // aura.mount=1 keeps the throwaway out of sidecar listings; aura.parent
       // lets the reaper remove it if the instance dies mid-seed.
-      const args = ['run', '--rm', '--network', rt.network, ...rawSocketArgs(spec), '--label', 'aura.mount=1', '--label', `aura.parent=${instanceId}`,
+      const plain = Object.fromEntries(Object.entries(env).filter(([k]) => !(secretEnv && Object.prototype.hasOwnProperty.call(secretEnv, k))));
+      // The secrets by env file only (owner decision 3), removed once the throwaway has run.
+      const r = await withEnvFile(secretEnv, (envFile) => docker(['run', '--rm', '--network', rt.network, ...rawSocketArgs(spec),
+        '--label', 'aura.mount=1', '--label', `aura.parent=${instanceId}`,
         ...volumeArgs(spec),
-        ...Object.entries(env).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
+        ...Object.entries(plain).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
+        ...(envFile ? ['--env-file', envFile] : []),
         ...(spec.user ? ['--user', spec.user] : []),
         ...(spec.workdir ? ['--workdir', spec.workdir] : []),
-        spec.image, ...spec.seed!.command];
-      const r = await docker(args, { timeoutMs: 10 * 60_000 });
+        spec.image, ...spec.seed!.command], { timeoutMs: 10 * 60_000 }));
       if (r.code !== 0) throw new Error(`seed for ${spec.name} failed: ${(r.stderr || r.stdout).trim().slice(-2000)}`);
     },
     async create(req) {
       // D107: mandatory isolation is this runtime's to enforce (its feature says so), or the create is refused.
       const network = req.spec.network === 'instance' ? runner.isolatedNetwork(req.instanceId) : undefined;
-      const args = await sidecarCreateArgs(req, runner.sidecarRuntime(), {
-        mountRootSubpath: (c) => runner.mountRootSubpath(c), baseImage: opts.baseImage, ...(network ? { network } : {}),
+      const rt = runner.sidecarRuntime();
+      // The setup secrets by env file only (owner decision 3): it exists only while `docker create` runs.
+      return withEnvFile(sidecarCreateEnv(req, rt).file, async (envFile) => {
+        const args = await sidecarCreateArgs(req, rt, {
+          mountRootSubpath: (c) => runner.mountRootSubpath(c), baseImage: opts.baseImage, ...(network ? { network } : {}), ...(envFile ? { envFile } : {}),
+        });
+        return (await dockerOk(args, `docker create ${sidecarContainerName(req.instanceId, req.spec.name)}`)).trim();
       });
-      return (await dockerOk(args, `docker create ${sidecarContainerName(req.instanceId, req.spec.name)}`)).trim();
     },
     async start(id, ref) {
       const started = await docker(['start', id]);

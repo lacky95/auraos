@@ -23,6 +23,7 @@
 import * as core from '@aura/core';
 import type { AccessPrincipal, ApprovalRecord, CredentialSummary, CredentialVault, GrantScope, GrantSubject } from '@aura/core';
 import type { ResolvedPrincipal } from './access/identify.ts';
+import { liveSetupService } from './setup/service.ts';
 import { credentialAsk, credentialDisplay, credentialReadDisplay, requesterReason, type CredentialAsk, type CredentialRead } from './approvals/display.ts';
 import {
   actionGate, consumeApproval, json, liveApprovalDeps, presentedApproval, refusal, requestApproval, requesterSummary,
@@ -41,6 +42,13 @@ export interface CredentialDeps extends ApprovalServiceDeps {
   };
   /** The install scope an app id resolves to and its installation, for pinning a grant (S1). */
   appBinding(appId: string): Promise<core.AppGrantBinding>;
+  /**
+   * D108 owner decision 2: the calling instance's installation and its
+   * current setup secret handles by field (the effective configuration), or
+   * null (no setup engine, no setup, not ready). Only a handle that is still
+   * its field's current one reads without a grant.
+   */
+  setupSecrets(instance: { appId: string; instanceId: string; userId?: string }): Promise<core.InstallationSecrets | null>;
 }
 
 export function liveCredentialDeps(): CredentialDeps {
@@ -52,6 +60,14 @@ export function liveCredentialDeps(): CredentialDeps {
     grants: svc.grants,
     appBinding: async (appId) => {
       try { return await core.getAppManager().appGrantBinding(appId); } catch { return { scope: undefined, installationId: null }; }
+    },
+    setupSecrets: async (instance) => {
+      const service = liveSetupService();
+      if (!service) return null;
+      try {
+        const view = await service.selfConfig(instance);
+        return view.appId === instance.appId ? { installationId: view.installationId, secrets: view.secrets } : null;
+      } catch { return null; }
     },
   };
 }
@@ -169,11 +185,13 @@ async function holdsRead(deps: CredentialDeps, appId: string, userId: string, na
   return core.appGrantCounts(g, await deps.appBinding(appId));
 }
 
-async function reveal(deps: CredentialDeps, p: core.InstancePrincipal, userId: string, name: string, via: string): Promise<string | null> {
+async function reveal(
+  deps: CredentialDeps, p: core.InstancePrincipal, userId: string, name: string, via: string, grant?: 'setup-generated' | 'credential.read',
+): Promise<string | null> {
   const value = await deps.vault.reveal(userId, name, p.appId);
   await audit(deps, {
     by: { kind: 'system' }, action: 'vault.read', target: `vault:${name}`, outcome: value === null ? 'failed' : 'ok',
-    detail: { name, app: p.appId, instance: p.instanceId, user: userId, via },
+    detail: { name, app: p.appId, instance: p.instanceId, user: userId, via, ...(grant ? { grant } : {}) },
   });
   return value;
 }
@@ -189,8 +207,14 @@ export async function readCredential(request: Request, handle: string | undefine
   // Another user's handle, another app's handle, a revoked one: all unknown.
   if (!held || held.consumer !== p.appId) return json({ error: 'not-found' }, 404);
 
-  // D108: the installation's own generated setup secret needs no grant (nobody typed it; core setup/values.ts).
-  const own = core.secretReadableWithoutGrant(held, (await deps.appBinding(p.appId)).installationId);
+  // D108 owner decision 2: the installation's own generated setup secret, while it is its field's current
+  // handle, needs no grant (nobody typed it; core setup/values.ts `secretReadableWithoutGrant`).
+  let own = false;
+  if (held.installation) {
+    const current = await deps.setupSecrets({ appId: p.appId, instanceId: p.instanceId, userId });
+    const pinned = (await deps.appBinding(p.appId)).installationId;
+    own = !!current && current.installationId === pinned && core.secretReadableWithoutGrant(held, current, handle);
+  }
   if (!own && !(await holdsRead(deps, p.appId, userId, held.name))) {
     const binding = await deps.appBinding(p.appId);
     if (!binding.installationId) {
@@ -215,7 +239,7 @@ export async function readCredential(request: Request, handle: string | undefine
       detail: { name: held.name, app: p.appId, user: userId, approval: gate.consumed()?.id },
     });
   }
-  const value = await reveal(deps, p, userId, held.name, 'handle');
+  const value = await reveal(deps, p, userId, held.name, 'handle', own ? 'setup-generated' : 'credential.read');
   if (value === null) return json({ error: 'not-found' }, 404);
   return json({ name: held.name, value });
 }

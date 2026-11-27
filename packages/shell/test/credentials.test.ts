@@ -107,6 +107,9 @@ let responses: string[];
 let scheme: 'http' | 'https';
 /** What an app grant counts for now (S1): the app's scope and installation. */
 let binding: core.AppGrantBinding;
+/** D108: the calling installation's current setup secret handles (its effective configuration), and who asked. */
+let setupCurrent: core.InstallationSecrets | null;
+let setupAsked: Array<{ appId: string; instanceId: string; userId?: string }>;
 
 function deps(): CredentialDeps & ApprovalRouteDeps {
   const d: CredentialDeps & ApprovalRouteDeps = {
@@ -129,6 +132,7 @@ function deps(): CredentialDeps & ApprovalRouteDeps {
     vault,
     grants,
     appBinding: async () => binding,
+    setupSecrets: async (i) => { setupAsked.push(i); return setupCurrent; },
     storeCredential: (userId, ask, value, record) => storeApprovedCredential(d, userId, ask, value, record),
   };
   return d;
@@ -145,6 +149,8 @@ beforeEach(() => {
   responses = [];
   scheme = 'https';
   binding = { scope: 'user', installationId: 'inst-1' };
+  setupCurrent = null;
+  setupAsked = [];
 });
 
 const req = (method: string, path: string, body?: unknown, headers: Record<string, string> = {}) => new Request(`http://shell.test${path}`, {
@@ -380,6 +386,57 @@ test('revoke: one app\'s access, then the whole secret; handles and grants stop 
   const revoked = audits.filter((a) => a.action === 'vault.revoked');
   assert.equal(revoked.length, 2);
   assert.ok(!JSON.stringify(audits).includes(SECRET));
+});
+
+// ── D108 owner decision 2: the app's own generated setup secret ─────────────
+
+test('a generated setup secret: the app reads its own without a grant, audited without the value; another installation, a stale handle and a typed secret need the grant; revoked → gone', async () => {
+  const gen = await vault.generate('default', { consumer: 'com.example.notes', installationId: 'inst-1', field: 'sessionKey' });
+  const name = core.setupSecretName('inst-1', 'sessionKey');
+  const value = await vault.reveal('default', name, 'com.example.notes');
+  assert.ok(value && value.length === 32);
+  setupCurrent = { installationId: 'inst-1', secrets: { sessionKey: gen.handle } };
+
+  const ok = await readValue(gen.handle);
+  assert.equal(ok.status, 200);
+  assert.deepEqual(ok.body, { name, value });
+  assert.deepEqual(setupAsked, [{ appId: 'com.example.notes', instanceId: 'com.example.notes-1', userId: 'default' }], 'the caller\'s own installation, from its verified principal');
+  assert.equal(grants.m.size, 0, 'no grant was needed or given');
+  assert.equal([...store.records.values()].filter((r) => r.action === 'credential.read').length, 0, 'no approval asked');
+  const reads = audits.filter((a) => a.action === 'vault.read');
+  assert.equal(reads.length, 1, 'one audit row per read');
+  assert.equal((reads[0]!.detail as any).grant, 'setup-generated');
+  assert.ok(!JSON.stringify(audits).includes(value!) && !JSON.stringify(audits).includes(gen.handle), 'no value, no handle in the audit');
+
+  // Another installation of the same app (its record, or the grant binding, says so): the normal grant.
+  setupCurrent = { installationId: 'inst-2', secrets: { sessionKey: gen.handle } };
+  assert.equal((await readValue(gen.handle)).status, 202);
+  setupCurrent = { installationId: 'inst-1', secrets: { sessionKey: gen.handle } };
+  binding = { scope: 'user', installationId: 'inst-2' };
+  assert.equal((await readValue(gen.handle)).status, 202);
+  binding = { scope: 'user', installationId: 'inst-1' };
+  // Purpose-bound: not (any more) its field's current handle, or another field holds it: the normal grant.
+  setupCurrent = { installationId: 'inst-1', secrets: { sessionKey: 'cred_' + 'Q'.repeat(22) } };
+  assert.equal((await readValue(gen.handle)).status, 202);
+  setupCurrent = { installationId: 'inst-1', secrets: { adminPassword: gen.handle } };
+  assert.equal((await readValue(gen.handle)).status, 202);
+  // No setup view (engine missing, setup not ready): the normal grant.
+  setupCurrent = null;
+  assert.equal((await readValue(gen.handle)).status, 202);
+  // A user-typed secret, even listed in the installation's current secrets: the normal grant.
+  const typed = await stored();
+  setupCurrent = { installationId: 'inst-1', secrets: { sessionKey: gen.handle, apiToken: typed } };
+  assert.equal((await readValue(typed)).status, 202);
+  // Another app holding nothing of it: unknown.
+  assert.equal((await readValue(gen.handle, SPY)).status, 404);
+
+  // Revoked (the owner's revoke of the app's access): the entry is gone and the next read fails.
+  assert.equal((await readValue(gen.handle)).status, 200);
+  assert.equal(await revokeCredential(deps(), 'default', name, 'com.example.notes', core.userAttribution({ userId: 'default' }), {}), true);
+  assert.equal(await vault.describe('default', name), null, 'a generated secret goes entirely');
+  assert.equal((await readValue(gen.handle)).status, 404);
+  assert.equal(audits.filter((a) => a.action === 'vault.revoked').length, 1);
+  assert.ok(!JSON.stringify(audits).includes(value!), 'no value in any audit row');
 });
 
 test('per-user isolation: another user\'s handle is unknown, and a request for another user cannot be stored', async () => {

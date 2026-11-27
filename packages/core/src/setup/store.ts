@@ -151,11 +151,29 @@ export function tamperAuditInput(ref: ConfigRecordRef): { by: { kind: 'system' }
   };
 }
 
-/** The vault port of `forgetInstallation`: the handle's app no longer holds it (CredentialVault.removeConsumer). */
-export function vaultHandleRevoker(vault: Pick<CredentialVault, 'resolve' | 'removeConsumer'>): RevokeSecretHandle {
+/**
+ * The vault port of `forgetInstallation`: the handle's app no longer holds it
+ * (CredentialVault.removeConsumer; a generated setup secret is removed
+ * entirely). One `vault.revoked` audit row per handle revoked (owner
+ * decision 2: revocation is audited), with the name, never a value or handle.
+ */
+export function vaultHandleRevoker(
+  vault: Pick<CredentialVault, 'resolve' | 'removeConsumer'>,
+  opts: { audit?(entry: { by: { kind: 'system' }; action: string; target: string; outcome: 'ok'; detail: Record<string, unknown> }): Promise<unknown> } = {},
+): RevokeSecretHandle {
   return async (userId, handle) => {
     const hit = await vault.resolve(userId, handle);
-    if (hit) await vault.removeConsumer(userId, hit.name, hit.consumer);
+    if (!hit) return;
+    if (!(await vault.removeConsumer(userId, hit.name, hit.consumer))) return;
+    try {
+      await opts.audit?.({
+        by: { kind: 'system' }, action: 'vault.revoked', target: `vault:${hit.name}`, outcome: 'ok',
+        detail: {
+          name: hit.name, app: hit.consumer, user: userId, via: 'delete-app-data',
+          ...(hit.installation ? { installation: hit.installation.installationId, field: hit.installation.field, generated: true } : {}),
+        },
+      });
+    } catch { /* the audit trail must not fail the delete */ }
   };
 }
 
