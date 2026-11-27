@@ -35,6 +35,12 @@ export interface OsEvents {
   /** The set of sidecars attached to an instance changed (appeared, vanished, or changed state). */
   'app:sidecarsChanged': { instanceId: string; appId: string; count: number };
   /**
+   * 5b RS: the kernel started an instance again that ended with the previous
+   * kernel (a runtime without `survivesShellRestart`, PRoot). `from` is the
+   * former instance id (its windows map to `to`). One emit site: AppManager.
+   */
+  'app:respawned': { from: string; to: string; appId: string };
+  /**
    * Restart that keeps windows (shell lib/appRestart.ts). `restarting` comes
    * before the old instances go down, so the desktop keeps their windows as
    * placeholders; `restarted` maps each old viewId to the new one.

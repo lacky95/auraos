@@ -99,6 +99,8 @@ export async function getRuntimes(_ctx: Ctx, deps: RuntimesDeps = liveRuntimesDe
       settingsSchema: m.descriptor.settingsSchema,
       settings,
       capabilities: m.capabilities(settings),
+      // D100 §12: technical feasibility, derived from the capabilities (never an authorization).
+      features: core.moduleFeatures(m, settings),
       // `detail` stays for the clients that read it (Settings, `aura runtime show`); `checks` is the ARI shape.
       health: { status: health.status, checks: health.checks, ...(refusal ? { detail: refusal } : {}) },
       instances: instances.filter((i) => i.sandbox === id && i.state !== 'destroyed')

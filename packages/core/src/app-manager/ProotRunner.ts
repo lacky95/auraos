@@ -15,7 +15,7 @@ import type { SandboxExecOpts, SandboxRunner, SandboxRunnerOpts } from './Sandbo
 import { OutputLog } from './outputLog.js';
 import type { SpawnContext } from '../scopes/types.js';
 import { VolumeStore } from '../context/VolumeStore.js';
-import { PROOT_HOST, securityEnvValue } from '../security/options.js';
+import { prootUnavailable } from '../runtimes/proot/host.js';
 import {
   ASTRO_START_SHELL, RAW_START_SHELL, PROVISION_TIMEOUT_MS, ProvisionWatch, nextHealthDeadline,
 } from './provisioning.js';
@@ -186,18 +186,8 @@ export function prootBinds(spec: ProotBindSpec): string[] {
   return args;
 }
 
-/**
- * Why the proot runtime cannot run an app on this host, or null (D75, D92):
- * the `proot-host` switch (`AURA_USE_PROOT`) is off, or the base rootfs is
- * missing. PRoot never runs an app unwrapped instead.
- */
-export function prootUnavailable(env: Record<string, string | undefined>, baseRootfs: string): string | null {
-  if (securityEnvValue(PROOT_HOST, env) !== true) {
-    return 'AURA_USE_PROOT is not true on this AuraOS (security option proot-host), and PRoot never runs an app unwrapped';
-  }
-  if (!existsSync(baseRootfs)) return `the base rootfs (${baseRootfs}) is missing`;
-  return null;
-}
+/** Owned by the PRoot module; re-exported for the runner's callers. */
+export { prootUnavailable };
 
 /** PRoot's placements (ARI-1): `master` (the default) and `pool`. */
 export type ProotPlacement = 'master' | 'pool';
@@ -291,7 +281,7 @@ export class ProotRunner implements SandboxRunner {
    * grant/revoke/install for live instances — so a running terminal sees a new
    * capability appear in PATH without a respawn.
    */
-  public provisionToolsDir(instanceId: string, manifest: AppManifest): string {
+  public provisionToolsDir(instanceId: string, manifest: Pick<AppManifest, 'tools'>): string {
     const dir = this.toolsDir(instanceId);
     provisionAllowlist({
       dataDir: this.dataDir,
@@ -328,7 +318,7 @@ export class ProotRunner implements SandboxRunner {
     // Fail closed (D75, D92): no `proot-host` switch or no rootfs means no
     // start; PRoot never runs an app unwrapped. The manifest's `useProot` is
     // not read (Q17). The runtime refuses this before a start already
-    // (runtimes/builtins/proot.ts); this keeps the runner from ever doing it.
+    // (runtimes/proot/index.ts); this keeps the runner from ever doing it.
     const why = prootUnavailable(process.env, this.baseRootfs);
     if (why) throw new Error(`[ProotRunner] runtime proot is not available: ${why}`);
     // D65: the resolved App Home, or no start.

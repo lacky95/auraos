@@ -1,5 +1,5 @@
 // SF-1 (D94 G8): `chroot <base-rootfs> apt-get …` needs /dev/null and friends.
-// lib/chrootDevices.ts makes them the right character devices (null 1,3,
+// core runtimes/proot/chrootDevices.ts makes them the right character devices (null 1,3,
 // zero 1,5, random 1,8, urandom 1,9; 0666 root), replaces a wrong node (the
 // stray regular /dev/null an earlier failed run left) atomically, never
 // follows a symlink, is idempotent and runs mknod by argv (no shell).
@@ -13,7 +13,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CHROOT_DEVICES, ensureChrootDevices, isChrootDevice, type ArgvRunner } from '../src/lib/chrootDevices.ts';
+import { CHROOT_DEVICES, ensureChrootDevices, isChrootDevice, type ArgvRunner } from '@aura/core';
 
 const NAMES = CHROOT_DEVICES.map((d) => d.name);
 
@@ -150,9 +150,10 @@ test('fails closed when mknod does not produce the device; no temporary file is 
 });
 
 test('source: no shell, mknod by argv only, rename for the swap', () => {
-  const src = readFileSync(new URL('../src/lib/chrootDevices.ts', import.meta.url), 'utf8');
+  const src = readFileSync(new URL('../../core/src/runtimes/proot/chrootDevices.ts', import.meta.url), 'utf8');
   assert.doesNotMatch(src, /child_process|\bexecSync\b|\bexec\(|shell:\s*true|\/bin\/sh|bash -c/);
   assert.match(src, /run\('mknod', \['-m', '0666', '--', tmp, 'c', /);
   assert.match(src, /renameSync\(tmp, path\)/);
   assert.ok(!existsSync(new URL('../src/lib/chrootDevices.sh', import.meta.url)));
+  assert.ok(!existsSync(new URL('../src/lib/chrootDevices.ts', import.meta.url)), 'one copy: the PRoot module owns it (5b PR)');
 });

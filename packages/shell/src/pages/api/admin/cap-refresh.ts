@@ -9,7 +9,9 @@ import { capRefreshRequest } from '../../../lib/approvals/maintenance.ts';
  * up the new symlink set in /aura/my-tools without a proot respawn (the bind
  * is at the directory level, so symlink mutations are immediately visible).
  *
- * Returns the list of refreshed instance IDs.
+ * Returns the refreshed instance IDs and, per running instance, what its
+ * runtime confirmed (`tools`: `RuntimeOperationResult`s, D100 §5): applied
+ * (with `enforcement: enforced|advisory`), failed or unsupported.
  *
  * The owner's (lib/approvals/maintenance.ts): the owner and the host operator
  * directly, the System Terminal with one click.
@@ -24,9 +26,13 @@ export const POST: APIRoute = async (ctx) => {
   const { appId } = r;
 
   try {
-    const refreshed = getAppManager().refreshInstanceTools(appId);
-    await auditOwner(actor, 'cap.refresh', { target: `app:${appId}`, outcome: 'ok', detail: { refreshed: refreshed.length } });
-    return new Response(JSON.stringify({ ok: true, appId, refreshed }), {
+    const tools = getAppManager().applyInstanceTools(appId);
+    const refreshed = tools.filter((t) => t.state === 'applied').map((t) => t.target.instanceId);
+    await auditOwner(actor, 'cap.refresh', {
+      target: `app:${appId}`, outcome: tools.every((t) => t.state === 'applied') ? 'ok' : 'failed',
+      detail: { refreshed: refreshed.length, notApplied: tools.length - refreshed.length },
+    });
+    return new Response(JSON.stringify({ ok: true, appId, refreshed, tools }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     });

@@ -39,6 +39,7 @@ function fake(manifests, instances = []) {
     async start(appId, opts) { f.starts.push([appId, opts]); return f.getInstancesByApp(appId)[0].instanceId; },
     // Stream R: liveness through the runtime's capability (PRoot: the shell's own pid).
     runtimeCapabilitiesOf: () => ({ survivesShellRestart: false }),
+    noteRespawn() {},
     runnerOf: () => ({
       isRunning: () => true,
       async callOptionalLifecycle(instanceId, hook, body) { calls.push({ instanceId, hook, body }); return { ok: true }; },

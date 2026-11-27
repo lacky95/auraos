@@ -17,9 +17,10 @@
  * `useProot` is never read.
  *
  * Registration refuses a module this kernel must not load (`ariRefusal`:
- * an ARI above `ARI_VERSION`, a bad id or descriptor, a duplicate id).
+ * an ARI above `ARI_VERSION`, a bad id or descriptor, a duplicate id, a
+ * capability group that disagrees with its feature).
  */
-import { ariRefusal, healthRefusal, type RuntimeDescriptor, type RuntimeHealth, type RuntimeModule } from './ari.js';
+import { ariRefusal, groupMismatch, healthRefusal, moduleFeatures, type RuntimeDescriptor, type RuntimeFeature, type RuntimeHealth, type RuntimeModule } from './ari.js';
 import type { SandboxRunner } from '../app-manager/SandboxRunner.js';
 import { requirementsOf, type RequirementsManifest } from './requirements.js';
 import { RuntimeSettingsError, settingsDefaults, validateSettings } from './settingsSchema.js';
@@ -94,6 +95,9 @@ export class RuntimeRegistry {
     if (refused) throw refused;
     const id = module.descriptor.id;
     if (this.modules.has(id)) throw new RuntimeModuleError('runtime-duplicate', id, `runtime ${id} is already registered`);
+    // A capability group is present exactly when its feature is supported (D100 §12, 5b CR).
+    const mismatch = groupMismatch(module, moduleFeatures(module, settingsDefaults(module.descriptor.settingsSchema)));
+    if (mismatch) throw new RuntimeModuleError('invalid-descriptor', id, `runtime ${id} is not consistent: ${mismatch}`);
     this.modules.set(id, module);
   }
 
@@ -162,6 +166,11 @@ export class RuntimeRegistry {
   /** The capabilities of a runtime under its current settings. */
   capabilitiesOf(id: string, record: RuntimeSettingsRecord | null): RuntimeCapabilities {
     return this.require(id).capabilities(this.settingsOf(id, record));
+  }
+
+  /** A runtime's features under its current settings (D100 §12): technical feasibility, never authorization. */
+  featuresOf(id: string, record: RuntimeSettingsRecord | null): RuntimeFeature[] {
+    return moduleFeatures(this.require(id), this.settingsOf(id, record));
   }
 
   /**

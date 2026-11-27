@@ -63,7 +63,7 @@ delete process.env['AURA_HOST_WORKSPACE'];
 const { AppManifestSchema } = await import('../dist/types/manifest.js');
 const { ContainerRunner } = await import('../dist/app-manager/ContainerRunner.js');
 const { ProotRunner } = await import('../dist/app-manager/ProotRunner.js');
-const { prootRuntime } = await import('../dist/runtimes/builtins/proot.js');
+const { prootRuntime } = await import('../dist/runtimes/proot/index.js');
 const { healthRefusal } = await import('../dist/runtimes/ari.js');
 
 const TMP = mkdtempSync(join(tmpdir(), 'aura-golden-'));

@@ -162,7 +162,9 @@ export function requireCapabilities(runtime: string, caps: RuntimeCapabilities, 
  * provider would send. Null for anything that is not a runtime refusal.
  */
 export interface RuntimeRefusal {
-  code: RuntimeUnavailableCode | 'capability-missing' | RuntimeResolutionCode | RuntimeModuleRefusalCode;
+  code: RuntimeRefusalCode;
+  /** D100 §17: what a client may do about it. Clients read this, never the message text. */
+  category: RuntimeErrorCategory;
   message: string;
   runtime?: string;
   appId?: string;
@@ -172,12 +174,48 @@ export interface RuntimeRefusal {
 
 export function runtimeRefusal(err: unknown): RuntimeRefusal | null {
   if (err instanceof RuntimeCapabilityError) {
-    return { code: err.code, message: err.message, runtime: err.runtime, missing: err.missing, ...(err.suggest ? { suggest: err.suggest } : {}) };
+    return { code: err.code, category: CATEGORY_OF_CODE[err.code], message: err.message, runtime: err.runtime, missing: err.missing, ...(err.suggest ? { suggest: err.suggest } : {}) };
   }
-  if (err instanceof RuntimeUnavailableError || err instanceof RuntimeModuleError) return { code: err.code, message: err.message, runtime: err.runtime };
-  if (err instanceof RuntimeResolutionError) return { code: err.code, message: err.message, appId: err.appId };
+  if (err instanceof RuntimeUnavailableError || err instanceof RuntimeModuleError) {
+    return { code: err.code, category: CATEGORY_OF_CODE[err.code], message: err.message, runtime: err.runtime };
+  }
+  if (err instanceof RuntimeResolutionError) return { code: err.code, category: CATEGORY_OF_CODE[err.code], message: err.message, appId: err.appId };
   return null;
 }
+
+/**
+ * The standard error categories (D100 §17), so a client tells "not
+ * authorized", "not supported", "temporary", "restart needed", "needs more
+ * infrastructure" and "not applied yet" apart without parsing messages.
+ */
+export type RuntimeErrorCategory =
+  | 'unsupported-operation' | 'unsupported-feature' | 'permission-denied' | 'runtime-unavailable'
+  | 'instance-not-found' | 'resource-exhausted' | 'restart-required' | 'recreate-required'
+  | 'provisioning-failed' | 'enforcement-failed' | 'operation-timeout' | 'operation-cancelled' | 'conflict';
+
+/** Every code a runtime refusal or a failed operation carries. */
+export type RuntimeRefusalCode =
+  | RuntimeUnavailableCode | 'capability-missing' | RuntimeResolutionCode | RuntimeModuleRefusalCode
+  | 'feature-unsupported' | 'instance-not-found' | 'provisioning-failed' | 'enforcement-failed' | 'restart-required' | 'operation-timeout';
+
+/** The one table from a code to its category (a `Record`: exhaustive at compile time). */
+export const CATEGORY_OF_CODE: Readonly<Record<RuntimeRefusalCode, RuntimeErrorCategory>> = Object.freeze({
+  'capability-missing': 'unsupported-feature',
+  'feature-unsupported': 'unsupported-feature',
+  'runtime-not-installed': 'runtime-unavailable',
+  'runtime-disabled': 'runtime-unavailable',
+  'runtime-unresolved': 'runtime-unavailable',
+  'runtime-decision-needed': 'conflict',
+  'ari-unsupported': 'unsupported-operation',
+  'invalid-runtime-id': 'unsupported-operation',
+  'invalid-descriptor': 'unsupported-operation',
+  'runtime-duplicate': 'conflict',
+  'instance-not-found': 'instance-not-found',
+  'provisioning-failed': 'provisioning-failed',
+  'enforcement-failed': 'enforcement-failed',
+  'restart-required': 'restart-required',
+  'operation-timeout': 'operation-timeout',
+});
 
 /** Where an installation's runtime came from (§11.2). */
 export type RuntimeSource = 'manifest' | 'default' | 'override' | 'migration';

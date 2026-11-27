@@ -17,18 +17,18 @@ function fake(manifests, instances = [], sessions = []) {
     instances: new Map(instances.map((i) => [i.instanceId, { inPool: false, state: 'resumed', ...i }])),
     poolHomes: new Map(),
     endedSessions: [],
-    // Stream J's session broker through the container runner (openSessions / endSession).
-    container: {
-      openSessions: () => sessions,
-      async endSession(id) { if (id.endsWith('-stuck')) return false; f.endedSessions.push(id); return true; },
-    },
+    // Stream J's session broker, through the container module's `sessions` group (5b CR).
+    runtimes: { list: () => [{ sessions: {
+      list: () => sessions,
+      async end(id) { if (id.endsWith('-stuck')) return false; f.endedSessions.push(id); return true; },
+    } }] },
     isEnabled: () => true,
     getInstancesByApp: (appId) => [...f.instances.values()].filter((i) => i.appId === appId),
     async spawnInstance(appId, opts) { f.spawned.push([appId, opts]); return `${appId}-new`; },
     async resume(id) { f.resumed.push(id); },
     async stop(id) { if (id.endsWith('-stuck')) throw new Error('stuck'); f.stopped.push(id); },
   };
-  for (const name of ['launch', 'endUserSessions', 'endJumpSessionsOf']) f[name] = AppManager.prototype[name].bind(f);
+  for (const name of ['launch', 'endUserSessions', 'endJumpSessionsOf', 'openSessions', 'endSession', 'modulesWith']) f[name] = AppManager.prototype[name].bind(f);
   return f;
 }
 

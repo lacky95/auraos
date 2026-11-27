@@ -547,6 +547,10 @@ const routes: RouteAccessManifest['routes'] = {
     methods: { POST: rule(INSTANCE, 'instance', { guard: 'rule', ...why(
       'The owner (the CLI through the trusted Terminal, D29, or the host operator) or the instance itself by its own token. A non-interactive session in the running app environment (J, D74): `home` private|ephemeral as the user, app as the app identity (the instance itself: app only); `sidecar` in the body is the owner\'s only (the handler). Audited as instance.exec.') }) },
   },
+  '/api/instances/[instanceId]/runtime': {
+    methods: { GET: rule(INSTANCE, 'instance', { guard: 'rule', ...why(
+      'The owner or the instance itself: where it runs (its runtime, the source of that choice, the runtime\'s features), for `aura info` (5b, D100 §7). Nothing secret.') }) },
+  },
   '/api/instances/[instanceId]/logs': {
     methods: { GET: rule(INSTANCE, 'instance', { guard: 'rule', ...why(
       'The owner or the instance itself: the app\'s own output (engine log, or the PRoot ring). `sidecar` is the owner\'s only (the handler). Audited as instance.logs.') }) },

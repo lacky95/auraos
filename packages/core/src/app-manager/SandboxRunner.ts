@@ -43,7 +43,7 @@ export interface SandboxRunner {
    * manifest's `tools[]` grants. Delegates to `provisionAllowlist` — see
    * tool-provision.ts for the hardlink/symlink modes.
    */
-  provisionToolsDir(instanceId: string, manifest: AppManifest): string;
+  provisionToolsDir(instanceId: string, manifest: Pick<AppManifest, 'tools'>): string;
   /** Tear down the allowlist dir. Called on instance destroy. */
   clearToolsDir(instanceId: string): void;
 

@@ -21,7 +21,7 @@ import { ACTIVITY_STATE_MAX_BYTES, FLIGHT_MODES } from '../types/activity.js';
 import { OsEventBus } from '../ipc/OsEventBus.js';
 import { AppRegistry } from './AppRegistry.js';
 import { toolsTrackInstalledCaps } from '../capabilities/tool-allowlist.js';
-import { SHARED_HOME_PATH, healImageTools, toolchainMirrorBin } from './tool-provision.js';
+import { SHARED_HOME_PATH, currentToolsMode, healImageTools, toolchainMirrorBin } from './tool-provision.js';
 import { readLibMap, replaceLibFile, restoreLibsFromStore, toolchainLibFor, toolchainMirrorLib } from './tool-libs.js';
 import { legacySharedHomeDir, masterHomeDir, userHomeDir } from '../scopes/home.js';
 import { PortAllocator } from './PortAllocator.js';
@@ -38,6 +38,10 @@ import { parentOfConsumer } from './MountManager.js';
 import type { InstanceSpawnContext, SandboxExecOpts, SandboxRunner } from './SandboxRunner.js';
 import type { RuntimeCapabilities } from '../runtimes/types.js';
 import { RuntimeRegistry, type ResolvedRuntime, type RuntimeModule } from '../runtimes/registry.js';
+import {
+  RESPAWN_FREEZE_MS, readRespawnRecord, respawnEntries, writeRespawnRecord, type RespawnEntry,
+} from '../runtimes/respawn.js';
+import { moduleFeatures, operationResult, type RuntimeFeature, type RuntimeOperationResult, type RuntimeSessionInfo } from '../runtimes/ari.js';
 import { BUILTIN_RUNTIMES } from '../runtimes/builtins/index.js';
 import { RUNTIME_AUDIT_ACTIONS, RuntimeSettingsStore } from '../runtimes/settingsStore.js';
 import { migrateLegacyRuntimes, processLegacyEnv, type MigrationApp } from '../runtimes/migrateLegacy.js';
@@ -193,7 +197,13 @@ export class AppManager {
   readonly runtimes: RuntimeRegistry;
   /** The Runtime Settings record (`user:policy:runtimes`, ARI §9.7). */
   readonly runtimeSettings: RuntimeSettingsStore;
-  /** The container runtime's runner: what only it backs (adoption, builds, mounts, ports, sidecars). */
+  /**
+   * The container runtime's runner, for what is not behind ARI yet: app
+   * builds and provisioning (the kernel build service; 5b-2 D-B) and the
+   * mount, port and sidecar managers (5b G retypes them; D-M, D-P, D-S).
+   * Adoption, sessions, workloads, tools and usage go through the runtime
+   * modules' capability groups (5b CR, D77), never through this field.
+   */
   private readonly container: ContainerRunner;
   /** Phase 5 spawn seams, used only by `spawnContext`. */
   private readonly homes: HomeResolver;
@@ -246,7 +256,7 @@ export class AppManager {
    */
   private adoptionPending = false;
   /** Last known sidecars per backend, refreshed by `syncSidecars` (reconciler cadence). */
-  private sidecars: Array<{ runner: SandboxRunner; info: SidecarInfo }> = [];
+  private sidecars: Array<{ module: RuntimeModule; info: SidecarInfo }> = [];
   /** Consecutive syncs each sidecar's parent was absent — see selectOrphanSidecars. */
   private sidecarAbsence = new Map<string, number>();
   /** Sidecars kept running across a restart/crash of their instance (sidecarParking.ts). */
@@ -339,7 +349,10 @@ export class AppManager {
         runtimeAudit(RUNTIME_AUDIT_ACTIONS.settingsInvalid, runtime, { reason });
       },
     });
-    const builtinDeps = { container: this.container, proot: new ProotRunner(runnerOpts), baseRootfs: opts.baseRootfs };
+    const builtinDeps = {
+      container: this.container, proot: new ProotRunner(runnerOpts), baseRootfs: opts.baseRootfs,
+      toolsMode: () => currentToolsMode(opts.dataDir),
+    };
     for (const module of [...BUILTIN_RUNTIMES.map((b) => b.create(builtinDeps)), ...(opts.runtimes ?? [])]) {
       try { this.runtimes.register(module); } catch (err) {
         // A refused module is not loaded: an app naming it gets the Q17 `runtime-not-installed` error.
@@ -601,10 +614,94 @@ export class AppManager {
     if (blocked) this.reloadManifest(appId);
   }
 
-  /** Record an adopted instance's lifecycle status (ContainerRunner `measureAdopted`). Never throws. */
+  // ─── 5b RS: the kernel respawn of non-surviving runtimes (runtimes/respawn.ts) ──
+
+  /** Former instance id → the respawn of it (resolves to the new id, or null when it failed or was not one). */
+  private readonly respawns = new Map<string, Promise<string | null>>();
+  /** Writes start once init has read the previous record and started the respawns. */
+  private respawnArmed = false;
+  private respawnFrozenUntil = 0;
+  private respawnQueued = false;
+  private respawnLast = '';
+  private readonly respawnInstallations = new Map<string, string | null>();
+
+  /**
+   * The instance a former one was respawned as, once its respawn has run
+   * (the desktop restore maps windows with it); null when it was not
+   * respawned or the start failed.
+   */
+  respawnedInstance(formerInstanceId: string): Promise<string | null> {
+    return this.respawns.get(formerInstanceId) ?? Promise.resolve(null);
+  }
+
+  /** Started again through the normal resolve, one after another, in the background; failures fail closed (logged). */
+  private respawnFromRecord(entries: readonly RespawnEntry[]): void {
+    const settle = new Map<string, (id: string | null) => void>();
+    for (const e of entries) this.respawns.set(e.formerInstanceId, new Promise((r) => settle.set(e.formerInstanceId, r)));
+    this.respawnArmed = true;
+    OsEventBus.on('os:shuttingDown', () => { this.respawnFrozenUntil = Date.now() + RESPAWN_FREEZE_MS; });
+    void (async () => {
+      for (const e of entries) {
+        let to: string | null = null;
+        try {
+          to = await this.respawnOne(e);
+          if (to) {
+            console.log(`[AppManager] respawned ${e.formerInstanceId} as ${to} (${e.appId})`);
+            OsEventBus.emit('app:respawned', { from: e.formerInstanceId, to, appId: e.appId });
+          }
+        } catch (err) {
+          console.warn(`[AppManager] respawn of ${e.formerInstanceId} (${e.appId}) failed: ${(err as Error).message}`);
+        }
+        settle.get(e.formerInstanceId)?.(to);
+      }
+      this.noteRespawn();
+    })();
+  }
+
+  private async respawnOne(e: RespawnEntry): Promise<string | null> {
+    const manifest = this.registry.getById(e.appId);
+    if (!manifest || !this.isEnabled(e.appId)) return null;
+    if (manifest.componentType === 'service' || manifest.autoStart) return null; // started by init anyway
+    if (e.installationId && (await this.installationIdOf(e.appId)) !== e.installationId) return null; // reinstalled
+    return this.start(e.appId, e.owner ? { userId: e.owner } : {});
+  }
+
+  /** Rewrite the record after a lifecycle change (coalesced; frozen during a shutdown). */
+  private noteRespawn(): void {
+    if (!this.respawnArmed || this.respawnQueued) return;
+    this.respawnQueued = true;
+    queueMicrotask(() => {
+      this.respawnQueued = false;
+      if (Date.now() < this.respawnFrozenUntil) return;
+      void this.writeRespawn().catch((err) => console.warn(`[AppManager] respawn record: ${(err as Error).message}`));
+    });
+  }
+
+  private async writeRespawn(): Promise<void> {
+    const cands = [...this.instances.values()].map((i) => {
+      const m = this.registry.getById(i.appId);
+      const module = i.sandbox ? this.runtimes.get(i.sandbox) : undefined;
+      return {
+        instanceId: i.instanceId, appId: i.appId, state: i.state, ...(i.owner ? { owner: i.owner } : {}),
+        inPool: i.inPool, preview: i.preview,
+        survives: module ? module.capabilities({}).survivesShellRestart : null,
+        startedByKernel: !m || m.componentType === 'service' || !!m.autoStart,
+      };
+    });
+    for (const c of cands) {
+      if (c.survives === false && !this.respawnInstallations.has(c.appId)) this.respawnInstallations.set(c.appId, await this.installationIdOf(c.appId));
+    }
+    const record = { v: 1 as const, entries: respawnEntries(cands, (appId) => this.respawnInstallations.get(appId) ?? null) };
+    const text = JSON.stringify(record);
+    if (text === this.respawnLast || Date.now() < this.respawnFrozenUntil) return;
+    if (writeRespawnRecord(this.dataDir, record)) this.respawnLast = text;
+    else console.warn('[AppManager] respawn record: cannot write it');
+  }
+
+  /** Record an adopted instance's lifecycle status (its runtime's `adoption.measure`). Never throws. */
   private async measureAdopted(instanceId: string): Promise<void> {
     try {
-      const status = await this.container.measureAdopted?.(instanceId);
+      const status = await this.moduleOf(instanceId).adoption?.measure(instanceId);
       const inst = this.instances.get(instanceId);
       if (status && inst) inst.lifecycle = status;
     } catch (err) {
@@ -635,9 +732,19 @@ export class AppManager {
    * nothing falls back to another runner (Q17).
    */
   private runnerOf(instanceId: string): SandboxRunner {
+    return this.moduleOf(instanceId).runner;
+  }
+
+  /** The runtime module of an instance (its latched `sandbox`); same errors as `runnerOf`. */
+  private moduleOf(instanceId: string): RuntimeModule {
     const sandbox = this.instances.get(instanceId)?.sandbox;
     if (!sandbox) throw new Error(`${instanceId} has no runtime: it is not a spawned instance`);
-    return this.runtimes.runner(sandbox);
+    return this.runtimes.require(sandbox);
+  }
+
+  /** Every runtime module that has the capability group (D100: groups, never a concrete runner). */
+  private modulesWith<G extends 'adoption' | 'sessions' | 'workloads' | 'usage'>(group: G): Array<RuntimeModule & Required<Pick<RuntimeModule, G>>> {
+    return this.runtimes.list().filter((m) => m[group] !== undefined) as Array<RuntimeModule & Required<Pick<RuntimeModule, G>>>;
   }
 
   /** The capabilities of an instance's runtime (ARI §9.5), or null for an unknown instance. */
@@ -645,6 +752,22 @@ export class AppManager {
     const sandbox = this.instances.get(instanceId)?.sandbox;
     const module = sandbox ? this.runtimes.get(sandbox) : undefined;
     return module ? module.runner.capabilities() : null;
+  }
+
+  /**
+   * Where an instance runs, as the kernel knows it (D100 §7, `aura info`): its
+   * runtime, how it was chosen, and that runtime's features. Null for an
+   * unknown instance. Technical feasibility only, never an authorization.
+   */
+  runtimeViewOf(instanceId: string): { runtime: string; source?: string; features: RuntimeFeature[] } | null {
+    const inst = this.instances.get(instanceId);
+    const module = inst?.sandbox ? this.runtimes.get(inst.sandbox) : undefined;
+    if (!inst?.sandbox || !module) return null;
+    return {
+      runtime: inst.sandbox,
+      ...(inst.runtimeSource ? { source: inst.runtimeSource } : {}),
+      features: moduleFeatures(module, {}),
+    };
   }
 
   /**
@@ -1202,21 +1325,37 @@ export class AppManager {
    * that want to confirm what was refreshed).
    */
   refreshInstanceTools(appId: string): string[] {
+    return this.applyInstanceTools(appId).filter((r) => r.state === 'applied').map((r) => r.target.instanceId);
+  }
+
+  /**
+   * The app's tool grant applied to every running instance through its
+   * runtime's `tools` group (D100 §5): per instance, what the provider
+   * confirmed (`applied`, with `enforcement: enforced|advisory`), `failed`
+   * or `unsupported`. `aura cap grant|revoke` prints it.
+   */
+  applyInstanceTools(appId: string): RuntimeOperationResult[] {
     const manifest = this.registry.getById(appId);
     if (!manifest) return [];
-    const refreshed: string[] = [];
+    const results: RuntimeOperationResult[] = [];
     for (const inst of this.getInstancesByApp(appId)) {
+      const target = { instanceId: inst.instanceId };
+      let r: RuntimeOperationResult;
       try {
-        this.runnerOf(inst.instanceId).provisionToolsDir(inst.instanceId, manifest);
+        const tools = this.moduleOf(inst.instanceId).tools;
+        r = tools
+          ? tools.apply(inst.instanceId, { tools: manifest.tools })
+          : operationResult('tools.liveGrant', target, 'unsupported', { error: { code: 'feature-unsupported', message: `runtime ${inst.sandbox} provisions no tools` } });
         // OS sidecars with tools of their own hold (theirs ∩ the app's): a
         // grant/revoke on the app, or a template edit, changes them too.
-        this.osSidecars.refreshTools(inst.instanceId);
-        refreshed.push(inst.instanceId);
+        if (r.state === 'applied') this.osSidecars.refreshTools(inst.instanceId);
       } catch (err) {
-        console.warn(`[AppManager] refresh tools failed for ${inst.instanceId}: ${(err as Error).message}`);
+        r = operationResult('tools.liveGrant', target, 'failed', { error: { code: 'provisioning-failed', message: (err as Error).message } });
       }
+      if (r.state !== 'applied') console.warn(`[AppManager] refresh tools for ${inst.instanceId}: ${r.state}${r.error ? `: ${r.error.message}` : ''}`);
+      results.push(r);
     }
-    return refreshed;
+    return results;
   }
 
   /**
@@ -1438,6 +1577,8 @@ export class AppManager {
 
   async init(): Promise<void> {
     mkdirSync(join(this.dataDir, 'apps'), { recursive: true });
+    // 5b RS: what ran on a non-surviving runtime when the previous kernel ended, read before anything changes it.
+    const respawn = readRespawnRecord(this.dataDir).entries;
     this.healToolchainShims();
     await this.prepareAppHostGuard();
     await this.registry.init();
@@ -1453,6 +1594,8 @@ export class AppManager {
       console.error('[AppManager] orphan adoption failed at boot; the reconciler retries it');
     }
     if (!this.adoptionPending) await this.reconcileSurvivors();
+    // Before any start, so an autoStart app or a service comes back fresh, with a token.
+    await this.stopTokenlessSurvivors();
     // Sidecars likewise outlive this process: a docker daemon restart removes
     // the `--rm` app containers but revives their `unless-stopped` sidecars,
     // which nothing would ever reap. Same ordering constraint as mounts. At
@@ -1467,6 +1610,8 @@ export class AppManager {
     await this.migrateRuntimes();
     // Stream C (Q7): before any start, so the first spawn already gets only granted keys.
     await this.migrateContext();
+    // 5b RS (D73, D77): after the D75 migration and the Context migration, so a respawn resolves like any start.
+    this.respawnFromRecord(respawn);
     this.startReconciler();
     // Background, missing images only — never delays boot.
     for (const m of this.registry.getAll()) {
@@ -1526,31 +1671,41 @@ export class AppManager {
    * False when the scan failed (the survivors are unknown); never throws.
    */
   private async adoptOrphans(): Promise<boolean> {
+    // D77: every runtime whose instances outlive the kernel has the `adoption` group; none is hard-wired.
+    let complete = true;
+    for (const module of this.modulesWith('adoption')) {
+      if (!(await this.adoptFrom(module))) complete = false;
+    }
+    return complete;
+  }
+
+  /** Adopt one runtime's survivors. False when its scan failed (the survivors are unknown); never throws. */
+  private async adoptFrom(module: RuntimeModule & Required<Pick<RuntimeModule, 'adoption'>>): Promise<boolean> {
+    const runtime = module.descriptor.id;
     try {
-      const runner = this.container;
-      const orphans = runner.listOrphanRecords ? await runner.listOrphanRecords() : [];
-      if (!orphans) return false;
+      const survivors = await module.adoption.list();
+      if (!survivors) return false;
       // Idle warm-pool members stay pool members: adopted as ordinary
       // instances, every restart left one more window-less container behind
       // while the pool spawned a fresh one.
       const pooled = this.loadPoolIds();
       this.loadPoolHomes();
-      for (const o of orphans) {
+      for (const o of survivors) {
         // Known already, or still the runner's (a late pass: mid-stop).
-        if (this.instances.has(o.instanceId) || runner.isRunning(o.instanceId)) continue;
+        if (this.instances.has(o.instanceId) || module.runner.isRunning(o.instanceId)) continue;
         const inst: AppInstance = {
           instanceId:        o.instanceId,
           appId:             o.appId,
           state:             'resumed',
           port:              o.port,
-          pid:               o.pid,
+          pid:               null,
           startedAt:         new Date(),
           lastTransitionAt:  new Date(),
           restartCount:      0,
           inPool:            pooled.has(o.instanceId),
-          sandbox:           'container',
-          owner:             adoptedInstanceOwner(o.ownerLabel, pooled.has(o.instanceId)),
-          // D77: the identity it was started with, as the container says (never re-chowned).
+          sandbox:           runtime,
+          owner:             adoptedInstanceOwner(o.owner, pooled.has(o.instanceId)),
+          // D77: the identity it was started with, as the runtime says (never re-chowned).
           ...adoptedIdentity(o.user),
           // A preview survives as one: never a provider or interface, reaped when idle.
           ...(o.preview ? { preview: { workspace: o.preview, startedAt: new Date().toISOString() } } : {}),
@@ -1562,8 +1717,9 @@ export class AppManager {
         // ('installed'), every lifecycle call on an adopted instance failed —
         // `stop` answered "Invalid lifecycle transition: installed → pausing".
         this.fsm.set(o.instanceId, 'resumed');
-        // Containers from before instance tokens carry no nonce: they keep
-        // working, but the token-gated routes answer 401 until they restart.
+        // D89 (owner answer 5): the workload token is mandatory, so a survivor from before tokens
+        // is never adopted as a running instance: it is stopped through its lifecycle below and
+        // started fresh (with a token) by whatever starts it next.
         if (o.tokenNonce) this.tokens.register(o.instanceId, o.tokenNonce);
         // Bump nextInstanceNum so future spawns don't collide with this
         // adopted name. Instance IDs are "<appId>-<n>" or "<appId>" (single).
@@ -1575,13 +1731,13 @@ export class AppManager {
         }
         const manifest = this.registry.getById(o.appId);
         if (manifest) {
-          this.container.registerAdopted?.(o);
-          // Wire the crash handler so a dying adopted container is detected
-          // (registerAdopted starts the `docker wait` watcher that fires this).
+          inst.pid = module.adoption.adopt(o.instanceId).pid;
+          // Wire the crash handler so a dying adopted instance is detected
+          // (`adopt` starts the runtime's exit watch that fires this).
           // Without it the instance would stick in `resumed` forever and be
           // unrecoverable via `start`/`restart`.
-          this.container.onExit(o.instanceId, (code) => this.handleUnexpectedExit(o.instanceId, o.appId, code));
-          if (!inst.preview) {
+          module.runner.onExit(o.instanceId, (code) => this.handleUnexpectedExit(o.instanceId, o.appId, code));
+          if (!inst.preview && o.tokenNonce) {
             this.providers.registerInstance(inst, manifest);
             this.interfaces.registerInstance(inst, manifest);
           }
@@ -1591,16 +1747,39 @@ export class AppManager {
           // reconciler will tear the container down on the next pass anyway.
           console.warn(`[AppManager] skipping orphan adoption for ${o.instanceId}: manifest for ${o.appId} not found`);
         }
-        console.log(`[AppManager] adopted orphan container ${o.instanceId} (appId=${o.appId}, port=${o.port})`);
+        if (manifest && !o.tokenNonce) {
+          console.warn(`[AppManager] ${o.instanceId} predates workload tokens (D89): stopping it through its lifecycle; it starts fresh`);
+          this.tokenlessSurvivors.add(o.instanceId);
+          continue;
+        }
+        console.log(`[AppManager] adopted orphan ${runtime} instance ${o.instanceId} (appId=${o.appId}, port=${o.port})`);
         // The lifecycle checks a fresh start makes, again (F0a): the status
         // `aura get inst -o wide` shows. In the background: never holds boot.
         if (manifest) void this.measureAdopted(o.instanceId);
       }
     } catch (err) {
-      console.warn(`[AppManager] orphan adoption failed: ${(err as Error).message}`);
+      console.warn(`[AppManager] orphan adoption (${runtime}) failed: ${(err as Error).message}`);
       return false;
     }
     return true;
+  }
+
+  /**
+   * D89 (owner answer 5): survivors without a workload token, stopped through
+   * their lifecycle (never kept as adopted instances); the next start of the
+   * app (a window, autoStart, a service, the pool) spawns them fresh with a
+   * token. Reported once each, in the boot log. Never throws.
+   */
+  private readonly tokenlessSurvivors = new Set<string>();
+  private async stopTokenlessSurvivors(): Promise<void> {
+    for (const instanceId of [...this.tokenlessSurvivors]) {
+      this.tokenlessSurvivors.delete(instanceId);
+      try { await this.stop(instanceId); }
+      catch (err) {
+        console.warn(`[AppManager] stopping tokenless survivor ${instanceId} failed (${(err as Error).message}); killing it`);
+        try { this.forceKill(instanceId); } catch { /* the reconciler reaps it */ }
+      }
+    }
   }
 
   /** After adoption: drop the mounts, port forwards and OS sidecars of instances that did not survive. */
@@ -2261,17 +2440,26 @@ export class AppManager {
     return { uid: r.uid, gid: r.gid, ...(account?.username ? { account: account.username } : {}) };
   }
 
-  /** The open in-environment sessions (stream J; never persisted). */
-  openSessions(): ReturnType<ContainerRunner['openSessions']> {
-    return this.container.openSessions();
+  /** The open in-environment sessions of every runtime with the `sessions` group (stream J; never persisted). */
+  openSessions(): RuntimeSessionInfo[] {
+    return this.modulesWith('sessions').flatMap((m) => m.sessions.list());
+  }
+
+  /** Ends one open session through the runtime that holds it. */
+  private async endSession(sessionId: string): Promise<boolean> {
+    for (const m of this.modulesWith('sessions')) {
+      if (!m.sessions.list().some((r) => r.sessionId === sessionId)) continue;
+      return m.sessions.end(sessionId).catch(() => false);
+    }
+    return false;
   }
 
   /** Ends the open root tabs of an instance (or every one): `aura root end`, Settings End. */
   async endRootSessions(instanceId?: string): Promise<string[]> {
     const ended: string[] = [];
-    for (const r of this.container.openSessions()) {
+    for (const r of this.openSessions()) {
       if (r.kind !== 'root' || (instanceId && r.instanceId !== instanceId)) continue;
-      if (await this.container.endSession(r.sessionId).catch(() => false)) ended.push(r.sessionId);
+      if (await this.endSession(r.sessionId)) ended.push(r.sessionId);
     }
     return ended;
   }
@@ -2605,6 +2793,7 @@ export class AppManager {
       // newly visible instance (it filters by !inPool, so this is effectively
       // an "appeared" event for that view).
       OsEventBus.emit('app:stateChanged', { instanceId: inst.instanceId, appId, state: inst.state, port: inst.port });
+      this.noteRespawn();
       console.log(`[AppManager] pool: claimed ${inst.instanceId} for user`);
       return inst;
     }
@@ -2725,9 +2914,9 @@ export class AppManager {
    */
   private async endJumpSessionsOf(userId: string): Promise<number | null> {
     let ended = 0;
-    for (const r of this.container.openSessions()) {
+    for (const r of this.openSessions()) {
       if (r.userId !== userId) continue;
-      if (await this.container.endSession(r.sessionId).catch(() => false)) ended++;
+      if (await this.endSession(r.sessionId)) ended++;
       else console.warn(`[AppManager] could not end jump session ${r.sessionId} of a disabled user`);
     }
     return ended;
@@ -2778,7 +2967,7 @@ export class AppManager {
 
     // Clear instance after destroy
     this.runnerOf(instanceId).clearToolsDir(instanceId);
-    this.container.clearMountRoot?.(instanceId);
+    this.runnerOf(instanceId).clearMountRoot?.(instanceId);
     this.releaseHostSlot(appId, instanceId);
     this.instances.delete(instanceId);
     this.instanceHomes.delete(instanceId);
@@ -2815,8 +3004,10 @@ export class AppManager {
     }
     // 3. Belt-and-braces: remove any container the host still has for this app
     //    (untracked survivors — adoption-skipped, lost across restarts, etc.).
-    try { await this.container.killAllForApp?.(appId); }
-    catch (err) { console.warn(`[AppManager] container sweep for ${appId} failed: ${(err as Error).message}`); }
+    for (const m of this.modulesWith('adoption')) {
+      try { await m.adoption.removeAllOf(appId); }
+      catch (err) { console.warn(`[AppManager] ${m.descriptor.id} sweep for ${appId} failed: ${(err as Error).message}`); }
+    }
   }
 
   /**
@@ -2850,14 +3041,16 @@ export class AppManager {
     if (killed) {
       this.fsm.set(instanceId, 'destroyed');
       OsEventBus.emit('app:stateChanged', { instanceId, appId, state: 'destroyed', port: null });
+      this.noteRespawn();
     }
     this.runnerOf(instanceId).clearToolsDir(instanceId);
-    this.container.clearMountRoot?.(instanceId);
+    this.runnerOf(instanceId).clearMountRoot?.(instanceId);
     this.releaseHostSlot(appId, instanceId);
     this.instances.delete(instanceId);
     this.instanceHomes.delete(instanceId);
     this.fsm.delete(instanceId);
     this.nextActivityNum.delete(instanceId);
+    this.noteRespawn();
   }
 
   async pause(instanceId: string): Promise<void> {
@@ -3072,6 +3265,7 @@ export class AppManager {
       this.providers.registerInstance(inst, manifest);
       this.interfaces.registerInstance(inst, manifest);
       OsEventBus.emit('app:stateChanged', { instanceId: inst.instanceId, appId: inst.appId, state: inst.state, port: inst.port });
+      this.noteRespawn();
       console.log(`[AppManager] pool: auto-claimed ${inst.instanceId} (activity open on pool member)`);
       this.scheduleRefill(inst.appId);
       await this.notifyAssigned(inst);
@@ -3686,6 +3880,7 @@ export class AppManager {
       state,
       port: this.instances.get(instanceId)?.port ?? null,
     });
+    this.noteRespawn();
   }
 
   private upsertInstance(instanceId: string, appId: string, patch: Partial<AppInstance>): void {
@@ -3731,6 +3926,7 @@ export class AppManager {
       this.adoptionPending = false;
       console.log('[AppManager] reconcile: surviving containers adopted');
       await this.reconcileSurvivors();
+      await this.stopTokenlessSurvivors();
       if (this.appHostsReady) {
         await this.settleAdoptedSlots().catch((err) => console.warn(`[AppManager] app host slots after adoption: ${(err as Error).message}`));
       }
@@ -3767,6 +3963,7 @@ export class AppManager {
           // whole group — preferable to leaving a squatter behind.
           try { this.runnerOf(inst.instanceId).forceKill(inst.instanceId); } catch { /* runner may already have evicted it */ }
           OsEventBus.emit('app:stateChanged', { instanceId: inst.instanceId, appId: inst.appId, state: 'error', port: null });
+          this.noteRespawn();
           OsEventBus.emit('app:crashed',      { instanceId: inst.instanceId, appId: inst.appId, error: 'reconciled: backing process disappeared' });
         }
       }
@@ -3902,7 +4099,7 @@ export class AppManager {
     for (const instanceId of this.sidecarParking.takeExpired()) {
       if (this.instances.has(instanceId)) continue; // back (and adopted) after all
       console.warn(`[AppManager] ${instanceId} did not come back — reaping its parked sidecars`);
-      this.container.reapSiblingsOf?.(instanceId);
+      for (const m of this.modulesWith('workloads')) m.workloads.removeOf(instanceId);
     }
     await this.syncSidecars(2);
   }
@@ -3915,12 +4112,11 @@ export class AppManager {
   private async syncSidecars(graceTicks: number): Promise<void> {
     // Survivors unknown: their sidecars must not look orphaned.
     if (this.adoptionPending) return;
-    const fresh: Array<{ runner: SandboxRunner; info: SidecarInfo }> = [];
-    for (const runner of new Set(this.runtimes.list().map((m) => m.runner))) {
-      if (!runner.listSidecars) continue;
-      const list = await runner.listSidecars();
+    const fresh: Array<{ module: RuntimeModule; info: SidecarInfo }> = [];
+    for (const module of this.modulesWith('workloads')) {
+      const list = await module.workloads.list();
       if (!list) return;
-      for (const info of list) fresh.push({ runner, info });
+      for (const info of list) fresh.push({ module, info });
     }
     // Snapshot live instances AFTER listing: an instance always exists before
     // it can create a sidecar, so this order can't misclassify a new one.
@@ -3929,9 +4125,9 @@ export class AppManager {
     const orphans = selectOrphanSidecars(fresh.map((s) => s.info), live, this.sidecarAbsence, graceTicks);
     if (orphans.length > 0) {
       const orphanIds = new Set(orphans.map((o) => o.id));
-      for (const runner of new Set(fresh.map((s) => s.runner))) {
-        const ids = fresh.filter((s) => s.runner === runner && orphanIds.has(s.info.id)).map((s) => s.info.id);
-        if (ids.length > 0) runner.removeSidecars?.(ids);
+      for (const module of new Set(fresh.map((s) => s.module))) {
+        const ids = fresh.filter((s) => s.module === module && orphanIds.has(s.info.id)).map((s) => s.info.id);
+        if (ids.length > 0) module.workloads?.remove(ids);
       }
       for (const o of orphans) {
         console.warn(`[AppManager] reaped orphan sidecar ${o.id} (parent ${o.parentInstanceId} is gone)`);
@@ -3969,16 +4165,16 @@ export class AppManager {
     instance: ResourceUsage | null;
     sidecars: Array<SidecarInfo & { usage: ResourceUsage | null }>;
   }> {
-    const own = this.runnerOf(instanceId);
+    const own = this.moduleOf(instanceId);
     const attached = this.sidecars.filter((s) => s.info.parentInstanceId === instanceId);
-    const byRunner = new Map<SandboxRunner, string[]>();
-    for (const s of attached) byRunner.set(s.runner, [...(byRunner.get(s.runner) ?? []), s.info.id]);
-    if (!byRunner.has(own)) byRunner.set(own, []);
+    const byModule = new Map<RuntimeModule, string[]>();
+    for (const s of attached) byModule.set(s.module, [...(byModule.get(s.module) ?? []), s.info.id]);
+    if (!byModule.has(own)) byModule.set(own, []);
     const usage = new Map<string, ResourceUsage>();
-    for (const [runner, sidecarIds] of byRunner) {
-      if (!runner.usage) continue;
-      const res = await runner.usage({ instanceIds: runner === own ? [instanceId] : [], sidecarIds });
-      for (const [k, v] of res) usage.set(k, v);
+    for (const [module, sidecarIds] of byModule) {
+      if (!module.usage) continue;
+      const res = await module.usage({ instanceIds: module === own ? [instanceId] : [], sidecarIds });
+      for (const [k, v] of Object.entries(res)) usage.set(k, v);
     }
     return {
       instance: usage.get(instanceId) ?? null,
@@ -4012,7 +4208,7 @@ export class AppManager {
     // Sidecars that opted in (aura.keep-restart=1) are parked instead, so a
     // respawn adopts them; they are reaped if it doesn't come back in time.
     this.sidecarParking.park(instanceId);
-    this.runnerOf(instanceId).reapSiblingsOf?.(instanceId, { keep: { services: keepServicesOf(this.registry.getById(appId)) } });
+    this.moduleOf(instanceId).workloads?.removeOf(instanceId, { keepServices: keepServicesOf(this.registry.getById(appId)) });
     // Same reasoning for cross-app mounts: a crash skips onDestroy, and a bind
     // left under the dead instance's data dir pins the source filesystem.
     this.mounts.removeAll(instanceId);
@@ -4026,6 +4222,7 @@ export class AppManager {
       inst.error = `Process exited with code ${code}`;
     }
     OsEventBus.emit('app:stateChanged', { instanceId, appId, state: 'error', port: null });
+    this.noteRespawn();
     OsEventBus.emit('app:crashed',      { instanceId, appId, error: `Process exited with code ${code}` });
     console.error(`[AppManager] ${instanceId} crashed (exit code ${code})`);
   }
