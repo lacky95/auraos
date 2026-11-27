@@ -26,11 +26,13 @@ export interface SpawnContext {
   /** Absolute path: <scope.dataDir>/apps/<appId>/<instanceId> */
   instanceDataDir: string;
   /**
-   * Bearer token for the token-gated OS routes (see InstanceTokens), injected
-   * as AURA_INSTANCE_TOKEN; its nonce is recorded on the container
-   * (`aura.token.nonce`) so it survives a shell restart.
+   * The workload token (D89; mandatory since 5b): the bearer token for the
+   * token-gated OS routes (see InstanceTokens), minted by the kernel on every
+   * spawn and injected by every runtime as AURA_INSTANCE_TOKEN; its nonce is
+   * recorded on the container (`aura.token.nonce`) so it survives a shell
+   * restart. A workload without it is anonymous, never identified by address.
    */
-  instanceToken?: { token: string; nonce: string };
+  instanceToken: { token: string; nonce: string };
   /**
    * The app's effective source mode (nexus/AppSource.ts). A closed agent
    * workspace gets its own source read-only (ContainerRunner). Absent: open.

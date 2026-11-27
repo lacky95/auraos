@@ -130,6 +130,17 @@ export const BUILTIN_PERMISSIONS = [
   'sidecars.manageAll',
 ] as const;
 
+/**
+ * Reserved permission namespaces (interface registry review R10, D98/D99):
+ * no permission in them exists yet, and none is implied by a wildcard, a
+ * role or a broad grant. `system.provider.*` is for the app-provided system
+ * services (BT-S): providing or replacing the Interface Registry, the Event
+ * System or the Scheduler is declared and activated by the owner through its
+ * own mechanism, never by holding a permission named here. Catalogue only:
+ * nothing enforces it in this release.
+ */
+export const RESERVED_PERMISSION_NAMESPACES: readonly string[] = Object.freeze(['system.provider.']);
+
 export const PermissionSchema = z.string();
 export type Permission = z.infer<typeof PermissionSchema>;
 

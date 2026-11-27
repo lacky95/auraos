@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
-  RuntimeRegistry, builtInRuntimeRecord, runtimeNeeds, validateSettings, settingsDefaults, RuntimeSettingsError,
+  RuntimeRegistry, builtInRuntimeRecord, requirementsOf, validateSettings, settingsDefaults, RuntimeSettingsError,
   RuntimeSettingsStore, RuntimeChangeError, RUNTIME_POLICY_KEY, parseRuntimeRecord,
   migrateLegacyRuntimes, decideMigration, classify, legacyRuntime,
   RuntimeUnavailableError, RuntimeCapabilityError, RuntimeResolutionError,
@@ -123,7 +123,7 @@ test('capabilities from the manifest: a closed app, sidecars or port expose on P
     (e) => e instanceof RuntimeCapabilityError && e.code === 'capability-missing' && e.missing.includes('readOnlyBinds') && /ARI-4/.test(e.message));
   assert.throws(() => resolve(reg, app({ sandbox: 'proot', services: [{ name: 'db', image: 'redis:7' }] }), rec),
     (e) => e instanceof RuntimeCapabilityError && e.missing.includes('sidecars'));
-  assert.deepEqual(runtimeNeeds(app({ services: [{ name: 'db', image: 'redis:7' }] }), 'closed'), { sidecars: true, readOnlyBinds: true });
+  assert.deepEqual(requirementsOf(app({ services: [{ name: 'db', image: 'redis:7' }] }), { sourceMode: 'closed' }).needs, { sidecars: true, readOnlyBinds: true });
   assert.equal(resolve(reg, app(), rec, { sourceMode: 'closed' }).runtime, 'container');
 });
 
@@ -343,8 +343,8 @@ test('D75 owner decision: adopt the default, or keep PRoot for an open app only;
 test('a fake runtime registers through the registry and resolves in AppManager with no edit to it', async () => {
   const dataDir = mkdtempSync(join(TMP, 'mgr-'));
   const fakeCaps = { ...CONTAINER_CAPS, isolation: 'vm' };
-  const fake = { descriptor: { id: 'fake', title: 'Fake', description: 'test', builtIn: false, settingsSchema: { type: 'object', properties: {} } },
-    runner: { capabilities: () => fakeCaps }, capabilities: () => fakeCaps, unavailable: () => null };
+  const fake = { descriptor: { id: 'fake', version: '0.1.0', ari: 1, title: 'Fake', description: 'test', builtIn: false, settingsSchema: { type: 'object', properties: {} }, settingsVersion: 1 },
+    runner: { capabilities: () => fakeCaps }, capabilities: () => fakeCaps, health: () => ({ status: 'ok', checks: [] }), endpoint: () => null };
   const mgr = new AppManager({ appsDir: join(dataDir, 'apps'), dataDir, baseRootfs: ROOTFS, toolchainDir: join(dataDir, 'tc'), runtimes: [fake] });
   assert.ok(mgr.runtimes.get('fake'));
   // The Valkey store, swapped for memory (the record knows the registry's runtimes).

@@ -8,7 +8,7 @@ import { localSystemId } from '@aura/core/system-identity';
 import { isIP } from 'node:net';
 import { loadAppHostServices, type AppHostServices } from '../../../server/app-host-auth.mjs';
 import { gatewayClaimOf, ownerSsrClaimOf, ownerUiActs, ownerUiApp } from '../../../server/gateway-identity.mjs';
-import { SESSION_HOST_APPS } from '../../../server/session-hosts.mjs';
+import { OWNER_AGENT_APPS as OWNER_AGENT_APP_IDS, SESSION_HOST_APPS } from '../../../server/session-hosts.mjs';
 import type { AccessTarget, AccessVia, VerifiedIdentity } from './types.ts';
 
 /**
@@ -433,7 +433,7 @@ export function actingInstance(p: AccessPrincipal): InstancePrincipal | null {
  * Their upstreams take the `owner` level only (decide.ts, H2, D89 B6): no
  * other app instance reaches them through /api/proxy, whatever its token.
  */
-export const OWNER_AGENT_APPS: ReadonlySet<string> = new Set(['com.aura.terminal', 'com.aura.aurashelld']);
+export const OWNER_AGENT_APPS: ReadonlySet<string> = OWNER_AGENT_APP_IDS;
 
 /** D69 (stream T): the session host apps, one list (server/terminal-embed.mjs). */
 export { SESSION_HOST_APPS };

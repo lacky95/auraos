@@ -1,0 +1,18 @@
+{
+  "about": "Home import markers (Q15; philosophy audit #10/#11, N1): data, not kernel code. `apps`: home paths a known app uses (this installation's apps; edit freely). `tools`: home paths a capability (tool) keeps its state in. `personal`: paths whose contents are a personal login (prefix match on the home-relative path); an import skips them unless asked for. Read by core homes/importMarkers.ts from AURA_HOME_IMPORT_MARKERS, /os/home-import/markers.json or /workspace/os/home-import/markers.json.",
+  "apps": {
+    "io.lakner.improvementboard": [".claude.json", ".claude", ".codex"],
+    "dev.box": [".config/code-server", ".local/share/code-server", ".config/gh", ".config/glab-cli", ".gitconfig"],
+    "io.lakner.terminalx": [".gitconfig", ".config/glab-cli"]
+  },
+  "tools": {
+    "claude": [".claude.json", ".claude"],
+    "codex": [".codex"],
+    "gh": [".config/gh"],
+    "glab": [".config/glab-cli"],
+    "git": [".gitconfig"],
+    "ssh": [".ssh"],
+    "npm": [".npmrc"]
+  },
+  "personal": [".claude/.credentials.json", ".ssh", ".config/gh/hosts.yml", ".config/glab-cli/config.yml", ".npmrc", ".codex/auth.json"]
+}

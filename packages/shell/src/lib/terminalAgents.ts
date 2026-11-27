@@ -23,7 +23,7 @@
  * which D28 identifies only from a container: a PRoot app like TerminalX has
  * no network identity.
  */
-import type { AgentHooksChange } from './approvals/display.ts';
+import { adapterFiles, type AdapterChange } from './approvals/display.ts';
 
 /** How often a running stream checks that its app still holds the grant. */
 export const GRANT_RECHECK_MS = 30_000;
@@ -114,12 +114,14 @@ export function createAgentEventsRoute(deps: AgentEventsDeps): (request: Request
 
 // ── agent hooks ─────────────────────────────────────────────────────────────
 
-const HOOK_CHANGES: Readonly<Record<string, AgentHooksChange['op']>> = { POST: 'install', DELETE: 'remove' };
+const HOOK_CHANGES: Readonly<Record<string, AdapterChange['op']>> = { POST: 'install', DELETE: 'remove' };
+/** What the approval names (the route's words; the files come from the Terminal's own status). */
+const HOOKS_WHAT = 'the Terminal\'s session hooks';
 
 export interface AgentHooksDeps {
   caller(request: Request): Promise<Caller>;
   /** Null when the change may go ahead (its approval used up), else the answer (lib/approvals `approvedOrAsk`). */
-  approve(request: Request, change: AgentHooksChange): Promise<Response | null>;
+  approve(request: Request, change: AdapterChange): Promise<Response | null>;
   /** `/api/agent-hooks` on that instance with this method; null when not running. */
   forward(instanceId: string, method: string): Promise<Response | null>;
   /** D69: as AgentEventsDeps `owns`: the hooks live in that user's Private Home. */
@@ -135,7 +137,11 @@ export function createAgentHooksRoute(deps: AgentHooksDeps): (request: Request) 
     if (deps.owns && !(await deps.owns(request, instanceId))) return notRunning(instanceId);
     const op = HOOK_CHANGES[request.method];
     if (op && caller) {
-      const asked = await deps.approve(request, { op });
+      // Audit #1: the adapter (the Terminal) says which files it changes; the owner approves exactly those.
+      const status = await reach(instanceId, () => deps.forward(instanceId, 'GET'));
+      if (!status.ok) return status;
+      const files = adapterFiles(((await status.json().catch(() => null)) as { paths?: unknown } | null)?.paths);
+      const asked = await deps.approve(request, { what: HOOKS_WHAT, op, files });
       if (asked) return asked;
     }
     return reach(instanceId, () => deps.forward(instanceId, request.method));

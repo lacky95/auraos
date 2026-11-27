@@ -20,6 +20,7 @@
 import { join } from 'node:path';
 import { homeDirFor, homeSubpathFor } from '../scopes/home.js';
 import { HomeDeniedError, type EnvironmentScope, type ExecutionContext, type HomeKind, type JumpHomeMode } from './types.js';
+import { SESSION_HOST_APP_IDS } from '../system/systemApps.js';
 
 /** App Homes, as a subpath inside the app-data volume (D65). */
 export const APP_HOMES_SUBPATH = 'aura/apphomes';
@@ -96,8 +97,8 @@ export function planHomeTarget(dataDir: string, req: HomeTargetRequest): HomeTar
   throw new HomeDeniedError('not-authorized', 'unknown execution context');
 }
 
-/** Apps whose instances are a user's terminal sessions (D69): their home is the owner's Private Home. */
-export const TERMINAL_SESSION_APPS: ReadonlySet<string> = new Set(['com.aura.terminal']);
+/** Apps whose instances are a user's terminal sessions (D69): their home is the owner's Private Home. One list: system/systemApps.ts. */
+export const TERMINAL_SESSION_APPS: ReadonlySet<string> = SESSION_HOST_APP_IDS;
 
 export interface HomePlanInstance {
   instanceId: string;

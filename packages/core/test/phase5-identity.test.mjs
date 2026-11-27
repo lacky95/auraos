@@ -22,6 +22,9 @@ import { LINUX_ID_RANGES, formatPrincipalRef } from '../dist/identity/types.js';
 import { appAccountName, renderGroup, renderPasswd } from '../dist/identity/passwd.js';
 import { buildOwnershipReport } from '../dist/identity/ownershipReport.js';
 import { buildImportReport, PERSONAL_NOTE } from '../dist/homes/importReport.js';
+import { loadHomeImportMarkers, parseHomeImportMarkers, HomeImportMarkersError } from '../dist/homes/importMarkers.js';
+
+const SHIPPED_MARKERS = new URL('../../../os/home-import/markers.json', import.meta.url).pathname;
 import { homePlan, planHomeTarget } from '../dist/homes/plan.js';
 import { HomeDeniedError } from '../dist/homes/types.js';
 
@@ -258,7 +261,7 @@ test('the import report: static table plus granted tools, personal credentials m
     { installationId: 'i-board', appId: 'io.lakner.improvementboard' },
     { installationId: 'i-x', appId: 'io.lakner.terminalx', tools: ['ssh', 'git'] },
     { installationId: 'i-n', appId: 'com.example.none' },
-  ], { now });
+  ], { now, markers: loadHomeImportMarkers({ AURA_HOME_IMPORT_MARKERS: SHIPPED_MARKERS }) });
   const board = rep.installations.find((i) => i.appId === 'io.lakner.improvementboard');
   assert.deepEqual(board.candidates.map((c) => c.path), ['.claude', '.claude.json']);
   const claude = board.candidates.find((c) => c.path === '.claude');
@@ -269,6 +272,16 @@ test('the import report: static table plus granted tools, personal credentials m
   assert.ok(x.candidates.find((c) => c.path === '.ssh').personal.length > 0);
   assert.deepEqual(rep.installations.find((i) => i.appId === 'com.example.none').candidates, []);
   assert.ok(!JSON.stringify(rep).includes('never read'));
+});
+
+test('import markers are data (audit #11, N1): validated; missing or invalid refuses, never an empty personal list', () => {
+  assert.throws(() => loadHomeImportMarkers({ AURA_HOME_IMPORT_MARKERS: '/nonexistent/markers.json' }), HomeImportMarkersError);
+  assert.throws(() => parseHomeImportMarkers({ apps: {}, tools: {} }), /personal/);
+  assert.throws(() => parseHomeImportMarkers({ personal: ['../etc/passwd'] }), HomeImportMarkersError);
+  assert.throws(() => parseHomeImportMarkers({ personal: ['/abs'] }), HomeImportMarkersError);
+  const m = parseHomeImportMarkers({ personal: ['.ssh'], tools: { ssh: ['.ssh'] } });
+  assert.deepEqual([m.apps, m.tools, m.personal], [{}, { ssh: ['.ssh'] }, ['.ssh']]);
+  assert.ok(loadHomeImportMarkers({ AURA_HOME_IMPORT_MARKERS: SHIPPED_MARKERS }).personal.length > 0);
 });
 
 // ── the Home Resolver in report mode ────────────────────────────────────────

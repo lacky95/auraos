@@ -118,6 +118,8 @@ async function ensureAppManager() {
       shellPort:    Number(process.env['AURA_SHELL_PORT']     ?? 3000),
       // Stream C: the Context migration's source scan (System Management), handed to the kernel here (D97: no app-manager -> contract import).
       contractScan: core.scanContractSources,
+      // 5b K: the identity, user, grant and audit services, handed in (D97: no app-manager -> auth/services import).
+      auth: core.getAuthServices,
     });
     // Hydrate per-app enable state BEFORE init() so its autoStart / warmPool
     // / service-spawn loops skip disabled apps from the very first tick.

@@ -135,7 +135,7 @@ export async function importReport(): Promise<core.ImportReport> {
     const installationId = await installationOf(m.id, m.scopeId);
     if (installationId) installations.push({ installationId, appId: m.id, tools: Array.isArray(m.tools) ? m.tools : [] });
   }
-  return core.buildImportReport(core.userHomeDir(dataDir()), installations);
+  return core.buildImportReport(core.userHomeDir(dataDir()), installations, { markers: core.loadHomeImportMarkers() });
 }
 
 export interface IdentityCheck {

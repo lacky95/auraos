@@ -45,15 +45,21 @@ export interface RuntimesState {
 /** Human labels for the capability table (Settings shows the same). */
 export const CAPABILITY_LABELS: Record<string, string> = {
   isolation: 'Isolation',
+  network: 'Network',
+  appHome: 'App Home',
   privateHomeSession: 'Private Home in jump',
   sessionExec: 'Isolated jump session',
   identity: 'Per-app identities',
   readOnlyBinds: 'Read-only binds (closed apps)',
+  hostFilesystem: 'Host filesystem',
   mounts: 'Cross-app mounts',
+  idmappedMounts: 'Writable cross-uid mounts',
   portExpose: 'Port expose',
   sidecars: 'Sidecars',
   warmPool: 'Warm pool',
   survivesShellRestart: 'Survives a shell restart',
+  usage: 'Usage metering',
+  gpu: 'GPU',
 };
 
 /** A capability value for people: booleans as yes/no, with the fail-closed note. */
@@ -206,17 +212,19 @@ export function registerRuntime(program: Command): void {
 
   rt.command('check <id>').description('Would it run there? A read-only capability check: an app\'s needs and/or named needs.')
     .option('--app <appId>', 'What this app\'s manifest needs')
-    .option('--need <list>', 'jump, mount, closed, sidecars, port-expose or capability names (comma-separated)')
+    .option('--need <list>', 'jump, home-private|app|ephemeral, mount, idmap-mount, closed, sidecars, port-expose, host-filesystem or capability names (comma-separated)')
     .option('-o, --output <fmt>', 'text | json', 'text')
     .action(async (id: string, o: { app?: string; need?: string; output: string }) => {
       const needs = o.need ? o.need.split(',').map((s) => s.trim()).filter(Boolean) : [];
-      const r = await change('check', () => api.post<{ ok: boolean; missing: string[]; unavailable?: string; enabled: boolean }>(`${ROUTE}/check`, {
+      const r = await change('check', () => api.post<{ ok: boolean; missing: string[]; suggest?: string[]; unavailable?: string; enabled: boolean }>(`${ROUTE}/check`, {
         runtime: id, ...(o.app ? { appId: o.app } : {}), needs,
       }));
       if (o.output === 'json') { console.log(JSON.stringify(r, null, 2)); return; }
       if (r.ok) { ok(`${id}: yes`); return; }
       const why = [
         ...(r.missing.length ? [`capability-missing: ${r.missing.map((m) => CAPABILITY_LABELS[m] ?? m).join(', ')}`] : []),
+        // D73: named only, never picked.
+        ...(r.missing.length && r.suggest ? [r.suggest.length ? `it could run on: ${r.suggest.join(', ')}` : 'no installed runtime can run it'] : []),
         ...(!r.enabled ? ['disabled'] : []),
         ...(r.unavailable ? [`unavailable: ${r.unavailable}`] : []),
       ];

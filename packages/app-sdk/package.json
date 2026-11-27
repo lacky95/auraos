@@ -52,6 +52,10 @@
     "./runtime/next": {
       "import": "./dist/runtime/next.js",
       "types": "./dist/runtime/next.d.ts"
+    },
+    "./workload-env": {
+      "import": "./dist/workload-env.js",
+      "types": "./dist/workload-env.d.ts"
     }
   },
   "scripts": {

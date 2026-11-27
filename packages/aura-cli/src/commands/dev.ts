@@ -2,7 +2,7 @@ import type { Command } from 'commander';
 import { existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, statSync, chmodSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { AppManifestSchema, AURA_CONTRACT, AURA_NPMRC, initRepo, needsNpmrc, newOriginId, portPackageJsonForScope, portToolsForScope } from '@aura/core';
+import { AppManifestSchema, AURA_CONTRACT, AURA_NPMRC, initRepo, needsNpmrc, newOriginId, portPackageJsonForScope, portToolsForScope, requirementsOf, type AppManifest, type RuntimeRequirements } from '@aura/core';
 import { color, error, fail, info, ok, warn } from '../lib/format.js';
 import { CONTRACT_DOCS_HINT, DOCS_HINT, lintAppSources, lintContract, lintManifestKeys, type Finding } from '../lib/apphost-lint.js';
 import { promptText, promptChoice, promptConfirm, promptMultiSelect, PromptCancelled, BACK, type MultiSelectMode } from '../lib/prompts.js';
@@ -862,9 +862,14 @@ The app contract checks (D48, warnings: report only):
   - SDK calls whose permission is missing (user.confirm, storage, osSidecars, notifications)
   - services[] without sidecars.spawn or docker; privileged sidecars without sidecars.privileged
   - the docker CLI or socket without "docker" in tools[]; interfaces.resolve() of a name not in consumes[]
+Runtime requirements (D85 A5, warnings: report only): the capabilities the app needs from its
+runtime, why it needs this host's filesystem (A4), checked against each enabled runtime of the
+AuraOS this runs on (not checked when none is reachable), plus portability notes for fields that
+are facts of this host (A6, informational).
 Skips node_modules, dist, .astro and .next. ${DOCS_HINT}; ${CONTRACT_DOCS_HINT}.`)
-    .action((path: string | undefined, opts: { all?: boolean; source?: boolean }) => {
+    .action(async (path: string | undefined, opts: { all?: boolean; source?: boolean }) => {
       const targets: string[] = [];
+      const requirements: Array<{ manifest: AppManifest; req: RuntimeRequirements }> = [];
       if (opts.all) {
         targets.push(...allManifestPaths());
       } else if (path) {
@@ -907,6 +912,7 @@ Skips node_modules, dist, .astro and .next. ${DOCS_HINT}; ${CONTRACT_DOCS_HINT}.
             }
             findings.push(...lintManifestKeys(m, text, data, result.data, REMOVED_MANIFEST_KEYS));
             findings.push(...lintContract(m, text, result.data, { source: opts.source !== false }));
+            requirements.push({ manifest: result.data, req: requirementsOf(result.data) });
           }
         } catch (err) { warn(`${m}: ${String(err)}`); failed++; }
         if (opts.source !== false) findings.push(...lintAppSources(dirname(m)));
@@ -920,6 +926,7 @@ Skips node_modules, dist, .astro and .next. ${DOCS_HINT}; ${CONTRACT_DOCS_HINT}.
           + (appsWithProblems.length ? ` — needs attention: ${appsWithProblems.join(', ')}` : '')
           + `. ${DOCS_HINT}`);
       }
+      if (requirements.length) await printRuntimeRequirements(requirements);
       // A missing SDK export crashes the app at load; everything else is a warning.
       if (failed > 0 || tally.error > 0) process.exit(1);
     });
@@ -1215,4 +1222,45 @@ function registerDevOrigin(dev: Command): void {
       if (!r || r.skipped) fail(`${appId}: ${r?.skipped ?? 'not changed'}`);
       ok(`${r!.appId} ${color.dim(`(${r!.scope})`)}: ${r!.previous ?? color.dim('(none)')} → ${r!.originId}`);
     });
+}
+
+/**
+ * `aura dev validate`: the "Runtime requirements" section (Phase 5b Q; D85
+ * A5, A6). What each app needs from its runtime (core `requirementsOf`, the
+ * one derivation), checked against every enabled runtime of the AuraOS this
+ * runs on (`POST /api/admin/runtimes/check {requirements}`): ok, or what is
+ * missing and which runtimes could run it. Warnings only: the exit code is
+ * unchanged, and nothing is checked when no AuraOS is reachable.
+ */
+export async function printRuntimeRequirements(
+  apps: Array<{ manifest: AppManifest; req: RuntimeRequirements }>,
+  client: Pick<typeof api, 'get' | 'post'> = api,
+): Promise<void> {
+  console.log(color.bold('Runtime requirements'));
+  let runtimes: Array<{ id: string; enabled: boolean }> | null = null;
+  try {
+    runtimes = (await client.get<{ runtimes: Array<{ id: string; enabled: boolean }> }>('/api/admin/runtimes')).runtimes.filter((r) => r.enabled);
+  } catch { /* no AuraOS reachable, or not the owner's: said below */ }
+  for (const { manifest, req } of apps) {
+    const sandbox = manifest.sandbox ? ` (sandbox: ${manifest.sandbox})` : '';
+    console.log(`  ${manifest.id}${sandbox}: ${req.capabilities.length ? req.capabilities.join(', ') : 'nothing beyond the basics'}`);
+    if (req.hostFilesystem.needed) console.log(color.dim(`    host filesystem (A4): ${req.hostFilesystem.because.join(', ')}`));
+    for (const n of req.notes) info(color.dim(`    note: ${n.field}: ${n.note} (portability, informational)`));
+    if (!runtimes) { console.log(color.dim('    runtimes: not checked (no AuraOS reachable)')); continue; }
+    for (const r of runtimes) {
+      try {
+        const c = await client.post<{ ok: boolean; missing: string[]; suggest?: string[]; unavailable?: string }>('/api/admin/runtimes/check',
+          { runtime: r.id, requirements: { needs: req.needs } });
+        if (c.ok) { console.log(`    ${r.id}: ${color.green('ok')}`); continue; }
+        const why = [
+          ...(c.missing.length ? [`missing ${c.missing.join(', ')}`] : []),
+          ...(c.unavailable ? [`unavailable: ${c.unavailable}`] : []),
+          ...(c.missing.length && c.suggest ? [c.suggest.length ? `it could run on: ${c.suggest.join(', ')}` : 'no installed runtime can run it'] : []),
+        ];
+        warn(`    ${r.id}: ${why.join('; ')}`);
+      } catch (err) {
+        console.log(color.dim(`    ${r.id}: not checked (${(err as Error).message.split('\n')[0]})`));
+      }
+    }
+  }
 }

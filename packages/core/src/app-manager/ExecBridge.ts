@@ -46,6 +46,7 @@ import type { SidecarInfo } from '../types/instance.js';
 import type { SandboxRunner } from './SandboxRunner.js';
 import { DockerApiError, EngineDemux, type EngineClient } from './DockerApi.js';
 import type { OutputStream } from './outputLog.js';
+import type { SessionSpec } from '../runtimes/ari.js';
 
 export const EXEC_SUBPROTOCOL = 'aura.exec.v1';
 
@@ -68,33 +69,12 @@ export interface EngineContainer {
 
 /**
  * One in-environment session as the kernel decided it (D74, ARI §9.6): what a
- * runtime's `openSession` executes. Built only by the kernel from the verified
- * caller and the session record; nothing in it comes from the client except
- * argv, cwd, the terminal size and the TERM/LANG env.
+ * runtime's `openSession` executes. The ARI contract shape (runtimes/ari.ts);
+ * built only by the kernel from the verified caller and the session record;
+ * nothing in it comes from the client except argv, cwd, the terminal size and
+ * the TERM/LANG env.
  */
-export interface SessionSpec {
-  sessionId: string;
-  instanceId: string;
-  /** `user`: the user's identity (private, ephemeral); `app`: the app's (D79); `root`: a root tab (J.6). */
-  kind: 'user' | 'app' | 'root';
-  home: { mode: JumpHomeMode; hostPath: string | null };
-  uid: number;
-  gid: number;
-  groups: number[];
-  env: Record<string, string>;
-  cwd?: string;
-  argv: string[];
-  tty: boolean;
-  cols: number;
-  rows: number;
-  /** The session's /etc/passwd and /etc/group, bound in its mount namespace only. */
-  passwd?: string;
-  group?: string;
-  /** A root tab only: the Docker socket and CLI in the session's namespace (J.6). */
-  dockerSocket?: boolean;
-  /** The human user the session acts for (audit, the session table). */
-  userId?: string;
-}
+export type { SessionSpec };
 
 /** The kernel's part of a session spec (AppManager `sessionContext`). */
 export type SessionContext = Omit<SessionSpec, 'sessionId' | 'instanceId' | 'argv' | 'tty' | 'cols' | 'rows'>;

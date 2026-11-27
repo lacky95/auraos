@@ -234,17 +234,38 @@ export function confirmDisplay(payload: ConfirmPayload, requestedBy: string, rea
   };
 }
 
-// ── terminal.agent-hooks ────────────────────────────────────────────────────
+// ── app.adapter-change ──────────────────────────────────────────────────────
 
-export interface AgentHooksChange { op: 'install' | 'remove' }
+/**
+ * A system app's adapter changes files in the owner's home (philosophy audit
+ * #1): what it is (`what`, the route's own words), install or remove, and
+ * the files, as the adapter itself reported them. The shell names no product
+ * and no product file: a new agent integration changes the adapter, not this.
+ */
+export interface AdapterChange {
+  /** What is installed or removed, e.g. "the Terminal's session hooks" (route-defined, never from the client). */
+  what: string;
+  op: 'install' | 'remove';
+  /** Home-relative files the adapter changes (`~/…`), from the adapter's own status. */
+  files: string[];
+}
 
-export function agentHooksDisplay(change: AgentHooksChange, requestedBy: string): ApprovalDisplay {
+/** Home-relative (`~/…`) display paths of the absolute files an adapter reports, sorted, at most 8. */
+export function adapterFiles(paths: unknown, home = '/home/aura'): string[] {
+  const list = paths && typeof paths === 'object' ? Object.values(paths as Record<string, unknown>) : [];
+  const shown = list.filter((p): p is string => typeof p === 'string' && p.startsWith('/'))
+    .map((p) => (p === home ? '~' : p.startsWith(`${home}/`) ? `~/${p.slice(home.length + 1)}` : p));
+  return [...new Set(shown)].sort().slice(0, 8);
+}
+
+export function adapterChangeDisplay(change: AdapterChange, requestedBy: string): ApprovalDisplay {
+  const files = change.files.length ? change.files.join(', ') : 'files';
   return {
-    title: change.op === 'install' ? 'Install the Terminal\'s agent hooks' : 'Remove the Terminal\'s agent hooks',
+    title: clip(`${change.op === 'install' ? 'Install' : 'Remove'} ${change.what}`),
     details: [
-      'Changes ~/.claude/settings.json and ~/.codex/config.toml in your home, which every app shares (each file is backed up first).',
+      clip(`Changes ${files} in your home, which every app shares (each file is backed up first).`),
       change.op === 'install'
-        ? 'Claude Code and Codex then report what they do to the Terminal session they run in.'
+        ? 'Agents running in a Terminal session then report what they do to that session.'
         : 'Only the Terminal\'s own entries go.',
     ],
     requestedBy,

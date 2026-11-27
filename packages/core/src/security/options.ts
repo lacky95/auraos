@@ -206,6 +206,15 @@ export const SECURITY_OPTIONS: readonly SecurityOption[] = Object.freeze([
     since: '2026-11-26', phase: '5 (R2, D92)',
   },
   {
+    id: 'runtime-install',
+    title: 'Installable runtimes',
+    description: 'Runtime modules beyond the built-in container and PRoot: a Nexus package of kind runtime, run out of '
+      + 'process as a driver that speaks ARI, signed, installed and enabled by the owner at fresh. Not yet available: only '
+      + 'the built-in runtimes exist, and a module whose ARI is newer than this AuraOS is refused (ARI §4.1-4.3, ARI-2).',
+    type: 'enum', values: ['built-in-only'], default: 'built-in-only', source: 'reserved',
+    restartRequired: false, change: 'fresh', since: '2026-11-26', phase: 'later (ARI §4.1)',
+  },
+  {
     id: 'aura-root',
     title: 'Root tab (`aura root`)',
     description: 'enabled (default): the owner can open a dedicated root tab (`aura root` in their own Terminal) with the '
