@@ -14,7 +14,8 @@ import * as core from '@aura/core';
 import type { ApprovalClaim, ApprovalDecider, ApprovalRecord, ApprovalRequest, ApprovalResult } from '@aura/core';
 import { ownerAction, type OwnerActionDeps } from '../src/lib/approvals/admin.ts';
 import {
-  checkCreateInputs, createLevel, createPayload, createRequest, duplicateFile, filesDigest, manifestFromDir, manifestFromFiles,
+  changedSinceApproval, checkCreateInputs, createLevel, createPayload, createRequest, duplicateFile, filesDigest, manifestFromDir, manifestFromFiles,
+  revalidationRefusal, validateScaffold, type ScaffoldEnv,
   treeDigest, type CreateFile, type CreateTarget,
 } from '../src/lib/approvals/appCreate.ts';
 import { EXPLANATION_MAX_BYTES } from '../src/lib/approvals/display.ts';
@@ -141,10 +142,11 @@ test('the files digest covers every path, mode and content, in no particular ord
   assert.notEqual(filesDigest(f), filesDigest(files({ name: 'Notez' })));
   assert.notEqual(filesDigest(f), filesDigest([f[0]!, { ...f[1]!, mode: 0o644 }]));
   assert.notEqual(filesDigest(f), filesDigest(files({}, [{ relPath: '.npmrc', content: '' }])));
-  const base = createPayload(target(f));
-  assert.deepEqual(Object.keys(base).sort(), ['appId', 'filesDigest', 'op', 'scope', 'target', 'via']);
-  assert.notDeepEqual(createPayload(target(f, { plan: { a: 1 } })), base);
-  assert.notDeepEqual(createPayload(target(f, { scope: 'global' })), base);
+  const base = createPayload(target(f), 'session');
+  assert.deepEqual(Object.keys(base).sort(), ['appId', 'filesDigest', 'level', 'op', 'scope', 'target', 'via']);
+  assert.notDeepEqual(createPayload(target(f, { plan: { a: 1 } }), 'session'), base);
+  assert.notDeepEqual(createPayload(target(f, { scope: 'global' }), 'session'), base);
+  assert.notEqual(core.payloadHash(createPayload(target(f), 'fresh')), core.payloadHash(base), 'the level is bound (owner decision 12)');
 });
 
 test('a staged clone is hashed without its fresh originId, and with everything else', () => {
@@ -275,15 +277,80 @@ test('the approval binds the files, the summary, the plan, the target and the re
 
 // ── the routes ─────────────────────────────────────────────────────────────
 
-test('scaffold and clone-app ask for every create (not only an overwrite), after their input checks', () => {
+test('scaffold and clone-app validate, ask for every create, then revalidate before the first write (owner decision 12)', () => {
   const read = (f: string) => readFileSync(new URL(`../src/pages/api/admin/${f}`, import.meta.url), 'utf8');
   const scaffold = read('scaffold.ts');
-  assert.match(scaffold, /const admin = await ownerAction\(ctx, createRequest\(parsed\.manifest, target\)\);\n  if \(admin instanceof Response\) return admin;/);
+  const first = scaffold.indexOf('validateScaffold(');
+  const ask = scaffold.indexOf('await ownerAction(ctx, v.request)');
+  const second = scaffold.indexOf('validateScaffold(', ask);
+  const write = scaffold.indexOf('writeFileSync(target');
+  assert.ok(first > 0 && first < ask, 'validated before the owner is asked');
+  assert.ok(ask < second && second < write, 'validated again after the approval and before anything is written');
+  assert.ok(scaffold.indexOf('changedSinceApproval(') < write && scaffold.indexOf('setAsideForOverwrite') > second, 'refused before an overwrite sets anything aside');
   assert.doesNotMatch(scaffold, /if \(replacing\) \{\n\s*const admin = await ownerAction/, 'no create path without the owner');
-  assert.ok(scaffold.indexOf('manifestFromFiles(') < scaffold.indexOf('ownerAction('), 'the facts are parsed before the owner is asked');
-  assert.ok(scaffold.indexOf('ownerAction(') < scaffold.indexOf('writeFileSync(target'), 'nothing is written before the decision');
   const clone = read('clone-app.ts');
-  assert.match(clone, /const admin = await ownerAction\(ctx, createRequest\(parsed\.manifest, \{/);
-  assert.ok(clone.indexOf('if (body.dryRun)') < clone.indexOf('ownerAction('), 'a dry run asks nobody');
-  assert.ok(clone.indexOf('ownerAction(') < clone.indexOf('renameSync(staging, dest)'), 'nothing lands before the decision');
+  const cAsk = clone.indexOf('await ownerAction(ctx, asked)');
+  assert.ok(clone.indexOf('if (body.dryRun)') < cAsk, 'a dry run asks nobody');
+  assert.ok(clone.indexOf('const again = decision()') > cAsk, 'revalidated after the approval');
+  assert.ok(clone.indexOf('changedSinceApproval(asked, again)') < clone.indexOf('renameSync(staging, dest)'), 'nothing lands before the revalidation');
+  assert.ok(clone.indexOf('changedSinceApproval(asked, again)') < clone.indexOf('setAsideForOverwrite'), 'nothing is set aside before it');
+});
+
+// ── owner decision 12: one validation, before the approval and again before execution ──
+
+const APPS = '/data/scopes/users/default/apps';
+function world(existing: string[] = []): ScaffoldEnv & { paths: Set<string> } {
+  const paths = new Set(existing);
+  return { paths, appsDir: (s) => (s === 'user' ? APPS : s === 'global' ? '/data/scopes/global/apps' : null), exists: (p) => paths.has(p) };
+}
+const body = (over: Record<string, unknown> = {}) => ({ appId: APP, scope: 'user', force: true, files: files(), ...over });
+
+test('validateScaffold: every check runs before the owner is asked; the request it builds is the one bound', () => {
+  const v = validateScaffold(body(), world());
+  assert.ok(!('status' in v), JSON.stringify(v));
+  assert.equal(v.request.action, 'app.create');
+  assert.equal(v.request.level, 'session');
+  assert.deepEqual(v.request.payload, createPayload(v.target, 'session'));
+  const refused = (b: Record<string, unknown>, env = world()) => {
+    const r = validateScaffold(b, env);
+    assert.ok('status' in r, JSON.stringify(b));
+    return [r.status, r.body['error'], r.body['category']].join(' ');
+  };
+  assert.equal(refused(body({ appId: 'Bad' })), '400 invalid-app-id invalid-input');
+  assert.equal(refused(body({ files: [] })), '400 no-files missing-input');
+  assert.equal(refused(body({ files: files({}, [{ relPath: '../other/x', content: '' }]) })), '400 path-escape invalid-input');
+  assert.equal(refused(body({ files: files({}, [{ relPath: '/etc/x', content: '' }]) })), '400 unsafe-path invalid-input');
+  assert.equal(refused(body({ files: files({}, [{ relPath: './app.manifest.json', content: manifest({ tools: ['docker'] }) }]) })), '422 duplicate-file invalid-input');
+  assert.equal(refused(body({ files: files({ id: 'com.other.app' }) })), '422 invalid-manifest invalid-input');
+  assert.equal(refused(body({ summary: 'x'.repeat(9000) })), '413 summary-too-large invalid-input');
+  assert.equal(refused(body({ scope: 'system' })), '400 unknown-scope invalid-input');
+  assert.equal(refused(body({ force: false }), world([`${APPS}/${APP}`])), '409 exists conflict');
+  const over = validateScaffold(body(), world([`${APPS}/${APP}`]));
+  assert.ok(!('status' in over) && over.request.action === 'admin.change' && over.replacing);
+});
+
+test('revalidation before execution: a request that fails now or differs from the approved one is refused', () => {
+  const env = world();
+  const approved = validateScaffold(body(), env);
+  assert.ok(!('status' in approved));
+  // Unchanged: the same decision.
+  const same = validateScaffold(body(), env);
+  assert.ok(!('status' in same));
+  assert.equal(changedSinceApproval(approved.request, same.request), null);
+  // The target appeared meanwhile: now an overwrite, not the approved create.
+  env.paths.add(`${APPS}/${APP}`);
+  const overwrite = validateScaffold(body(), env);
+  assert.ok(!('status' in overwrite));
+  assert.equal(changedSinceApproval(approved.request, overwrite.request), 'it is now an overwrite');
+  // …and without force it fails outright.
+  assert.ok('status' in validateScaffold(body({ force: false }), env));
+  // A level that changed (the same files read as privileged now) or other files: refused.
+  const fresh = { ...approved.request, level: 'fresh' as const };
+  assert.equal(changedSinceApproval(approved.request, fresh), 'its level is now fresh');
+  const other = validateScaffold(body({ files: files({ name: 'Other' }) }), world());
+  assert.ok(!('status' in other));
+  assert.equal(changedSinceApproval(approved.request, other.request), 'its files, target or summary changed');
+  const r = revalidationRefusal('it fails now: exists');
+  assert.deepEqual([r.status, r.body['error'], r.body['category']], [409, 'changed-since-approval', 'conflict']);
+  assert.match(String(r.body['message']), /nothing was written/);
 });

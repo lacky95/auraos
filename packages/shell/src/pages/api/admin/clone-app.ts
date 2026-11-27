@@ -9,7 +9,9 @@ import {
   type ManifestPatch, type ScopeDefinition, type ScopeId,
 } from '@aura/core';
 import { auditOwner, ownerAction } from '../../../lib/approvals/admin.ts';
-import { checkCreateInputs, createRequest, manifestFromDir, treeDigest } from '../../../lib/approvals/appCreate.ts';
+import {
+  changedSinceApproval, checkCreateInputs, createRequest, manifestFromDir, revalidationRefusal, treeDigest,
+} from '../../../lib/approvals/appCreate.ts';
 import { handOwnAppSourceToOwner } from '../../../lib/identityReports.ts';
 
 /**
@@ -224,22 +226,38 @@ export const POST: APIRoute = async (ctx) => {
       });
     }
 
-    // The owner decides on the staged copy: its manifest's facts, bound to the
-    // digest of the tree that lands (its fresh originId left out).
-    const parsed = manifestFromDir(staging, targetAppId);
-    if ('status' in parsed) return json(parsed.body, parsed.status);
-    const tree = treeDigest(staging);
-    const admin = await ownerAction(ctx, createRequest(parsed.manifest, {
-      via: 'clone', appId: targetAppId, scope: targetScopeId, dest, replaces: destExists,
-      files: { digest: tree.digest, count: tree.fileCount, bytes: tree.bytes },
-      source: { appId: sourceAppId, scope: sourceScope },
-      ...(body.withData ? { withData: true } : {}),
-      ...(body.summary !== undefined ? { summary: body.summary } : {}),
-      ...(body.plan !== undefined ? { plan: body.plan } : {}),
-    }));
+    // Owner decision 12: the owner decides on the validated, staged copy: its manifest's facts, bound to
+    // the digest of the tree that lands (its fresh originId left out) and the level derived from it.
+    const decision = (): ReturnType<typeof createRequest> | { status: number; body: Record<string, unknown> } => {
+      const parsed = manifestFromDir(staging, targetAppId);
+      if ('status' in parsed) return parsed;
+      const tree = treeDigest(staging);
+      return createRequest(parsed.manifest, {
+        via: 'clone', appId: targetAppId, scope: targetScopeId, dest, replaces: existsSync(dest),
+        files: { digest: tree.digest, count: tree.fileCount, bytes: tree.bytes },
+        source: { appId: sourceAppId, scope: sourceScope },
+        ...(body.withData ? { withData: true } : {}),
+        ...(body.summary !== undefined ? { summary: body.summary } : {}),
+        ...(body.plan !== undefined ? { plan: body.plan } : {}),
+      });
+    };
+    const asked = decision();
+    if ('status' in asked) return json(asked.body, asked.status);
+    if (existsSync(dest) !== destExists) return json(revalidationRefusal('the target appeared or went away').body, 409);
+    const admin = await ownerAction(ctx, asked);
     if (admin instanceof Response) return admin;
+    // …and revalidate it in full right before it lands: the staged manifest, its level and tree, the target.
+    const again = decision();
+    const changed = 'status' in again ? `it fails now: ${String(again.body['error'])}` : changedSinceApproval(asked, again);
+    if (changed) {
+      await auditOwner(admin, destExists ? 'app.clone-overwrite' : 'app.create', {
+        target: `app:${targetAppId}`, outcome: 'denied', detail: { sourceAppId, scope: targetScopeId, via: 'clone', revalidation: changed },
+      });
+      const r = revalidationRefusal(changed);
+      return json(r.body, r.status);
+    }
     await auditOwner(admin, destExists ? 'app.clone-overwrite' : 'app.create', {
-      target: `app:${targetAppId}`, detail: { sourceAppId, scope: targetScopeId, via: 'clone', filesDigest: tree.digest },
+      target: `app:${targetAppId}`, detail: { sourceAppId, scope: targetScopeId, via: 'clone', filesDigest: (asked.payload as { filesDigest?: string }).filesDigest },
     });
 
     // ─── Land it ───────────────────────────────────────────────────────────
