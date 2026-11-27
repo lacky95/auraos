@@ -7,8 +7,10 @@ import { systemMode } from '../../lib/systemMode.ts';
  * the `os:systemModeChanged` OS event, so switching in Settings → System or
  * with `aura mode` shows or hides it without a reload.
  *
- * Placement: the top edge's centre, over the status bar's empty middle. It
- * takes no pointer events, so it never blocks a click, and it sits below the
+ * Placement: the top edge's centre by default, over the status bar's empty
+ * middle. Hold, then drag to move it along any screen edge (lib/edgeBadge.ts,
+ * the flight tabs' gesture: a quick tap or swipe passes nothing on); edge and
+ * position persist per device, like the bars edge badge. It sits below the
  * shell's own layers (App Host setup bar 1880, system modals 1900, lock
  * screen 2000); the trusted dialogs (approvals, password) are native modal
  * <dialog>s in the browser's top layer, above every z-index.
@@ -18,12 +20,19 @@ import { systemMode } from '../../lib/systemMode.ts';
  */
 const mode = systemMode();
 ---
-<div id="aura-dev-mode-badge" class="dev-mode-badge" role="status" data-system-mode={mode} hidden={mode !== 'developer'}>
+<div id="aura-dev-mode-badge" class="dev-mode-badge" role="status" title="Developer mode (hold, then drag to move)"
+  data-system-mode={mode} data-edge="top" hidden={mode !== 'developer'}>
   Developer mode
 </div>
 
 <script>
   import { osEvents } from '../../lib/osEvents.ts';
+  import { attachEdgeDrag } from '../../lib/edgeBadge.ts';
+  import { localViewport } from '../../lib/keyboard/floatGesture.ts';
+  import { nearestEdge, type FlightEdge } from '../../lib/flight/geometry.ts';
+
+  const POS_KEY = 'aura.shell.dev-mode-badge';
+  const EDGES: FlightEdge[] = ['left', 'right', 'top', 'bottom'];
 
   const badge = document.getElementById('aura-dev-mode-badge');
   if (badge) {
@@ -32,26 +41,68 @@ const mode = systemMode();
       badge.dataset['systemMode'] = mode;
       badge.hidden = mode !== 'developer';
     });
+
+    const place = (edge: FlightEdge, pos: number) => {
+      badge.dataset['edge'] = edge;
+      badge.style.setProperty('--badge-pos', String(Math.min(1, Math.max(0, pos))));
+    };
+    const at = (x: number, y: number) => {
+      const vp = localViewport();
+      return nearestEdge(x, y, vp.width, vp.height);
+    };
+    try {
+      const saved = JSON.parse(localStorage.getItem(POS_KEY) || 'null');
+      if (saved && EDGES.includes(saved.edge) && typeof saved.pos === 'number') place(saved.edge, saved.pos);
+    } catch {}
+
+    attachEdgeDrag(badge, {
+      onTap: () => {},
+      onDrag: (x, y) => { const n = at(x, y); place(n.edge, n.pos); },
+      onDrop: (x, y) => {
+        const n = at(x, y);
+        place(n.edge, n.pos);
+        try { localStorage.setItem(POS_KEY, JSON.stringify(n)); } catch {}
+      },
+    });
   }
 </script>
 
 <style>
+  /* --badge-pos (0..1) slides the badge along its edge: 0 flush at the start,
+     1 flush at the end, 0.5 centred. */
   .dev-mode-badge {
     position: fixed;
-    top: 0;
-    left: 50%;
-    transform: translateX(-50%);
     z-index: 1870;
-    pointer-events: none;
     padding: 1px 10px 2px;
     font-size: 0.6rem;
     letter-spacing: 0.14em;
     text-transform: uppercase;
     color: var(--aura-color-bg);
     background: var(--aura-color-warning);
-    border-radius: 0 0 4px 4px;
     opacity: 0.9;
     white-space: nowrap;
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
   }
+  .dev-mode-badge[data-edge="top"],
+  .dev-mode-badge[data-edge="bottom"] {
+    left: calc(var(--badge-pos, 0.5) * 100%);
+    transform: translateX(calc(var(--badge-pos, 0.5) * -100%));
+  }
+  .dev-mode-badge[data-edge="left"],
+  .dev-mode-badge[data-edge="right"] {
+    top: calc(var(--badge-pos, 0.5) * 100%);
+    transform: translateY(calc(var(--badge-pos, 0.5) * -100%));
+    writing-mode: vertical-rl;
+    padding: 10px 2px 10px 1px;
+  }
+  .dev-mode-badge[data-edge="top"]    { top: 0;    border-radius: 0 0 4px 4px; }
+  .dev-mode-badge[data-edge="bottom"] { bottom: 0; border-radius: 4px 4px 0 0; }
+  .dev-mode-badge[data-edge="left"]   { left: 0;   border-radius: 0 4px 4px 0; }
+  .dev-mode-badge[data-edge="right"]  { right: 0;  border-radius: 4px 0 0 4px; }
+  .dev-mode-badge.is-lifted { opacity: 1; cursor: grabbing; box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45); }
   .dev-mode-badge[hidden] { display: none; }
 </style>
