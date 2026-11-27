@@ -25,7 +25,7 @@ import {
 } from '@aura/core';
 import { aptInstallArgv, aptUpdateArgv, type RunCommand } from './privilegedExec.ts';
 
-interface State {
+export interface State {
   capabilities: Record<string, { installed: boolean; installedAt: string; version: string | null }>;
   services:     Record<string, unknown>;
 }
@@ -37,6 +37,8 @@ export interface CapabilityInstaller {
   remove(name: string, def: CapabilityDefinition): void;
   loadState(): State;
   saveState(s: State): void;
+  /** The state, made to agree with the toolchain on disk first (`reconcileCapabilityState`); saved when that changed it. */
+  reconcile?(registry: Record<string, CapabilityDefinition>): State;
 }
 
 export const STATE_PATH = process.env['AURA_STATE_PATH']    ?? '/data/aura/state/capabilities.json';
@@ -92,9 +94,46 @@ function loadState(): State {
     return { capabilities: parsed.capabilities ?? {}, services: parsed.services ?? {} };
   } catch { return { capabilities: {}, services: {} }; }
 }
+// Atomic (write beside, then rename): an interrupted write must never leave a
+// truncated file, which loadState would read as "nothing installed".
 function saveState(s: State): void {
-  mkdirSync(dirname(STATE_PATH), { recursive: true });
-  writeFileSync(STATE_PATH, JSON.stringify(s, null, 2));
+  writeFileAtomic(STATE_PATH, JSON.stringify(s, null, 2), 0o644);
+}
+
+/**
+ * Make the recorded state agree with what the toolchain actually holds, so
+ * "installed" means "available" in both directions:
+ *  - a cap recorded installed whose binary is in none of `binDirs` (an
+ *    install interrupted before the binary landed, a lost toolchain the
+ *    mirror could not restore) is dropped, never reported available;
+ *  - a non-builtin registry cap whose binary IS there but has no record (the
+ *    image's infrastructure tools such as `oras`, an install interrupted
+ *    between the copy and the state write) is recorded installed.
+ * Run after the toolchain restore (`syncToolchainMirror`), so `binDirs`
+ * already holds everything the volume mirror kept. Mutates `state`; returns
+ * whether it changed.
+ */
+export function reconcileCapabilityState(
+  state: State, registry: Record<string, CapabilityDefinition>, binDirs: readonly string[], now: Date = new Date(),
+): boolean {
+  const present = (name: string): boolean => {
+    const binary = registry[name]?.binary ?? name;
+    return binDirs.some((dir) => existsSync(join(dir, binary)));
+  };
+  let changed = false;
+  for (const [name, rec] of Object.entries(state.capabilities)) {
+    if (rec.installed && !present(name)) {
+      delete state.capabilities[name];
+      console.warn(`[cap] ${name}: recorded installed, but its binary is not in the toolchain: record dropped`);
+      changed = true;
+    }
+  }
+  for (const [name, def] of Object.entries(registry)) {
+    if (def.source === 'builtin' || state.capabilities[name]?.installed || !present(name)) continue;
+    state.capabilities[name] = { installed: true, installedAt: now.toISOString(), version: null };
+    changed = true;
+  }
+  return changed;
 }
 
 /** Both toolchain bin dirs, in the order writes should land. */
@@ -302,6 +341,11 @@ export function liveCapabilityInstaller(run: RunCommand): CapabilityInstaller {
   const baseRootfs = process.env['AURA_BASE_ROOTFS'] ?? '/os/base-rootfs';
   return {
     loadState, saveState,
+    reconcile(registry) {
+      const state = loadState();
+      if (reconcileCapabilityState(state, registry, TOOLCHAIN_BIN_DIRS)) saveState(state);
+      return state;
+    },
     async install(name, def, force) {
       const binaryName = def.binary ?? name;
       const link = join(TOOLCHAIN_BIN, binaryName);
@@ -332,7 +376,12 @@ export function liveCapabilityInstaller(run: RunCommand): CapabilityInstaller {
           break;
       }
       if (!binary) throw new Error(`${name}: installed, but its binary '${def.binary_path ?? binaryName}' is missing`);
-      return { symlink: link, version, ...installWithSidecars(binary, binaryName, def, baseRootfs, force) };
+      const placed = installWithSidecars(binary, binaryName, def, baseRootfs, force);
+      // Recorded installed only once the binary is in BOTH stores: the
+      // volume mirror is what survives a recreate.
+      const absent = TOOLCHAIN_BIN_DIRS.filter((dir) => !existsSync(join(dir, binaryName)));
+      if (absent.length) throw new Error(`${name}: its binary did not reach ${absent.join(', ')}`);
+      return { symlink: link, version, ...placed };
     },
     remove: (name, def) => removeToolchainEntry(name, def, run),
   };

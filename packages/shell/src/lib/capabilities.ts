@@ -127,7 +127,24 @@ export async function getCapabilities(deps: CapabilityDeps = liveCapabilityDeps(
   let registry: Record<string, ResolvedCapability>;
   try { registry = await resolveRegistry(deps); }
   catch (err) { return json({ error: 'registry-invalid', message: (err as Error).message }, 500); }
-  return json({ statePath: STATE_PATH, state: deps.installer.loadState(), registry });
+  const defs = Object.fromEntries(Object.entries(registry).map(([n, c]) => [n, c.definition]));
+  const state = deps.installer.reconcile ? deps.installer.reconcile(defs) : deps.installer.loadState();
+  return json({ statePath: STATE_PATH, state, registry });
+}
+
+/**
+ * Boot (middleware, after `AppManager.init()` restored the toolchain from the
+ * volume mirror): make capabilities.json agree with the binaries actually
+ * there, so a shell recreate never leaves a cap recorded installed that
+ * is gone, or an available one recorded missing. Never throws.
+ */
+export async function reconcileCapabilities(deps: CapabilityDeps = liveCapabilityDeps()): Promise<void> {
+  try {
+    const defs = Object.fromEntries(Object.entries(await resolveRegistry(deps)).map(([n, c]) => [n, c.definition]));
+    deps.installer.reconcile?.(defs);
+  } catch (err) {
+    console.warn(`[cap] could not reconcile the capability state: ${(err as Error).message}`);
+  }
 }
 
 export async function postCapability(ctx: Ctx, deps: CapabilityDeps = liveCapabilityDeps()): Promise<Response> {
@@ -165,16 +182,21 @@ export async function postCapability(ctx: Ctx, deps: CapabilityDeps = liveCapabi
 
   const target = `capability:${name}`;
   const detail = { name, origin: cap.origin, digest: cap.digest, ...(action === 'install' ? { force } : {}) };
-  const state = deps.installer.loadState();
   try {
     if (action === 'remove') {
       deps.installer.remove(name, cap.definition);
+      const state = deps.installer.loadState();
       delete state.capabilities[name];
       deps.installer.saveState(state);
       await auditPrivileged(deps, actor, operation, { target, outcome: 'ok', detail });
       return json({ ok: true, action, name });
     }
     const result = await deps.installer.install(name, cap.definition, force);
+    // Persisted at once, before anything else can fail: the binary is already
+    // in the toolchain and its volume mirror (the installer checks both), so a
+    // recreate from here on restores it with its record. Read fresh, so an
+    // install that ran meanwhile is not overwritten.
+    const state = deps.installer.loadState();
     state.capabilities[name] = { installed: true, installedAt: new Date().toISOString(), version: result.version };
     deps.installer.saveState(state);
     const refreshed = deps.refresh();

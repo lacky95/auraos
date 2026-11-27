@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, symlinkSync, unlinkSync, lstatSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, symlinkSync, unlinkSync, lstatSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { execSync } from 'node:child_process';
 import { parse as parseYaml } from 'yaml';
@@ -95,7 +95,11 @@ export function loadState(): State {
 
 export function saveState(state: State): void {
   mkdirSync(dirname(STATE_PATH), { recursive: true });
-  writeFileSync(STATE_PATH, JSON.stringify(state, null, 2));
+  // Write beside, then rename (the shell's capabilityInstall.ts does the same):
+  // an interrupted write never leaves a truncated state file.
+  const tmp = `${STATE_PATH}.aura-new-${process.pid}`;
+  writeFileSync(tmp, JSON.stringify(state, null, 2));
+  renameSync(tmp, STATE_PATH);
 }
 
 function sh(cmd: string): string {

@@ -143,6 +143,12 @@ async function ensureAppManager() {
     }
     await mgr.init();
 
+    // capabilities.json against the toolchain init just restored from the
+    // volume mirror (lib/capabilities.ts reconcileCapabilities). Detached:
+    // the owner's registry is read through KV.
+    void import('./lib/capabilities.js').then((m) => m.reconcileCapabilities())
+      .catch((err) => console.warn(`[middleware] capability state reconcile failed: ${(err as Error).message}`));
+
     // Terminal session grants whose session ended while the shell was down
     // (server/terminal-embed.mjs). Detached: it asks each running Terminal.
     setTimeout(() => {
