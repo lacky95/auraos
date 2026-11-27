@@ -407,7 +407,7 @@ test('gateway: an identity it cannot prove is one class (a forged claim, another
   assert.doesNotMatch(JSON.stringify(bodies[0]), /signature|expired|instance id|nonce/i);
 });
 
-test('errorResponse(status, body): the one builder, JSON, no-store, nosniff; the old form is unchanged', async () => {
+test('errorResponse(status, body): the one builder, JSON, no-store, nosniff; the old form also says message (Pass B)', async () => {
   const res = errorResponse(409, { error: 'x-code', message: 'A sentence.', hint: 'Do this.' });
   assert.equal(res.status, 409);
   assert.equal(res.headers.get('cache-control'), 'no-store');
@@ -415,5 +415,6 @@ test('errorResponse(status, body): the one builder, JSON, no-store, nosniff; the
   assert.deepEqual(await res.json(), { error: 'x-code', message: 'A sentence.', hint: 'Do this.' });
   const old = errorResponse('something failed', 500);
   assert.equal(old.status, 500);
-  assert.deepEqual(await old.json(), { error: 'something failed' });
+  // D105 Pass B: `error` keeps the sentence for the clients that show it; `message` says it where the SDK and CLI read it.
+  assert.deepEqual(await old.json(), { error: 'something failed', message: 'something failed' });
 });

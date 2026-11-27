@@ -170,7 +170,8 @@ test('a closed install follows the dev open rule: refused until opened, for ever
     caller = who;
     const r = await call({ appId: 'io.ex.closed' });
     assert.deepEqual([r.status, r.body.error], [409, 'source-closed'], who.kind);
-    assert.match(r.body.message, /aura dev open io\.ex\.closed/);
+    // D105 Pass B: the one source-closed body (core sourceClosedBody): the way out is its hint.
+    assert.match(r.body.hint, /aura dev open io\.ex\.closed/);
   }
   assert.equal(store.records.size, 0);
   // The owner opened it: now it is asked like any open install.

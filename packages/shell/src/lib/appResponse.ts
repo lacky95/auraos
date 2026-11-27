@@ -195,7 +195,7 @@ const MAX_MESSAGE = 300;
  */
 export function errorText(err: unknown): string {
   const raw = err instanceof Error ? err.message : String(err);
-  return raw.replace(/^(?:[A-Z][A-Za-z]*Error: )+/, '').replace(/^\[[A-Za-z][\w.-]*\]\s*/, '').trim() || 'unknown error';
+  return raw.replace(/^(?:[A-Za-z]*Error: )+/, '').replace(/^\[[A-Za-z][\w.-]*\]\s*/, '').trim() || 'unknown error';
 }
 
 /**
