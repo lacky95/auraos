@@ -146,6 +146,7 @@ export interface LayoutHost {
   focus(viewId: string): void;
   minimize(viewId: string): void;
   restore(viewId: string): void;
+  /** A USER close (the layout's own close control): may ask about a background process left without a window (D101). */
   close(viewId: string): void;
   toggleMaximize(viewId: string): void;
 

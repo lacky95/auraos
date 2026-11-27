@@ -26,7 +26,7 @@
 
 // Namespace import: the running shell may cache a core build without newer exports.
 import * as core from '@aura/core';
-import type { AppActivity, FlightState } from '@aura/core';
+import type { ActivityCloseResult, AppActivity, FlightState } from '@aura/core';
 import { loadFlightMemory, noteFlight } from './memory.js';
 
 export const CLOSE_VETO_MS = 3_000;
@@ -129,15 +129,18 @@ class FlightService {
 
   // ─── Close with veto ─────────────────────────────────────────────────
 
-  /** A user Close (flight ✕, notification Close). */
-  requestClose(activityId: string, reason: string): CloseResult {
+  /**
+   * A user Close (flight ✕, notification Close). A close at once also returns
+   * what it did (D101: the flight layer asks about a background process
+   * from it); a vetoable close does not, the app decides that one.
+   */
+  async requestClose(activityId: string, reason: string): Promise<{ result: CloseResult; close?: ActivityCloseResult }> {
     const a = mgr().getActivity(activityId);
-    if (!a || a.presentation !== 'flight') return 'not-found';
+    if (!a || a.presentation !== 'flight') return { result: 'not-found' };
     // No veto asked for, or a second Close while the app is still deciding: close now.
     if (!this.confirm.has(activityId) || this.closing.has(activityId)) {
       this.cancelClose(activityId);
-      void mgr().closeActivity(activityId);
-      return 'closed';
+      return { result: 'closed', close: await mgr().closeActivity(activityId) };
     }
     this.closing.set(activityId, setTimeout(() => {
       this.closing.delete(activityId);
@@ -146,7 +149,7 @@ class FlightService {
     bus().emit('activity:flightClosing', {
       activityId, parentInstanceId: a.parentInstanceId, appId: a.appId, reason, vetoMs: CLOSE_VETO_MS,
     });
-    return 'closing';
+    return { result: 'closing' };
   }
 
   /** The app keeps a closing flight: it un-perches so the app can ask the user. */
@@ -194,7 +197,7 @@ class FlightService {
     // Fold / unfold at the flight's own anchor (its tab), in either mode.
     if (cid === BTN_SHOW) mgr().updateFlight(activityId, { folded: false });
     else if (cid === BTN_PERCH) mgr().updateFlight(activityId, { folded: true });
-    else if (cid === BTN_CLOSE) this.requestClose(activityId, 'notification');
+    else if (cid === BTN_CLOSE) void this.requestClose(activityId, 'notification');
     else if (cid.startsWith(APP_BTN)) {
       const action = a.flight?.actions?.[Number(cid.slice(APP_BTN.length))];
       if (!action) return;
