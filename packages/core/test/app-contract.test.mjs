@@ -90,9 +90,9 @@ test('dataDirReport combines install folder, container layer and the home mount'
     dockerMounts: async () => [{ destination: '/home/aura', rw: true }, { destination: '/data', rw: true }],
   };
   const r = await dataDirReport([
-    { appId: 'a', scope: 'user', dir: '/a', sandbox: 'proot', instances: [{ instanceId: 'a' }] },
-    { appId: 'b', scope: 'user', dir: '/b', sandbox: 'container', instances: [{ instanceId: 'b-1', container: 'aura-b-1' }] },
-    { appId: 'c', scope: 'user', dir: '/c', sandbox: 'container', instances: [{ instanceId: 'c-1', container: 'aura-c-1' }] },
+    { appId: 'a', scope: 'user', dir: '/a', sandbox: 'proot', ownNamespace: false, instances: [{ instanceId: 'a' }] },
+    { appId: 'b', scope: 'user', dir: '/b', sandbox: 'container', ownNamespace: true, instances: [{ instanceId: 'b-1', container: 'aura-b-1' }] },
+    { appId: 'c', scope: 'user', dir: '/c', sandbox: 'container', ownNamespace: true, instances: [{ instanceId: 'c-1', container: 'aura-c-1' }] },
   ], deps);
   assert.deepEqual(r.map((x) => [x.appId, x.outside, x.home]), [['a', true, 'rw'], ['b', true, 'rw'], ['c', false, 'rw']]);
   assert.deepEqual(r[1].containerLayer, [{ instanceId: 'b-1', writes: ['/root/.cache-x'], truncated: false }]);

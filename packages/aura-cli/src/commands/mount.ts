@@ -16,6 +16,7 @@ import type { AuraMount, MountMode } from '@aura/core';
 import { api, type ShellError } from '../lib/client.js';
 import { color, fail, info, ok, table, warn } from '../lib/format.js';
 import { termSize, truncateAnsi } from '../lib/tui.js';
+import { canMount, type InstanceRuntimeDto } from '../lib/resources.js';
 import {
   promptChoice,
   promptConfirm,
@@ -40,7 +41,8 @@ interface InstanceLite {
   appId: string;
   state: string;
   inPool?: boolean;
-  sandbox?: 'proot' | 'container';
+  sandbox?: string;
+  runtime?: InstanceRuntimeDto | null;
 }
 interface AppDto {
   manifest: { id: string; name?: string; scopeId?: string; componentType?: string };
@@ -96,6 +98,11 @@ function reportCapability(res: MountsResponse): void {
  * warm-pool members are spawn-warmed but not user-attached, and a
  * creating/destroyed instance isn't serving anything.
  */
+/** The picker's note for an instance whose runtime has no `mounts` (5b G: the capability, not the id). */
+function notMountable(i: InstanceLite): string {
+  return canMount(i) ? '' : color.yellow(` · ${i.runtime?.id ?? i.sandbox ?? 'runtime'} (not mountable: no mounts)`);
+}
+
 function collectInstances(apps: AppDto[]): Array<InstanceLite & { appName: string }> {
   const out: Array<InstanceLite & { appName: string }> = [];
   for (const a of apps) {
@@ -132,7 +139,7 @@ async function resolveInstance(flag: string | undefined, apps?: AppDto[]): Promi
     live.map((i) => ({
       value: i.instanceId,
       label: i.instanceId,
-      desc: `${i.appName} · ${i.state}${i.sandbox === 'container' ? '' : color.yellow(` · ${i.sandbox ?? 'proot'} (not mountable)`)}`,
+      desc: `${i.appName} · ${i.state}${notMountable(i)}`,
     })),
     0,
     { allowBack: true },
@@ -603,7 +610,7 @@ async function runWizard(): Promise<void> {
           label: i.instanceId === currentInstanceId
             ? `${i.instanceId} ${color.green('[current]')}`
             : i.instanceId,
-          desc: `${i.state}${i.sandbox === 'container' ? '' : color.yellow(` · ${i.sandbox ?? 'proot'} (not mountable)`)}`,
+          desc: `${i.state}${notMountable(i)}`,
         }));
         // Default the cursor to a prior choice if we're re-entering via BACK,
         // else to the top row (which is `current` when we're inside an app).

@@ -107,7 +107,8 @@ function deps(): AppSourceDeps {
         return a ? core.effectiveSourceMode(scopeDir(a.scopeId), a) : null;
       },
       instance: (id) => (id.startsWith('com.aura.terminal') || id.startsWith('io.lakner.terminalx')
-        ? { appId: id.replace(/-\d+$/, ''), sandbox: 'container' } : id === 'io.proot.app' ? { appId: id, sandbox: 'proot' } : undefined),
+        ? { appId: id.replace(/-\d+$/, ''), runtime: 'container', capabilities: { mounts: true } as never }
+        : id === 'io.proot.app' ? { appId: id, runtime: 'proot', capabilities: { mounts: false } as never } : undefined),
       instancesOf: (appId) => (appId === 'io.shop.app' ? ['io.shop.app'] : []),
       startPreview: async (appId, opts) => {
         for (const [id, p] of previews) if (p.appId === appId && p.owner === opts.owner) previews.delete(id);

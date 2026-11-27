@@ -35,15 +35,23 @@ export interface DataDirAppInput {
   scope: string;
   /** Install folder on the shell's filesystem. */
   dir: string;
-  sandbox: 'proot' | 'container';
-  /** Running instances, container instances with their container name. */
+  /** The runtime id as latched (or the manifest's), reported as is. */
+  sandbox: string;
+  /**
+   * The runtime gives each instance its own mount namespace (5b G, from its
+   * capabilities: isolation `namespace` or stronger): the home is what the
+   * instance mounts, unknown until observed. Otherwise it shares the shell's
+   * filesystem and its home is the shell's, read-write.
+   */
+  ownNamespace: boolean;
+  /** Running instances; those whose workload layer can be inspected with its engine name. */
   instances: Array<{ instanceId: string; container?: string }>;
 }
 
 export interface DataDirAppReport {
   appId: string;
   scope: string;
-  sandbox: 'proot' | 'container';
+  sandbox: string;
   installFolder: { writes: string[]; truncated: boolean };
   containerLayer: Array<{ instanceId: string; writes: string[]; truncated: boolean } | { instanceId: string; error: string }>;
   home: 'rw' | 'ro' | 'none' | 'unknown';
@@ -109,7 +117,7 @@ export async function dataDirReport(apps: readonly DataDirAppInput[], deps: Data
   for (const app of apps) {
     const installFolder = deps.installWrites(app.dir);
     const containerLayer: DataDirAppReport['containerLayer'] = [];
-    let home: DataDirAppReport['home'] = app.sandbox === 'container' ? 'unknown' : 'rw';
+    let home: DataDirAppReport['home'] = app.ownNamespace ? 'unknown' : 'rw';
     for (const inst of app.instances) {
       if (!inst.container) continue;
       const diff = await deps.dockerDiff(inst.container);

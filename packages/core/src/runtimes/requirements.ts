@@ -155,3 +155,22 @@ export function requestNeeds(kind: RequestKind | ExecutionContext, opts: { jumpH
     case 'host-filesystem': return { hostFilesystem: true };
   }
 }
+
+/** The installation facts an instance latched at its start (AppInstance `runAs`). */
+export interface InstanceFacts {
+  /** `user`: a Terminal instance runs as its user's uid (D69). Absent: root (a record from before 5-apps). */
+  runAs?: 'app' | 'root' | 'user';
+}
+
+/**
+ * An instance's effective capabilities (5b G): its runtime's, narrowed by
+ * the installation facts. A root instance (legacy or an approved root
+ * request) runs everything as uid 0 whatever the runtime enforces, so for
+ * its sessions `identity` is `none` and there is no Private Home boundary
+ * (J.5; the runtime flag `identity: enforced` is static, P-2). Never widens a
+ * capability. The gates read this, never a runtime id (ARI §9.5).
+ */
+export function instanceCapabilities(runtime: RuntimeCapabilities, facts: InstanceFacts): RuntimeCapabilities {
+  if (facts.runAs === 'app' || facts.runAs === 'user') return { ...runtime };
+  return { ...runtime, identity: 'none', privateHomeSession: false };
+}

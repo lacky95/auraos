@@ -65,7 +65,7 @@ const state = (): RuntimesState => ({
     { id: 'container', title: 'Container', description: 'Docker.', builtIn: true, alwaysEnabled: true, enabled: true, isDefault: true,
       settingsSchema: { type: 'object' as const, properties: {} }, settings: {}, capabilities: { ...CAPS, isolation: 'namespace', readOnlyBinds: true },
       health: { status: 'ok' as const }, instances: [] },
-    { id: 'proot', title: 'PRoot', description: 'ptrace.', builtIn: true, alwaysEnabled: false, enabled: true, isDefault: false,
+    { id: 'proot', hostSwitches: { AURA_USE_PROOT: 'true' }, title: 'PRoot', description: 'ptrace.', builtIn: true, alwaysEnabled: false, enabled: true, isDefault: false,
       settingsSchema: { type: 'object' as const, properties: { placement: { type: 'string' as const, title: 'Placement', enum: ['master', 'pool'], default: 'master' } } },
       settings: { placement: 'master' }, capabilities: CAPS, health: { status: 'ok' as const },
       instances: [{ instanceId: 'io.ex.kept-1', appId: 'io.ex.kept', state: 'resumed', source: 'migration' }] },

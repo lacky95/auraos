@@ -2,7 +2,8 @@
 // every runtime module passes, in process, with no Docker. Started by stream K
 // (descriptor, capabilities, settings, health, endpoint, fail closed with
 // suggest); stream E adds the instance-operation, workload-token, G1 and A4
-// rows. The template for module contract tests (D97, Phases 7/8).
+// rows; 5b E adds the instance-ops, workload-token (D89), A4, address-identity
+// and G1 rows. The template for module contract tests (D97, Phases 7/8).
 //
 //   describeRuntime(name, makeModule, harness)
 //     makeModule()      a fresh module (its runner may be a recording stub)
@@ -11,6 +12,9 @@
 //     harness.groups    async (module) => void: exercises the module's groups on its
 //                       harness (adoption list/adopt, sessions, workloads, usage, tools),
 //                       optional; the shape rows below check what comes back
+//     harness.instanceOps  (module, instanceId) => workload env: the runner really runs
+//                       instances in process (the reference mock); enables the
+//                       instance-ops and workload-token rows (5b E)
 //
 // Run via: node tools/run-tests.mjs --only=core (ari-conformance.test.mjs)
 
@@ -149,6 +153,69 @@ export function describeRuntime(name, makeModule, harness = {}) {
       assert.ok(e && typeof e.host === 'string' && Number.isInteger(e.port));
       assert.deepEqual(plain(e), e);
     }
+  });
+
+  test(`[ARI ${name}] instance ops: spawn → endpoint object → isRunning; forceKill; exactly one onExit; kill after it is a no-op`, async (t) => {
+    if (!harness.instanceOps) { t.skip('no in-process instances for this module (the VM kit runs them)'); return; }
+    const m = makeModule();
+    const r = m.runner;
+    const id = 'org.k.app-9';
+    const exits = [];
+    await r.spawn(id, 'org.k.app', 4809, { id: 'org.k.app' }, { appDir: '', instanceDataDir: '', instanceToken: { token: 'tok-9', nonce: 'n-9' } });
+    r.onExit(id, (code) => exits.push(code));
+    assert.equal(r.isRunning(id), true);
+    const e = m.endpoint(id);
+    assert.ok(e && typeof e.host === 'string' && e.port === 4809, 'endpoint is an object with the spawned port');
+    assert.deepEqual(Object.keys(e).filter((k) => !['host', 'port', 'address'].includes(k)), [], 'an endpoint is for dialing only (D88)');
+    assert.equal(r.forceKill(id), true);
+    assert.equal(r.isRunning(id), false);
+    await r.kill(id);
+    assert.equal(exits.length, 1, 'exactly one exit report (G1: the kernel turns it into the events)');
+    assert.equal(r.forceKill(id), false, 'nothing left to kill');
+  });
+
+  test(`[ARI ${name}] workload token (D89): the workload gets AURA_INSTANCE_TOKEN; adoption carries its nonce; no token, no start`, async (t) => {
+    if (!harness.instanceOps) { t.skip('the golden argv pins it for the built-ins (ari-conformance.test.mjs)'); return; }
+    const m = makeModule();
+    const id = 'org.k.app-8';
+    await m.runner.spawn(id, 'org.k.app', 4808, { id: 'org.k.app' }, { appDir: '', instanceDataDir: '', instanceToken: { token: 'tok-8', nonce: 'n-8' } });
+    assert.equal(harness.instanceOps(m, id).AURA_INSTANCE_TOKEN, 'tok-8');
+    if (m.adoption) {
+      const s = (await m.adoption.list())?.find((x) => x.instanceId === id);
+      assert.equal(s?.tokenNonce, 'n-8', 'the nonce survives (a survivor without one is never adopted)');
+      assert.ok(!('token' in s), 'never the token itself');
+    }
+    await assert.rejects(m.runner.spawn('org.k.app-7', 'org.k.app', 4807, { id: 'org.k.app' }, { appDir: '', instanceDataDir: '' }), 'a start without a token is refused');
+    m.runner.forceKill(id);
+  });
+
+  test(`[ARI ${name}] A4: without hostFilesystem, every host-bound manifest feature is refused naming hostFilesystem`, (t) => {
+    const m = makeModule();
+    const caps = m.capabilities(settingsList()[0]);
+    if (caps.hostFilesystem) { t.skip('declares hostFilesystem'); return; }
+    const reg = new RuntimeRegistry();
+    reg.register(m);
+    const rec = { ...builtInRuntimeRecord(reg), enabled: [m.descriptor.id] };
+    const rows = [
+      { tools: ['docker'] },
+      { services: [{ name: 'db', image: 'redis:7', inheritDockerSocket: true }] },
+      { ports: { hostPublish: [{ port: 80 }] } },
+      { permissions: ['apps.mount'] },
+      { services: [{ name: 'db', image: 'redis:7', privileged: true }] },
+    ];
+    for (const extra of rows) {
+      const manifest = { id: 'org.k.app', sandbox: m.descriptor.id, ...extra };
+      assert.throws(() => reg.resolve({ manifest, installationId: 'i', sourceMode: 'open', record: rec }),
+        (e) => e.code === 'capability-missing' && e.missing.includes('hostFilesystem'), JSON.stringify(extra));
+    }
+  });
+
+  test(`[ARI ${name}] no address identity (D89): nothing the module reports identifies a workload by its address`, async () => {
+    const m = makeModule();
+    const caps = m.capabilities(settingsList()[0]);
+    assert.ok(!Object.keys(caps).some((k) => /address|network.?identity/i.test(k)), 'no capability offers address identity');
+    for (const f of moduleFeatures(m, settingsList()[0])) assert.ok(!/identity/i.test(JSON.stringify(f.constraints ?? {})) || f.id === 'workload.identityInheritance', f.id);
+    if (m.adoption) for (const s of (await m.adoption.list()) ?? []) assert.ok(!('address' in s) && !('addresses' in s), 'a survivor is matched by token nonce, never by address');
   });
 
   test(`[ARI ${name}] fail closed: every capability it lacks refuses the request that needs it, with capability-missing and suggest`, () => {

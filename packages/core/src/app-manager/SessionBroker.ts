@@ -191,22 +191,8 @@ export class SessionBroker {
   }
 
   /** Copies the helper onto the data volume under a content-addressed name (root, 0755 in a 0700 dir). */
-  private async stageHelper(): Promise<string> {
-    const src = await (this.deps.helperBinary ?? defaultHelperBinary.bind(null, this.deps.dataDir))();
-    const bytes = readFileSync(src);
-    const sha = createHash('sha256').update(bytes).digest('hex').slice(0, 16);
-    const dir = join(this.deps.dataDir, SESSION_BROKER_SUBPATH);
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
-    chmodSync(dir, 0o700);
-    const dest = join(dir, `aura-session-enter-${sha}`);
-    const current = existsSync(dest) ? createHash('sha256').update(readFileSync(dest)).digest('hex').slice(0, 16) : null;
-    if (current !== sha) {
-      const tmp = `${dest}.tmp-${process.pid}`;
-      copyFileSync(src, tmp);
-      chmodSync(tmp, 0o755);
-      renameSync(tmp, dest);
-    }
-    return dest;
+  private stageHelper(): Promise<string> {
+    return stageSessionEnter(this.deps.dataDir, this.deps.helperBinary);
   }
 
   /** One short command in the broker (end, reap); its stdout. */
@@ -266,6 +252,29 @@ export class SessionBroker {
     void session.exited.then(() => { this.open.delete(spec.sessionId); }, () => { this.open.delete(spec.sessionId); });
     return session;
   }
+}
+
+/**
+ * The launcher staged on the data volume under a content-addressed name (root,
+ * 0755 in a 0700 dir): the session broker runs it, and MountManager's helper
+ * runs its idmap subcommands (D80, 5b G). Returns the shell-side path.
+ */
+export async function stageSessionEnter(dataDir: string, helperBinary?: () => Promise<string>): Promise<string> {
+  const src = await (helperBinary ?? defaultHelperBinary.bind(null, dataDir))();
+  const bytes = readFileSync(src);
+  const sha = createHash('sha256').update(bytes).digest('hex').slice(0, 16);
+  const dir = join(dataDir, SESSION_BROKER_SUBPATH);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  chmodSync(dir, 0o700);
+  const dest = join(dir, `aura-session-enter-${sha}`);
+  const current = existsSync(dest) ? createHash('sha256').update(readFileSync(dest)).digest('hex').slice(0, 16) : null;
+  if (current !== sha) {
+    const tmp = `${dest}.tmp-${process.pid}`;
+    copyFileSync(src, tmp);
+    chmodSync(tmp, 0o755);
+    renameSync(tmp, dest);
+  }
+  return dest;
 }
 
 /** The image's helper, or one compiled from the checkout when the image predates stream J. */

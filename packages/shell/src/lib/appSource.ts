@@ -49,7 +49,8 @@ export interface AppSourceDeps {
     get(appId: string): ScopedApp | undefined;
     scopes(): ScopeDefinition[];
     sourceMode(appId: string): SourceModeInfo | null;
-    instance(instanceId: string): { appId: string; sandbox?: string } | undefined;
+    /** The instance's app, runtime id and effective capabilities (5b G: null before a start). */
+    instance(instanceId: string): { appId: string; runtime?: string; capabilities: core.RuntimeCapabilities | null } | undefined;
     instancesOf(appId: string): string[];
     /** AppManager `isTrustedSystemCopy`: the active copy is the system installation. */
     trustedSystemCopy(appId: string): boolean;
@@ -84,7 +85,10 @@ export function liveAppSourceDeps(authenticate: AppSourceDeps['authenticate'], a
       get: (id) => mgr.registry.getById(id) as ScopedApp | undefined,
       scopes: () => mgr.getScopeDefinitions(),
       sourceMode: (id) => mgr.sourceModeOf(id),
-      instance: (id) => mgr.getInstance(id),
+      instance: (id) => {
+        const i = mgr.getInstance(id);
+        return i ? { appId: i.appId, ...(i.sandbox ? { runtime: i.sandbox } : {}), capabilities: mgr.instanceCapabilities(id) } : undefined;
+      },
       instancesOf: (appId) => mgr.getInstancesByApp(appId).map((i) => i.instanceId),
       trustedSystemCopy: (appId) => mgr.isTrustedSystemCopy(appId),
       startPreview: (appId, opts) => mgr.startPreview(appId, opts),
@@ -154,13 +158,16 @@ function upstreamOf(deps: AppSourceDeps, app: ScopedApp): core.AppSourceInfo | n
   return core.readPublishMarker(app.appDir)?.source ?? null;
 }
 
-/** The caller of an instance route, which must run in a container to receive binds. */
+/** The caller of an instance route, whose runtime must take live binds (`mounts`, 5b G). */
 function consumer(deps: AppSourceDeps, instanceId: string | undefined): string | Response {
   if (!instanceId) return json({ error: 'invalid-instance' }, 400);
   const inst = deps.apps.instance(instanceId);
   if (!inst) return json({ error: 'instance-not-found' }, 404);
-  if (inst.sandbox && inst.sandbox !== 'container') {
-    return json({ error: 'not-a-container', message: `${instanceId} runs in a '${inst.sandbox}' sandbox; source views need sandbox: container` }, 409);
+  if (inst.capabilities && !inst.capabilities.mounts) {
+    return json({
+      error: 'capability-missing', category: core.CATEGORY_OF_CODE['capability-missing'], missing: ['mounts'], ...(inst.runtime ? { runtime: inst.runtime } : {}),
+      message: `${instanceId} runs on runtime '${inst.runtime ?? 'unknown'}', which can't take source views (missing: mounts)`,
+    }, 409);
   }
   return instanceId;
 }

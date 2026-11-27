@@ -19,7 +19,7 @@ export const GET: APIRoute = () => {
     // `sidecarCount` comes from the reconciler's cache — no backend call, so
     // this stays cheap. Details + usage: /api/instances/<id>/sidecars.
     instances:  mgr.getInstancesByApp(manifest.id).map((inst) => ({
-      ...publicInstance(inst),
+      ...publicInstance(inst, mgr),
       sidecarCount: mgr.getSidecars(inst.instanceId).length,
       // Where the shell dials the instance (AppManager.getUpstreamUrl): the WS
       // proxy and the App Host router read it here instead of guessing (a

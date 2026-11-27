@@ -1,4 +1,5 @@
 import type { APIRoute } from 'astro';
+import * as core from '@aura/core';
 import { getAppManager } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
 import { auditOwner, liveOwnerActionDeps, ownerAction } from '../../../../lib/approvals/admin.ts';
@@ -7,6 +8,7 @@ import { liveApprovalDeps } from '../../../../lib/approvals/service.ts';
 import { liveAppSourceDeps, mountAppVolume } from '../../../../lib/appSource.ts';
 import { isDeveloperMode } from '../../../../lib/systemMode.ts';
 import { TERMINAL_APP_ID } from '../../../../../server/terminal-embed.mjs';
+import { capabilityRefusal, refusalResponse } from '../../../../lib/runtimeCaps.ts';
 
 /**
  * Cross-app mounts for one instance.
@@ -62,7 +64,7 @@ export const POST: APIRoute = async (ctx) => {
   try { body = await request.clone().json(); }
   catch { return errorResponse('Body must be JSON', 400); }
 
-  if (body.kind === 'workspace') return mountWorkspace(ctx, instanceId, instance.sandbox);
+  if (body.kind === 'workspace') return mountWorkspace(ctx, instanceId);
   if (body.kind === 'patches' || body.kind === 'work') {
     const deps = liveAppSourceDeps((r) => authenticate(r), liveApprovalDeps(), liveOwnerActionDeps());
     return mountAppVolume(request, instanceId, deps, { app: body.targetAppId, kind: body.kind, n: body.n, new: body.new });
@@ -78,14 +80,10 @@ export const POST: APIRoute = async (ctx) => {
     return errorResponse(`mode must be 'ro' or 'rw'`, 400);
   }
 
-  // Container-only: a PRoot instance has no /data volume mount to receive
-  // propagation. Say so rather than mounting into a path nobody can see.
-  if (instance.sandbox && instance.sandbox !== 'container') {
-    return errorResponse(
-      `${instanceId} runs in a '${instance.sandbox}' sandbox; cross-app mounting requires sandbox: container`,
-      409,
-    );
-  }
+  // The runtime's `mounts` capability (5b G): a runtime without it has nothing
+  // to receive a live bind. Say so rather than mounting into a path nobody can see.
+  const refused = capabilityRefusal(instanceId, core.requestNeeds('mount'), 'cross-app mounts');
+  if (refused) return refused;
 
   try {
     const mount = await mgr.mounts.add(instanceId, {
@@ -95,6 +93,9 @@ export const POST: APIRoute = async (ctx) => {
     });
     return jsonResponse({ ok: true, mount });
   } catch (err) {
+    // D80: a cross-uid writable mount without idmapped mounts is `capability-missing: idmappedMounts`.
+    const refusal = refusalResponse(err);
+    if (refusal) return refusal;
     const message = err instanceof Error ? err.message : String(err);
     // "already mounted" / "unavailable" are conflicts, not server faults.
     const conflict = /already mounted|unavailable|refusing/i.test(message);
@@ -103,9 +104,7 @@ export const POST: APIRoute = async (ctx) => {
 };
 
 /** `aura mount workspace`: the checks are the route's, the bind is MountManager's. */
-async function mountWorkspace(
-  ctx: Parameters<APIRoute>[0], instanceId: string, sandbox: string | undefined,
-): Promise<Response> {
+async function mountWorkspace(ctx: Parameters<APIRoute>[0], instanceId: string): Promise<Response> {
   if (!isDeveloperMode()) {
     return errorResponse('aura mount workspace needs Developer Mode (Settings → System, or aura mode developer on the host)', 409);
   }
@@ -119,9 +118,8 @@ async function mountWorkspace(
     || caller.sidecar || mgr.registry.getScopeId(TERMINAL_APP_ID) !== 'system') {
     return errorResponse('the AuraOS checkout is mounted only into the System Terminal that asks for it: run aura mount workspace there', 403);
   }
-  if (sandbox && sandbox !== 'container') {
-    return errorResponse(`${instanceId} runs in a '${sandbox}' sandbox; the workspace mount requires sandbox: container`, 409);
-  }
+  const refused = capabilityRefusal(instanceId, core.requestNeeds('mount'), 'the workspace mount');
+  if (refused) return refused;
   const actor = await ownerAction(ctx, {
     action: 'admin.change', level: 'session', payload: { op: 'mount.workspace', instanceId },
     title: 'Mount the AuraOS source writable into the System Terminal',

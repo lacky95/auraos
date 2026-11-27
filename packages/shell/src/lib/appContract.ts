@@ -140,7 +140,10 @@ export interface ContractReportApp {
   name: string;
   scope: string;
   dir: string;
-  sandbox: 'proot' | 'container';
+  /** The runtime id, as latched or named (5b G: reported as is). */
+  sandbox: string;
+  /** Its runtime gives instances their own mount namespace (capabilities). */
+  ownNamespace: boolean;
   manifest: AppManifest & { context?: string[] };
   instances: Array<{ instanceId: string; container?: string }>;
 }
@@ -175,7 +178,7 @@ export async function contractReport(deps: ContractReportDeps, opts: { dataDir?:
   const apps = deps.apps().sort((a, b) => a.appId.localeCompare(b.appId));
   const [keys, signals] = await Promise.all([deps.contextKeys().catch(() => []), deps.signals().catch(() => ({} as Record<string, number>))]);
   const dataDir = opts.dataDir && deps.dataDir
-    ? new Map((await deps.dataDir(apps.map((a) => ({ appId: a.appId, scope: a.scope, dir: a.dir, sandbox: a.sandbox, instances: a.instances })))).map((r) => [r.appId, r]))
+    ? new Map((await deps.dataDir(apps.map((a) => ({ appId: a.appId, scope: a.scope, dir: a.dir, sandbox: a.sandbox, ownNamespace: a.ownNamespace, instances: a.instances })))).map((r) => [r.appId, r]))
     : null;
   const rows = apps.map((a): ContractReportRow => {
     const source = core.scanContractSources(a.dir, a.manifest, keys);
@@ -215,15 +218,24 @@ export async function contractReport(deps: ContractReportDeps, opts: { dataDir?:
 export function liveContractReportDeps(): ContractReportDeps {
   const mgr = core.getAppManager();
   return {
-    apps: () => mgr.registry.getAll().map((m) => ({
-      appId: m.id, name: m.name, scope: String(m.scopeId), dir: m.appDir,
-      // The runtime a running instance latched; else the manifest's, else the default (container, Q18).
-      sandbox: (mgr.getAllInstances().find((i) => i.appId === m.id && i.sandbox)?.sandbox ?? m.sandbox ?? 'container') === 'container' ? 'container' : 'proot',
-      manifest: m as unknown as ContractReportApp['manifest'],
-      instances: mgr.getAllInstances()
-        .filter((i) => i.appId === m.id && !i.inPool)
-        .map((i) => ({ instanceId: i.instanceId, ...(i.sandbox === 'container' ? { container: `aura-${i.instanceId}` } : {}) })),
-    })),
+    apps: () => mgr.registry.getAll().map((m) => {
+      // The runtime a running instance latched; else the manifest's, else the built-in default (Q18).
+      const sandbox = mgr.getAllInstances().find((i) => i.appId === m.id && i.sandbox)?.sandbox ?? m.sandbox ?? 'container';
+      const caps = mgr.runtimes.get(sandbox)?.capabilities({});
+      const ownNamespace = !!caps && caps.isolation !== 'none' && caps.isolation !== 'ptrace';
+      return {
+        appId: m.id, name: m.name, scope: String(m.scopeId), dir: m.appDir, sandbox, ownNamespace,
+        manifest: m as unknown as ContractReportApp['manifest'],
+        instances: mgr.getAllInstances()
+          .filter((i) => i.appId === m.id && !i.inPool)
+          // An own-namespace workload's layer is inspected by its engine name (core's one name rule, never
+          // re-derived here). 5b-2 D-R moves the inspection behind the module's `diagnostics` group.
+          .map((i) => ({
+            instanceId: i.instanceId,
+            ...(mgr.instanceCapabilities(i.instanceId)?.isolation === 'namespace' ? { container: core.containerName(i.instanceId) } : {}),
+          })),
+      };
+    }),
     contextKeys: async () => (await new core.ContextStore().list()).map((e) => e.key),
     signals: async () => {
       const { defaultRedis } = await import('@aura/kv-store');

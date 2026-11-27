@@ -8,7 +8,9 @@
 // side of it is ari-modules.test.mjs, which adopts from this mock).
 // Run via: node tools/run-tests.mjs --only=core
 
-import { mkdirSync, mkdtempSync } from 'node:fs';
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describeRuntime } from './ari-conformance/kit.mjs';
@@ -83,6 +85,7 @@ describeRuntime('fake', () => {
 
 describeRuntime('mock', mockProvider, {
   instance: 'known-1',
+  instanceOps: (m, id) => m._workloadEnv(id),
   groups: async (m) => {
     const [s] = await m.adoption.list();
     if (!s) throw new Error('the mock lists its survivor');
@@ -91,4 +94,29 @@ describeRuntime('mock', mockProvider, {
     const u = await m.usage({ instanceIds: [s.instanceId], sidecarIds: [] });
     if (!u[s.instanceId]) throw new Error('usage is keyed by instance id');
   },
+});
+
+// ── Rows over the built-ins' sources and golden argv (5b E) ─────────────────
+
+test('[ARI built-ins] D89: a start with a workload token injects AURA_INSTANCE_TOKEN in every runtime column (golden argv)', () => {
+  const golden = JSON.parse(readFileSync(new URL('./golden/spawn-args.json', import.meta.url), 'utf8'));
+  let checked = 0;
+  for (const [fixture, cols] of Object.entries(golden)) {
+    const spawns = Object.entries(cols).filter(([, v]) => v && typeof v === 'object' && !('refused' in v));
+    if (!spawns.some(([, v]) => /AURA_INSTANCE_TOKEN/.test(JSON.stringify(v)))) continue;   // a fixture without a token in its context
+    for (const [col, v] of spawns) { assert.match(JSON.stringify(v), /AURA_INSTANCE_TOKEN=tok-1|"AURA_INSTANCE_TOKEN":"tok-1"/, `${fixture}/${col}`); checked++; }
+  }
+  assert.ok(checked >= 2, 'the container and the PRoot column both inject it');
+});
+
+test('[ARI built-ins] G1: no runtime module or runner imports OsEventBus (the kernel emits app:*; runtimes report through onExit)', () => {
+  const files = [];
+  const walk = (d) => { for (const n of readdirSync(d)) { const p = join(d, n); if (statSync(p).isDirectory()) walk(p); else if (p.endsWith('.ts')) files.push(p); } };
+  walk(new URL('../src/runtimes/', import.meta.url).pathname);
+  for (const f of ['ContainerRunner.ts', 'ProotRunner.ts', 'SessionBroker.ts']) files.push(new URL(`../src/app-manager/${f}`, import.meta.url).pathname);
+  for (const f of files) {
+    const src = readFileSync(f, 'utf8');
+    assert.doesNotMatch(src, /^import\s+(?!type\b)[^;]*OsEventBus/m, f);
+    assert.doesNotMatch(src, /getEventBus\(|osEvents\.emit\(/, f);
+  }
 });

@@ -62,6 +62,22 @@
  * can bind anything itself. Until Phase 5 removes the socket (D30),
  * read-only here is a guardrail for agents, not a boundary.
  *
+ * ## Between different uids (D80, 5b G)
+ *
+ * Since per-installation app uids, a writable `source` or `data` mount into a
+ * consumer that runs as another uid than the files' on-disk owner would be
+ * writable in name only. Such a mount is an idmapped bind (the session
+ * launcher's `idmap-bind`, run in the helper): the owner shows as the
+ * consumer inside the bind only, writes land as the owner on disk, and the
+ * bind is nosuid,nodev. It needs the runtime's `idmappedMounts` (a boot
+ * probe) and is refused with `capability-missing: idmappedMounts` otherwise,
+ * never made read-only or broader. A source tree (root-owned) needs
+ * Developer Mode on top of being open; a root-owned data tree is never
+ * mapped. Switching Developer Mode off makes such source mounts read-only
+ * again (`revokeWritable`); revoking `apps.mount` detaches every cross-app
+ * mount of the consumer (`revokeConsumer`). A patch workspace (`work`) is the
+ * consumer's own dir: no idmap, no Developer Mode. Read-only mounts are unchanged.
+ *
  * ## The AuraOS checkout (`workspace` kind, Developer Mode)
  *
  * `aura mount workspace` binds `/workspace`, the live AuraOS source,
@@ -72,11 +88,13 @@
  * never made into a sidecar.
  */
 import { execFileSync, execSync } from 'node:child_process';
-import { chownSync, existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chownSync, existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { AppRegistry } from './AppRegistry.js';
 import type { ScopeRegistry } from '../scopes/ScopeRegistry.js';
-import type { ContainerRunner } from './ContainerRunner.js';
+import { IDMAP_HELPER_PATH, type ContainerMountBackend } from '../runtimes/container/backends.js';
+import { containerName } from '../runtimes/container/names.js';
+import { RuntimeCapabilityError } from '../runtimes/types.js';
 import { BASE_IMAGE } from './BaseImage.js';
 import { SYSTEM_APP_LATER, SYSTEM_APP_LATER_MESSAGE } from '../nexus/AppSource.js';
 
@@ -175,11 +193,6 @@ export interface FanoutTarget {
   forceRo: boolean;
 }
 
-/** Mirrors ContainerRunner.containerName — same sanitisation rule. */
-function containerNameFor(instanceId: string): string {
-  return `aura-${instanceId.replace(/[^a-zA-Z0-9_.-]/g, '_')}`;
-}
-
 export interface AuraMount {
   /** `<targetAppId>` for a source mount, `<targetAppId>:data` for a data mount, `workspace` for the checkout. */
   id: string;
@@ -206,6 +219,12 @@ export interface AuraMount {
   workspace?: string;
   /** `patches` mounts: the patch repository dir, relative to the root dataDir. */
   patches?: string;
+  /**
+   * D80: a writable mount between different uids, through an idmapped bind:
+   * the on-disk owner (`from`, `uid:gid`) shows as the consumer (`to`) inside
+   * the bind only.
+   */
+  idmap?: { from: string; to: string };
 }
 
 export interface AddMountSpec {
@@ -232,7 +251,17 @@ interface MountManagerOpts {
   dataDir: string;
   registry: AppRegistry;
   scopeRegistry: ScopeRegistry;
-  runner: ContainerRunner;
+  runner: ContainerMountBackend;
+  /**
+   * D80: the `uid:gid` a consumer's processes run as; null for a root
+   * consumer that keeps its capabilities (it writes anywhere). Absent: no
+   * cross-uid handling (tests, a host without app identities).
+   */
+  consumerIdentity?(consumer: string): { uid: number; gid: number } | null;
+  /** D80: Developer Mode is on (a writable source mount into another uid needs it). Absent: off. */
+  developerMode?(): boolean;
+  /** The consumer's runtime id, for a capability refusal. */
+  runtimeOf?(consumer: string): string | undefined;
   /** Resolve a consumer instanceId → its shell-side data dir. */
   instanceDataDir(instanceId: string): string | null;
   /**
@@ -492,7 +521,7 @@ export class MountManager {
    * Returns the shell-side root dir and the path it appears at inside.
    */
   private rootFor(instanceId: string, consumerDataDir: string): { shellDir: string; containerDir: string } {
-    const container = containerNameFor(instanceId);
+    const container = containerName(instanceId);
     try {
       const out = execSync(`docker inspect -f '{{range .Mounts}}{{.Destination}}{{"\\n"}}{{end}}' ${container}`,
         { stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000, encoding: 'utf-8' });
@@ -553,6 +582,48 @@ export class MountManager {
   }
 
   /**
+   * D80: how a writable `source` or `data` mount reaches a consumer that runs
+   * as another uid than the files' on-disk owner. Null: no idmap needed (a
+   * read-only mount, the same uid, a root consumer with its capabilities, or
+   * a kind the consumer owns itself). `ro`: a declaration or re-bind that may
+   * no longer be writable (Developer Mode is off, a root-owned data tree)
+   * comes back read-only, like a closed source. Otherwise the idmap, or a
+   * refusal: never a plain bind that is writable in name only, never broader.
+   */
+  private crossUid(
+    consumer: string, kind: MountKind, srcShell: string, requested: boolean,
+  ): { from: { uid: number; gid: number }; to: { uid: number; gid: number } } | 'ro' | null {
+    if (kind !== 'source' && kind !== 'data') return null;
+    const to = this.opts.consumerIdentity?.(consumer);
+    if (!to) return null;
+    let st: { uid: number; gid: number };
+    try { st = statSync(srcShell); } catch { return null; }   // absent: bind() reports it
+    if (st.uid === to.uid) return null;
+    const who = `${consumer} runs as ${to.uid}:${to.gid} and the files are owned by ${st.uid}:${st.gid}`;
+    const refuse = (why: string): 'ro' => {
+      if (requested) throw new Error(`refusing a writable mount: ${who}; ${why}`);
+      console.warn(`[MountManager] ${who}; ${why}: mounting it read-only`);
+      return 'ro';
+    };
+    // Owner answer 4: writable source of another uid only in Developer Mode (closed sources were refused above).
+    if (kind === 'source' && !this.opts.developerMode?.()) {
+      return refuse('a writable source mount into another app\'s uid needs Developer Mode (or patch it in a workspace: aura dev patch start)');
+    }
+    // An idmap of uid 0 would let the consumer create root-owned files on disk.
+    if (kind === 'data' && st.uid === 0) {
+      return refuse('the data is root-owned, and uid 0 is never mapped to another uid: it must be owned by the app\'s identity first '
+        + '(the app runs as its own uid and its ownership was applied: aura admin apps run-as, aura admin homes ownership)');
+    }
+    const probe = this.opts.runner.canIdmapMounts();
+    if (!probe.ok || !this.opts.runner.idmapHelperHostPath()) {
+      const runtime = this.opts.runtimeOf?.(consumer) ?? 'container';
+      throw new RuntimeCapabilityError(runtime, ['idmappedMounts'],
+        `refusing a writable mount: ${who}, and runtime ${runtime} has no idmapped mounts (${probe.reason ?? 'unavailable'}); never mounted weaker or broader`);
+    }
+    return { from: { uid: st.uid, gid: st.gid }, to };
+  }
+
+  /**
    * Bind the AuraOS checkout read-write into one consumer (`aura mount
    * workspace`, D60). The caller has checked Developer Mode and that the
    * consumer is the asking System Terminal. Never declared, never mirrored.
@@ -566,6 +637,62 @@ export class MountManager {
     }, { persist: false });
   }
 
+  /**
+   * Revokes writable access (owner answer 4 on D80): every live writable
+   * `source`/`data` mount that `match` selects is made read-only again, and
+   * so is its declaration. Called when Developer Mode is switched off (the
+   * idmapped source mounts) and when a consumer loses `apps.mount`. A mount
+   * that can't be re-made read-only stays detached, declared read-only.
+   * Never throws; returns the revoked `<consumer>:<mountId>`.
+   */
+  async revokeWritable(match: (m: AuraMount) => boolean): Promise<string[]> {
+    const revoked: string[] = [];
+    for (const [consumer, set] of [...this.mounts]) {
+      for (const m of [...set.values()]) {
+        if (m.mode !== 'rw' || (m.kind !== 'source' && m.kind !== 'data') || m.origin === 'inherited' || !match(m)) continue;
+        try { this.unmountHost(consumer, m.hostDest); }
+        catch (err) { console.warn(`[MountManager] revoke ${m.id} in ${consumer}: ${(err as Error).message}`); continue; }
+        set.delete(m.id);
+        revoked.push(`${consumer}:${m.id}`);
+        // The inheriting sidecars drop their writable copy first; the read-only re-add mirrors again.
+        if (!isSidecarConsumer(consumer) && KIND_POLICY[m.kind].fanout) this.queueFanout(() => this.fanoutRemove(consumer, m.id));
+        const ro: AddMountSpec = { targetAppId: m.targetAppId, mode: 'ro', data: m.kind === 'data', declaredAt: m.declaredAt };
+        try {
+          await this.add(consumer, ro, { origin: m.origin });
+        } catch (err) {
+          console.warn(`[MountManager] ${m.id} in ${consumer} stays detached: ${(err as Error).message}`);
+          this.writeDeclFile(consumer, [...this.readDecls(consumer).filter((d) => !(d.targetAppId === m.targetAppId && !!d.data === (m.kind === 'data'))), ro]);
+        }
+      }
+      if (set.size === 0) this.mounts.delete(consumer);
+    }
+    await this.settled();
+    return revoked;
+  }
+
+  /**
+   * Revokes every cross-app mount of an instance and of its OS sidecars, read-only and writable, with their
+   * declarations, so no later spawn restores them (owner answer 4 on D80: losing `apps.mount` revokes the
+   * access, including existing mounts). A bind that can't be unmounted stays listed (reconcile reaps it).
+   * Never throws; returns the revoked `<consumer>:<mountId>`.
+   */
+  revokeConsumer(instanceId: string): string[] {
+    const revoked: string[] = [];
+    for (const key of [instanceId, ...(isSidecarConsumer(instanceId) ? [] : this.sidecarKeysOf(instanceId))]) {
+      const set = this.mounts.get(key);
+      for (const m of [...(set?.values() ?? [])]) {
+        try { this.unmountHost(key, m.hostDest); }
+        catch (err) { console.warn(`[MountManager] revoke ${m.id} in ${key}: ${(err as Error).message}`); continue; }
+        set!.delete(m.id);
+        revoked.push(`${key}:${m.id}`);
+      }
+      if (set && set.size === 0) this.mounts.delete(key);
+      this.writeDeclFile(key, []);
+      this.pruneStale(key);
+    }
+    return revoked;
+  }
+
   /** Every live mount of the AuraOS checkout, in every consumer. */
   workspaceMounts(): AuraMount[] {
     return [...this.mounts.values()].flatMap((set) => [...set.values()].filter((m) => m.kind === 'workspace'));
@@ -576,7 +703,7 @@ export class MountManager {
     spec: { targetAppId: string; kind: MountKind; mode: MountMode; id: string; declaredAt?: string; workspace?: string; patches?: string },
     opts: { persist?: boolean; origin?: MountOrigin },
   ): Promise<AuraMount> {
-    const { kind, mode, id } = spec;
+    const { kind, id } = spec;
 
     if (this.mounts.get(instanceId)?.has(id)) {
       throw new Error(`${id} is already mounted into ${instanceId}`);
@@ -620,13 +747,27 @@ export class MountManager {
     const hostDest   = this.opts.runner.toDaemonHostPath(dstShell);
     const containerPath = `${root.containerDir}/${dirName}`;
 
+    let mode = spec.mode;
+    const plan = mode === 'rw' ? this.crossUid(instanceId, kind, srcShell, (opts.origin ?? 'added') === 'added' && opts.persist !== false) : null;
+    if (plan === 'ro') mode = 'ro';
+    const idmap = plan && plan !== 'ro'
+      ? { from: `${plan.from.uid}:${plan.from.gid}`, to: `${plan.to.uid}:${plan.to.gid}` } : undefined;
+
     // A bind may already exist at the destination — a survivor from a previous
     // shell generation (binds live in the host kernel, not in this process).
     // Mounting again would STACK a second bind on top; one detach then peels a
     // single layer and the mount "comes back". Adopt the survivor instead, with
     // its ACTUAL mode — verify() below still enforces what was promised.
     const preExisting = this.liveMountPaths().includes(dstShell);
-    if (!preExisting) {
+    if (!preExisting && idmap) {
+      // D80: the session launcher's `idmap-bind` (Node has no mount_setattr), in the same helper.
+      this.runHelper(instanceId, [
+        '-v', `${hostSource}:/src`,
+        '-v', '/:/host:rshared',
+        '-v', `${this.opts.runner.idmapHelperHostPath()!}:${IDMAP_HELPER_PATH}:ro`,
+      ], `mkdir -p "/host$1" && { ${IDMAP_HELPER_PATH} idmap-bind /src "/host$1" "$2" "$3" || { rmdir "/host$1" 2>/dev/null || true; exit 1; }; }`,
+      hostDest, idmap.from, idmap.to);
+    } else if (!preExisting) {
       this.runHelper(instanceId, [
         // The SOURCE carries the ro/rw decision — see the module header.
         '-v', `${hostSource}:/src${mode === 'ro' ? ':ro' : ''}`,
@@ -647,6 +788,7 @@ export class MountManager {
       declaredAt: spec.declaredAt ?? new Date().toISOString(),
       ...(kind === 'work' ? { workspace: spec.workspace! } : {}),
       ...(kind === 'patches' ? { patches: spec.patches! } : {}),
+      ...(idmap && !preExisting ? { idmap } : {}),
     };
 
     try {
@@ -1093,7 +1235,7 @@ export class MountManager {
    * that joins its PID namespace and reads PID 1's view — unprivileged.
    */
   private readMountinfo(consumer: string): string | null {
-    const container = containerNameFor(consumer);
+    const container = containerName(consumer);
     try {
       return execFileSync('docker', ['exec', container, 'cat', '/proc/self/mountinfo'],
         { stdio: ['ignore', 'pipe', 'pipe'], timeout: 15_000, encoding: 'utf-8' });
@@ -1135,6 +1277,10 @@ export class MountManager {
       throw new Error(
         `refusing mount: requested read-only but ${mount.containerPath} is read-write in ${instanceId}`,
       );
+    }
+    // D80: a cross-uid writable mount that arrived without its idmapping would be writable in name only.
+    if (mount.idmap && !opts.split(',').includes('idmapped')) {
+      throw new Error(`refusing mount: ${mount.containerPath} arrived in ${instanceId} without its idmapping`);
     }
   }
 }

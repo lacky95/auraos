@@ -122,6 +122,8 @@ export async function getRuntimes(_ctx: Ctx, deps: RuntimesDeps = liveRuntimesDe
       features: core.moduleFeatures(m, settings),
       // `detail` stays for the clients that read it (Settings, `aura runtime show`); `checks` is the ARI shape.
       health: { status: health.status, checks: health.checks, ...(refusal ? { detail: refusal } : {}) },
+      // The host switches the module reads (display only; 5b G: clients render them, never compare ids).
+      ...(m.hostSwitches ? { hostSwitches: m.hostSwitches() } : {}),
       instances: on,
       /** 5b S: "N instances run on the old settings; restart to apply". */
       restartToApply: on.filter((i) => i.restartToApply).length,

@@ -12,7 +12,7 @@ The sector rules are in `packages/core/AGENTS.md`. This module is the kernel's l
   - window flight (presentation, debt);
   - manifests, interfaces, sidecars and usage.
 - **Runners:** `ContainerRunner.ts` and `ProotRunner.ts` implement `SandboxRunner.ts`. From 5b CR/PR they sit behind ARI modules in `core/src/runtimes/<id>/`.
-- **Resource managers:** `SidecarManager`, `MountManager`, `PortManager`. From 5b G they are typed to runtime backends.
+- **Resource managers:** `SidecarManager`, `MountManager`, `PortManager`, typed to the container backends (`runtimes/container/backends.ts`, 5b G), never to `ContainerRunner`; names come from `runtimes/container/names.ts`. A writable cross-uid mount is an idmapped bind or refused (`idmappedMounts`, D80).
 - **System Management parts that still live here:** `AppRegistry`, `appBuild`, `BaseImage`, `tool-provision`, `provisioning`. They move out in the Phase 8 decomposition.
 
 ## Rules
@@ -21,7 +21,7 @@ The sector rules are in `packages/core/AGENTS.md`. This module is the kernel's l
   - New lifecycle behaviour goes in a focused file with its own contract, which AppManager calls.
   - New presentation behaviour doesn't belong in the kernel.
   - Phase 8 decomposes AppManager behind a facade. Code you add now should already have that shape.
-- **Don't add a kind check** (`sandbox === 'container'` or `'proot'`) outside the runtime modules. Ask the runtime's capabilities instead (ARI, 5b G).
+- **Don't add a kind check** (`sandbox === 'container'` or `'proot'`) outside the runtime modules. Ask `AppManager.instanceCapabilities()` (effective: the runtime's, narrowed by the installation) instead (ARI, 5b G; `ari-coverage.test.mjs` fails on a new one).
 - **Runners don't import `OsEventBus`.** They report exits through `onExit`; the kernel emits `app:*` (G1).
 - **Keep the `SandboxRunner` and ARI arguments plain data.** The spawn context carries no functions and no live objects.
 - **Collaborators are passed in.** Don't fetch them from `globalThis` or import a sibling module's `services.ts`. The auth services arrive as `opts.auth` from the composition point (5b K removed the `AppManager ↔ auth/services` cycle).

@@ -6,7 +6,8 @@ import { defaultKv } from '@aura/kv-store';
 import { connect } from 'node:net';
 import { dirname, join } from 'node:path';
 import type { AppRegistry } from './AppRegistry.js';
-import type { ContainerRunner } from './ContainerRunner.js';
+import type { ContainerSidecarBackend } from '../runtimes/container/backends.js';
+import { containerName } from '../runtimes/container/names.js';
 import type { InstanceTokens } from './InstanceTokens.js';
 import type { FanoutTarget, MountManager } from './MountManager.js';
 import { MOUNT_ROOT_PATH } from './MountManager.js';
@@ -133,7 +134,7 @@ export interface Caller {
 }
 
 interface SidecarManagerOpts {
-  runner: ContainerRunner;
+  runner: ContainerSidecarBackend;
   registry: AppRegistry;
   permissions: PermissionManager;
   tokens: InstanceTokens;
@@ -513,7 +514,7 @@ export class SidecarManager {
         if (ctx.env[name] !== undefined) { env[name] = ctx.env[name]; continue; }
         // A Context key the app does not hold, or names unknown (Valkey down): never from the container's env.
         if (!ctx.known || ctx.known.has(name)) continue;
-        parentEnv ??= await this.containerEnv(`aura-${instanceId}`);
+        parentEnv ??= await this.containerEnv(containerName(instanceId));
         if (parentEnv[name] !== undefined) env[name] = parentEnv[name];
       }
     }

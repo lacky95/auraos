@@ -121,15 +121,22 @@ export async function buildAppDTO(appId: string): Promise<AppDTO | null> {
   const manifest = mgr.getManifest(appId);
   if (!manifest) return null;
   const instances = await Promise.all(
-    mgr.getInstancesByApp(appId).map((inst) => probeHealth(inst).then((health) => ({ instance: publicInstance(inst), health }))),
+    mgr.getInstancesByApp(appId).map((inst) => probeHealth(inst).then((health) => ({ instance: publicInstance(inst, mgr), health }))),
   );
   return { manifest, instances };
 }
 
-/** An instance for an API response. `owner` is server-side until Phase 3. */
-export function publicInstance(inst: AppInstance): Omit<AppInstance, 'owner'> {
+/** The runtime of an instance in the instance view (5b G): `{id, source, capabilities}`, its effective capabilities. */
+export type InstanceRuntimeView = ReturnType<ReturnType<typeof getAppManager>['instanceRuntime']>;
+
+/**
+ * An instance for an API response. `owner` is server-side until Phase 3.
+ * With `mgr`, it carries `runtime` (5b G): clients gate on
+ * `runtime.capabilities`, never on the runtime id.
+ */
+export function publicInstance(inst: AppInstance, mgr?: Pick<ReturnType<typeof getAppManager>, 'instanceRuntime'>): Omit<AppInstance, 'owner'> & { runtime?: InstanceRuntimeView } {
   const { owner: _owner, ...rest } = inst;
-  return rest;
+  return mgr ? { ...rest, runtime: mgr.instanceRuntime(inst.instanceId) } : rest;
 }
 
 export function jsonResponse(data: unknown, status = 200) {
