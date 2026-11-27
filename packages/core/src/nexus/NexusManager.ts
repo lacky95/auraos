@@ -10,6 +10,7 @@
  * `permission.needed` and waits for the next `next()` call; only an
  * in-process caller can answer that with `{ approve: true }`.
  */
+import type { InstanceUpdater } from '../app-manager/maintenance.js';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve as resolvePath } from 'node:path';
@@ -111,6 +112,13 @@ export interface NexusManagerOpts {
    * install leaves provisioning to the first start.
    */
   provision?: (appId: string, onLine: (line: string) => void) => Promise<{ ok: boolean; ran: boolean; output: string }>;
+  /**
+   * The kernel's `InstanceUpdater` (Phase 6 stream M): an update of an
+   * installed app goes drain → switch → maintenance start → onUpdate → serve.
+   * Absent (tests, tools): the files are switched and running instances keep
+   * the old code until they restart, as before.
+   */
+  updater?: InstanceUpdater;
   /** App Host records follow the install lifecycle. Injected by the singleton. */
   hostLifecycle?: AppHostLifecycle;
 }
@@ -131,6 +139,7 @@ export class NexusManager {
   /** Deterministic AppRegistry (re)registration hook. */
   private readonly onAppChanged?: (appId: string) => void;
   private readonly provision?: NexusManagerOpts['provision'];
+  private readonly updater?: InstanceUpdater;
   private readonly hostLifecycle?: AppHostLifecycle;
   /** App ids (and raw refs) currently mid-install. Exposed so the store UI can
    *  render/persist an "installing…" state that survives a page reload. */
@@ -149,6 +158,7 @@ export class NexusManager {
     this.bus           = opts.bus;
     this.onAppChanged  = opts.onAppChanged;
     this.provision     = opts.provision;
+    this.updater       = opts.updater;
     this.hostLifecycle = opts.hostLifecycle;
     this.sourcesConfig = opts.sourcesConfig ?? cloneDefaultSources();
     this.catalog       = new CatalogAggregator({
@@ -636,41 +646,78 @@ export class NexusManager {
       }
 
       yield { type: 'install.start' };
-      let record: InstallRecord;
-      this.hostLifecycle?.beginInstall(manifest.id, targetScope);
-      try {
-        if (restore.kind === 'deny') {
-          installer.setAsideRetainedData(manifest.id, restore.installation.installationId);
-        } else if (restore.kind === 'restore' || (restore.kind === 'confirm' && restore.installation)) {
-          installer.restoreRetainedData(manifest.id, restore.installation!.installationId);
-        }
-        record = await installer.install(stagingDir, manifest, resolved, link, { keepProvenance: opts.action === 'app.patch.activate' });
-        // A patch activation keeps the release's provenance on the record: the
-        // installation's source is that record's, as every later sync reads it.
-        const landed: AppIdentityFacts = opts.action === 'app.patch.activate'
-          ? { ...hostFacts, source: { kind: record.source, ref: record.ref, ...(record.digest ? { digest: record.digest } : {}) } }
-          : hostFacts;
-        // Before the registry reload below, so its host guard accepts this manifest.
+      let record!: InstallRecord;
+      let installedNew: InstallRecord | null = null;
+      let provisionedInSwitch = false;
+      // The code switch: the files and record, the App Host record, the root approval, then the registry.
+      const applyInstall = async (): Promise<void> => {
+        this.hostLifecycle?.beginInstall(manifest.id, targetScope);
         try {
-          await this.hostLifecycle?.completeInstall(landed, restore, manifest.hosts.map((h) => h.name));
-        } catch (err) {
-          console.warn(`[nexus] app host update for ${manifest.id} failed: ${(err as Error).message}`);
-        }
-        // The approved root request, on the installation, before the app can start (fail closed if it can't be).
-        if (executionApproved) {
-          try {
-            // A new record with no data from before may start as root at once; an app that ran as its
-            // app identity keeps data that uid owns: its flip goes through the run-as migration.
-            const restored = restore.kind === 'restore' || (restore.kind === 'confirm' && !!restore.installation);
-            await this.hostLifecycle?.approveExecution(manifest.id, targetScope, {
-              runAs: 'root', digest: executionApproved.digest, approvedAt: Date.now(), via: binding.action,
-            }, { newRecord: !priorInstallation && !restored });
-          } catch (err) {
-            console.warn(`[nexus] ${manifest.id}: its root approval could not be recorded (${(err as Error).message}); it does not start until you approve it again (aura admin apps run-as ${manifest.id} root: a dry run, then --apply <digest>)`);
+          if (restore.kind === 'deny') {
+            installer.setAsideRetainedData(manifest.id, restore.installation.installationId);
+          } else if (restore.kind === 'restore' || (restore.kind === 'confirm' && restore.installation)) {
+            installer.restoreRetainedData(manifest.id, restore.installation!.installationId);
           }
+          record = await installer.install(stagingDir, manifest, resolved, link, { keepProvenance: opts.action === 'app.patch.activate' });
+          installedNew = record;
+          // A patch activation keeps the release's provenance on the record: the
+          // installation's source is that record's, as every later sync reads it.
+          const landed: AppIdentityFacts = opts.action === 'app.patch.activate'
+            ? { ...hostFacts, source: { kind: record.source, ref: record.ref, ...(record.digest ? { digest: record.digest } : {}) } }
+            : hostFacts;
+          // Before the registry reload below, so its host guard accepts this manifest.
+          try {
+            await this.hostLifecycle?.completeInstall(landed, restore, manifest.hosts.map((h) => h.name));
+          } catch (err) {
+            console.warn(`[nexus] app host update for ${manifest.id} failed: ${(err as Error).message}`);
+          }
+          // The approved root request, on the installation, before the app can start (fail closed if it can't be).
+          if (executionApproved) {
+            try {
+              // A new record with no data from before may start as root at once; an app that ran as its
+              // app identity keeps data that uid owns: its flip goes through the run-as migration.
+              const restored = restore.kind === 'restore' || (restore.kind === 'confirm' && !!restore.installation);
+              await this.hostLifecycle?.approveExecution(manifest.id, targetScope, {
+                runAs: 'root', digest: executionApproved.digest, approvedAt: Date.now(), via: binding.action,
+              }, { newRecord: !priorInstallation && !restored });
+            } catch (err) {
+              console.warn(`[nexus] ${manifest.id}: its root approval could not be recorded (${(err as Error).message}); it does not start until you approve it again (aura admin apps run-as ${manifest.id} root: a dry run, then --apply <digest>)`);
+            }
+          }
+        } finally {
+          this.hostLifecycle?.endInstall(manifest.id, targetScope);
         }
-      } finally {
-        this.hostLifecycle?.endInstall(manifest.id, targetScope);
+        this.onAppChanged?.(manifest.id);
+      };
+
+      // An update of an installed app (Phase 6 stream M, D108 A3): its running code is drained, the new code
+      // starts with no traffic, runs onUpdate, then serves; a failure puts the previous tree back.
+      if (this.updater && currentManifest && currentRecord) {
+        const outcome = await this.updater.updateInstance(manifest.id, {
+          fromVersion: currentManifest.version, toVersion: manifest.version,
+          // The new code's dependencies before it starts (the builder; progress on the bus, a failure is the start's).
+          switchCode: async () => {
+            await applyInstall();
+            const dir = join(installer.appsDir, manifest.id);
+            if (this.provision && needsProvisioning(dir, manifest.runtime)) {
+              provisionedInSwitch = true;
+              await this.provision(manifest.id, (line) => this.bus?.emit('nexus:install.progress', { id: manifest.id, line }))
+                .catch((err: unknown) => { console.warn(`[nexus] ${manifest.id}: dependency install failed (${(err as Error).message}); the entrypoint retries`); });
+            }
+          },
+          rollback: async () => {
+            if (!installedNew) return;
+            installer.rollbackUpdate(installedNew, currentRecord);
+            this.onAppChanged?.(manifest.id);
+          },
+        });
+        if (!outcome.ok) {
+          unmark();
+          throw Object.assign(new Error(`${outcome.error.message}${outcome.rolledBack ? ' (the previous version is back)' : ''}`),
+            { code: outcome.error.error, body: outcome.error, rolledBack: outcome.rolledBack });
+        }
+      } else {
+        await applyInstall();
       }
 
       // Register with the AppRegistry NOW — before provisioning, and well before
@@ -683,7 +730,7 @@ export class NexusManager {
       //    left a window where the store said INSTALLED and launching 404'd.
       //    An app that is registered but not yet provisioned is fine — the
       //    entrypoint provisions it and the runner now waits for that.
-      this.onAppChanged?.(manifest.id);
+      //    (applyInstall registered it; an update's new code is already serving.)
 
       // Install the app's dependencies HERE, not on the launch path.
       //
@@ -701,7 +748,7 @@ export class NexusManager {
       // hangs up mid-install — costs a slow first launch, not a broken app.
       // The entrypoint still provisions as a fallback and the runners wait.
       const appDir = join(installer.appsDir, manifest.id);
-      if (this.provision && needsProvisioning(appDir, manifest.runtime)) {
+      if (this.provision && !provisionedInSwitch && needsProvisioning(appDir, manifest.runtime)) {
         yield { type: 'install.provision', message: 'installing dependencies (in the builder)…' };
         try {
           const prov = await this.provision(manifest.id, (line) => {

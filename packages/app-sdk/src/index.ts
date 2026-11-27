@@ -100,6 +100,7 @@ export {
   createIntentHandler,
   createSaveStateHandler,
   createAssignHandler,
+  createUpdateHandler,
 } from './lifecycle.js';
 export { parseIntentPayload, IntentRejectedError } from './intent.js';
 export type { IntentPayload } from './intent.js';
@@ -113,6 +114,7 @@ export type {
   SaveStateResult,
   IntentRequest,
   AssignRequest,
+  UpdateContext,
 } from './lifecycle.js';
 
 // Android-`Context`-equivalent: env-var + header readers. See ./context.ts.

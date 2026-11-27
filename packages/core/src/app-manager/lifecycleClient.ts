@@ -115,6 +115,34 @@ export async function callOptionalHook(
   }
 }
 
+/**
+ * A maintenance hook (D108 A3, stream M: `onUpdate`; 7c: `onSetup`, ...),
+ * called inside a maintenance start with its own timeout and the reason in
+ * `x-aura-maintenance`. Optional like every maintenance hook: an app that
+ * doesn't implement it answers 404 and the result is null, never an error.
+ * Otherwise unlike `callOptionalHook`, a failure is the update's failure:
+ * an unknown or unbound instance, a non-2xx answer or the timeout throws.
+ */
+export async function callMaintenanceHook(
+  traits: LifecycleTraits, instanceId: string, dest: LifecycleDestination | null, hook: string, body: unknown,
+  opts: { timeoutMs: number; reason: string },
+): Promise<unknown | null> {
+  if (!dest) throw new Error(`${traits.name} ${instanceId} is not running; ${hook} not sent`);
+  const why = dest.unbound();
+  if (why) throw new Error(`${traits.name} ${instanceId}: ${why}; ${hook} not sent`);
+  const res = await fetch(lifecycleUrl(dest.host, dest.port, hook), {
+    method: 'POST',
+    headers: lifecycleHeaders(dest.token, { 'Content-Type': 'application/json', 'x-aura-maintenance': opts.reason }),
+    body: JSON.stringify(body ?? {}),
+    signal: AbortSignal.timeout(opts.timeoutMs),
+  });
+  if (res.status === 404) return null;
+  const text = await res.text();
+  if (!res.ok) throw new Error(`${traits.name} ${instanceId} maintenance hook ${hook} returned ${res.status}${text ? `: ${text.slice(0, 300)}` : ''}`);
+  if (!text) return null;
+  try { return JSON.parse(text) as unknown; } catch { return null; }
+}
+
 /** A health loop's view of the start it waits for. */
 export interface HealthTarget {
   /**

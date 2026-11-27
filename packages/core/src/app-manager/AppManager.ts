@@ -54,7 +54,7 @@ import { RUNTIME_AUDIT_ACTIONS, RuntimeSettingsStore, runtimeSettingsRevision } 
 import { migrateLegacyRuntimes, migrationReport, processLegacyEnv, type MigrationApp, type MigrationReport } from '../runtimes/migrateLegacy.js';
 import { defaultRedis } from '@aura/kv-store';
 import { AdminAudit } from '../auth/AdminAudit.js';
-import { CONTRACT_AUDIT_ACTIONS, operationalBlock, OperationalBlockError, type OperationalBlock } from '../contract/types.js';
+import { CONTRACT_AUDIT_ACTIONS, operationalBlock, OperationalBlockError, operationalBlockOf, type OperationalBlock } from '../contract/types.js';
 import type { AuthServices } from '../auth/services.js';
 import { defaultIdentityKeyFile } from '../auth/identityKey.js';
 import { HomeDeniedError, type HomeResolver, type ResolvedHome } from '../homes/types.js';
@@ -80,7 +80,7 @@ import { runAsMigrationBlock, type RunAsOwnershipInput } from '../identity/runAs
 import { installationAppHomes } from '../homes/appHomeAdmin.js';
 import type { AppInstallation, AppRunAsMigration } from '../app-hosts/contracts.js';
 import type { AppGrantBinding } from '../auth/types.js';
-import { RuntimeCapabilityError, RuntimeModuleError } from '../runtimes/types.js';
+import { RuntimeCapabilityError, RuntimeModuleError, runtimeErrorBody, runtimeRefusal } from '../runtimes/types.js';
 import { BASE_GROUP, BASE_PASSWD, identityAccountName, isNonRootIdentity, isSessionIdentity } from '../runtimes/spawn/identityArgs.js';
 import { renderGroup, renderPasswd, type PasswdEntry } from '../identity/passwd.js';
 import type { SessionCaller, SessionContext } from './ExecBridge.js';
@@ -104,6 +104,12 @@ import { getAppHostServices, type AppHostServices } from '../app-hosts/services.
 import { appSourceFingerprint } from '../app-hosts/sourceFingerprint.js';
 import { seedHomeAs } from './homeSeed.js';
 import { PREVIEW_IDLE_MS, previewTitle } from './preview.js';
+import type {
+  MaintenanceReason, MaintenanceRefusal, MaintenanceSession, MaintenanceStartOptions, MaintenanceStartResult, StopReason,
+  UpdateInstanceOptions, UpdateInstanceOutcome,
+} from './maintenance.js';
+import { UPDATE_HOOK_TIMEOUT_MS, runInstanceUpdate } from './instanceUpdate.js';
+import type { AuraErrorBody } from '../errors/contracts.js';
 import { MOUNT_DIR_NAME } from './MountManager.js';
 import { ExecBridge } from './ExecBridge.js';
 import { RootGrants } from './rootTabs.js';
@@ -2062,9 +2068,129 @@ export class AppManager {
    * (the OS itself: autostart, restore), the local owner.
    */
   async start(appId: string, opts: LaunchUser = {}): Promise<string> {
+    // An app in maintenance (an update, D108 A3) starts once it is over: never next to its new code.
+    const busy = this.maintenanceBusy.get(appId);
+    if (busy) await busy.catch(() => undefined);
+    const pending = this.pendingUpdates.get(appId);
+    if (pending && !this.liveUserInstances(appId).length) return this.startPendingUpdate(appId, pending, opts.userId);
+    return this.startDirect(appId, opts);
+  }
+
+  /** A start with no maintenance wait (the update's own restarts). */
+  private async startDirect(appId: string, opts: LaunchUser = {}): Promise<string> {
     const instanceId = await this.launch(appId, opts.userId);
     await this.claimHostSlot(appId, instanceId);
     return instanceId;
+  }
+
+  // ─── Maintenance starts and updates (Phase 6 stream M, D108 A3; contract maintenance.ts) ──────
+
+  /** Apps in a maintenance start or an update: their pool does not refill, a start waits. */
+  private readonly maintenanceBusy = new Map<string, Promise<unknown>>();
+  /** Updates switched on disk while the app kept running (or did not run): `onUpdate` at its next start. */
+  private readonly pendingUpdates = new Map<string, { fromVersion: string; toVersion: string }>();
+
+  /** The app's live, user-owned instances (no pool member, no preview). */
+  private liveUserInstances(appId: string): AppInstance[] {
+    return this.getInstancesByApp(appId).filter((i) => !i.inPool && !i.preview && i.state !== 'destroyed' && i.state !== 'error');
+  }
+
+  /**
+   * The `MaintenanceStarter` port: the app's new code up and healthy, with no
+   * traffic routed (no proxy, App Host, intents or activity claim) and no
+   * start hooks, through the one start gate (spawnContext). Reason `setup` is
+   * refused until the setup engine enables it (Phase 7c P3). A refusal is the
+   * D105 body.
+   */
+  async startMaintenance(appId: string, opts: MaintenanceStartOptions): Promise<MaintenanceStartResult> {
+    const refuse = (error: AuraErrorBody): MaintenanceRefusal => ({ ok: false, error });
+    if (opts.reason !== 'update') {
+      return refuse({ error: 'maintenance-unavailable', category: 'unsupported-operation',
+        message: `a '${String(opts.reason)}' maintenance start arrives with the setup engine (D108, Phase 7c); only 'update' runs now` });
+    }
+    const manifest = this.registry.getById(appId);
+    if (!manifest) return refuse({ error: 'not-found', category: 'not-found', message: `App not found: ${appId}` });
+    if (this.liveUserInstances(appId).length) {
+      return refuse({ error: 'app-running', category: 'conflict', target: appId,
+        message: `${appId} runs: a maintenance start needs it stopped first (an update drains it)` });
+    }
+    let instanceId: string;
+    try {
+      instanceId = await this.spawnInstance(appId, { inPool: false, ...(opts.userId ? { userId: opts.userId } : {}), maintenance: opts.reason });
+    } catch (err) {
+      const blocked = operationalBlockOf(err);
+      if (blocked) return refuse(blocked);
+      const r = runtimeRefusal(err);
+      if (r) return refuse(runtimeErrorBody(r));
+      return refuse({ error: 'maintenance-start-failed', category: 'provisioning-failed', target: appId,
+        message: `${appId}: the new code did not start: ${(err as Error).message}`, hint: `see aura logs app ${appId}` });
+    }
+    const timeoutMs = opts.hookTimeoutMs ?? UPDATE_HOOK_TIMEOUT_MS;
+    const reason = opts.reason;
+    let finished = false;
+    const session: MaintenanceSession = {
+      instanceId, appId, reason, startedAt: Date.now(),
+      callHook: (hook, body) => this.runnerOf(instanceId).callMaintenanceHook(instanceId, hook, body ?? {}, { timeoutMs, reason }),
+      finish: async (outcome) => {
+        if (finished) return;
+        finished = true;
+        if (outcome === 'stop') { await this.stop(instanceId, { reason: reason === 'update' ? 'update' : 'user' }); return; }
+        await this.serveInstance(instanceId, appId, manifest, { inPool: false, preview: false });
+        const inst = this.instances.get(instanceId);
+        if (inst) { delete inst.maintenance; this.instances.set(instanceId, inst); }
+        await this.claimHostSlot(appId, instanceId);
+      },
+    };
+    return { ok: true, session };
+  }
+
+  /**
+   * The `InstanceUpdater` port: drain → switchCode → maintenance start
+   * `update` → `onUpdate` (120 s; skipped when the versions are equal) →
+   * serve; rolled back on a failure (instanceUpdate.ts). An app with live
+   * sessions (`keepRunningOnBuild`, a user's session host, D35) is not
+   * drained: its next start runs `onUpdate` (the owner restarts it).
+   */
+  async updateInstance(appId: string, opts: UpdateInstanceOptions): Promise<UpdateInstanceOutcome> {
+    const prior = this.maintenanceBusy.get(appId);
+    if (prior) await prior.catch(() => undefined);
+    const run = runInstanceUpdate({
+      running: (id) => this.liveUserInstances(id).map((i) => ({ instanceId: i.instanceId, ...(i.owner ? { owner: i.owner } : {}) })),
+      keepsRunning: (id) => this.registry.getById(id)?.keepRunningOnBuild === true || isUserEnvironment({ appId: id }),
+      drain: (id) => this.stopAll(id, { reason: 'update' }),
+      startMaintenance: (id, o) => this.startMaintenance(id, o),
+      start: (id, userId) => this.startDirect(id, userId ? { userId } : {}),
+      markPending: (id, fromVersion, toVersion) => { this.pendingUpdates.set(id, { fromVersion, toVersion }); },
+      log: (line) => console.log(`[AppManager] update: ${line}`),
+    }, appId, opts);
+    this.maintenanceBusy.set(appId, run);
+    try {
+      const out = await run;
+      if (out.ok && out.hookCalled) this.pendingUpdates.delete(appId);
+      return out;
+    } finally {
+      if (this.maintenanceBusy.get(appId) === run) this.maintenanceBusy.delete(appId);
+    }
+  }
+
+  /** A start after an update that did not drain the app: maintenance `update`, `onUpdate`, serve. Fails closed. */
+  private async startPendingUpdate(appId: string, pending: { fromVersion: string; toVersion: string }, userId?: string): Promise<string> {
+    const run = (async () => {
+      const started = await this.startMaintenance(appId, { reason: 'update', ...pending, ...(userId ? { userId } : {}) });
+      if (!started.ok) throw Object.assign(new Error(started.error.message), { code: started.error.error, body: started.error });
+      try {
+        await started.session.callHook('onUpdate', pending);
+      } catch (err) {
+        await started.session.finish('stop').catch(() => undefined);
+        throw Object.assign(new Error(`${appId}: onUpdate (${pending.fromVersion} → ${pending.toVersion}) failed: ${(err as Error).message}; not started`),
+          { code: 'update-hook-failed' });
+      }
+      this.pendingUpdates.delete(appId);
+      await started.session.finish('serve');
+      return started.session.instanceId;
+    })();
+    this.maintenanceBusy.set(appId, run);
+    try { return await run; } finally { if (this.maintenanceBusy.get(appId) === run) this.maintenanceBusy.delete(appId); }
   }
 
   /**
@@ -2846,7 +2972,11 @@ export class AppManager {
   }
 
   private async spawnInstance(
-    appId: string, opts: { inPool: boolean; userId?: string; preview?: { appDir: string; workspace: string; owner: string; dataFrom: string | null } },
+    appId: string, opts: {
+      inPool: boolean; userId?: string; preview?: { appDir: string; workspace: string; owner: string; dataFrom: string | null };
+      /** D108 A3: a maintenance start: up and healthy, no traffic, no start hooks until it serves (`serveInstance`). */
+      maintenance?: MaintenanceReason;
+    },
   ): Promise<string> {
     const manifest = this.registry.getById(appId);
     if (!manifest) throw new Error(`App not found: ${appId}`);
@@ -2938,7 +3068,7 @@ export class AppManager {
       const pid = await runner.spawn(spec.instanceId, spec.appId, spec.port, spec.manifest, runnerContextOf(spec));
       const lifecycle = runner.lifecycleStatus(instanceId) ?? undefined;
       this.upsertInstance(instanceId, appId, {
-        pid, port, startedAt: new Date(), inPool: opts.inPool, owner, lifecycle,
+        pid, port, startedAt: new Date(), inPool: opts.inPool, owner, lifecycle, version: manifest.version,
         ...(opts.preview ? { preview: { workspace: opts.preview.workspace, startedAt: new Date().toISOString() } } : {}),
       });
       if (opts.inPool) this.savePoolIds();
@@ -2956,44 +3086,13 @@ export class AppManager {
         console.warn(`[AppManager] port reapply failed for ${instanceId}: ${(err as Error).message}`);
       });
 
-      await this.runnerOf(instanceId).callLifecycle(instanceId, 'onCreate');
-      this.transition(instanceId, appId, 'starting', port);
-
-      await this.runnerOf(instanceId).callLifecycle(instanceId, 'onStart');
-      this.transition(instanceId, appId, 'started', port);
-
-      await this.runnerOf(instanceId).callLifecycle(instanceId, 'onResume');
-      this.transition(instanceId, appId, 'resuming', port);
-      this.transition(instanceId, appId, 'resumed', port);
-
-      const spawned = this.instances.get(instanceId);
-      // Called unconditionally: InterfaceRegistry applies the warm-pool rule
-      // itself, so it is stated once instead of repeated at all four of its
-      // register call sites.
-      if (spawned && !opts.preview) this.interfaces.registerInstance(spawned, manifest);
-      // Register content providers ONLY for user-owned instances. If pool
-      // members claimed /api/data/<authority>/* routes, multiple pool entries
-      // would compete and the route would point at an instance the user
-      // doesn't own. Pool claim registers providers after the hand-off.
-      if (!opts.inPool) {
-        if (spawned && !opts.preview) this.providers.registerInstance(spawned, manifest);
-      } else {
-        // Pool warm-up: pre-compile the iframe entry point (`/`) so the user's
-        // FIRST iframe load after claim doesn't trigger Vite's on-demand compile
-        // + bundle path. waitHealthy only touched /api/lifecycle/health, leaving
-        // the index.astro module cold. Warming `/` also primes the bundled
-        // page modules it references (e.g. the terminal's xterm bundle, now an
-        // npm dep pulled in via the page's <script> rather than a static vendor
-        // file). Fire-and-forget; never blocks the spawn.
-        const warmups = ['/'];
-        const host = this.runnerOf(instanceId).getHost(instanceId) ?? '127.0.0.1';
-        for (const path of warmups) {
-          fetch(`http://${host}:${port}${path}`, { signal: AbortSignal.timeout(5000), headers: this.ownRelayHeaders(appId, instanceId, 'GET', path) })
-            .then((r) => r.body?.cancel()).catch(() => undefined);
-        }
+      // D108 A3: a maintenance start stops here: healthy, no hooks, nothing registered, no traffic.
+      if (opts.maintenance) {
+        this.upsertInstance(instanceId, appId, { maintenance: opts.maintenance });
+        this.runnerOf(instanceId).onExit(instanceId, (code) => this.handleUnexpectedExit(instanceId, appId, code));
+        return instanceId;
       }
-
-      this.runnerOf(instanceId).onExit(instanceId, (code) => this.handleUnexpectedExit(instanceId, appId, code));
+      await this.serveInstance(instanceId, appId, manifest, { inPool: opts.inPool, preview: !!opts.preview });
       if (nonRoot) this.appStarts.set(appId, { at: new Date().toISOString(), ok: true });
       return instanceId;
     } catch (err) {
@@ -3006,6 +3105,54 @@ export class AppManager {
       this.transition(instanceId, appId, 'error', null, String(err));
       throw err;
     }
+  }
+
+  /**
+   * The rest of a start once its process is healthy: the start hooks, the
+   * registrations (interfaces, content providers) and the exit watch. A
+   * direct start runs it at once; a maintenance start when it serves.
+   */
+  private async serveInstance(instanceId: string, appId: string, manifest: AppManifest, opts: { inPool: boolean; preview: boolean }): Promise<void> {
+    const port = this.instances.get(instanceId)?.port ?? null;
+    await this.runnerOf(instanceId).callLifecycle(instanceId, 'onCreate');
+    this.transition(instanceId, appId, 'starting', port);
+
+    await this.runnerOf(instanceId).callLifecycle(instanceId, 'onStart');
+    this.transition(instanceId, appId, 'started', port);
+
+    await this.runnerOf(instanceId).callLifecycle(instanceId, 'onResume');
+    this.transition(instanceId, appId, 'resuming', port);
+    this.transition(instanceId, appId, 'resumed', port);
+
+    const spawned = this.instances.get(instanceId);
+    // Called unconditionally: InterfaceRegistry applies the warm-pool rule
+    // itself, so it is stated once instead of repeated at all four of its
+    // register call sites.
+    if (spawned && !opts.preview) this.interfaces.registerInstance(spawned, manifest);
+    // Register content providers ONLY for user-owned instances. If pool
+    // members claimed /api/data/<authority>/* routes, multiple pool entries
+    // would compete and the route would point at an instance the user
+    // doesn't own. Pool claim registers providers after the hand-off.
+    if (!opts.inPool) {
+      if (spawned && !opts.preview) this.providers.registerInstance(spawned, manifest);
+    } else {
+      // Pool warm-up: pre-compile the iframe entry point (`/`) so the user's
+      // FIRST iframe load after claim doesn't trigger Vite's on-demand compile
+      // + bundle path. waitHealthy only touched /api/lifecycle/health, leaving
+      // the index.astro module cold. Warming `/` also primes the bundled
+      // page modules it references (e.g. the terminal's xterm bundle, now an
+      // npm dep pulled in via the page's <script> rather than a static vendor
+      // file). Fire-and-forget; never blocks the spawn.
+      const warmups = ['/'];
+      const host = this.runnerOf(instanceId).getHost(instanceId) ?? '127.0.0.1';
+      for (const path of warmups) {
+        fetch(`http://${host}:${port}${path}`, { signal: AbortSignal.timeout(5000), headers: this.ownRelayHeaders(appId, instanceId, 'GET', path) })
+          .then((r) => r.body?.cancel()).catch(() => undefined);
+      }
+    }
+
+    // A maintenance start already watches the exit (spawnInstance).
+    if (!this.instances.get(instanceId)?.maintenance) this.runnerOf(instanceId).onExit(instanceId, (code) => this.handleUnexpectedExit(instanceId, appId, code));
   }
 
   /**
@@ -3083,7 +3230,7 @@ export class AppManager {
   private scheduleRefill(appId: string): void {
     // Never top up the warm pool for an app that is being uninstalled — else
     // the reconciler respawns instances after we've killed them all.
-    if (this.uninstalling.has(appId)) return;
+    if (this.uninstalling.has(appId) || this.maintenanceBusy.has(appId)) return;
     const manifest = this.registry.getById(appId);
     if (!manifest || manifest.warmPool <= 0 || manifest.instanceMode !== 'multi' || this.skipBlocked(manifest, 'pool refill')) return;
     const target   = manifest.warmPool;
@@ -3197,11 +3344,12 @@ export class AppManager {
   }
 
   /**
-   * Stop an instance. `reason: 'restart'` (appRestart) keeps the sibling
+   * Stop an instance (`reason` reaches the app's stop hooks as `x-aura-stop-reason`;
+   * `update` is the drain before an update, stream M). `reason: 'restart'` (appRestart) keeps the sibling
    * containers that opted in (`aura.keep-restart=1`) running and parks them
    * until the instance is back; any other stop removes them all.
    */
-  async stop(instanceId: string, opts: { reason?: 'user' | 'restart' } = {}): Promise<void> {
+  async stop(instanceId: string, opts: { reason?: StopReason } = {}): Promise<void> {
     const inst = this.instances.get(instanceId);
     if (!inst?.sandbox || !this.runnerOf(instanceId).isRunning(instanceId)) return;
     const reason = opts.reason ?? 'user';
@@ -3250,7 +3398,7 @@ export class AppManager {
   }
 
   /** Stop ALL instances of an app. */
-  async stopAll(appId: string, opts: { reason?: 'user' | 'restart' } = {}): Promise<void> {
+  async stopAll(appId: string, opts: { reason?: StopReason } = {}): Promise<void> {
     const instances = this.getInstancesByApp(appId);
     await Promise.all(instances.map((i) => this.stop(i.instanceId, opts)));
   }
@@ -4348,7 +4496,7 @@ export class AppManager {
     //    cap so calling it slack-times is safe.
     for (const m of this.registry.getAll()) {
       if (m.warmPool <= 0 || m.instanceMode !== 'multi') continue;
-      if (this.uninstalling.has(m.id)) continue;   // don't respawn mid-uninstall
+      if (this.uninstalling.has(m.id) || this.maintenanceBusy.has(m.id)) continue;   // don't respawn mid-uninstall or mid-update
       const inPool   = this.countPool(m.id);
       const inFlight = this.refillInFlight.get(m.id) ?? 0;
       const slack = m.warmPool - (inPool + inFlight);

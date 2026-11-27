@@ -233,6 +233,33 @@ export class Installer {
     return existsSync(dir) ? dir : null;
   }
 
+  /**
+   * Undo an update (Phase 6 stream M: `updateInstance` failed after the code
+   * switched): the tree `record`'s install moved aside goes back in place, the
+   * current runtime data moves with it (data an `onUpdate` already changed
+   * stays changed: the app's migration owns that), the new tree goes to trash,
+   * and the previous install record is restored. Throws when there is no
+   * rollback tree.
+   */
+  rollbackUpdate(record: InstallRecord, previous: InstallRecord | null): void {
+    const tree = this.previousTree(record);
+    if (!tree) throw new Error(`no rollback tree of ${record.id} (the install replaced nothing)`);
+    const targetDir = join(this.opts.appsDir, record.id);
+    const ts = Date.now();
+    const tmpDir = `${targetDir}.tmp.${ts}`;
+    moveOrCopy(tree, tmpDir);
+    if (existsSync(targetDir)) {
+      carryOverRuntimeData(targetDir, tmpDir, record.id);
+      const trashRoot = join(this.opts.dataDir, 'nexus', 'trash');
+      mkdirSync(trashRoot, { recursive: true });
+      moveOrCopy(targetDir, join(trashRoot, `${record.id}-${ts}`));
+    }
+    renameSync(tmpDir, targetDir);
+    const recordPath = join(this.opts.dataDir, 'nexus', 'installed', `${record.id}.json`);
+    if (previous) writeFileSync(recordPath, JSON.stringify(previous, null, 2));
+    else rmSync(recordPath, { force: true });
+  }
+
   /** The newest trash entry of an app (the latest tree an install or uninstall moved aside), or null. */
   newestTrash(appId: string): string | null {
     const trashRoot = join(this.opts.dataDir, 'nexus', 'trash');

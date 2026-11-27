@@ -71,6 +71,11 @@ export interface UpdateInstanceOptions {
   toVersion: string;
   /** Switches the code (a Nexus install or a release switch) between the drain and the maintenance start. */
   switchCode(): Promise<void>;
+  /**
+   * Puts the old code back after a failure past the drain (a Nexus update: the Installer's rollback
+   * tree). Absent: nothing is restored (`rolledBack: false`). Added by stream M (additive, optional).
+   */
+  rollback?(): Promise<void>;
   userId?: string;
 }
 

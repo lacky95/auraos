@@ -46,7 +46,7 @@ import {
   newLifecycleToken, relayStrictEnv, type HealthIdentityClass, type LifecycleStatus,
 } from './lifecycleGate.js';
 import {
-  StartupFailure, callOptionalHook, callRequiredHook, lifecycleUrl, waitHealthy, type LifecycleDestination, type LifecycleTraits,
+  StartupFailure, callMaintenanceHook, callOptionalHook, callRequiredHook, lifecycleUrl, waitHealthy, type LifecycleDestination, type LifecycleTraits,
 } from './lifecycleClient.js';
 import { relayKey } from '../app-hosts/relayClaim.js';
 
@@ -1384,6 +1384,10 @@ export class ContainerRunner implements SandboxRunner, ContainerMountBackend, Co
   callOptionalLifecycle(instanceId: string, hook: string, body?: unknown): Promise<unknown> {
     return callOptionalHook(LIFECYCLE, this.destination(instanceId), hook, body);
   }
+  callMaintenanceHook(instanceId: string, hook: string, body: unknown, opts: { timeoutMs: number; reason: string }): Promise<unknown> {
+    return callMaintenanceHook(LIFECYCLE, instanceId, this.destination(instanceId), hook, body, opts);
+  }
+
 
   // ─── Kill / cleanup ───────────────────────────────────────────────────
   async kill(instanceId: string, opts: { keep?: KeepSiblings } = {}): Promise<void> {

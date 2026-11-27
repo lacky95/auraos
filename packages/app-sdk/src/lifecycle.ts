@@ -67,13 +67,51 @@ export type LifecycleHookName =
 
 /** Why a stop hook (onPause/onStop/onDestroy) runs: `restart` = the instance
  *  comes right back (keep what should survive, e.g. `keepAcrossRestart`
- *  sidecars); `user` = a real stop; null = not a stop, or an older OS. */
-export interface LifecycleContext { reason: 'user' | 'restart' | null; }
+ *  sidecars); `update` = the drain before an update (the new version starts
+ *  next and gets `onUpdate`: finish writes, close files); `user` = a real
+ *  stop; null = not a stop, or an older OS. */
+export interface LifecycleContext { reason: 'user' | 'restart' | 'update' | null; }
 
 /** The hook context from the kernel's `x-aura-stop-reason` header. */
 export function lifecycleContextOf(headers: Headers): LifecycleContext {
   const r = headers.get('x-aura-stop-reason');
-  return { reason: r === 'restart' || r === 'user' ? r : null };
+  return { reason: r === 'restart' || r === 'user' || r === 'update' ? r : null };
+}
+
+// =========================================================================
+//  onUpdate — the new version's maintenance hook, body { fromVersion, toVersion }
+// =========================================================================
+
+export interface UpdateContext { fromVersion: string; toVersion: string; }
+
+/**
+ * `POST /api/lifecycle/onUpdate` (Phase 6, D108 A3): runs once in the NEW
+ * version after an update (a Nexus update, a release switch), before any
+ * traffic reaches it: migrate data, convert config. The OS calls it only when
+ * the manifest `version` changed, with a 2-minute default timeout. Throwing
+ * (or answering non-2xx) fails the update: the OS puts the previous version
+ * back where it can (a Nexus update). Optional: an app without the route is
+ * updated as before.
+ *
+ *   // src/pages/api/lifecycle/onUpdate.ts
+ *   export const POST = createUpdateHandler(async ({ fromVersion, toVersion }) => { await migrate(fromVersion); });
+ */
+export function createUpdateHandler(impl: (ctx: UpdateContext) => void | Promise<void>): APIRoute {
+  return async ({ request }) => {
+    let body: Partial<UpdateContext> = {};
+    try { body = await request.json() as Partial<UpdateContext>; } catch { /* empty body: refused below */ }
+    if (typeof body.fromVersion !== 'string' || typeof body.toVersion !== 'string') {
+      return json({ ok: false, error: 'onUpdate needs { fromVersion, toVersion }' }, 400);
+    }
+    console.log(`[${APP_ID()}] onUpdate ${body.fromVersion} → ${body.toVersion}`);
+    try {
+      await impl({ fromVersion: body.fromVersion, toVersion: body.toVersion });
+    } catch (err) {
+      console.error(`[${APP_ID()}] onUpdate failed:`, err);
+      return json({ ok: false, error: String(err) }, 500);
+    }
+    return json({ ok: true });
+  };
 }
 
 /**

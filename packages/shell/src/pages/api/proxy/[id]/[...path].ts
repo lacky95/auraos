@@ -145,9 +145,10 @@ const forward = async ({ params, request, locals }: APIContext): Promise<Respons
   }
   const mine = (i: { owner?: string }) => sessionUser === null || i.owner === sessionUser;
   const exact = mgr.getInstance(id);
-  let instance = exact && isLive(exact.state) && mine(exact)
+  // An instance in a maintenance start (D108 A3: an update's new code before its onUpdate) gets no traffic.
+  let instance = exact && !exact.maintenance && isLive(exact.state) && mine(exact)
     ? exact
-    : mgr.getInstancesByApp(id).find((i) => !i.inPool && !i.preview && isLive(i.state) && i.port != null && mine(i));
+    : mgr.getInstancesByApp(id).find((i) => !i.inPool && !i.preview && !i.maintenance && isLive(i.state) && i.port != null && mine(i));
 
   if (!instance?.port) {
     // Cold-start: a bare-appId request for a path the app's manifest declares
@@ -166,7 +167,7 @@ const forward = async ({ params, request, locals }: APIContext): Promise<Respons
       try {
         await ensureInstance(mgr, id, sessionUser);
         instance = mgr.getInstancesByApp(id)
-          .find((i) => !i.inPool && !i.preview && isLive(i.state) && i.port != null && mine(i));
+          .find((i) => !i.inPool && !i.preview && !i.maintenance && isLive(i.state) && i.port != null && mine(i));
       } catch (err) {
         // The start gate (D48, D108): never started; say why (its D105 body).
         const blocked = operationalBlockOf(err);

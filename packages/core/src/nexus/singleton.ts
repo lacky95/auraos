@@ -68,6 +68,8 @@ export function getNexusManager(): NexusManager {
     hostLifecycle: getAppHostServices().lifecycle,
     // Dependencies install in the throwaway builder, never in the shell (P5-3).
     provision:     (id, onLine) => getAppManager().provisionApp(id, { onLine }),
+    // Phase 6 stream M: an update drains, switches, runs onUpdate in a maintenance start, then serves.
+    updater:       { updateInstance: (id, o) => getAppManager().updateInstance(id, o) },
   });
   g[GLOBAL_KEY] = instance;
   g[CODE_KEY] = CODE;

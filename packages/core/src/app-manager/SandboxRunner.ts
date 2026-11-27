@@ -64,6 +64,12 @@ export interface SandboxRunner {
   callLifecycle(instanceId: string, hook: string, opts?: { reason?: string }): Promise<void>;
   /** Invoke a best-effort lifecycle hook with optional payload. */
   callOptionalLifecycle(instanceId: string, hook: string, body?: unknown): Promise<unknown>;
+  /**
+   * A maintenance hook (D108 A3, stream M): its JSON answer, null when the
+   * app doesn't implement it (404); throws on a failure or the timeout
+   * (lifecycleClient.ts `callMaintenanceHook`).
+   */
+  callMaintenanceHook(instanceId: string, hook: string, body: unknown, opts: { timeoutMs: number; reason: string }): Promise<unknown>;
   /** Health identity class and runtime-check outcome of this start; null when
    *  not measured (not healthy yet, or adopted from a previous shell). */
   lifecycleStatus(instanceId: string): LifecycleStatus | null;

@@ -24,7 +24,7 @@ import {
   newLifecycleToken, relayStrictEnv, type HealthIdentityClass, type LifecycleStatus,
 } from './lifecycleGate.js';
 import {
-  DestinationBindingError, StartupFailure, callOptionalHook, callRequiredHook, lifecycleUrl, waitHealthy,
+  DestinationBindingError, StartupFailure, callMaintenanceHook, callOptionalHook, callRequiredHook, lifecycleUrl, waitHealthy,
   type LifecycleDestination, type LifecycleTraits,
 } from './lifecycleClient.js';
 import { relayKey } from '../app-hosts/relayClaim.js';
@@ -571,6 +571,10 @@ export class ProotRunner implements SandboxRunner {
   callOptionalLifecycle(instanceId: string, hook: string, body?: unknown): Promise<unknown | null> {
     return callOptionalHook(LIFECYCLE, this.destination(instanceId), hook, body);
   }
+  callMaintenanceHook(instanceId: string, hook: string, body: unknown, opts: { timeoutMs: number; reason: string }): Promise<unknown> {
+    return callMaintenanceHook(LIFECYCLE, instanceId, this.destination(instanceId), hook, body, opts);
+  }
+
 
   async kill(instanceId: string): Promise<void> {
     const spawned = this.processes.get(instanceId);

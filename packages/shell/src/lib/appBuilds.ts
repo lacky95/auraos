@@ -34,6 +34,18 @@ const isRunning = (appId: string) =>
 /** Move a running app onto what is now on disk, unless it must keep running. */
 async function switchRunning(appId: string): Promise<Pick<BuildResult, 'restarted' | 'restartNote'>> {
   if (!isRunning(appId)) return { restartNote: 'not running — starts from the build next time' };
+  // A release switch that changed the app's version (Phase 6 stream M): drain, the new code without
+  // traffic, onUpdate, serve (an app with live sessions runs onUpdate at its next start instead).
+  const mgr = core.getAppManager();
+  const toVersion = mgr.getManifest(appId)?.version;
+  const fromVersion = mgr.getInstancesByApp(appId).find((i) => !i.inPool && !i.preview && i.version)?.version;
+  if (toVersion && fromVersion && fromVersion !== toVersion) {
+    const out = await mgr.updateInstance(appId, { fromVersion, toVersion, switchCode: async () => { /* already on disk */ } });
+    if (!out.ok) return { restartNote: `update ${fromVersion} → ${toVersion} failed: ${out.error.message}` };
+    return keepsRunning(appId) || (out.instanceId && !out.hookCalled && mgr.getInstance(out.instanceId)?.version === fromVersion)
+      ? { restartNote: `kept running (live sessions): onUpdate ${fromVersion} → ${toVersion} runs at its next start` }
+      : { restarted: true };
+  }
   if (keepsRunning(appId)) return { restartNote: 'kept running (live sessions) — switches on its next start' };
   try { await restartWithActivities(appId); return { restarted: true }; }
   catch (err) { return { restartNote: `restart failed: ${(err as Error).message}` }; }

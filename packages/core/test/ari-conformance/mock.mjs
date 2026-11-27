@@ -67,6 +67,12 @@ export function mockProvider({
     },
     kill: async (id) => { exit(id, 0); },
     forceKill: (id) => exit(id, 137),
+    // Stream M (D108 A3): a maintenance hook of a running workload; it implements none (null = absent, never an
+    // error); an unknown instance is refused, never answered as absent.
+    callMaintenanceHook: async (id, hook) => {
+      if (!running.has(id)) throw new Error(`[mock] ${id} is not running; ${hook} not sent`);
+      return null;
+    },
   };
   const self = { descriptor: { id: 'mock' }, capabilities: () => ({ ...MOCK_CAPS }), featureOverrides };
   return {

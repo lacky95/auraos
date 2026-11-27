@@ -72,7 +72,7 @@ function fakeManager() {
     async installationRunAs() { return { installationId: 'inst-shop' }; },
     noteRespawn() {},
   };
-  for (const name of ['spawnInstance', 'spawnContext', 'allocateInstanceId', 'transition', 'upsertInstance', 'defaultInstance',
+  for (const name of ['spawnInstance', 'serveInstance', 'spawnContext', 'allocateInstanceId', 'transition', 'upsertInstance', 'defaultInstance',
     'startPreview', 'previewsOf', 'stopPreview', 'reapIdlePreviews', 'previewDataSource']) {
     fake[name] = AppManager.prototype[name].bind(fake);
   }

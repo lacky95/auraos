@@ -26,6 +26,13 @@ export interface AppInstance {
    */
   inPool?: boolean;
   /**
+   * Set while the instance runs in a maintenance start (D108 A3, stream M): it receives no traffic
+   * (no proxy, App Host, intents or activity claim) until it serves.
+   */
+  maintenance?: 'update' | 'setup';
+  /** The manifest `version` it was started from (stream M: a release switch compares it); absent for an adopted one. */
+  version?: string;
+  /**
    * The runtime that runs this instance (ARI §9.1): latched at spawn from
    * the resolution (an override, the manifest's `sandbox` or the default);
    * needed at call sites (kill, lifecycle hooks) because the manifest or the

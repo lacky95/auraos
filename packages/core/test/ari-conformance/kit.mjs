@@ -260,6 +260,13 @@ export function describeRuntime(name, makeModule, harness = {}) {
     }
   });
 
+  // Stream M (D108 A3): a maintenance hook to an instance the runner doesn't run is refused, never "no such hook".
+  test(`[ARI ${name}] maintenance hooks (stream M): an unknown instance is refused, not answered as an absent hook`, async () => {
+    const m = makeModule();
+    if (typeof m.runner.callMaintenanceHook !== 'function') return;   // stub runners of the built-ins: maintenance.test.mjs drives the real ones
+    await assert.rejects(m.runner.callMaintenanceHook('no-such-instance', 'onUpdate', {}, { timeoutMs: 500, reason: 'update' }), /not running/);
+  });
+
   // Phase 6 D-M: the mounts group is the mechanism only; its shape is the contract.
   test(`[ARI ${name}] mounts (D-M): present exactly with mount.attach; attach/detach/table/verify/rootOf are functions`, () => {
     const m = makeModule();
