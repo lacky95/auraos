@@ -115,7 +115,7 @@ function deps(): ApprovalRouteDeps & CredentialDeps {
       handleOf: async (_u: string, name: string) => `cred_${name.toLowerCase().padEnd(22, 'x').slice(0, 22)}`,
     } as never,
     grants: {} as never,
-    appScope: () => undefined,
+    appBinding: async () => ({ scope: undefined, installationId: null }),
   };
 }
 
