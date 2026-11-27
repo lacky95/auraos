@@ -47,8 +47,9 @@ case "$*" in
   *"rev-parse HEAD"*)          [ -f /tmp/rebased ] && echo bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb || echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ;;
   *"rev-parse FETCH_HEAD"*)    echo bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ;;
   *fetch*)                     : ;;
-  *"rev-list --count"*)        echo 0 ;;
-  *rebase*)                    touch /tmp/rebased ;;
+  *"rev-list --count"*)        echo "\${STUB_AHEAD:-0}" ;;
+  *"merge --ff-only"*)         touch /tmp/rebased ;;
+  *rebase*)                    echo "a rebase must never run" >&2; exit 99 ;;
   *)                           : ;;
 esac`);
   write('curl', 'echo 200');            // health check always answers
@@ -57,7 +58,7 @@ esac`);
   return dir;
 }
 
-function runMode(mode, { dryRun = false } = {}) {
+function runMode(mode, { dryRun = false, env = {} } = {}) {
   const work = mkdtempSync(join(tmpdir(), 'aura-updater-'));
   const jobFile = join(work, 'job.json');
   const logFile = join(work, 'job.log');
@@ -86,7 +87,7 @@ function runMode(mode, { dryRun = false } = {}) {
   try {
     execFileSync('bash', [scriptFile], {
       stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000,
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      env: { ...process.env, ...env, PATH: `${bin}:${process.env.PATH}` },
     });
   } catch (err) {
     status = err.status ?? 1;
@@ -122,8 +123,20 @@ test('dry run stops before touching the container, and still acknowledges', () =
 test('rebuild and restart do not touch git', () => {
   for (const mode of ['rebuild', 'restart']) {
     const { step } = runMode(mode);
-    for (const key of ['inspect', 'fetch', 'rebase']) {
+    for (const key of ['inspect', 'fetch', 'forward']) {
       assert.equal(step(key).status, 'skipped', `${mode} should skip ${key}`);
     }
   }
+});
+
+test('Developer Mode update: fast-forward only; local commits refuse and change nothing (D36, owner question i)', () => {
+  const ok = runMode('update');
+  assert.equal(ok.step('forward').status, 'done');
+  assert.equal(ok.job.toRev, 'b'.repeat(40));
+  const { status, job, step } = runMode('update', { env: { STUB_AHEAD: '2' } });
+  assert.equal(status, 1);
+  assert.equal(job.phase, 'failed');
+  assert.equal(step('forward').status, 'failed');
+  assert.match(job.log.join('\n'), /2 local commit\(s\).*the owner manages git/);
+  assert.equal(step('build').status, 'pending', 'nothing was built');
 });

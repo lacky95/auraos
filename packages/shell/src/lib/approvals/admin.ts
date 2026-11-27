@@ -32,7 +32,7 @@ import {
 } from './service.ts';
 
 /** The owner's management actions, opening an app's source (Track P) and creating an app (D109 AF2, appCreate.ts): same flow. */
-export type AdminApprovalAction = Extract<ApprovalAction, `admin.${string}` | 'app.source.open' | 'app.create'>;
+export type AdminApprovalAction = Extract<ApprovalAction, `admin.${string}` | 'app.source.open' | 'app.create' | 'system.release.activate'>;
 
 /** One owner-management request, as its route validated it. */
 export interface AdminRequest {

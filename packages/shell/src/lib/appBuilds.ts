@@ -51,6 +51,26 @@ async function switchRunning(appId: string): Promise<Pick<BuildResult, 'restarte
   catch (err) { return { restartNote: `restart failed: ${(err as Error).message}` }; }
 }
 
+/**
+ * A release switch (Phase 6 U step 11, owner question h): the system apps whose
+ * component changed move onto the new release's code: `onUpdate` through M's
+ * updateInstance when their version changed, else a restart with their windows.
+ * The Terminal and other `keepRunningOnBuild` apps switch on their next start,
+ * unless the owner chose `now` (D35: their sessions end).
+ */
+export async function switchSystemAppsToRelease(appIds: string[], when: 'now' | 'next-start'): Promise<Array<{ appId: string; restarted?: boolean; restartNote?: string }>> {
+  const out: Array<{ appId: string; restarted?: boolean; restartNote?: string }> = [];
+  for (const appId of appIds) {
+    if (when === 'now' && keepsRunning(appId) && isRunning(appId)) {
+      try { await restartWithActivities(appId); out.push({ appId, restarted: true }); }
+      catch (err) { out.push({ appId, restartNote: `restart failed: ${(err as Error).message}` }); }
+      continue;
+    }
+    out.push({ appId, ...(await switchRunning(appId)) });
+  }
+  return out;
+}
+
 /** Build `appIds` (sequentially), then optionally restart the ones that were built. */
 export async function buildApps(appIds: string[], opts: { force?: boolean; restart?: boolean } = {}): Promise<BuildResult[]> {
   const mgr = core.getAppManager();

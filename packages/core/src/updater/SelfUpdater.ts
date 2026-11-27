@@ -11,7 +11,7 @@
  * container that does, and then gets out of the way:
  *
  *     shell ──spawns──▶ updater (own container, own lifetime)
- *       │                  │ git fetch + ff-only merge
+ *       │                  │ git fetch + ff-only merge (Developer Mode)
  *       ✝ killed by ◀──────┤ docker compose up -d --build aura-os
  *         the recreate     │ poll the new shell until it answers
  *       ▲ new shell        │ roll back to the previous rev if it never does
@@ -28,17 +28,31 @@
  * works on any host without configuration.
  *
  * Safety rules, in order of how much they matter:
- *   • Never discard the user's work. A dirty worktree or a non-fast-forward
- *     upstream aborts the update instead of resetting over it.
+ *   • Never discard the user's work. A dirty worktree, local commits or a
+ *     non-fast-forward upstream abort the update instead of replaying or
+ *     resetting over it (Developer Mode: the owner manages git, D4/5.2).
  *   • Never leave the OS down. If the new revision doesn't answer, the
  *     updater restores the previous one and rebuilds it.
  *   • Never lie about what happened. Every step appends to the job log,
  *     including the failure paths.
+ *
+ * Normal mode (Phase 6 stream U): the same updater activates a built release
+ * (mode `release`) or goes back to the previous one (mode `rollback`). Its
+ * file work is os/release/activate.mjs, run from the RUNNING release's own
+ * tree (`/data/releases/<current>`, the trusted side), step by step: the
+ * activation lock for the whole job, re-verification, kernel stop, the data
+ * snapshot, the atomic pointer switch with writes held, start, health, the
+ * "accepting writes" point, and the automatic rollback (release AND data)
+ * only before writes were accepted (Q35). Building a release is the release
+ * builder's (os/release/builder.mjs, `startBuild`) in the same kind of
+ * detached container.
  */
 import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
+import { layout, RELEASE_ID_RE } from '../release/paths.js';
+import { latestSnapshotInto, systemLockHolder } from '../release/activate.js';
 
 /**
  * Docker Compose plugin version the updater installs when running from an
@@ -52,16 +66,22 @@ export type UpdatePhase =
   | 'rolling-back' | 'done' | 'failed' | 'rolled-back';
 
 /**
- * What a run actually does. All three share the same machinery — detached
- * container, job file, checklist, transcript — because all three destroy the
+ * What a run actually does. All share the same machinery — detached
+ * container, job file, checklist, transcript — because all destroy the
  * shell that would otherwise be supervising them.
  *
- *   update   fetch + rebase + rebuild + recreate + verify (with rollback)
+ *   update   Developer Mode: fetch + fast-forward + rebuild + recreate + verify
+ *            (with rollback). Local commits refuse: the owner manages git.
  *   rebuild  rebuild the image from the checkout AS IS, recreate, verify.
  *            No git: for picking up local edits, or retrying a failed build.
  *   restart  recreate nothing, just restart the master container and verify.
+ *   release  Normal mode: activate a built release (snapshot, switch, writes
+ *            held, health, accept writes; automatic rollback before that).
+ *   rollback Normal mode: back to the previous release; its data only when
+ *            the owner chose to restore the snapshot (Q35).
  */
-export type UpdateMode = 'update' | 'rebuild' | 'restart';
+export type UpdateMode = 'update' | 'rebuild' | 'restart' | 'release' | 'rollback';
+export const RELEASE_MODES: ReadonlySet<UpdateMode> = new Set(['release', 'rollback']);
 
 export type StepStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped';
 
@@ -89,7 +109,7 @@ export const UPDATE_STEPS: ReadonlyArray<{ key: string; label: string }> = [
   { key: 'action',   label: 'Action triggered' },
   { key: 'inspect',  label: 'Workspace inspected (git checkout, clean tree)' },
   { key: 'fetch',    label: 'Latest commit fetched from the remote' },
-  { key: 'rebase',   label: 'Checkout moved to the new revision' },
+  { key: 'forward',  label: 'Checkout fast-forwarded to the new revision' },
   { key: 'compose',  label: 'Docker Compose available' },
   { key: 'build',    label: 'Image rebuilt' },
   { key: 'recreate', label: 'Master container recreated' },
@@ -104,6 +124,31 @@ export const UPDATE_STEPS: ReadonlyArray<{ key: string; label: string }> = [
   { key: 'complete', label: 'Done — process finished and acknowledged' },
 ];
 
+/**
+ * The checklist of a release activation or rollback (Phase 6 U), in order.
+ * `drain` is the shell's (lib/plannedRestart.ts: desktop saved, apps told)
+ * and done at job creation; the rest is the updater's.
+ */
+export const RELEASE_STEPS: ReadonlyArray<{ key: string; label: string }> = [
+  { key: 'action',   label: 'Action triggered' },
+  { key: 'drain',    label: 'Desktop saved, apps told to get ready' },
+  { key: 'lock',     label: 'Activation lock taken' },
+  { key: 'verify',   label: 'Release verified (complete, tree digest, signature)' },
+  { key: 'stop',     label: 'Kernel stopped (apps keep running)' },
+  { key: 'snapshot', label: 'Data snapshot taken (Valkey + migrations)' },
+  { key: 'switch',   label: 'Release pointer switched' },
+  { key: 'restore',  label: 'Data snapshot restored (only when chosen)' },
+  { key: 'start',    label: 'Master container started on the release' },
+  { key: 'health',   label: 'Release healthy (kernel, services, probe)' },
+  { key: 'accept',   label: 'Accepting writes' },
+  { key: 'rollback', label: 'Automatic rollback (only if the release failed before accepting writes)' },
+  { key: 'complete', label: 'Done — process finished and acknowledged' },
+];
+
+/** The checklist of a mode. */
+export const stepsOf = (mode: UpdateMode): ReadonlyArray<{ key: string; label: string }> =>
+  (RELEASE_MODES.has(mode) ? RELEASE_STEPS : UPDATE_STEPS);
+
 export interface UpdateJob {
   id: string;
   phase: UpdatePhase;
@@ -116,6 +161,16 @@ export interface UpdateJob {
   dryRun: boolean;
   fromRev?: string;
   toRev?: string;
+  /** Release modes: the release left, the release switched to, the snapshot taken or restored. */
+  fromRelease?: string;
+  toRelease?: string;
+  snapshot?: string | null;
+  /** `rollback`: the owner chose to restore the data snapshot too (Q35). */
+  restoreData?: boolean;
+  /** `release`: Terminal sessions (D35) switch now, or on their next start (default). */
+  when?: 'now' | 'next-start';
+  /** Set by the shell once it audited and announced a finished release job (boot report). */
+  reported?: string;
   error?: string;
   /** Human-readable progress, newest last. */
   log: string[];
@@ -134,7 +189,7 @@ export interface UpdatePreflight {
   branch: string;
   currentRev?: string;
   latestRev?: string;
-  /** Commits this checkout is behind / ahead of the remote branch. */
+  /** Commits this checkout is behind / ahead of the remote branch (ahead refuses: the owner manages git). */
   behind: number;
   ahead: number;
   /** Subject line of the newest upstream commit, for the confirm dialog. */
@@ -144,6 +199,37 @@ export interface UpdatePreflight {
 }
 
 interface DockerMount { Type?: string; Name?: string; Destination?: string }
+
+/** What `start()` takes; the release fields only for the modes `release` and `rollback`. */
+export interface StartOptions {
+  mode?: UpdateMode;
+  branch?: string;
+  dryRun?: boolean;
+  /** `release`: the built release to switch to. */
+  releaseId?: string;
+  /** `release`: D35, Terminal sessions switch now or on their next start (default). */
+  when?: 'now' | 'next-start';
+  /** `rollback`: also restore the data snapshot of the switch into the current release (Q35). */
+  restoreData?: boolean;
+  /** `rollback`: the advisories the owner confirmed (a non-critical security rollback, 5b answer 1). */
+  confirmInsecure?: string;
+  /** The caller drained (lib/plannedRestart.ts): the `drain` step is done. */
+  drained?: boolean;
+}
+
+/** The fields of release.json the updater reads (core release/types.ts ReleaseManifest). */
+interface ReleaseRecordLite { id?: string; images?: { shell?: string } }
+
+function readJsonFile<T>(file: string): T | null {
+  try { return JSON.parse(readFileSync(file, 'utf-8')) as T; } catch { return null; }
+}
+
+/** POSIX single-quoting for a generated command line. */
+const shq = (w: string): string => (/^[\w@%+=:,./-]+$/.test(w) ? w : `'${w.replace(/'/g, `'\\''`)}'`);
+
+/** The Developer-Mode refusal of local commits (D4/5.2, D36: no rebase). */
+export const developerAheadMessage = (ahead: number, branch: string): string =>
+  `Developer Mode: ${ahead} local commit(s) are not on ${branch}; the owner manages git (push or move them, then update). The updater only fast-forwards.`;
 
 const UPDATER_NAME = 'aura-updater';
 
@@ -214,8 +300,13 @@ export class SelfUpdater {
     } catch { return null; }
   }
 
-  /** True while a job is neither finished nor failed — the UI disables the button. */
+  /**
+   * True while a job is neither finished nor failed, or while a release job
+   * (a build, an activation) holds the `system` activation lock — the UI
+   * disables the button.
+   */
   isRunning(): boolean {
+    if (systemLockHolder(this.dataDir)) return true;
     const job = this.readJob();
     if (!job) return false;
     return !['done', 'failed', 'rolled-back'].includes(job.phase);
@@ -407,6 +498,8 @@ export class SelfUpdater {
       out.behind = Number(counts[1] ?? 0);
       out.updateAvailable = out.behind > 0;
       if (out.behind > 0) out.latestSubject = git('log', '-1', '--format=%s', 'FETCH_HEAD');
+      // Developer Mode updates fast-forward only (D36: no rebase of local commits, owner question i).
+      if (out.ahead > 0) out.blockers.push(developerAheadMessage(out.ahead, branch));
     } catch (err) {
       out.blockers.push(`Could not reach ${remote.fetchUrl} (${branch}): ${(err as Error).message.split('\n')[0]}`);
     }
@@ -417,9 +510,9 @@ export class SelfUpdater {
    * Launch the updater. Returns the job id immediately — the work outlives
    * this process, so there is nothing to await.
    */
-  start(opts: { mode?: UpdateMode; branch?: string; dryRun?: boolean } = {}):
-      { ok: true; job: UpdateJob } | { ok: false; reason: string } {
+  start(opts: StartOptions = {}): { ok: true; job: UpdateJob } | { ok: false; reason: string } {
     const mode: UpdateMode = opts.mode ?? 'update';
+    if (RELEASE_MODES.has(mode)) return this.startRelease(mode, opts);
     const branch = (opts.branch ?? 'main').trim();
     if (!UPDATE_BRANCH_RE.test(branch)) {
       return { ok: false, reason: `Invalid branch name: ${branch}` };
@@ -472,13 +565,106 @@ export class SelfUpdater {
       composeFile: probed.composeFile,
       workDir: probed.workDir,
     });
+    const launched = this.launch(`${UPDATER_NAME}-${id}`, probed, script);
+    return launched.ok ? { ok: true, job } : launched;
+  }
 
+  /**
+   * Normal mode: activate a built release, or go back to the previous one.
+   * The mechanical checks only (the shell's route ran the preflight, the
+   * security rule and the owner's approval before it drained): a pointer, a
+   * complete target, the snapshot a data restore needs.
+   */
+  private startRelease(mode: UpdateMode, opts: StartOptions): { ok: true; job: UpdateJob } | { ok: false; reason: string } {
+    if (this.isRunning()) return { ok: false, reason: 'An update or release job is already running.' };
+    this.settleAbandoned();
+    const L = layout(this.dataDir);
+    const pointer = readJsonFile<{ current?: string; previous?: string | null; jobId?: string }>(L.pointer);
+    if (!pointer?.current || !RELEASE_ID_RE.test(pointer.current)) return { ok: false, reason: 'This install does not run from a release (Normal mode): nothing to activate.' };
+    const from = pointer.current;
+    const to = mode === 'release' ? opts.releaseId : (pointer.previous ?? undefined);
+    if (!to || !RELEASE_ID_RE.test(to)) {
+      return { ok: false, reason: mode === 'release' ? 'No release id to activate.' : 'There is no previous release to roll back to.' };
+    }
+    if (to === from) return { ok: false, reason: `Release ${to} is already current.` };
+    const toRec = readJsonFile<ReleaseRecordLite>(join(L.release(to), 'release.json'));
+    const fromRec = readJsonFile<ReleaseRecordLite>(join(L.release(from), 'release.json'));
+    if (!existsSync(join(L.release(to), '.complete')) || !toRec) return { ok: false, reason: `Release ${to} is not complete.` };
+    if (!fromRec) return { ok: false, reason: `The running release ${from} has no record: it cannot be the trusted side of an activation.` };
+    let restoreSnapshot: string | null = null;
+    if (mode === 'rollback' && opts.restoreData) {
+      // Only the snapshot of the switch INTO the current release: never data from across two updates (Q35).
+      const snap = latestSnapshotInto(this.dataDir, from, pointer.jobId);
+      if (!snap) return { ok: false, reason: `No data snapshot of the switch to ${from}: the data cannot be restored (the release alone can be rolled back).` };
+      restoreSnapshot = snap;
+    }
+    const probed = this.probe();
+    if (!probed.ok) return { ok: false, reason: probed.reason };
+
+    const id = new Date().toISOString().replace(/[:.]/g, '-');
+    const now = new Date().toISOString();
+    const when = opts.when === 'now' ? 'now' : 'next-start';
+    const job: UpdateJob = {
+      id, phase: 'queued', startedAt: now, mode, branch: '', dryRun: false,
+      fromRelease: from, toRelease: to, snapshot: restoreSnapshot, ...(mode === 'rollback' ? { restoreData: Boolean(restoreSnapshot) } : { when }),
+      steps: RELEASE_STEPS.map((s) => (s.key === 'action'
+        ? { ...s, status: 'done' as StepStatus, detail: describeRelease(mode, from, to, Boolean(restoreSnapshot)), at: now }
+        : s.key === 'drain'
+          ? { ...s, status: (opts.drained ? 'done' : 'skipped') as StepStatus, detail: opts.drained ? 'desktop saved' : 'not drained by the caller', at: now }
+          : { ...s, status: 'pending' as StepStatus })),
+      log: [`queued: ${mode} ${from} → ${to}${restoreSnapshot ? ` (restoring data snapshot ${restoreSnapshot})` : ''}`],
+    };
+    mkdirSync(this.jobsDir(), { recursive: true });
+    writeFileSync(this.jobFile(id), JSON.stringify(job, null, 2));
+    const script = releaseScript({
+      jobFile: `/data/aura/update/${id}.json`, logFile: `/data/aura/update/${id}.log`, jobId: id, mode,
+      from, to, restoreSnapshot, fromImage: fromRec.images?.shell ?? '', toImage: toRec.images?.shell ?? '',
+      project: probed.project, composeFile: probed.composeFile, workDir: probed.workDir,
+      confirmInsecure: opts.confirmInsecure ?? '',
+    });
+    const launched = this.launch(`${UPDATER_NAME}-${id}`, probed, script);
+    return launched.ok ? { ok: true, job } : launched;
+  }
+
+  /**
+   * Build a release (Normal mode, `aura release build`): the release builder
+   * (os/release/builder.mjs, stream B) from the running release's trusted
+   * tree, in a detached container like the updater's. The builder takes the
+   * activation lock and writes its job to `aura/release/jobs/<id>.json`.
+   */
+  startBuild(opts: { fetchFrom: string; channel: 'signed' | 'main'; maturity?: string; ref?: string; composition: 'desktop' | 'server' }):
+      { ok: true; jobId: string } | { ok: false; reason: string } {
+    if (this.isRunning()) return { ok: false, reason: 'An update or release job is already running.' };
+    const L = layout(this.dataDir);
+    const pointer = readJsonFile<{ current?: string }>(L.pointer);
+    if (!pointer?.current || !RELEASE_ID_RE.test(pointer.current)) return { ok: false, reason: 'This install does not run from a release (Normal mode): the first release is built by install.sh.' };
+    if (!/^(https:\/\/|\/)\S+$/.test(opts.fetchFrom)) return { ok: false, reason: 'The release source must be an https URL or a local path (aura/release/source.json).' };
+    if (opts.ref !== undefined && !/^v?[0-9A-Za-z][0-9A-Za-z.+_-]{0,100}$/.test(opts.ref)) return { ok: false, reason: `Invalid release ref: ${opts.ref}` };
+    if (opts.maturity !== undefined && !['alpha', 'beta', 'stable'].includes(opts.maturity)) return { ok: false, reason: `Invalid maturity: ${opts.maturity}` };
+    const probed = this.probe();
+    if (!probed.ok) return { ok: false, reason: probed.reason };
+    const jobId = new Date().toISOString().replace(/[:.]/g, '-');
+    const trusted = `/data/releases/${pointer.current}`;
+    const argv = [
+      'node', `${trusted}/os/release/builder.mjs`, 'build', '--data-root', '/data', '--data-volume', probed.appDataVolume,
+      '--fetch-from', opts.fetchFrom, '--channel', opts.channel, '--composition', opts.composition, '--job', jobId,
+      ...(opts.channel === 'signed' ? ['--keys', `${trusted}/os/release-keys`, ...(existsSync(L.trustedKeys) ? ['--keys', '/data/aura/release/trusted-keys'] : [])] : []),
+      ...(opts.maturity ? ['--maturity', opts.maturity] : []),
+      ...(opts.ref ? ['--ref', opts.ref] : []),
+    ];
+    const script = `set -uo pipefail\nmkdir -p /data/aura/release/jobs\n${argv.map(shq).join(' ')} > /data/aura/release/jobs/${jobId}.out 2>&1\n`;
+    const launched = this.launch(`aura-release-build-${jobId}`, probed, script);
+    return launched.ok ? { ok: true, jobId } : launched;
+  }
+
+  /** One detached updater container (`--rm`; the job file is the record). */
+  private launch(name: string, probed: Extract<ReturnType<SelfUpdater['probe']>, { ok: true }>, script: string): { ok: true } | { ok: false; reason: string } {
     // --rm so a finished updater doesn't linger; the job file is the record.
     // The host workspace is bound at /workspace (same path the shell sees) so
     // git and the build act on the real checkout, not a copy.
     const args = [
       'run', '--detach', '--rm',
-      '--name', `${UPDATER_NAME}-${id}`,
+      '--name', name,
       '--network', probed.network,
       '-v', '/var/run/docker.sock:/var/run/docker.sock',
       // Mount the checkout at its HOST path, not /workspace. Compose runs in
@@ -510,7 +696,7 @@ export class SelfUpdater {
     } catch (err) {
       return { ok: false, reason: `could not launch updater: ${(err as Error).message}` };
     }
-    return { ok: true, job };
+    return { ok: true };
   }
 
   /** @see ContainerRunner.getOwnContainerId — same trick, same reasons. */
@@ -541,13 +727,68 @@ function updaterHome(): string {
   return '/root';
 }
 
+/** Human label for a release activation or rollback. */
+function describeRelease(mode: UpdateMode, from: string, to: string, restoreData: boolean): string {
+  return mode === 'release'
+    ? `Activate release ${to} (from ${from})`
+    : `Roll back to ${to} (from ${from})${restoreData ? ', restoring the data snapshot' : ', data kept'}`;
+}
+
 /** Human label for the button that started a run. */
+
 function describeMode(mode: UpdateMode, branch: string, dryRun: boolean): string {
   const base = mode === 'update'  ? `Update — pull ${branch} and rebuild`
              : mode === 'rebuild' ? 'Rebuild — image from the current checkout'
              :                      'Restart — master container only';
   return dryRun ? `${base} (dry run)` : base;
 }
+
+/** The job-file helpers every updater program shares (say, setrev, step, fail). */
+const JOB_HELPERS = `# Job file updates go through node (already in the image) so the JSON can
+# never be corrupted by shell quoting of a commit subject or an error string.
+say() {
+  node -e '
+    const fs=require("fs"); const [f,phase,line]=process.argv.slice(1);
+    let j={}; try{ j=JSON.parse(fs.readFileSync(f,"utf8")); }catch{}
+    if(phase) j.phase=phase;
+    if(line){ j.log=(j.log||[]).concat(line); }
+    if(["done","failed","rolled-back"].includes(phase)) j.finishedAt=new Date().toISOString();
+    fs.writeFileSync(f, JSON.stringify(j,null,2));
+  ' "$JOB" "$1" "$2" || true
+  echo "[$(date -u +%H:%M:%S)] $2" | tee -a "$LOGFILE"
+}
+setrev() {
+  node -e '
+    const fs=require("fs"); const [f,k,v]=process.argv.slice(1);
+    let j={}; try{ j=JSON.parse(fs.readFileSync(f,"utf8")); }catch{}
+    j[k]=v; fs.writeFileSync(f, JSON.stringify(j,null,2));
+  ' "$JOB" "$1" "$2" || true
+}
+# Mark one checklist entry. Same node-based JSON edit as say(), for the same
+# reason: shell quoting must never be able to corrupt the job file.
+step() {
+  node -e '
+    const fs=require("fs"); const [f,key,status,detail]=process.argv.slice(1);
+    let j={}; try{ j=JSON.parse(fs.readFileSync(f,"utf8")); }catch{}
+    j.steps=(j.steps||[]).map(s=> s.key===key
+      ? {...s, status, detail: detail || s.detail, at:new Date().toISOString()} : s);
+    fs.writeFileSync(f, JSON.stringify(j,null,2));
+  ' "$JOB" "$1" "$2" "\${3:-}" || true
+}
+# Whatever was in flight when we give up is what failed; anything never
+# reached stays "pending" rather than pretending to be skipped on purpose.
+fail() {
+  node -e '
+    const fs=require("fs"); const [f]=process.argv.slice(1);
+    let j={}; try{ j=JSON.parse(fs.readFileSync(f,"utf8")); }catch{}
+    j.steps=(j.steps||[]).map(s=> s.status==="running" ? {...s, status:"failed", at:new Date().toISOString()} : s);
+    fs.writeFileSync(f, JSON.stringify(j,null,2));
+  ' "$JOB" || true
+  step complete failed "$1"
+  say failed "$1"
+  exit 1
+}
+`;
 
 /**
  * Render the updater program for a given run. Exported for tests: this is
@@ -611,51 +852,7 @@ MAX_WAIT=2700      # 45 min hard cap, even while progressing
 STALL_LIMIT=36     # 36 x 10s = 6 min with no new container output = stuck
 GONE_LIMIT=6       # 6 x 10s = 1 min of the container not running at all
 
-# Job file updates go through node (already in the image) so the JSON can
-# never be corrupted by shell quoting of a commit subject or an error string.
-say() {
-  node -e '
-    const fs=require("fs"); const [f,phase,line]=process.argv.slice(1);
-    let j={}; try{ j=JSON.parse(fs.readFileSync(f,"utf8")); }catch{}
-    if(phase) j.phase=phase;
-    if(line){ j.log=(j.log||[]).concat(line); }
-    if(["done","failed","rolled-back"].includes(phase)) j.finishedAt=new Date().toISOString();
-    fs.writeFileSync(f, JSON.stringify(j,null,2));
-  ' "$JOB" "$1" "$2" || true
-  echo "[$(date -u +%H:%M:%S)] $2" | tee -a "$LOGFILE"
-}
-setrev() {
-  node -e '
-    const fs=require("fs"); const [f,k,v]=process.argv.slice(1);
-    let j={}; try{ j=JSON.parse(fs.readFileSync(f,"utf8")); }catch{}
-    j[k]=v; fs.writeFileSync(f, JSON.stringify(j,null,2));
-  ' "$JOB" "$1" "$2" || true
-}
-# Mark one checklist entry. Same node-based JSON edit as say(), for the same
-# reason: shell quoting must never be able to corrupt the job file.
-step() {
-  node -e '
-    const fs=require("fs"); const [f,key,status,detail]=process.argv.slice(1);
-    let j={}; try{ j=JSON.parse(fs.readFileSync(f,"utf8")); }catch{}
-    j.steps=(j.steps||[]).map(s=> s.key===key
-      ? {...s, status, detail: detail || s.detail, at:new Date().toISOString()} : s);
-    fs.writeFileSync(f, JSON.stringify(j,null,2));
-  ' "$JOB" "$1" "$2" "\${3:-}" || true
-}
-# Whatever was in flight when we give up is what failed; anything never
-# reached stays "pending" rather than pretending to be skipped on purpose.
-fail() {
-  node -e '
-    const fs=require("fs"); const [f]=process.argv.slice(1);
-    let j={}; try{ j=JSON.parse(fs.readFileSync(f,"utf8")); }catch{}
-    j.steps=(j.steps||[]).map(s=> s.status==="running" ? {...s, status:"failed", at:new Date().toISOString()} : s);
-    fs.writeFileSync(f, JSON.stringify(j,null,2));
-  ' "$JOB" || true
-  step complete failed "$1"
-  say failed "$1"
-  exit 1
-}
-
+${JOB_HELPERS}
 # Every git call goes through g(): -C for the repo, and safe.directory inline
 # rather than via a global git config, which writes to $HOME — and $HOME in
 # this container is a symlink the image's CMD creates, which never ran because
@@ -686,7 +883,7 @@ confirm_stuck() {
 
 if [ "$MODE" != "update" ]; then
   # No git in a rebuild or a restart: those act on what is already checked out.
-  for k in inspect fetch rebase; do step "$k" skipped "$MODE does not touch git"; done
+  for k in inspect fetch forward; do step "$k" skipped "$MODE does not touch git"; done
 fi
 
 if [ "$MODE" = "update" ]; then
@@ -699,7 +896,7 @@ fi
 # rollback would then have to throw it away. Untracked files are fine (user
 # apps, notes) — only tracked modifications block.
 if [ -n "$(g status --porcelain --untracked-files=no)" ]; then
-  fail "Uncommitted changes in $WS — commit or stash them first (the rebase needs a clean tree)."
+  fail "Uncommitted changes in $WS — commit or stash them first (an update needs a clean tree)."
 fi
 FROM_REV=$(g rev-parse HEAD)
 setrev fromRev "$FROM_REV"
@@ -716,30 +913,29 @@ step fetch running
 say pulling "fetching $BRANCH from $FETCH_URL"
 g fetch "$FETCH_URL" "$BRANCH" 2>&1 | tee -a "$LOGFILE" | tail -3 || fail "git fetch failed"
 step fetch done
-step rebase running
-# Rebase, not merge: local commits on this machine get REPLAYED on top of
-# upstream, so the machine ends up on latest without a merge bubble and
-# without losing local work. A conflict is a human decision — abort and leave
-# the checkout exactly as it was rather than stopping mid-rebase, which would
-# strand the machine on a detached HEAD with no shell to fix it from.
+step forward running
+# Fast-forward only (D36, owner question i): local commits are the owner's
+# (Developer Mode: the owner manages git), so they are never replayed or reset
+# over. A local commit or a non-fast-forward upstream refuses and leaves the
+# checkout exactly as it was.
 LOCAL_AHEAD=$(g rev-list --count FETCH_HEAD..HEAD 2>/dev/null || echo 0)
 if [ "$LOCAL_AHEAD" != "0" ]; then
-  say pulling "replaying $LOCAL_AHEAD local commit(s) onto the fetched $BRANCH"
+  step forward failed "$LOCAL_AHEAD local commit(s)"
+  fail "Developer Mode: $LOCAL_AHEAD local commit(s) are not on $BRANCH; the owner manages git (push or move them, then update). Nothing was changed."
 fi
-if ! g rebase FETCH_HEAD 2>&1 | tee -a "$LOGFILE" | tail -4; then
-  g rebase --abort 2>/dev/null || true
+if ! g merge --ff-only FETCH_HEAD 2>&1 | tee -a "$LOGFILE" | tail -4; then
   chown -R "$OWNER" "$WS/.git" 2>/dev/null || true
-  fail "rebase onto $BRANCH hit a conflict — aborted, checkout unchanged. Resolve it manually."
+  fail "$BRANCH cannot be fast-forwarded to the fetched revision; nothing was changed. Resolve it in git."
 fi
 TO_REV=$(g rev-parse HEAD)
 setrev toRev "$TO_REV"
-step rebase done "\${FROM_REV:0:12} → \${TO_REV:0:12}"
+step forward done "\${FROM_REV:0:12} → \${TO_REV:0:12}"
 # git ran as root in here; hand the objects back to whoever owns the checkout
 # so the host user's own git keeps working.
 chown -R "$OWNER" "$WS/.git" 2>/dev/null || true
 
 if [ "$FROM_REV" = "$TO_REV" ]; then
-  step rebase done "already at \${TO_REV:0:12}"
+  step forward done "already at \${TO_REV:0:12}"
   for k in compose build recreate restart verify rollback; do step "$k" skipped "nothing to update"; done
   step complete done "nothing to do"
   say done "already up to date at \${TO_REV:0:12} — nothing to build"
@@ -957,6 +1153,217 @@ else
   step complete failed "finished — neither revision is up"
   say failed "neither \${TO_REV:0:12} nor \${FROM_REV:0:12} came up — manual attention needed"
 fi
+exit 1
+`;
+}
+
+// ── release activation and rollback (Normal mode, Phase 6 U) ───────────────
+
+interface ReleaseScriptInput {
+  jobFile: string; logFile: string; jobId: string; mode: UpdateMode;
+  from: string; to: string; restoreSnapshot: string | null; fromImage: string; toImage: string;
+  project: string; composeFile: string; workDir: string; confirmInsecure: string;
+  /** Tests: the data root, the activation module, the shell's base URL, the health budget and poll (s). */
+  dataDir?: string; activate?: string; shellUrl?: string; healthBudget?: number; poll?: number;
+}
+
+/** Render the release program (exported for tests, like renderUpdaterScript: it is generated shell). */
+export function renderReleaseScript(o: Omit<ReleaseScriptInput, 'project' | 'composeFile' | 'workDir'> & Partial<ReleaseScriptInput>): string {
+  return releaseScript({ project: 'aura', composeFile: '/workspace/docker-compose.yml', workDir: '/workspace', ...o });
+}
+
+/**
+ * The release program: every file step is os/release/activate.mjs from the
+ * RUNNING release's tree (the trusted side; nothing of the target runs
+ * before it verified), the container steps are docker. Before "accepting
+ * writes" any failure rolls back release AND data (Q35); after it, nothing
+ * here touches the data again (a later rollback is the owner's).
+ */
+function releaseScript(o: ReleaseScriptInput): string {
+  const data = o.dataDir ?? '/data';
+  const act = o.activate ?? `${data}/releases/${o.from}/os/release/activate.mjs`;
+  const url = o.shellUrl ?? 'http://aura-shell:3000';
+  return `
+set -uo pipefail
+JOB=${JSON.stringify(o.jobFile)}
+LOGFILE=${JSON.stringify(o.logFile)}
+ID=${JSON.stringify(o.jobId)}
+MODE=${JSON.stringify(o.mode)}
+DATA=${JSON.stringify(data)}
+FROM=${JSON.stringify(o.from)}
+TO=${JSON.stringify(o.to)}
+RESTORE_SNAPSHOT=${JSON.stringify(o.restoreSnapshot ?? '')}
+FROM_IMAGE=${JSON.stringify(o.fromImage)}
+TO_IMAGE=${JSON.stringify(o.toImage)}
+CONFIRM_INSECURE=${JSON.stringify(o.confirmInsecure)}
+TRUSTED="$DATA/releases/$FROM"
+ACT=${JSON.stringify(act)}
+SHELL_URL=${JSON.stringify(url)}
+HEALTH="$SHELL_URL/api/auth/status"
+PROJECT=${JSON.stringify(o.project)}
+COMPOSE_FILE=${JSON.stringify(o.composeFile)}
+WS=${JSON.stringify(o.workDir)}
+POLL=${o.poll ?? 5}
+# No build at boot in Normal mode: a release that is not healthy in 5 min is not (plan §5 U step 9).
+BUDGET=${o.healthBudget ?? 300}
+SNAP=""
+mkdir -p "$(dirname "$LOGFILE")"; : > "$LOGFILE"
+
+${JOB_HELPERS}
+act() { node "$ACT" "$@" --data "$DATA" 2>>"$LOGFILE"; }
+field() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const v=JSON.parse(s)[process.argv[1]];process.stdout.write(v==null?"":String(v));}catch{}})' "$1"; }
+ping_ok() { [ "$(curl -s -o /dev/null -w '%{http_code}' -m 8 "$HEALTH" 2>/dev/null)" = 200 ]; }
+shell_running() { [ "$(docker inspect -f '{{.State.Running}}' aura-shell 2>/dev/null || echo false)" = true ]; }
+running_image() { docker inspect -f '{{.Config.Image}}' aura-shell 2>/dev/null || echo none; }
+
+# Start the master container on the release the pointer names: a plain start
+# when the image is the same (release-entry.sh reads the pointer), a recreate
+# with the release's image when it differs (stream L: the release compose
+# file reads AURA_SHELL_IMAGE).
+start_shell() {
+  local img="$1"
+  if [ -n "$img" ] && [ "$(running_image)" != "$img" ]; then
+    AURA_SHELL_IMAGE="$img" docker compose -p "$PROJECT" -f "$COMPOSE_FILE" --project-directory "$WS" up -d --no-build --force-recreate aura-os 2>&1 | tee -a "$LOGFILE" | tail -3
+  else
+    docker start aura-shell >/dev/null 2>&1
+  fi
+}
+
+# Health: the probe answers AND the kernel's status.json says ready, with
+# every service resumed, for a boot after SINCE. 0 healthy, 1 failed or out
+# of budget (HEALTH_REASON says why).
+HEALTH_REASON=""
+wait_healthy() {
+  local since="$1" started now verdict code gone=0
+  started=$(date +%s)
+  while :; do
+    verdict=$(act health --since "$since"); code=$?
+    if [ "$code" = 0 ] && ping_ok; then return 0; fi
+    if [ "$code" = 1 ]; then HEALTH_REASON=$(printf '%s' "$verdict" | field failed); return 1; fi
+    if shell_running; then gone=0; else gone=$(( gone + 1 )); fi
+    if [ "$gone" -ge 6 ]; then HEALTH_REASON="aura-shell is not running"; return 1; fi
+    now=$(date +%s)
+    if [ $(( now - started )) -ge "$BUDGET" ]; then
+      HEALTH_REASON="not healthy after \${BUDGET}s; waiting for: $(printf '%s' "$verdict" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write((JSON.parse(s).waiting||[]).join(", ")||"the health probe")}catch{process.stdout.write("the health probe")}})')"
+      return 1
+    fi
+    sleep "$POLL"
+  done
+}
+
+# The lock holder lives as long as this program (heartbeat every 30 s).
+LOCKOUT="$(dirname "$LOGFILE")/$ID.lock.out"
+release_lock() { if [ -n "\${LOCKPID:-}" ]; then kill "$LOCKPID" 2>/dev/null; wait "$LOCKPID" 2>/dev/null; fi; rm -f "$LOCKOUT"; }
+trap release_lock EXIT
+step lock running
+say checking "taking the activation lock"
+node "$ACT" hold-lock --data "$DATA" --job "$ID" --by "system.release.$MODE" > "$LOCKOUT" 2>>"$LOGFILE" &
+LOCKPID=$!
+for _ in $(seq 1 50); do
+  grep -q '"ok": true' "$LOCKOUT" 2>/dev/null && break
+  kill -0 "$LOCKPID" 2>/dev/null || break
+  sleep 0.2
+done
+if ! grep -q '"ok": true' "$LOCKOUT" 2>/dev/null; then
+  REASON=$(field error < "$LOCKOUT")
+  LOCKPID=""
+  step lock failed "\${REASON:-the lock holder did not start}"
+  fail "\${REASON:-the activation lock could not be taken}"
+fi
+step lock done "held by $ID"
+
+step verify running
+if [ "$MODE" = "rollback" ]; then
+  # 5b owner answer 1: never back past a resolved critical fix; others only when confirmed.
+  CHECK=$(act rollback-check --confirm-insecure "$CONFIRM_INSECURE") || { step verify failed "security rule"; fail "$(printf '%s' "$CHECK" | field reason)$(printf '%s' "$CHECK" | field error)"; }
+fi
+V=$(act verify --id "$TO" --trusted "$TRUSTED") || { step verify failed "$(printf '%s' "$V" | field error)"; fail "release $TO refused: $(printf '%s' "$V" | field error)"; }
+step verify done "$TO: $(printf '%s' "$V" | field provenance)"
+
+step stop running
+say building "stopping the kernel (apps keep running and are adopted)"
+docker stop -t 15 aura-shell >/dev/null 2>&1 || true
+if shell_running; then step stop failed "aura-shell still running"; fail "could not stop aura-shell"; fi
+step stop done
+
+if [ "$MODE" = "release" ]; then
+  step snapshot running
+  S=$(act snapshot --to "$TO" --job "$ID") || { step snapshot failed "$(printf '%s' "$S" | field error)"; docker start aura-shell >/dev/null 2>&1; fail "the data snapshot failed; nothing was switched: $(printf '%s' "$S" | field error)"; }
+  SNAP=$(printf '%s' "$S" | field id)
+  setrev snapshot "$SNAP"
+  step snapshot done "$SNAP"
+  step switch running
+  P=$(act switch --to "$TO" --job "$ID" --snapshot "$SNAP") || { step switch failed "$(printf '%s' "$P" | field error)"; act release-hold >/dev/null; docker start aura-shell >/dev/null 2>&1; fail "the switch failed; $FROM keeps running: $(printf '%s' "$P" | field error)"; }
+  step switch done "$FROM → $TO (writes held)"
+  step restore skipped "a release activation keeps the data"
+else
+  step snapshot skipped "a rollback takes no new snapshot"
+  step switch running
+  P=$(act revert --job "$ID") || { step switch failed "$(printf '%s' "$P" | field error)"; docker start aura-shell >/dev/null 2>&1; fail "the rollback switch failed: $(printf '%s' "$P" | field error)"; }
+  step switch done "$FROM → $TO"
+  # A rollback never boots held: this also ends an abandoned activation's hold.
+  act release-hold >/dev/null
+  if [ -n "$RESTORE_SNAPSHOT" ]; then
+    step restore running
+    R=$(act restore --snapshot "$RESTORE_SNAPSHOT") || { step restore failed "$(printf '%s' "$R" | field error)"; fail "the data restore failed (the pointer is on $TO; nothing was deleted): $(printf '%s' "$R" | field error)"; }
+    step restore done "$RESTORE_SNAPSHOT (the replaced data is kept in the snapshot dir)"
+  else
+    step restore skipped "data kept (the owner did not choose a restore)"
+  fi
+  step accept skipped "a rollback does not hold writes"
+  step rollback skipped "nothing to roll back to"
+fi
+
+step start running
+SINCE=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
+start_shell "$TO_IMAGE"
+step start done "$(running_image)"
+step health running
+say verifying "waiting for $TO to become healthy (budget \${BUDGET}s)"
+if wait_healthy "$SINCE"; then
+  step health done "kernel ready, services resumed"
+  if [ "$MODE" = "rollback" ]; then
+    step complete done "rolled back to $TO"
+    say done "rolled back to $TO"
+    exit 0
+  fi
+  step accept running
+  if A=$(act accept --job "$ID" --trusted "$TRUSTED" --url "$SHELL_URL"); then
+    step accept done "via $(printf '%s' "$A" | field via)"
+    step rollback skipped "not needed"
+    step complete done "release $TO active"
+    say done "release $TO is active and accepting writes"
+    exit 0
+  fi
+  HEALTH_REASON="accept-writes refused: $(printf '%s' "$A" | field error)"
+  step accept failed "$HEALTH_REASON"
+else
+  step health failed "$HEALTH_REASON"
+fi
+
+if [ "$MODE" = "rollback" ]; then
+  fail "the rollback to $TO did not become healthy: $HEALTH_REASON (manual attention: release-ctl.sh on the host)"
+fi
+# Automatic rollback, before writes were accepted: release AND data (Q35).
+step rollback running
+setrev error "$HEALTH_REASON"
+say rolling-back "$TO failed before accepting writes ($HEALTH_REASON) — restoring $FROM and its data"
+docker stop -t 15 aura-shell >/dev/null 2>&1 || true
+act revert --job "$ID" >/dev/null || { step rollback failed "pointer revert failed"; fail "the automatic rollback could not switch back (manual attention: release-ctl.sh rollback)"; }
+act restore --snapshot "$SNAP" >/dev/null || { step rollback failed "snapshot restore failed"; fail "the automatic rollback could not restore the data snapshot $SNAP (the pointer is on $FROM; manual attention)"; }
+act release-hold >/dev/null
+SINCE=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
+FAILED_REASON="$HEALTH_REASON"
+start_shell "$FROM_IMAGE"
+if wait_healthy "$SINCE"; then
+  step rollback done "$FROM restored with its data ($SNAP)"
+  step complete done "finished — $TO rolled back"
+  say rolled-back "$TO failed before accepting writes ($FAILED_REASON); $FROM and its data are back"
+  exit 1
+fi
+step rollback failed "$FROM did not come back either: $HEALTH_REASON"
+step complete failed "finished — neither release is healthy"
+say failed "neither $TO nor $FROM became healthy — manual attention needed (release-ctl.sh on the host)"
 exit 1
 `;
 }

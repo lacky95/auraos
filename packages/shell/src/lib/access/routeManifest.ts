@@ -227,6 +227,25 @@ const routes: RouteAccessManifest['routes'] = {
   },
   '/api/admin/restart': { methods: { POST: ownerManages('Restarts the OS: the owner decides.') } },
   '/api/admin/soft-restart': { methods: { POST: ownerManages('Stops every app and the app manager: the owner decides.') } },
+  // Phase 6 U: locked releases of a Normal-mode install (lib/release/releaseAdmin.ts). Developer Mode answers 409.
+  '/api/admin/release': {
+    methods: { GET: rule(OWNER, 'system', why('The current and previous release, channel, provenance, the held state and the last jobs (D29: the trusted Terminal too).')) },
+  },
+  '/api/admin/release/build': {
+    methods: { POST: ownerManages('Builds a release from the update channel: the owner decides (one click); the running release is untouched.') },
+  },
+  '/api/admin/release/activate': {
+    methods: { POST: ownerManages('Switches to a built release: the approval system.release.activate (forced) on the release binding, recomputed after it.') },
+  },
+  '/api/admin/release/rollback': {
+    methods: { POST: ownerManages('Back to the previous release at fresh; restoring its data snapshot is a separate explicit choice (Q35); never past a resolved critical fix.') },
+  },
+  '/api/admin/release/accept-writes': {
+    methods: { POST: ownerManages('The updater\'s operator ticket once the release is healthy; the handler refuses everyone else, except the owner at fresh after an abandoned activation.') },
+  },
+  '/api/admin/release/jobs/[id]': {
+    methods: { GET: rule(OWNER, 'system', why('One build or activation job checklist.')) },
+  },
   // 5-main (P2, the SF-2 report): maintenance changes that took no approval. The owner and the operator
   // act directly; `aura` in the System Terminal asks for one click (lib/approvals/maintenance.ts).
   '/api/admin/cap-doctor': {
@@ -777,32 +796,9 @@ const routes: RouteAccessManifest['routes'] = {
 };
 
 // ── reserved: routes declared ahead of their stream, denied until it implements them ────
-// (Phase 5 Stage 1: each stream moved its row into `routes`.) Phase 6 Stage 1b (6B.0): the release
-// routes of streams U and L. Each row denies every method; its note is the rule the stream moves into
-// `routes` with the handler.
+// (Phase 5 Stage 1: each stream moved its row into `routes`; Phase 6 U moved the release rows.)
 
-const RESERVED = (note: string) => rule([], 'system', why(`Reserved (Phase 6 Stage 1b): denied until stream U implements it. ${note}`));
-
-const reserved: RouteAccessManifest['reserved'] = {
-  '/api/admin/release': {
-    methods: { GET: RESERVED('Then: the owner (D29: the trusted Terminal too). The current and previous release, channel, provenance, available updates.') },
-  },
-  '/api/admin/release/build': {
-    methods: { POST: RESERVED('Then: ownerManages: build a release (owner decides; the operator directly).') },
-  },
-  '/api/admin/release/activate': {
-    methods: { POST: RESERVED('Then: ownerManages, approval system.release.activate (forced) on the release binding.') },
-  },
-  '/api/admin/release/rollback': {
-    methods: { POST: RESERVED('Then: ownerManages at fresh; a data restore is its own explicit choice (Q35).') },
-  },
-  '/api/admin/release/accept-writes': {
-    methods: { POST: RESERVED('Then: the host operator only (the updater\'s operator ticket), never a session or an app.') },
-  },
-  '/api/admin/release/jobs/[id]': {
-    methods: { GET: RESERVED('Then: the owner: one build or activation job checklist.') },
-  },
-};
+const reserved: RouteAccessManifest['reserved'] = {};
 
 export const ROUTE_ACCESS_MANIFEST: RouteAccessManifest = {
   groups,

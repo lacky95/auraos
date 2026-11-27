@@ -160,6 +160,29 @@ const S = {
       <button id="upd-logs-btn" type="button" style={S.link} hidden><span style="display:inline-flex;align-items:center;gap:4px;"><Icon name="chevron-right" /> Show full log</span></button>
       <div id="upd-log" style={S.logbox}></div>
     </div>
+
+    <!-- Locked releases (Phase 6 U, Normal mode; hidden in Developer Mode): the
+         running and previous release, what is built and ready, the held state
+         after a switch, and rollback. Activations and rollbacks run in the same
+         detached updater, so the checklist above shows their steps. -->
+    <div id="rel" style={S.upd} hidden>
+      <div id="rel-held" hidden style="margin-bottom:10px;padding:10px 12px;border:1px solid var(--aura-color-warning,#c90);font-size:0.64rem;line-height:1.6;color:var(--aura-color-secondary);"></div>
+      <div style={S.row}><span style={S.k}>RELEASE</span><span id="rel-current" style={S.v}>—</span></div>
+      <div style={S.row}><span style={S.k}>PREVIOUS</span><span id="rel-previous" style={S.v}>—</span></div>
+      <div style={S.row}><span style={S.k}>CHANNEL</span><span id="rel-channel" style={S.v}>—</span></div>
+      <ul id="rel-built" style={S.steps}></ul>
+      <div style="display:flex;gap:6px;margin-top:8px;">
+        <button id="rel-build-btn" type="button" style={S.btn}>Build latest release</button>
+        <button id="rel-rollback-btn" type="button" style={S.btn2}>Roll back</button>
+        <button id="rel-accept-btn" type="button" style={S.btn2} hidden>Keep and accept</button>
+      </div>
+      <label class="aura-check" style="margin-top:6px;font-size:0.62rem;letter-spacing:0.08em;color:var(--aura-color-text-dim);">
+        <input id="rel-restore" type="checkbox" />
+        <span class="aura-check-box" aria-hidden="true"><Icon name="check" /></span>
+        <span>ROLL BACK THE DATA TOO (CHANGES SINCE THE SWITCH ARE LOST)</span>
+      </label>
+      <div id="rel-note" style={S.note}></div>
+    </div>
   </main>
   <footer class="settings-foot">{about ? `AURAOS V${about.version}` : 'ABOUT'}</footer>
 
@@ -521,7 +544,7 @@ const S = {
       const summary = `${pre.behind} new commit(s) on ${pre.branch}\n`
         + `${(pre.currentRev || '').slice(0, 12)} → ${(pre.latestRev || '').slice(0, 12)}\n`
         + (pre.latestSubject ? `\nLatest: ${pre.latestSubject}\n` : '')
-        + (pre.ahead ? `\n${pre.ahead} local commit(s) will be rebased on top.\n` : '');
+        + '';
       if (!(await showConfirm(`Update AuraOS?\n\n${summary}\nThis rebuilds the container image and restarts the OS. Afterwards, apps whose sources changed are built in the background and switch to their new build (Terminal and OpsConsole on their next start). Running apps keep running; the desktop reconnects when the shell is back. If the new build does not come up, it rolls back automatically.`))) return;
       btn.disabled = true;
       btn.textContent = 'Starting…';
@@ -542,6 +565,91 @@ const S = {
       }
       poll();
     });
+
+    // ── Locked releases (Phase 6 U): /api/admin/release, Normal mode only ──
+    const rel = document.getElementById('rel');
+    const relNote = document.getElementById('rel-note');
+    const relHeld = document.getElementById('rel-held');
+    const relBuilt = document.getElementById('rel-built');
+    const relBuildBtn = document.getElementById('rel-build-btn') as HTMLButtonElement;
+    const relRollbackBtn = document.getElementById('rel-rollback-btn') as HTMLButtonElement;
+    const relAcceptBtn = document.getElementById('rel-accept-btn') as HTMLButtonElement;
+    const relRestore = document.getElementById('rel-restore') as HTMLInputElement;
+    // Never "signed" unless the release IS the maintainer-signed one (D71).
+    const relLabel = (r) => !r ? '—' : r.missing ? `${r.id} (missing)`
+      : `${r.version || 'main'} · ${String(r.commit || '').slice(0, 12)} · ${r.provenance === 'upstream-signed' ? 'signed release'
+        : r.provenance === 'locally-modified' ? 'locally modified, not a signed release' : 'unsigned (main channel)'}${r.securityUpdate ? ` · security update${r.severity ? ` (${r.severity})` : ''}` : ''}`;
+    const relSay = (t) => { if (relNote) relNote.textContent = t; };
+    async function relSend(path, body) {
+      const r = await ownerFetch(path, 'POST', body);
+      const b = await r.json().catch(() => ({}));
+      return { ok: r.ok, status: r.status, body: b };
+    }
+    async function loadRelease() {
+      let s;
+      try { const r = await fetch(osUrl('/api/admin/release')); if (!r.ok) return; s = await r.json(); } catch { return; }
+      if (!s || !s.pointer) return;           // Developer Mode: the update above is the workflow
+      rel.hidden = false;
+      btn.hidden = true; rebuildBtn.hidden = true;   // Normal mode updates by release, not by git
+      document.getElementById('rel-current').textContent = relLabel(s.current);
+      document.getElementById('rel-previous').textContent = relLabel(s.previous);
+      document.getElementById('rel-channel').textContent = `${s.channel}${s.channel === 'main' ? ' (unsigned)' : ''} · security updates: ${s.securityPolicy}`;
+      relRollbackBtn.disabled = !s.previous || s.running;
+      relBuildBtn.disabled = s.running;
+      relHeld.hidden = !s.held;
+      relAcceptBtn.hidden = !(s.held && s.held.abandoned);
+      if (s.held) {
+        relHeld.textContent = s.held.abandoned
+          ? `The switch to ${s.held.marker.to || 'the new release'} was interrupted before AuraOS checked it, so changes are held. Roll back (with the data, to restore everything from before the switch) or keep it.`
+          : `Verifying ${s.held.marker.to || 'the new release'}: changes are held until it is healthy (usually under a minute).`;
+        if (s.held.abandoned) relRestore.checked = true;
+      }
+      const ready = (s.releases || []).filter((r) => !r.missing && r.id !== s.pointer.current && r.id !== s.pointer.previous);
+      relBuilt.innerHTML = '';
+      for (const r of ready) {
+        const li = document.createElement('li');
+        li.textContent = `Ready: ${relLabel(r)} `;
+        const b = document.createElement('button');
+        b.type = 'button'; b.textContent = 'Activate'; b.disabled = s.running;
+        b.addEventListener('click', async () => {
+          if (!(await showConfirm(`Activate AuraOS ${r.version || r.id}?\n\n${relLabel(r)}\n\nAuraOS restarts on it. Changes are held until it is healthy; if it does not come up, it rolls back automatically, data included. Terminal sessions keep running and switch on their next start.`))) return;
+          b.disabled = true;
+          const res = await relSend('/api/admin/release/activate', { releaseId: r.id });
+          if (!res.ok) { relSay(res.body.message || res.body.error || `Could not activate (HTTP ${res.status}).`); b.disabled = false; return; }
+          relSay(`Activating ${r.version || r.id}…`);
+          poll();
+        });
+        li.appendChild(b);
+        relBuilt.appendChild(li);
+      }
+      if (!ready.length) relSay(s.running ? 'A release job is running.' : 'No other release is built. Build the latest one from the update channel.');
+    }
+    relBuildBtn?.addEventListener('click', async () => {
+      relBuildBtn.disabled = true;
+      const res = await relSend('/api/admin/release/build', {});
+      relSay(res.ok ? `Building (job ${res.body.job}). It appears here when it is ready; the running release is untouched.` : (res.body.message || res.body.error || `Could not build (HTTP ${res.status}).`));
+      if (!res.ok) relBuildBtn.disabled = false;
+    });
+    relRollbackBtn?.addEventListener('click', async () => {
+      const restoreData = relRestore.checked;
+      if (!(await showConfirm(`Roll AuraOS back to the previous release?\n\n${restoreData ? 'The data snapshot taken before the switch is restored: every change since then is lost (kept aside on disk).' : 'Your data stays as it is now.'}\n\nThe rolled-back release cannot be rolled back again.`))) return;
+      relRollbackBtn.disabled = true;
+      let res = await relSend('/api/admin/release/rollback', { restoreData });
+      if (res.status === 409 && res.body.error === 'rollback-insecure') {
+        if (!(await showConfirm(`${res.body.message}\n\nRoll back anyway and bring back: ${res.body.advisories.join(', ')}?`))) { relRollbackBtn.disabled = false; return; }
+        res = await relSend('/api/admin/release/rollback', { restoreData, confirmInsecure: res.body.advisories.join(',') });
+      }
+      if (!res.ok) { relSay(res.body.message || res.body.error || `Could not roll back (HTTP ${res.status}).`); relRollbackBtn.disabled = false; return; }
+      relSay(`Rolling back to ${res.body.to}…`);
+      poll();
+    });
+    relAcceptBtn?.addEventListener('click', async () => {
+      if (!(await showConfirm('Keep the new release and accept changes? Rolling back with the data stays possible only until then.'))) return;
+      const res = await relSend('/api/admin/release/accept-writes', {});
+      relSay(res.ok ? `Release ${res.body.release} kept; changes are accepted.` : (res.body.message || res.body.error || `HTTP ${res.status}`));
+      loadRelease();
+    });
+    loadRelease();
 
     refresh().then((s) => {
       paint(s || {});

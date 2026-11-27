@@ -10,7 +10,8 @@
  *   4. one-shot flags for the next boot: skip the restore (restore: false),
  *      restart the Shell Daemon
  *   5. SelfUpdater.start({ mode }) — runs outside this container, so it
- *      outlives the shell it restarts
+ *      outlives the shell it restarts (also a release activation or rollback,
+ *      Phase 6 U: the drain before the kernel stops)
  * If step 5 cannot start, the freeze and the flags are undone.
  */
 // Namespace import: the running shell may cache a core build without newer exports.
@@ -18,9 +19,15 @@ import * as core from '@aura/core';
 import { defaultKv } from '@aura/kv-store';
 import { flushAndFreeze, RESTART_DAEMON_KEY, SKIP_KEY, unfreeze } from './desktopSession.js';
 
-export type RestartMode = 'restart' | 'update' | 'rebuild';
+export type RestartMode = 'restart' | 'update' | 'rebuild' | 'release' | 'rollback';
 export interface PlannedRestartOpts {
   mode?: RestartMode;
+  /** `release` (Phase 6 U): the built release to switch to; D35 `when` for the Terminal. */
+  releaseId?: string;
+  when?: 'now' | 'next-start';
+  /** `rollback`: also restore the data snapshot (Q35); the advisories a security rollback confirmed. */
+  restoreData?: boolean;
+  confirmInsecure?: string;
   /** Bring the desktop (activities, workspaces, layouts) back after the restart (default true). */
   restore?: boolean;
   branch?: string;
@@ -82,7 +89,14 @@ export async function plannedRestart(opts: PlannedRestartOpts = {}): Promise<Pla
     return { ok: false, error: `could not save the desktop: ${(err as Error).message}` };
   }
 
-  const res = updater.start({ mode: opts.mode ?? 'restart', branch: opts.branch });
+  const res = updater.start({
+    mode: opts.mode ?? 'restart', branch: opts.branch,
+    ...(opts.releaseId ? { releaseId: opts.releaseId } : {}),
+    ...(opts.when ? { when: opts.when } : {}),
+    ...(opts.restoreData ? { restoreData: true } : {}),
+    ...(opts.confirmInsecure ? { confirmInsecure: opts.confirmInsecure } : {}),
+    drained: true,
+  });
   if (!res.ok) {
     unfreeze();
     await clearFlags().catch(() => undefined);

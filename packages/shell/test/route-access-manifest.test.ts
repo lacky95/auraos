@@ -334,16 +334,17 @@ test('every reserved Phase 5 row has moved into routes; J\'s root tab is an owne
   }
 });
 
-test('Phase 6 Stage 1b: the release routes are reserved, every method denied until stream U implements them', () => {
+test('Phase 6 U moved the release rows into routes: owner reads, owner-managed changes, nothing public, nothing reserved', () => {
   const reserved = ROUTE_ACCESS_MANIFEST.reserved ?? {};
-  const rows: Array<[string, RouteMethod]> = [
-    ['/api/admin/release', 'GET'], ['/api/admin/release/build', 'POST'], ['/api/admin/release/activate', 'POST'],
-    ['/api/admin/release/rollback', 'POST'], ['/api/admin/release/accept-writes', 'POST'], ['/api/admin/release/jobs/[id]', 'GET'],
-  ];
-  assert.deepEqual(Object.keys(reserved).sort(), rows.map(([r]) => r).sort());
-  for (const [route, method] of rows) {
-    assert.ok(!(route in ROUTE_ACCESS_MANIFEST.routes), `${route} is not implemented yet`);
-    assert.deepEqual(reserved[route]?.methods?.[method]?.allow, [], `${method} ${route} is denied`);
+  assert.deepEqual(Object.keys(reserved), []);
+  for (const route of ['/api/admin/release', '/api/admin/release/jobs/[id]']) {
+    const r = effectiveRule(ROUTE_ACCESS_MANIFEST, { route, handlers: ['GET'] }, 'GET');
+    assert.deepEqual(r?.allow, ['owner'], route);
+  }
+  for (const route of ['/api/admin/release/build', '/api/admin/release/activate', '/api/admin/release/rollback', '/api/admin/release/accept-writes']) {
+    const r = effectiveRule(ROUTE_ACCESS_MANIFEST, { route, handlers: ['POST'] }, 'POST');
+    assert.deepEqual(r?.allow, ['own-instance', 'owner'], route);
+    assert.equal(r?.systemApp, 'com.aura.terminal', `${route}: only the System Terminal asks the owner`);
   }
 });
 

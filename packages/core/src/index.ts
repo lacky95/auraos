@@ -116,5 +116,10 @@ export type * from './app-manager/maintenance.js';
 // release path list (twin of os/release/layout.mjs) and the D94 infrastructure contracts (IC-5 fills propagate).
 export * from './release/types.js';
 export * as releasePaths from './release/paths.js';
+// Phase 6 U: the activation reads (lock holder, writes held, the snapshot of a switch).
+export {
+  RELEASE_LOCK_STALE_MS, systemLockHolder, readWritesHeld, latestSnapshotInto,
+  type ReleaseLockHolder, type WritesHeldMarker,
+} from './release/activate.js';
 export * from './infra/types.js';
 export { InfraPropagationError, buildSecrets, infraExecEnv, renderDigest } from './infra/propagate.js';

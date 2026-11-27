@@ -74,6 +74,11 @@ export const SHELL_BOOT_HOOKS: readonly BootHook[] = [
   },
   // After Settings → About → Update / Rebuild: build the apps that changed (lib/appBuilds.ts).
   { name: 'app-build-pass', layer: 'server', run: async () => { (await import('./appBuilds.js')).scheduleAppBuildPass(); } },
+  // Phase 6 U: a finished release job is audited and announced once; an abandoned hold is announced.
+  {
+    name: 'release-report', layer: 'server',
+    run: async () => { const m = await import('./release/releaseAdmin.ts'); await m.reportReleaseJobs(m.liveReleaseDeps()); },
+  },
   // Pre-registered Nexus sources (lib/nexusSeeds.ts): through the shell's own KV API.
   { name: 'nexus-seeds', layer: 'server', run: async () => { await (await import('./nexusSeedsApply.js')).applySourceSeeds(); } },
   // Web Shell: reopen the windows of before the restart on the re-adopted / restarted instances,

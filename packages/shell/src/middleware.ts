@@ -9,6 +9,7 @@ import { captureAccess, createAccessReporter } from './lib/access/guard.ts';
 import { GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
 import { shellFramePolicy } from './lib/desktop/shellFramePolicy.ts';
 import { runAfterResponse } from './lib/afterResponse.ts';
+import { writeGate } from './lib/release/writeGate.ts';
 
 /**
  * Readiness (Phase 6 K): the kernel boots eagerly (lib/bootHooks.ts, started by
@@ -65,6 +66,13 @@ export const onRequest = defineMiddleware(async (ctx, next) => {
     return notReady;
   }
   core.getSystem()?.noteFirstRequest();
+  // ── Phase 6 U: the release write gate (lib/release/writeGate.ts) ──
+  const held = writeGate(ctx.request.method, ctx.url.pathname);
+  if (held) {
+    reportAccess(access, held.status);
+    return held;
+  }
+  // ── end of the write gate ──
   // Free-flight activities (lib/flight/service.ts), a Web Shell feature: once per shell
   // build — a hot-swapped build takes over the previous one's listeners + notifications.
   if (!flightServiceStarted && compositionOf(process.env) !== 'server') {

@@ -76,7 +76,11 @@ export interface BootStatus {
   systemMode: string | null;
   startedAt: string;
   kernelReadyAt: string | null;
-  /** Phase 6b U holds writes during release verification; always true in 6a. */
+  /**
+   * Phase 6b U: false while a newly activated release verifies (`aura/boot/writes-held`
+   * at boot); the middleware answers mutating calls 503 `release-verifying` until the
+   * updater's accept-writes call (or the owner's choice after an abandoned activation).
+   */
   acceptingWrites: boolean;
   acceptingWritesAt: string | null;
   appManagers: number;
@@ -108,4 +112,6 @@ export interface SystemHandle {
   restartKernel(): Promise<void>;
   /** The middleware stamps the first request once. */
   noteFirstRequest(): void;
+  /** Phase 6b U: the release verified, writes are accepted (`acceptingWritesAt`). Idempotent. */
+  acceptWrites(): void;
 }

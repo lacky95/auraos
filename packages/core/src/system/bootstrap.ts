@@ -26,6 +26,7 @@ import { ensureSystemIdentity } from './systemIdentity.js';
 import { bootstrapKv } from './kvBootstrap.js';
 import { BOOTSTRAP_VERSION, writeBootStatus } from './status.js';
 import { composeKernel } from './compose.js';
+import { readWritesHeld } from '../release/activate.js';
 import type {
   BootHook, BootHookContext, BootOptions, BootStatus, Composition, ShutdownReason, SystemHandle,
 } from './types.js';
@@ -94,7 +95,8 @@ export function bootSystem(options: BootOptions): SystemHandle {
     entry: opts.entry, composition, release: null,
     systemMode: safe(() => opts.systemMode?.() ?? null, null),
     startedAt: now(), kernelReadyAt: null,
-    acceptingWrites: true, acceptingWritesAt: null,
+    // Phase 6b U: a release activation that has not accepted writes yet boots held.
+    acceptingWrites: readWritesHeld(dataDir) === null, acceptingWritesAt: null,
     appManagers: 0, kv: { embedded: true, version: null },
     accessMode: safe(() => opts.accessMode?.() ?? null, null),
     services: {}, firstRequestAt: null, hooks: {}, infra: null,
@@ -120,6 +122,12 @@ export function bootSystem(options: BootOptions): SystemHandle {
     noteFirstRequest: () => {
       if (state.status.firstRequestAt) return;
       state.status.firstRequestAt = now();
+      save(state);
+    },
+    acceptWrites: () => {
+      if (state.status.acceptingWrites) return;
+      state.status.acceptingWrites = true;
+      state.status.acceptingWritesAt = now();
       save(state);
     },
   };
@@ -257,7 +265,7 @@ async function bootKernel(state: SystemState, { first }: { first: boolean }): Pr
   catch (err) { console.warn(`[boot] could not hydrate custom interfaces: ${(err as Error).message}`); }
   await mgr.init();
   st.kernelReadyAt = now();
-  st.acceptingWritesAt ??= st.kernelReadyAt;
+  if (st.acceptingWrites) st.acceptingWritesAt ??= st.kernelReadyAt;
   delete st.error;
   refreshServices(state, mgr);
   console.log(`[boot] kernel ready (${state.opts.entry}, ${state.opts.composition})`);
