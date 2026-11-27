@@ -575,3 +575,22 @@ test('B1: disabling an account ends its screens', async () => {
   assert.equal(await screens.get(s.sid), null);
   assert.ok(await screens.get(o.sid));
 });
+
+test('a source tree handed to the owner keeps the dev caches: the report walk excludes .astro and node_modules (console: EACCES on .astro/types.d.ts)', async () => {
+  const { SOURCE_TREE_EXCLUDE, DEV_CACHE_DIRS } = await import('../dist/identity/appOwnership.js');
+  // Every dev cache is excluded by its first path segment, so the dev-cache rows (only from root) still find it root's.
+  for (const d of DEV_CACHE_DIRS) assert.ok(SOURCE_TREE_EXCLUDE.includes(d.split('/')[0]), d);
+  const root = fresh('srcx');
+  const app = join(root, 'ws', 'apps', 'org.a.x');
+  mkdirSync(join(app, '.astro'), { recursive: true });
+  writeFileSync(join(app, '.astro', 'types.d.ts'), 'x');
+  writeFileSync(join(app, 'index.ts'), 'abc');
+  const r = await buildOwnershipReport([
+    { section: 'plannedUserPaths', path: join(root, 'ws'), kind: 'developer-mode-tree', to: { uid: 1000, gid: 1000 }, recursive: true, exclude: [...SOURCE_TREE_EXCLUDE], only: 'when Developer Mode is on' },
+  ], { refuseRoots: [] });
+  // ws, apps, org.a.x, index.ts: the .astro directory and its file are not walked.
+  assert.equal(r.plannedUserPaths[0].entries, 4);
+  const shellSrc = readFileSync(new URL('../../shell/src/lib/identityReports.ts', import.meta.url), 'utf-8');
+  assert.equal((shellSrc.match(/SOURCE_TREE_EXCLUDE/g) ?? []).length, 3, 'Developer Mode tree, own app source and its hand-over');
+  assert.doesNotMatch(shellSrc, /\['node_modules'\]/);
+});

@@ -1145,17 +1145,25 @@ export class ContainerRunner implements SandboxRunner {
       // Skip aura-shell itself — it's not an app instance, just the
       // controller container that owns this runner.
       if (name === 'aura-shell') continue;
-      let inspect: DockerInspect;
-      try {
-        const { stdout: raw } = await execFileAsync('docker', ['inspect', name, '--format', '{{json .}}'], {
-          encoding: 'utf-8',
-          timeout: 3_000,
-        });
-        inspect = JSON.parse(raw) as DockerInspect;
-      } catch (err) {
-        console.warn(`[ContainerRunner] inspect ${name} failed: ${(err as Error).message}`);
-        continue;
+      // A survivor whose inspect fails is not "no survivor": skipped, it kept
+      // running untracked and its port went to the next spawn (two instances
+      // on one port after the following restart, live 0.0.51). One retry with
+      // more time (a busy daemon at boot); still unreadable: the scan is
+      // incomplete (null, the reconciler retries). Gone since `ps`: skipped.
+      let inspect: DockerInspect | null = null;
+      for (const timeout of [3_000, 10_000]) {
+        try {
+          const { stdout: raw } = await execFileAsync('docker', ['inspect', name, '--format', '{{json .}}'], { encoding: 'utf-8', timeout });
+          inspect = JSON.parse(raw) as DockerInspect;
+          break;
+        } catch (err) {
+          const why = `${(err as { stderr?: string }).stderr ?? ''} ${(err as Error).message}`;
+          if (/no such (object|container)/i.test(why)) break;
+          console.warn(`[ContainerRunner] adoption scan: inspect ${name} failed (${timeout} ms): ${(err as Error).message}`);
+          if (timeout === 10_000) return null;
+        }
       }
+      if (!inspect) continue;
       // App-spawned SIBLING runtime containers (labelled `aura.parent`) are not
       // AppManager instances — they belong to an app and are managed via
       // reapSiblings, not adopted as instances.
