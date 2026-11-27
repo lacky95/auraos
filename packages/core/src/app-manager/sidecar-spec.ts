@@ -153,10 +153,9 @@ export class SpecError extends Error {
 export class SidecarIdentityError extends SpecError {
   readonly code = 'sidecar-identity-conflict';
   readonly body: AuraErrorBody;
-  constructor(appId: string, template: string, user: string, appUser: string | null) {
+  constructor(appId: string, template: string, user: string, appUser: string) {
     const message = `template '${template}' sets user '${user}' and inheritHome: a sidecar with ${appId}'s home runs as `
-      + (appUser ? `the app's identity (${appUser})` : 'the app\'s own user (a root installation: its image user, without capabilities)')
-      + ', so it is not created';
+      + `the app's identity (${appUser}), so it is not created`;
     super(409, message);
     this.name = 'SidecarIdentityError';
     this.body = {

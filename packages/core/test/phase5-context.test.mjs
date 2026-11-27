@@ -12,7 +12,7 @@ import { kvServer, createRedis } from '@aura/kv-store';
 import {
   GrantStore, GrantError, CONTEXT_READ_PERMISSION_RE, contextReadPermission, credentialReadPermission, userScope,
   isPrivilegedPermission, grantedContextEnv, grantedContextValue, appGrantCounts, liveGrantedContextDeps,
-  computePermissionDiff,
+  computePermissionDiff, HOME_INHERIT_SIDECAR_PERMISSION_RE, homeInheritSidecarPermission,
 } from '../dist/index.js';
 import { migratePhase5Context, PHASE5_CONTEXT_MIGRATION } from '../dist/context/migratePhase5.js';
 
@@ -78,6 +78,25 @@ test('context.read:<KEY> is a privileged, app-only, OS-wide permission', async (
   await grants.grant({ kind: 'app', id: APP }, contextReadPermission('X'), { by, appScope: 'global', installationId: 'inst-1' });
   await assert.rejects(grants.grant({ kind: 'apiKey', id: 'k1' }, contextReadPermission('X'), { by }), GrantError);
   await assert.rejects(grants.grant({ kind: 'app', id: APP }, contextReadPermission('X'), { by, scope: userScope('default') }), GrantError);
+});
+
+test('B12b: home.inherit.sidecar:<template> is a privileged, app-only, OS-wide grant pinned to the installation', async () => {
+  const perm = homeInheritSidecarPermission('supervisor');
+  assert.equal(perm, 'home.inherit.sidecar:supervisor');
+  assert.ok(HOME_INHERIT_SIDECAR_PERMISSION_RE.test(perm) && isPrivilegedPermission(perm));
+  for (const bad of ['home.inherit.sidecar:', 'home.inherit.sidecar:Up', 'home.inherit.sidecar:a/b', 'home.inherit.sidecar:*']) {
+    assert.ok(!isPrivilegedPermission(bad), bad);
+  }
+  await assert.rejects(grants.grant({ kind: 'apiKey', id: 'k1' }, perm, { by }), GrantError);
+  await assert.rejects(grants.grant({ kind: 'app', id: APP }, perm, { by, scope: userScope('default') }), GrantError);
+  await assert.rejects(grants.grant({ kind: 'app', id: APP }, perm, { by }), GrantError, 'an app grant needs its installation');
+  await grants.grant({ kind: 'app', id: APP }, perm, { by, appScope: 'global', installationId: 'inst-1' });
+  const rec = await grants.get({ kind: 'app', id: APP }, perm);
+  // Counts only for the installation it was given to: a reinstall under the same id inherits nothing (S1).
+  assert.equal(appGrantCounts(rec, { scope: 'global', installationId: 'inst-1' }), true);
+  assert.equal(appGrantCounts(rec, { scope: 'global', installationId: 'inst-2' }), false);
+  assert.equal(appGrantCounts(await grants.get({ kind: 'app', id: APP }, homeInheritSidecarPermission('other')), { scope: 'global', installationId: 'inst-1' }), false);
+  await grants.revoke({ kind: 'app', id: APP }, perm);
 });
 
 test('an app without a grant sees no key; undeclared keys never reach it', async () => {

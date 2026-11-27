@@ -27,7 +27,8 @@ import { buildOwnershipReport } from '../dist/identity/ownershipReport.js';
 import { APP_MIGRATION, buildPrivilegeReview, manifestPrivilegeNeeds } from '../dist/identity/privilegeReview.js';
 import { newInstallationRunAs } from '../dist/identity/types.js';
 import {
-  containerIdentityArgs, identityFilesSubpath, inheritHomeUser, renderIdentityFiles, sidecarIdentityArgs, writeIdentityFiles,
+  containerIdentityArgs, identityFilesSubpath, inheritHomeUser, isRootInstallation, renderIdentityFiles, SidecarHomeError, sidecarIdentityArgs,
+  verifiedNonRootUser, writeIdentityFiles,
 } from '../dist/runtimes/spawn/identityArgs.js';
 import {
   ASTRO_START_SHELL, BUILDER_CACHE_PATH, RAW_START_SHELL, builderProvisionEnv, builderProvisionShell, PROVISION_BEGIN,
@@ -196,9 +197,16 @@ test('sidecars keep their image user; every inheritHome sidecar runs as its app,
   assert.deepEqual(sidecarIdentityArgs({ image: 'trilium', inheritHome: false }, APP, opts), [], 'foreign image without the home');
   assert.deepEqual(sidecarIdentityArgs({ image: 'canvas', inheritHome: false, user: '0:0' }, APP, opts), [], 'explicit user wins without the home');
   assert.deepEqual(sidecarIdentityArgs({ image: 'aura-base', inheritHome: false }, APP, opts), [], 'aura-base without the home');
-  // B12: a root installation's home sidecar keeps its image user, never with capabilities.
-  assert.deepEqual(sidecarIdentityArgs({ image: 'aura-base', inheritHome: true }, { uid: 0, gid: 0, range: 'root' }, opts), NO_PRIV, 'root parent');
-  assert.deepEqual(sidecarIdentityArgs({ image: 'ghcr.io/x/webui:1', inheritHome: true }, undefined, opts), NO_PRIV, 'root parent, foreign image');
+  // B12b: a root installation's home sidecar runs only as a verified non-root user, never with capabilities.
+  assert.deepEqual(sidecarIdentityArgs({ image: 'aura-base', inheritHome: true }, { uid: 0, gid: 0, range: 'root' }, { ...opts, rootHomeUser: '1000:1000' }),
+    ['--user', '1000:1000', ...NO_PRIV], 'root parent, verified user pinned');
+  assert.deepEqual(sidecarIdentityArgs({ image: 'ghcr.io/x/webui:1', inheritHome: true }, undefined, { ...opts, rootHomeUser: '1000' }),
+    ['--user', '1000', ...NO_PRIV], 'root parent, foreign image');
+  // Never the image's root: no verified user (or root, or a name) fails closed.
+  for (const rootHomeUser of [undefined, '', '0', '0:0', 'node', '1000:0']) {
+    assert.throws(() => sidecarIdentityArgs({ image: 'aura-base', inheritHome: true }, undefined, { ...opts, ...(rootHomeUser !== undefined ? { rootHomeUser } : {}) }),
+      /verified non-root user/, `root parent, rootHomeUser ${JSON.stringify(rootHomeUser)}`);
+  }
   const s = sidecarIdentityArgs({ image: 'aura-base', inheritHome: true }, APP, opts);
   assert.deepEqual(s.slice(0, 6), ['--user', '200007:200007', ...NO_PRIV]);
   assert.ok(s.some((a) => a.includes('target=/etc/passwd')), 'aura-base: the identity files');
@@ -206,6 +214,27 @@ test('sidecars keep their image user; every inheritHome sidecar runs as its app,
   assert.deepEqual(sidecarIdentityArgs({ image: 'ghcr.io/x/webui:1', inheritHome: true }, APP, opts), ['--user', '200007:200007', ...NO_PRIV]);
   assert.equal(inheritHomeUser(APP), '200007:200007');
   assert.equal(inheritHomeUser({ uid: 0, gid: 0, range: 'root' }), null);
+});
+
+test('B12b: a root installation, a verifiably non-root user, the home sidecar refusals (owner decision 7)', () => {
+  assert.equal(isRootInstallation(undefined), true);
+  assert.equal(isRootInstallation({ uid: 0, gid: 0, range: 'root' }), true);
+  assert.equal(isRootInstallation({ uid: 0, gid: 0, range: 'root', approvedRoot: true }), false, 'an approved root request is the app\'s identity');
+  assert.equal(isRootInstallation(APP), false);
+  // (a) numeric and non-root only: a name is resolved inside the container, so never assumed.
+  for (const [user, want] of [['1000', '1000'], ['1000:1000', '1000:1000'], [' 1000:2000 ', '1000:2000'], ['0', null], ['0:0', null],
+    ['1000:0', null], ['0:1000', null], ['', null], [undefined, null], ['node', null], ['root', null], ['1000:node', null], ['-1', null], ['99999999999', null]]) {
+    assert.equal(verifiedNonRootUser(user), want, JSON.stringify(user));
+  }
+  const na = SidecarHomeError.notAuthorized('org.b.board', 'supervisor');
+  assert.equal(na.status, 403);
+  assert.deepEqual([na.body.error, na.body.category, na.body.permission], ['sidecar-home-not-authorized', 'missing-permission', 'home.inherit.sidecar:supervisor']);
+  assert.match(na.body.hint, /aura admin apps run-as org\.b\.board app.*aura admin grant org\.b\.board home\.inherit\.sidecar:supervisor/);
+  const ru = SidecarHomeError.rootUser('org.b.board', 'supervisor', 'aura-base', '');
+  assert.deepEqual([ru.status, ru.body.error, ru.body.manifestField], [409, 'sidecar-home-root-user', 'services[supervisor].user']);
+  assert.match(ru.message, /empty \(root\)/);
+  const esc = SidecarHomeError.escalation('org.b.board', 'supervisor', 'container', 'no nosuid');
+  assert.deepEqual([esc.status, esc.body.error, esc.body.category, esc.body.missing], [409, 'sidecar-home-escalation', 'unsupported-feature', ['nosuidHomeMount']]);
 });
 
 test('adoption keeps the latched identity from Config.User (D77)', () => {
