@@ -210,11 +210,11 @@ test('D-X: the exec bridge reads logs through the runtime\'s `logs` and refuses 
   await assert.rejects(bridge.logs('org.mock.gone', {}, () => {}), (e) => e.status === 409 && e.code === 'not-running');
 });
 
-test('D-B, D-P: builds and port exposure go through the groups; the container module declares both, PRoot and the mock neither', () => {
+test('D-B, D-P: builds and port exposure go through the groups; the container module declares both, PRoot neither, the mock builds (D106)', () => {
   const mgr = mgrOf({ runtimes: [mockProvider()] });
   const withBuild = mgr.runtimes.list().filter((m) => m.build).map((m) => m.descriptor.id);
   const withEndpoints = mgr.runtimes.list().filter((m) => m.endpoints).map((m) => m.descriptor.id);
-  assert.deepEqual([withBuild, withEndpoints], [['container'], ['container']]);
+  assert.deepEqual([withBuild, withEndpoints], [['container', 'mock'], ['container']]);
   const src = readFileSync(new URL('../src/app-manager/AppManager.ts', import.meta.url), 'utf8');
   assert.doesNotMatch(src, /this\.container\.(buildApp|provisionApp)\b/, 'builds never call the concrete runner (D-B)');
   const pm = readFileSync(new URL('../src/app-manager/PortManager.ts', import.meta.url), 'utf8');

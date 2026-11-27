@@ -152,6 +152,27 @@ export function describeRuntime(name, makeModule, harness = {}) {
     }
   });
 
+  // D106: resources.limits for build/check workloads. Supported → the build group refuses an invalid record with the
+  // stable code before anything runs; unsupported → no build is ever handed limits there (the kernel fails closed).
+  test(`[ARI ${name}] resources.limits (D106): declared honestly; an invalid limits record is refused (invalid-resource-limits) before running`, async () => {
+    const m = makeModule();
+    const f = moduleFeatures(m, settingsList()[0]).find((x) => x.id === 'resources.limits');
+    assert.ok(['supported', 'conditional', 'unsupported'].includes(f.support));
+    if (f.support === 'unsupported') return;
+    assert.ok(m.build, 'limits are for build/check workloads: the build group is there');
+    for (const bad of [{ cpus: 0 }, { memoryBytes: 1.5 }, { pids: -1 }, { cpus: Infinity }, { swap: 1 }]) {
+      await assert.rejects(m.build.build({ appId: 'org.k.app', appDir: '/nonexistent', limits: bad }), (e) => e.code === 'invalid-resource-limits', JSON.stringify(bad));
+    }
+  });
+
+  // Phase 6 D-M: the mounts group is the mechanism only; its shape is the contract.
+  test(`[ARI ${name}] mounts (D-M): present exactly with mount.attach; attach/detach/table/verify/rootOf are functions`, () => {
+    const m = makeModule();
+    if (!m.mounts) return;
+    for (const k of ['capable', 'idmapProbe', 'rootDir', 'hostPath', 'rootOf', 'attach', 'detach', 'table', 'verify']) assert.equal(typeof m.mounts[k], 'function', `mounts.${k}`);
+    assert.deepEqual(Object.keys(m.mounts.capable()).filter((k) => !['ok', 'reason'].includes(k)), []);
+  });
+
   test(`[ARI ${name}] A4 spec (buildSpawnSpec): a runtime without hostFilesystem gets no host path; one with it gets the spec as resolved`, () => {
     const m = makeModule();
     const caps = m.capabilities(settingsList()[0]);

@@ -19,6 +19,8 @@ import type { RuntimeLogsRequest, RuntimeLogsStream, RuntimeOutputStream, Runtim
 import { IDMAP_HELPER_PATH, type ContainerMountBackend, type ContainerPortBackend, type ContainerSidecarBackend, type FacilityProbe, type SidecarRuntimeFacts } from '../runtimes/container/backends.js';
 // Value import, but MountManager imports ContainerRunner type-only, so there
 // is no runtime cycle.
+import { DEFAULT_BUILD_LIMITS, limitArgs } from '../runtimes/container/limits.js';
+import type { ResourceLimits } from '../runtimes/ari.js';
 import { MOUNT_ROOT_PATH } from '../runtimes/spawn/paths.js';
 import { KEEP_RESTART_LABEL, keptAcrossRestart, type KeepSiblings } from './sidecarParking.js';
 import type { SandboxExecOpts, SandboxRunner, SandboxRunnerOpts } from './SandboxRunner.js';
@@ -229,6 +231,11 @@ function dockerOut(args: string[]): string {
   return execFileSync('docker', args, { encoding: 'utf-8', timeout: 5_000, stdio: ['ignore', 'pipe', 'ignore'] });
 }
 
+
+/** A throwaway builder container's name (`aura-build-<app>`, `aura-provision-<app>`). */
+function builderName(kind: 'build' | 'provision', appId: string): string {
+  return `aura-${kind}-${appId.replace(/[^a-zA-Z0-9_.-]/g, '_')}`;
+}
 
 interface TrackedContainer {
   /** Watches the app's log to tell "installing dependencies" from "failing
@@ -1470,12 +1477,12 @@ export class ContainerRunner implements SandboxRunner, ContainerMountBackend, Co
   /** Shell-side pids of the `docker run` clients of running builds (getActivePids). */
   private readonly buildPids = new Set<number>();
 
-  async buildApp(appId: string, appDir: string, opts: { timeoutMs?: number } = {}): Promise<{ ok: boolean; output: string }> {
-    await whenBaseImageReady();
-    const name = `aura-build-${appId.replace(/[^a-zA-Z0-9_.-]/g, '_')}`;
-    const args = [
-      'run', '--rm', '--name', name,
-      '--pids-limit', '512', '--memory', '3g', '--cpus', '2',
+  /** The `docker run` argv of an app build (golden: test/golden-spawn-args.test.mjs, golden/build-args.json). */
+  buildAppArgs(appId: string, appDir: string, limits: ResourceLimits = DEFAULT_BUILD_LIMITS): string[] {
+    return [
+      'run', '--rm', '--name', builderName('build', appId),
+      // D106: the one limits mapping (runtimes/container/limits.ts); the build profile unless the caller names one.
+      ...limitArgs(limits),
       '--workdir', `/workspace/apps/${appId}`,
       ...this.buildAppDirMount(appDir, appId, this.appDataVolume),
       ...this.buildAppDirMount(`${appDir}/dist/${BUILD_STAGING_DIR}`, appId, this.appDataVolume, `/workspace/apps/${appId}/dist`),
@@ -1487,6 +1494,12 @@ export class ContainerRunner implements SandboxRunner, ContainerMountBackend, Co
       'bash', '-c',
       'set -e; ASTRO=node_modules/.bin/astro; [ -x "$ASTRO" ] || ASTRO=/workspace/node_modules/.bin/astro; exec "$ASTRO" build',
     ];
+  }
+
+  async buildApp(appId: string, appDir: string, opts: { timeoutMs?: number; limits?: ResourceLimits } = {}): Promise<{ ok: boolean; output: string }> {
+    await whenBaseImageReady();
+    const name = builderName('build', appId);
+    const args = this.buildAppArgs(appId, appDir, opts.limits);
     const timeoutMs = opts.timeoutMs ?? 10 * 60_000;
     return await new Promise((resolve) => {
       let output = '';
@@ -1516,26 +1529,14 @@ export class ContainerRunner implements SandboxRunner, ContainerMountBackend, Co
    * runs here. Capped like a build.
    */
   async provisionApp(
-    appId: string, appDir: string, runtime: 'astro' | 'raw', opts: { timeoutMs?: number; onLine?: (line: string) => void } = {},
+    appId: string, appDir: string, runtime: 'astro' | 'raw', opts: { timeoutMs?: number; onLine?: (line: string) => void; limits?: ResourceLimits } = {},
   ): Promise<{ ok: boolean; output: string }> {
     await whenBaseImageReady();
     const cacheDir = join(this.dataDir, BUILDER_CACHE_SUBPATH);
     mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
     chmodSync(cacheDir, 0o700);
-    const name = `aura-provision-${appId.replace(/[^a-zA-Z0-9_.-]/g, '_')}`;
-    const args = [
-      'run', '--rm', '--name', name,
-      '--network', SHARED_NETWORK, ...rawSocketArgs(),
-      '--pids-limit', '512', '--memory', '3g', '--cpus', '2',
-      '--workdir', `/workspace/apps/${appId}`,
-      ...this.buildAppDirMount(appDir, appId, this.appDataVolume),
-      ...this.workspaceMounts(),
-      '--mount', `type=volume,source=${this.nodeModulesVolume},target=/workspace/node_modules,readonly`,
-      '--mount', `type=volume,source=${this.appDataVolume},target=${BUILDER_CACHE_PATH},volume-subpath=${BUILDER_CACHE_SUBPATH}`,
-      ...builderProvisionEnv(appId),
-      BASE_IMAGE,
-      'bash', '-c', builderProvisionShell(runtime),
-    ];
+    const name = builderName('provision', appId);
+    const args = this.provisionAppArgs(appId, appDir, runtime, opts.limits);
     const timeoutMs = opts.timeoutMs ?? PROVISION_TIMEOUT_MS;
     return await new Promise((resolve) => {
       let output = '';
@@ -1556,6 +1557,23 @@ export class ContainerRunner implements SandboxRunner, ContainerMountBackend, Co
       child.on('error', (err) => { clearTimeout(timer); untrack(); resolve({ ok: false, output: `${output}\n${err.message}` }); });
       child.on('close', (code) => { clearTimeout(timer); untrack(); resolve({ ok: code === 0, output }); });
     });
+  }
+
+  /** The `docker run` argv of a dependency install (golden: golden/build-args.json). */
+  provisionAppArgs(appId: string, appDir: string, runtime: 'astro' | 'raw', limits: ResourceLimits = DEFAULT_BUILD_LIMITS): string[] {
+    return [
+      'run', '--rm', '--name', builderName('provision', appId),
+      '--network', SHARED_NETWORK, ...rawSocketArgs(),
+      ...limitArgs(limits),
+      '--workdir', `/workspace/apps/${appId}`,
+      ...this.buildAppDirMount(appDir, appId, this.appDataVolume),
+      ...this.workspaceMounts(),
+      '--mount', `type=volume,source=${this.nodeModulesVolume},target=/workspace/node_modules,readonly`,
+      '--mount', `type=volume,source=${this.appDataVolume},target=${BUILDER_CACHE_PATH},volume-subpath=${BUILDER_CACHE_SUBPATH}`,
+      ...builderProvisionEnv(appId),
+      BASE_IMAGE,
+      'bash', '-c', builderProvisionShell(runtime),
+    ];
   }
 
   /** Run `argv` in the instance's container (`docker exec`), in its app dir. */

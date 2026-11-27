@@ -29,6 +29,7 @@ import { containerDiagnostics } from './diagnostics.js';
 import { containerEndpoints } from './endpoints.js';
 import { containerSidecars } from './sidecars.js';
 import { containerMounts } from './mounts.js';
+import { validateLimits } from './limits.js';
 import { RuntimeExecError } from '../types.js';
 import { hostToolsGroup, toolsEnforcement, toolsFeatureOverrides, type HostToolStore, type ToolsMode } from '../hostTools.js';
 
@@ -72,7 +73,12 @@ export function containerRuntime(runner: ContainerRunnerSurface, deps: Container
     runner,
     capabilities: () => runner.capabilities({}),
     // App builds and provisioning run on this runtime (its `build` group, D-B).
-    featureOverrides: () => ({ 'build.execute': { support: 'supported' }, ...toolsFeatureOverrides(runner.capabilities({}), toolsMode()) }),
+    // Build/check workloads take enforced resource limits (D106, `limits.ts`); app instances don't (BT-M2).
+    featureOverrides: () => ({
+      'build.execute': { support: 'supported' },
+      'resources.limits': { support: 'supported', applyMode: 'recreate-required', constraints: { workloads: 'build', instances: 'unsupported' } },
+      ...toolsFeatureOverrides(runner.capabilities({}), toolsMode()),
+    }),
     // Never `unavailable`: the default runtime must not be blocked by a probe. A failed check degrades (and its
     // feature fails closed where it is used: a mount without propagation is refused by MountManager).
     health: () => {
@@ -164,13 +170,16 @@ export function containerRuntime(runner: ContainerRunnerSurface, deps: Container
     }) } : {}),
     // App builds and provisioning in a throwaway builder container (D-B; the runner's `buildApp`/`provisionApp`).
     build: {
-      build: async ({ appId, appDir, timeoutMs }) => {
+      // Limits are validated before anything runs (`invalid-resource-limits`); absent: DEFAULT_BUILD_LIMITS.
+      build: async ({ appId, appDir, timeoutMs, limits }) => {
+        if (limits !== undefined) validateLimits(limits);
         if (!runner.buildApp) throw new Error('the container runner has no builder');
-        return runner.buildApp(appId, appDir, timeoutMs !== undefined ? { timeoutMs } : {});
+        return runner.buildApp(appId, appDir, { ...(timeoutMs !== undefined ? { timeoutMs } : {}), ...(limits ? { limits } : {}) });
       },
-      provision: async ({ appId, appDir, runtime, onLine }) => {
+      provision: async ({ appId, appDir, runtime, onLine, limits }) => {
+        if (limits !== undefined) validateLimits(limits);
         if (!runner.provisionApp) throw new Error('the container runner has no builder');
-        return runner.provisionApp(appId, appDir, runtime, onLine ? { onLine } : {});
+        return runner.provisionApp(appId, appDir, runtime, { ...(onLine ? { onLine } : {}), ...(limits ? { limits } : {}) });
       },
     } satisfies RuntimeBuild,
     ...(caps.hostFilesystem ? { tools: hostToolsGroup(runner, toolsMode, () => deps.toolStore?.() ?? null) } : {}),

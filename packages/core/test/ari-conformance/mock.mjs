@@ -16,6 +16,14 @@ export function mockProvider() {
   const running = new Map();   // instanceId → { port, env, ref, nonce }
   const exits = new Map();     // instanceId → [cb]
   const workloads = new Map(); // OS sidecar ref → { ref, state, env, tags }
+  const builds = [];           // { op, appId, limits }
+  /** D106 `resources.limits`: positive finite; integer bytes and pids; nothing else. */
+  const checkLimits = (l) => {
+    if (l === undefined) return;
+    const bad = !l || typeof l !== 'object' || Object.entries(l).some(([k, v]) => !['cpus', 'memoryBytes', 'pids'].includes(k)
+      || typeof v !== 'number' || !Number.isFinite(v) || v <= 0 || (k !== 'cpus' && !Number.isInteger(v)));
+    if (bad) throw Object.assign(new Error('invalid resource limits'), { code: 'invalid-resource-limits' });
+  };
   const survivors = [{ instanceId: 'org.mock.app-1', appId: 'org.mock.app', port: 4700, ref: 'urn:mock:ws/7f3a', tokenNonce: 'n-1', owner: 'default' }];
   const sessions = [{ sessionId: 's-1', instanceId: 'org.mock.app-1', kind: 'user', userId: 'default', home: 'private', uid: 100000, startedAt: '2026-11-27T00:00:00.000Z' }];
   let seq = 0;
@@ -45,6 +53,14 @@ export function mockProvider() {
     descriptor: { id: 'mock', version: '0.1.0', ari: 1, title: 'Mock', description: 'reference mock provider (tests only)', builtIn: false,
       settingsVersion: 1, settingsSchema: { type: 'object', properties: {} } },
     runner, capabilities: () => ({ ...MOCK_CAPS }), health: () => HEALTHY, endpoint: (id) => runnerEndpoint(runner, id),
+    // D106: it builds in memory, within the limits it is given (validated by its own rules: the contract, not Docker's).
+    featureOverrides: () => ({ 'build.execute': { support: 'supported' }, 'resources.limits': { support: 'supported', constraints: { workloads: 'build' } } }),
+    build: {
+      build: async (spec) => { checkLimits(spec.limits); builds.push({ op: 'build', appId: spec.appId, limits: spec.limits ?? null }); return { ok: true, output: '' }; },
+      provision: async (spec) => { checkLimits(spec.limits); builds.push({ op: 'provision', appId: spec.appId, limits: spec.limits ?? null }); return { ok: true, output: '' }; },
+    },
+    /** What it built, with the limits each ran within. */
+    _builds: builds,
     adoption: {
       list: async () => [...survivors.map((x) => ({ ...x })),
         ...[...running].filter(([id]) => !survivors.some((s) => s.instanceId === id))

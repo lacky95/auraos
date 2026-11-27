@@ -644,10 +644,24 @@ export interface RuntimeEndpoints {
  * AuraOS release builder is OS infrastructure, outside ARI.
  */
 export interface RuntimeBuild {
-  /** `astro build` the app's sources into its staging dir. */
-  build(spec: { appId: string; appDir: string; timeoutMs?: number }): Promise<{ ok: boolean; output: string }>;
-  /** Installs the app's dependencies (its package manager's tree, the `@aura/*` packages). */
-  provision(spec: { appId: string; appDir: string; runtime: 'astro' | 'raw'; onLine?: (line: string) => void }): Promise<{ ok: boolean; output: string }>;
+  /** `astro build` the app's sources into its staging dir, within `limits` (D106). */
+  build(spec: { appId: string; appDir: string; timeoutMs?: number; limits?: ResourceLimits }): Promise<{ ok: boolean; output: string }>;
+  /** Installs the app's dependencies (its package manager's tree, the `@aura/*` packages), within `limits` (D106). */
+  provision(spec: { appId: string; appDir: string; runtime: 'astro' | 'raw'; onLine?: (line: string) => void; limits?: ResourceLimits }): Promise<{ ok: boolean; output: string }>;
+}
+
+/**
+ * `resources.limits` (D106): what a build or check workload may use, as
+ * plain data, runtime-independent. A runtime that declares the feature
+ * enforces every field given (the container: `runtimes/container/limits.ts`
+ * `limitArgs`); an invalid record is refused with `invalid-resource-limits`;
+ * a runtime without the feature is never handed one (the kernel fails closed).
+ * App instances stay `unsupported` until BT-M2 quotas.
+ */
+export interface ResourceLimits {
+  cpus?: number;
+  memoryBytes?: number;
+  pids?: number;
 }
 
 /**

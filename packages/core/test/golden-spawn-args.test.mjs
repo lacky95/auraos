@@ -320,3 +320,25 @@ test('audit N4: every AURA_* variable the spawn args set is on exactly one kerne
   }
   for (const name of SERVER_ONLY_ENV) assert.ok(!SESSION_VISIBLE_ENV.includes(name), name);
 });
+
+// D106 (owner decision, 2026-11-27): the app build and dependency-install containers take their resource limits
+// from the one mapping (runtimes/container/limits.ts `limitArgs`): `--cpus=2 --memory=<3 GiB> --memory-swap=<same>
+// --pids-limit=512` by default (the caps they always had, now with no swap beyond memory), or the limits the
+// caller names. Recorded in golden/build-args.json (written on the first run).
+const BUILD_GOLDEN = join(dirname(fileURLToPath(import.meta.url)), 'golden', 'build-args.json');
+test('build and provision container argv match golden/build-args.json (D106 limits)', () => {
+  const runner = new ContainerRunner(opts);
+  const appDir = join(dataDir, 'scopes', 'users', 'default', 'apps', 'io.golden.build');
+  mkdirSync(appDir, { recursive: true });
+  const out = {
+    'build:default': norm(runner.buildAppArgs('io.golden.build', appDir)),
+    'build:limits': norm(runner.buildAppArgs('io.golden.build', appDir, { cpus: 0.5, memoryBytes: 268435456, pids: 64 })),
+    'provision:default:astro': norm(runner.provisionAppArgs('io.golden.build', appDir, 'astro')),
+    'provision:limits:raw': norm(runner.provisionAppArgs('io.golden.build', appDir, 'raw', { memoryBytes: 1073741824 })),
+  };
+  if (!existsSync(BUILD_GOLDEN)) {
+    writeFileSync(BUILD_GOLDEN, `${JSON.stringify(out, null, 2)}\n`);
+    assert.fail(`recorded a new golden file at ${BUILD_GOLDEN}: review and commit it`);
+  }
+  assert.deepEqual(out, JSON.parse(readFileSync(BUILD_GOLDEN, 'utf-8')));
+});
