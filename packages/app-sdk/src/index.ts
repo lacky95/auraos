@@ -17,6 +17,7 @@ export type { AuraUser, ConfirmLevel, ConfirmOptions, ConfirmResult, UserProfile
 export { StorageApi, StorageError } from './storage.js';
 // One error type (OsError {status, code}); the classes above and below extend it.
 export { OsError } from './errors.js';
+export type { OsErrorFacts } from './errors.js';
 // The app contract (D48): its version, Context, approvals, permissions.
 export { AURA_CONTRACT } from './contract.js';
 export { ContextApi } from './aura-context.js';

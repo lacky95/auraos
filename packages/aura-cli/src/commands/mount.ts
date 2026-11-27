@@ -13,7 +13,7 @@
 import { Option, type Command } from 'commander';
 import { stdin, stdout } from 'node:process';
 import type { AuraMount, MountMode } from '@aura/core';
-import { api, type ShellError } from '../lib/client.js';
+import { api, exitCodeOf, shellErrorText } from '../lib/client.js';
 import { color, fail, info, ok, table, warn } from '../lib/format.js';
 import { termSize, truncateAnsi } from '../lib/tui.js';
 import { canMount, type InstanceRuntimeDto } from '../lib/resources.js';
@@ -60,20 +60,6 @@ const SCOPE_ORDER = ['system', 'global', 'user'];
  * is the only debugging signal the user gets, so it must not be reworded or
  * truncated.
  */
-function apiError(err: unknown): string {
-  const e = err as ShellError;
-  if (typeof e?.body === 'string' && e.body.length > 0) {
-    try {
-      const parsed = JSON.parse(e.body) as { error?: string; message?: string };
-      const msg = parsed.error ?? parsed.message;
-      if (msg) return e.status ? `${msg} ${color.dim(`(HTTP ${e.status})`)}` : msg;
-    } catch {
-      /* not JSON — fall through and show the raw body */
-    }
-    return e.status ? `HTTP ${e.status}: ${e.body}` : e.body;
-  }
-  return e instanceof Error ? e.message : String(err);
-}
 
 function isTTY(): boolean {
   return Boolean(stdin.isTTY && stdout.isTTY);
@@ -226,7 +212,7 @@ async function printActiveMounts(instanceId: string, apps: AppDto[]): Promise<vo
   try {
     res = await fetchMounts(instanceId);
   } catch (err) {
-    warn(`could not re-read mounts of ${instanceId}: ${apiError(err)}`);
+    warn(`could not re-read mounts of ${instanceId}: ${shellErrorText(err)}`);
     return;
   }
   console.log('');
@@ -260,7 +246,7 @@ async function listMounts(opts: { instance?: string }): Promise<void> {
   try {
     res = await fetchMounts(instanceId);
   } catch (err) {
-    fail(apiError(err));
+    fail(shellErrorText(err), exitCodeOf(err));
   }
   reportCapability(res!);
   printMounts(instanceId, res!.mounts ?? [], apps);
@@ -381,7 +367,7 @@ async function addMounts(
   try {
     existing = await fetchMounts(instanceId);
   } catch (err) {
-    fail(apiError(err));
+    fail(shellErrorText(err), exitCodeOf(err));
   }
   // Surface an incapable host BEFORE the user picks anything — every add would
   // fail and the reason is the only actionable information.
@@ -407,7 +393,7 @@ async function addMounts(
       ok(mountedLine(res.mount));
     } catch (err) {
       failed++;
-      console.error(`${color.red('✗')} ${targetAppId}: ${apiError(err)}`);
+      console.error(`${color.red('✗')} ${targetAppId}: ${shellErrorText(err)}`);
     }
   }
   // After the per-mount lines, not instead of them: the lines say what THIS run
@@ -447,7 +433,7 @@ async function removeMounts(
   try {
     res = await fetchMounts(instanceId);
   } catch (err) {
-    fail(apiError(err));
+    fail(shellErrorText(err), exitCodeOf(err));
   }
   reportCapability(res!);
   const mounts = res!.mounts ?? [];
@@ -500,7 +486,7 @@ async function removeMounts(
       );
       ok(`detached ${color.bold(id)} from ${instanceId}`);
     } catch (err) {
-      console.error(`${color.red('✗')} ${id}: ${apiError(err)}`);
+      console.error(`${color.red('✗')} ${id}: ${shellErrorText(err)}`);
       process.exitCode = 1;
     }
   }
@@ -871,7 +857,7 @@ async function applyChanges(instanceId: string, plan: ChangePlan): Promise<numbe
     try {
       await api.del<RemoveResponse>(`/api/instances/${encodeURIComponent(instanceId)}/mounts/${encodeURIComponent(id)}`);
       ok(`detached ${id}`);
-    } catch (err) { failed++; warn(`detach ${id}: ${apiError(err)}`); }
+    } catch (err) { failed++; warn(`detach ${id}: ${shellErrorText(err)}`); }
   }
   for (const a of plan.adds) {
     try {
@@ -879,7 +865,7 @@ async function applyChanges(instanceId: string, plan: ChangePlan): Promise<numbe
         targetAppId: a.appId, mode: a.rw ? 'rw' : 'ro', data: a.data,
       });
       ok(mountedLine(res.mount));
-    } catch (err) { failed++; warn(`mount ${a.appId}: ${apiError(err)}`); }
+    } catch (err) { failed++; warn(`mount ${a.appId}: ${shellErrorText(err)}`); }
   }
   return failed;
 }
@@ -992,7 +978,7 @@ async function mountWorkspace(): Promise<void> {
   try {
     res = await api.post<AddResponse>(`/api/instances/${encodeURIComponent(instanceId)}/mounts`, { kind: 'workspace' });
   } catch (err) {
-    fail(apiError(err));
+    fail(shellErrorText(err), exitCodeOf(err));
   }
   ok(`/workspace is mounted read-write at ${color.bold(res!.mount.containerPath)} in ${instanceId}`);
   console.log(color.dim('  Changes there change the running AuraOS. Rebuild and restart: aura dev rebuild. Detach: aura mount rm workspace.'));

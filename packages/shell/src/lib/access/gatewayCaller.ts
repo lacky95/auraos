@@ -7,11 +7,13 @@ import { presentsApproval } from '../approvals/service.ts';
 import { systemMode } from '../systemMode.ts';
 import { decide as liveDecide } from './decide.ts';
 import { readJsonBody, refused, TOO_LARGE } from './enforce.ts';
+import { errorResponse } from '../appResponse.ts';
+import { refusalBody, type RefusalView } from './refusalText.ts';
 import { OWNER_UI_EXCLUDED_TARGETS, gatewayInstance, gatewayOwner, type GatewayOwnerDeps } from './identify.ts';
 import { combineCandidates, concreteRule, kvNamespace, resourceFor, type ObserverManager } from './observer.ts';
 import { candidateRules, handlersOf, manifestRoute, normalizeMethod, readsBody as routeReadsBody } from './resolve.ts';
 import { ROUTE_ACCESS_MANIFEST } from './routeManifest.ts';
-import type { AccessLabel, Decide, RequestSnapshot, RouteAccessManifest } from './types.ts';
+import type { AccessLabel, Decide, DecideResult, RequestSnapshot, RouteAccessManifest } from './types.ts';
 
 /**
  * The enforcement of `/_aura/os/*`. The gateway proves who is calling; this
@@ -30,6 +32,11 @@ import type { AccessLabel, Decide, RequestSnapshot, RouteAccessManifest } from '
  * OWNER_UI_APPS entry lists), and here it never reaches a login session, a
  * shell screen or another app's upstream. Freshness and approvals on a rule
  * still apply to the owner.
+ *
+ * A refusal keeps the code `gateway-denied` and status 403 it always had,
+ * and says why (refusalText.ts): the decided reason and what is missing, as
+ * the calling app may know it. The app page reads it, so it is always worded
+ * for an app, also when the owner acted through a trusted UI.
  */
 
 export interface GatewayEnforceDeps {
@@ -53,6 +60,12 @@ export interface GatewayRequestContext {
   params?: Record<string, string | undefined>;
 }
 
+/** The gateway's refusal of a decision: code and status as before, the body says why. */
+function gatewayRefusal(result: DecideResult, view: RefusalView): Response {
+  const { body } = refusalBody(result, { ...view, gateway: true });
+  return errorResponse(403, { ...body, error: 'gateway-denied' });
+}
+
 /** Null when the call may proceed, else the refusal. */
 export async function enforceGateway(
   ctx: GatewayRequestContext,
@@ -63,13 +76,20 @@ export async function enforceGateway(
 ): Promise<Response | null> {
   const claim = gatewayClaimOf(ctx.request);
   const inst = gatewayInstance(ctx.request, deps.mgr as unknown as Parameters<typeof gatewayInstance>[1]);
-  if (!claim || !inst || inst === 'invalid') return refused(401, 'gateway-identity-invalid');
+  // One class (error-messages review §4.4): never which part of the claim failed.
+  if (!claim || !inst || inst === 'invalid') {
+    return refused(401, 'gateway-identity-invalid', 'The App Host could not prove which app instance is calling.', {
+      category: 'not-authenticated', hint: 'Open the app again from AuraOS.',
+    });
+  }
 
   const manifest = deps.manifest ?? ROUTE_ACCESS_MANIFEST;
   const route = manifestRoute(manifest, ctx.routePattern ?? '');
-  if (!route.startsWith('/api/')) return refused(403, 'gateway-denied');
-
   const method = normalizeMethod(ctx.request.method);
+  const view: RefusalView = { audience: 'app', callerAppId: inst.appId, method, ...scopeView(deps.mgr) };
+  const unclassified = () => gatewayRefusal({ outcome: 'deny', reason: 'unclassified' }, { ...view, route: route.startsWith('/api/') ? route : undefined });
+  if (!route.startsWith('/api/')) return unclassified();
+
   const snapshot: RequestSnapshot = {
     method: ctx.request.method,
     routePattern: route,
@@ -84,14 +104,16 @@ export async function enforceGateway(
   const info = { route, handlers: handlersOf(manifest, route) };
   const readsBody = routeReadsBody(manifest, info, method);
   const body = readsBody ? await readJsonBody(ctx.request) : undefined;
-  if (body === TOO_LARGE) return refused(413, 'gateway-body-too-large');
+  if (body === TOO_LARGE) {
+    return refused(413, 'gateway-body-too-large', 'The request body is larger than any request an access rule reads (1 MiB).', { category: 'invalid-request' });
+  }
   const candidates = candidateRules(manifest, info, method, {
     query: new URLSearchParams(ctx.url.search),
     namespace: kvNamespace(snapshot),
     params: snapshot.params,
     ...(readsBody ? { body } : {}),
   });
-  if (candidates.length === 0) return refused(403, 'gateway-denied');
+  if (candidates.length === 0) return unclassified();
 
   const transport = snapshot.https ? 'https' as const : 'http' as const;
   const strict = (deps.mode ?? accessMode)() === 'enforce';
@@ -117,23 +139,32 @@ export async function enforceGateway(
     });
     return { variant, result };
   }));
-  const allowed = (results: Awaited<ReturnType<typeof decideAs>>) => combineCandidates(results).result.outcome === 'allow';
+  const verdict = (results: Awaited<ReturnType<typeof decideAs>>) => combineCandidates(results).result;
 
   const instance: AccessPrincipal = {
     kind: 'instance', appId: inst.appId, instanceId: inst.instanceId, verification: 'verified',
   };
-  if (allowed(await decideAs(instance))) return null;
+  const asInstance = verdict(await decideAs(instance));
+  if (asInstance.outcome === 'allow') return null;
+  // Every refusal below says the app's own: the owner path adds nothing an app page may learn.
+  const denied = () => gatewayRefusal(asInstance, { ...view, route });
 
   // D45: the owner acting through a trusted system UI, on that UI's routes only.
-  if (!claim.owner) return refused(403, 'gateway-denied');
+  if (!claim.owner) return denied();
   const owner = await gatewayOwner(ctx.request, { mgr: deps.mgr as unknown as GatewayOwnerDeps['mgr'], services: deps.ownerServices });
-  if (!owner) return refused(403, 'gateway-denied');
-  if (!allowed(await decideAs(owner))) return refused(403, 'gateway-denied');
+  if (!owner) return denied();
+  if (verdict(await decideAs(owner)).outcome !== 'allow') return denied();
   if (method !== 'GET' && method !== 'HEAD') {
     const audit = deps.audit ?? liveAudit;
     afterResponse(ctx.request, (status) => recordOwnerAction(audit, owner, route, method, status));
   }
   return null;
+}
+
+/** A system app's permissions ship with AuraOS: no grant hint for those. */
+function scopeView(mgr: ObserverManager): Pick<RefusalView, 'scopeOf'> {
+  const registry = mgr.registry;
+  return registry?.getScopeId ? { scopeOf: (id: string) => registry.getScopeId!(id) } : {};
 }
 
 /** The audit outcome of a route's final status. */

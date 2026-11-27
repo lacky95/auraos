@@ -29,11 +29,9 @@ export interface IntentPayload {
  * doing something else silently.
  */
 export class IntentRejectedError extends OsError {
-  readonly hint: string | undefined;
   constructor(code: string, message: string, opts: { hint?: string; status?: number } = {}) {
-    super(opts.status ?? 422, code, message);
+    super(opts.status ?? 422, code, message, opts.hint ? { facts: { hint: opts.hint } } : {});
     this.name = 'IntentRejectedError';
-    this.hint = opts.hint;
   }
   /** The `rejected` field of the hook reply. */
   toReply(): { code: string; message: string; hint?: string; status: number } {

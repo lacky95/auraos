@@ -85,7 +85,8 @@ export function error(msg: string): void {
   console.error(`${color.red('✗')} ${msg}`);
 }
 
-export function fail(msg: string): never {
+/** Ends the command: exit 1, or the code a failed shell call maps to (client.ts EXIT). */
+export function fail(msg: string, exitCode = 1): never {
   console.error(`${color.red('✗')} ${msg}`);
-  process.exit(1);
+  process.exit(exitCode);
 }

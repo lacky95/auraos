@@ -1,8 +1,8 @@
 import * as core from '@aura/core';
-import type { AccessPrincipal, InstancePrincipal, Principal } from '@aura/core';
+import type { AccessPrincipal, AuthzMissing, InstancePrincipal, Principal } from '@aura/core';
 import { OWNER_AGENT_APPS, OWNER_AGENT_EXCLUDED_TARGETS, SESSION_HOST_APPS, isOwnerPrincipal } from './identify.ts';
 import type {
-  AccessReason, AccessRule, Decide, DecideInput, DecideResult, PolicyResource, PolicyTransport,
+  AccessReason, AccessRule, Decide, DecideInput, DecideResult, PolicyResource, PolicyTransport, RefusalFacts,
 } from './types.ts';
 
 /**
@@ -42,7 +42,7 @@ import type {
  */
 
 export interface DecideDeps {
-  authorizer: { authorize(principal: Principal, action: string): Promise<{ allow: boolean; reason: string }> };
+  authorizer: { authorize(principal: Principal, action: string): Promise<{ allow: boolean; reason: string; missing?: AuthzMissing }> };
   /** D29: whether this instance acts for the owner (identify.ts `isTrustedOwnerAgent`). Never asked at the gateway. */
   ownerAgent?(principal: InstancePrincipal): boolean;
   /** D63: the owner's switch (`freshAuthRequiresHttps`). Absent: its default, off. */
@@ -129,7 +129,8 @@ export async function freshAuthRequiresHttps(
 }
 
 const allow = (reason: AccessReason): DecideResult => ({ outcome: 'allow', reason });
-const deny = (reason: AccessReason): DecideResult => ({ outcome: 'deny', reason });
+const deny = (reason: AccessReason, facts?: RefusalFacts): DecideResult =>
+  (facts ? { outcome: 'deny', reason, facts } : { outcome: 'deny', reason });
 
 /** The one owner test (identify.ts `isOwnerPrincipal`, A1 included). */
 const isOwner = (p: AccessPrincipal): boolean => isOwnerPrincipal(p);
@@ -200,17 +201,19 @@ function ownsTarget(p: Extract<AccessPrincipal, { kind: 'instance' }>, r: Policy
 /**
  * Whether each permission is held; `auto` when any was only auto-granted. In
  * `strict` an auto-grant is not held: the permission has to be declared.
+ * A refusal names the first permission not held and what core's Authorizer
+ * says is missing (for the answer only; an unresolved `<…>` names nothing).
  */
 async function checkPermissions(
   deps: DecideDeps, principal: Principal, permissions: readonly string[], strict = false,
-): Promise<{ ok: boolean; auto: boolean }> {
+): Promise<{ ok: boolean; auto: boolean; refused?: { permission: string; missing?: AuthzMissing } }> {
   let auto = false;
   for (const permission of permissions) {
     if (permission.includes('<')) return { ok: false, auto };
     const d = await deps.authorizer.authorize(principal, permission);
-    if (!d.allow) return { ok: false, auto };
+    if (!d.allow) return { ok: false, auto, refused: { permission, ...(d.missing ? { missing: d.missing } : {}) } };
     if (isAutoGrant(d.reason)) {
-      if (strict) return { ok: false, auto: true };
+      if (strict) return { ok: false, auto: true, refused: { permission, missing: 'declaration' } };
       auto = true;
     }
   }
@@ -241,15 +244,24 @@ export async function targetPermissionsHeld(
     verification: 'verified',
   };
   const held = await checkPermissions(deps, target, rule.targetPermissions, strict);
-  if (!held.ok) return deny('missing-target-permission');
+  if (!held.ok) {
+    return deny('missing-target-permission', held.refused
+      ? { ...held.refused, holder: 'target', targetAppId: resource.appId }
+      : undefined);
+  }
   return allow(held.auto ? 'auto-granted' : 'public');
 }
 
+/** A rule no app level satisfies: only the owner, so there is nothing to grant. */
+const ownerOnly = (rule: AccessRule): boolean =>
+  rule.allow.includes('owner') && !rule.allow.some((l) => l !== 'owner');
+
 async function matchLevel(
   input: DecideInput, rule: AccessRule, deps: DecideDeps,
-): Promise<{ granted: AccessReason | null; failure: AccessReason; member?: true }> {
+): Promise<{ granted: AccessReason | null; failure: AccessReason; member?: true; facts?: RefusalFacts }> {
   const p = input.principal;
   let failure: AccessReason = p.kind === 'anonymous' ? 'unauthenticated' : 'wrong-principal';
+  let facts: RefusalFacts | undefined = failure === 'wrong-principal' && ownerOnly(rule) ? { ownerOnly: true } : undefined;
 
   if (rule.allow.includes('owner')) {
     if (isOwner(p)) return { granted: 'owner', failure };
@@ -262,6 +274,8 @@ async function matchLevel(
   if (rule.allow.includes('own-instance') && p.kind === 'instance') {
     if (ownsTarget(p, input.resource)) return { granted: 'own-instance', failure };
     failure = 'wrong-target';
+    // A system app's own route (the owner's tools): for any other app it is the owner's.
+    if (rule.systemApp) facts = { ownerOnly: true };
   }
 
   // I.2 (D82): a member's own grants, on the rules that name them. Strict: an
@@ -273,6 +287,7 @@ async function matchLevel(
     const why = await memberHolds(deps, memberView, rule.memberPermissions, input.resource);
     if (why === null) return { granted: 'app-permission', failure, member: true };
     failure = why;
+    facts = undefined;   // a member's own grants: what is missing is its user grant, not an app's
   }
 
   if (rule.allow.includes('app-permission')) {
@@ -285,10 +300,15 @@ async function matchLevel(
     if (canHold) {
       const held = await checkPermissions(deps, holder as Principal, permissions, input.strict || asMember !== null);
       if (held.ok) return { granted: held.auto ? 'auto-granted' : 'app-permission', failure };
-      if (p.kind !== 'anonymous' && failure !== 'wrong-target') failure = 'missing-permission';
+      if (p.kind !== 'anonymous' && failure !== 'wrong-target') {
+        failure = 'missing-permission';
+        facts = held.refused
+          ? { ...held.refused, holder: held.refused.missing === 'grant' ? 'owner-grant' : 'caller' }
+          : undefined;
+      }
     }
   }
-  return { granted: null, failure };
+  return { granted: null, failure, ...(facts ? { facts } : {}) };
 }
 
 async function evaluate(input: DecideInput, deps: DecideDeps): Promise<DecideResult> {
@@ -306,7 +326,9 @@ async function evaluate(input: DecideInput, deps: DecideDeps): Promise<DecideRes
 
   const via = input.auth.via;
   const refusedAs: AccessReason = principal.kind === 'anonymous' ? 'unauthenticated' : 'wrong-principal';
-  if (rule.credentials && !(via && rule.credentials.includes(via))) return deny(refusedAs);
+  if (rule.credentials && !(via && rule.credentials.includes(via))) {
+    return deny(refusedAs, refusedAs === 'wrong-principal' ? { credentials: rule.credentials } : undefined);
+  }
 
   const matched = await matchLevel(input, rule, deps);
   let granted = matched.granted;
@@ -316,9 +338,9 @@ async function evaluate(input: DecideInput, deps: DecideDeps): Promise<DecideRes
   // Terminal: memberHolds checked a named instance, sessionHostReachable checks it again).
   if (rule.target === 'proxy-upstream' && resource.appId && OWNER_AGENT_APPS.has(resource.appId) && granted !== 'owner') {
     if (ownSessionHost(principal, resource)) granted = 'own-session';
-    else if (!(matched.member && SESSION_HOST_APPS.has(resource.appId))) return deny(granted ? 'wrong-target' : matched.failure);
+    else if (!(matched.member && SESSION_HOST_APPS.has(resource.appId))) return deny(granted ? 'wrong-target' : matched.failure, granted ? undefined : matched.facts);
   }
-  if (!granted) return deny(matched.failure);
+  if (!granted) return deny(matched.failure, matched.facts);
   if (!sessionHostReachable(principal, rule, resource, deps)) return deny('not-session-owner');
 
   let reason: AccessReason = granted;

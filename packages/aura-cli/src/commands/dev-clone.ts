@@ -17,7 +17,7 @@
 import type { Command } from 'commander';
 import { stdin, stdout } from 'node:process';
 import { join } from 'node:path';
-import { api, type ShellError } from '../lib/client.js';
+import { api, errorBodyOf, exitCodeOf, shellErrorText, type ShellError } from '../lib/client.js';
 import { color, fail, info, ok, warn } from '../lib/format.js';
 import {
   promptChoice, promptConfirm, promptMultiSelect, promptText,
@@ -92,24 +92,11 @@ interface CloneConfig {
  * path, which manifest field) — rewording them here would throw away the only
  * actionable signal the user gets.
  */
+/** The clone route's error, plus the flag to type for its one HTTP-only fix ("force=true"). */
 function apiError(err: unknown): string {
   const e = err as ShellError;
-  if (typeof e?.body === 'string' && e.body.length > 0) {
-    try {
-      const parsed = JSON.parse(e.body) as { error?: string; message?: string };
-      const msg = parsed.message ?? parsed.error;
-      if (msg) {
-        // The endpoint speaks HTTP ("force=true"); translate that one case to
-        // the flag the user actually types.
-        const hint = parsed.error === 'exists' ? `\n  Re-run with ${color.bold('--force')} to overwrite it.` : '';
-        return (e.status ? `${msg} ${color.dim(`(HTTP ${e.status})`)}` : msg) + hint;
-      }
-    } catch {
-      /* not JSON — fall through and show the raw body */
-    }
-    return e.status ? `HTTP ${e.status}: ${e.body}` : e.body;
-  }
-  return e instanceof Error ? e.message : String(err);
+  const exists = errorBodyOf(e?.body)?.error === 'exists';
+  return shellErrorText(err) + (exists ? `\n  Re-run with ${color.bold('--force')} to overwrite it.` : '');
 }
 
 function isTTY(): boolean {
@@ -120,7 +107,7 @@ async function fetchApps(): Promise<AppDto[]> {
   try {
     return await api.get<AppDto[]>('/api/apps');
   } catch (err) {
-    fail(`${apiError(err)}\n  \`aura dev clone\` copies server-side (the CLI usually can't see other apps' directories), so the shell must be running.`);
+    fail(`${apiError(err)}\n  \`aura dev clone\` copies server-side (the CLI usually can't see other apps' directories), so the shell must be running.`, exitCodeOf(err));
   }
 }
 
@@ -409,7 +396,7 @@ async function cloneFromConfig(cfg: CloneConfig, asJson: boolean): Promise<void>
       dryRun:       cfg.dryRun,
     });
   } catch (err) {
-    fail(apiError(err));
+    fail(apiError(err), exitCodeOf(err));
   }
 
   if (asJson) {
