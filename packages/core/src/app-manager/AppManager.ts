@@ -54,7 +54,7 @@ import { RUNTIME_AUDIT_ACTIONS, RuntimeSettingsStore, runtimeSettingsRevision } 
 import { migrateLegacyRuntimes, migrationReport, processLegacyEnv, type MigrationApp, type MigrationReport } from '../runtimes/migrateLegacy.js';
 import { defaultRedis } from '@aura/kv-store';
 import { AdminAudit } from '../auth/AdminAudit.js';
-import { CONTRACT_AUDIT_ACTIONS, contractRefusal } from '../contract/types.js';
+import { CONTRACT_AUDIT_ACTIONS, operationalBlock, OperationalBlockError, type OperationalBlock } from '../contract/types.js';
 import type { AuthServices } from '../auth/services.js';
 import { defaultIdentityKeyFile } from '../auth/identityKey.js';
 import { HomeDeniedError, type HomeResolver, type ResolvedHome } from '../homes/types.js';
@@ -349,10 +349,10 @@ export class AppManager {
     this.baseRootfs = opts.baseRootfs;
     this.scopeRegistry = new ScopeRegistry({ systemAppsDir: opts.appsDir, dataDir: opts.dataDir });
     this.registry = new AppRegistry(this.scopeRegistry.getAll(), {
-      // D48: the same audit style as a refused runtime module (`runtime.module-refused`).
-      onContractRefused: (r) => {
+      // The start gate (D48, D108): the same audit style as a refused runtime module (`runtime.module-refused`).
+      onBlocked: (b) => {
         void new AdminAudit(() => defaultRedis()).record({
-          by: { kind: 'system' }, action: CONTRACT_AUDIT_ACTIONS.refused, target: `app:${r.subject}`, outcome: 'failed', detail: { code: r.code, reason: r.message },
+          by: { kind: 'system' }, action: CONTRACT_AUDIT_ACTIONS.refused, target: `app:${b.target}`, outcome: 'failed', detail: { code: b.error, reason: b.message },
         }).catch(() => undefined);
       },
     });
@@ -723,7 +723,7 @@ export class AppManager {
 
   private async respawnOne(e: RespawnEntry): Promise<string | null> {
     const manifest = this.registry.getById(e.appId);
-    if (!manifest || !this.isEnabled(e.appId)) return null;
+    if (!manifest || !this.isEnabled(e.appId) || this.skipBlocked(manifest, 'respawn')) return null;
     if (manifest.componentType === 'service' || manifest.autoStart) return null; // started by init anyway
     if (e.installationId && (await this.installationIdOf(e.appId)) !== e.installationId) return null; // reinstalled
     return this.start(e.appId, e.owner ? { userId: e.owner } : {});
@@ -1748,7 +1748,7 @@ export class AppManager {
       this.disabled.delete(appId);
       // Re-arm: same code paths init() runs at boot, just for this app.
       const m = this.registry.getById(appId);
-      if (m) {
+      if (m && !this.skipBlocked(m, 'enable')) {
         if (m.componentType === 'service') {
           this.startService(appId).catch((err) =>
             console.error(`[AppManager] enable: service ${appId} failed: ${(err as Error).message}`),
@@ -1838,6 +1838,7 @@ export class AppManager {
     for (const m of this.registry.getAll()) {
       if (m.componentType !== 'service') continue;
       if (!this.isEnabled(m.id)) { console.log(`[AppManager] skipping disabled service ${m.id}`); continue; }
+      if (this.skipBlocked(m, 'service')) continue;
       console.log(`[AppManager] starting service ${m.id}`);
       this.startService(m.id).catch((err) => {
         console.error(`[AppManager] service ${m.id} failed to start: ${(err as Error).message}`);
@@ -1851,6 +1852,7 @@ export class AppManager {
       if (m.componentType === 'service') continue; // already handled above
       if (!m.autoStart) continue;
       if (!this.isEnabled(m.id)) { console.log(`[AppManager] skipping disabled autoStart ${m.id}`); continue; }
+      if (this.skipBlocked(m, 'autoStart')) continue;
       console.log(`[AppManager] auto-starting ${m.id}`);
       this.start(m.id).catch((err) => {
         console.error(`[AppManager] autoStart ${m.id} failed: ${(err as Error).message}`);
@@ -2231,6 +2233,7 @@ export class AppManager {
     | { kind: 'rejected'; appId: string; instanceId: string; code: string; message: string; hint?: string; status: number }
     | { kind: 'disambiguation'; candidates: IntentMatch[] }
     | { kind: 'noHandler' }
+    | { kind: 'setup-required'; appId: string; state: OperationalBlock['state']; error: OperationalBlock }
   > {
     let chosen: { appId: string };
     if (intent.appId !== undefined) {
@@ -2249,6 +2252,9 @@ export class AppManager {
     }
     const manifest = this.registry.getById(chosen.appId);
     if (!manifest) return { kind: 'noHandler' };
+    // D108 A2: an app that may not start is an answer (show its setup or why), not a failed spawn.
+    const blocked = operationalBlock(manifest);
+    if (blocked) return { kind: 'setup-required', appId: chosen.appId, state: blocked.state, error: blocked };
 
     // Snapshot the app's instances first so the handler can tell a cold
     // start (Android onCreate + intent) from a re-delivery (onNewIntent).
@@ -2437,6 +2443,10 @@ export class AppManager {
     // A run-as migration that did not finish: its storage may be half handed over (identity/runAsOwnership.ts).
     const migrating = runAsMigrationBlock(appId, opts.installation);
     if (migrating) throw new HomeDeniedError('ownership-pending', migrating);
+    // The start gate (D108 A2, D48): every spawn passes here (start, intents, services, autostart, the pool,
+    // respawn, previews). A blocked app never starts; its D105 body travels with the error.
+    const blocked = operationalBlock(opts.manifest);
+    if (blocked) throw new OperationalBlockError(blocked);
     // The user it is for: its owner, or the user a pool member is warmed for (D78; stream T keys the pool per user).
     const user = opts.owner ?? (opts.inPool ? this.poolHomeUser(appId, opts.manifest) : undefined);
     // Owner decision 5-main item 3 (identity/execution.ts): a root request runs only with the owner's
@@ -2839,10 +2849,6 @@ export class AppManager {
       await this.retryAdoption();
       if (this.adoptionPending) console.warn(`[AppManager] ${appId}: starting while the survivors of the last shell are unknown (adoption scan failed): its port may be a survivor's`);
     }
-    // D48: an app built for a newer Aura contract is listed `incompatible` and never started.
-    const refused = contractRefusal(manifest);
-    if (refused) throw new Error(refused.message);
-
     const scope = this.scopeRegistry.getById(manifest.scopeId);
     // A preview is one more instance of the app (`<appId>-<n>`), whatever its instanceMode.
     const instanceId = this.allocateInstanceId(appId, opts.preview ? 'multi' : manifest.instanceMode);
@@ -3057,12 +3063,22 @@ export class AppManager {
    * over-spawning when many slots open simultaneously (init, rapid claims).
    * Fire-and-forget — never blocks the caller.
    */
+  /**
+   * The supervisor loops (boot services, autoStart, warm pools, enable, respawn) skip an app the
+   * start gate refuses, instead of spawning it to fail (D108 A2). The gate itself is in `spawnContext`.
+   */
+  private skipBlocked(manifest: AppManifest, loop: string): boolean {
+    const blocked = operationalBlock(manifest);
+    if (blocked) console.log(`[AppManager] ${loop}: skipping ${manifest.id} (${blocked.error}): ${blocked.message}`);
+    return blocked !== null;
+  }
+
   private scheduleRefill(appId: string): void {
     // Never top up the warm pool for an app that is being uninstalled — else
     // the reconciler respawns instances after we've killed them all.
     if (this.uninstalling.has(appId)) return;
     const manifest = this.registry.getById(appId);
-    if (!manifest || manifest.warmPool <= 0 || manifest.instanceMode !== 'multi' || contractRefusal(manifest)) return;
+    if (!manifest || manifest.warmPool <= 0 || manifest.instanceMode !== 'multi' || this.skipBlocked(manifest, 'pool refill')) return;
     const target   = manifest.warmPool;
     const inPool   = this.countPool(appId);
     const inFlight = this.refillInFlight.get(appId) ?? 0;

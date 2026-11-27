@@ -1,5 +1,5 @@
 import type { APIRoute } from 'astro';
-import { contractRefusal, getAppManager } from '@aura/core';
+import { getAppManager, operationalBlock } from '@aura/core';
 import { jsonResponse, publicInstance } from '../../../lib/appResponse.js';
 
 /**
@@ -16,8 +16,8 @@ export const GET: APIRoute = () => {
     // to /api/admin/apps/enabled. Default is true for any app missing from
     // the KV state map.
     enabled:    mgr.isEnabled(manifest.id),
-    // D48: built for a newer Aura contract: listed, never started. The refusal message, else null.
-    incompatible: contractRefusal(manifest)?.message ?? null,
+    // The start gate (D48 newer Aura contract, D108 setup/profiles): listed, never started. Its message, else null.
+    incompatible: operationalBlock(manifest)?.message ?? null,
     // `sidecarCount` comes from the reconciler's cache — no backend call, so
     // this stays cheap. Details + usage: /api/instances/<id>/sidecars.
     instances:  mgr.getInstancesByApp(manifest.id).map((inst) => ({

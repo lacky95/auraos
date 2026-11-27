@@ -37,6 +37,8 @@ interface IntentBody {
  *                                                         — the handler declined it (4xx, its status)
  *   { kind: 'disambiguation', candidates: [...] }         — shell should pick one
  *   { kind: 'noHandler' }                                 — 404 (or explicit appId not installed)
+ *   { kind: 'setup-required', appId, state, error }       — 409: the start gate refuses the app
+ *                                                           (`error` is its D105 body, D108 A2)
  * A malformed intent (unknown flag, bad instanceId, …) answers 4xx
  * `{ kind: 'error', code, error, hint? }`.
  *
@@ -99,6 +101,8 @@ export const POST: APIRoute = async (ctx) => {
     const result = await getAppManager().startIntent(intent, userId ? { userId } : {});
     if (result.kind === 'noHandler') return errorResponse('No app handles this intent', 404);
     if (result.kind === 'rejected') return jsonResponse({ ...result, error: result.message }, result.status);
+    // D108 A2: the app may not start (no setup engine yet, or a newer Aura contract): its D105 body.
+    if (result.kind === 'setup-required') return jsonResponse(result, 409);
     // Only the System Terminal's own answer to OPEN_TERMINAL names a session it created.
     const created = (result as { result?: Record<string, unknown> }).result?.['sessionId'];
     if (caller && intent.action === OPEN_TERMINAL_ACTION && intent.extras?.['background'] === true

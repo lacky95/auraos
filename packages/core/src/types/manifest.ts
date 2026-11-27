@@ -463,6 +463,15 @@ export const AppManifestSchema = z.object({
    */
   auraContract: z.number().int().min(1).optional(),
   /**
+   * Reserved for D108 (app setup and operating profiles): kept as declared,
+   * never interpreted. Until AuraOS has the setup engine an app declaring
+   * either is refused at install and never started (contract/types.ts
+   * `operationalBlock`), instead of running unconfigured. Apps without them
+   * are unaffected.
+   */
+  setup: z.record(z.string(), z.unknown()).optional(),
+  profiles: z.array(z.unknown()).optional(),
+  /**
    * The Aura Context keys this app reads with `osClient.context.get(key)`
    * (D48). Only these are handed to it; reading another key is refused and
    * shows in the access report. Env-var names, like the Context keys.

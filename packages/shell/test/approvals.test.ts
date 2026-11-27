@@ -424,15 +424,22 @@ test('install without an approval answers needs-approval with the exact diff; wi
   assert.equal((await install(TERMINAL, { 'x-aura-approval': id })).status, 202, 'single use');
 });
 
-test('D48: core refusing an app built for a newer contract is 422 contract-unsupported with its message', async () => {
-  const message = 'com.example.notes is built for Aura contract 2; this AuraOS implements 1. Update AuraOS or install a version built for contract 1.';
-  async function* refused(): AsyncGenerator<NexusProgressEvent, null, unknown> {
-    yield { type: 'error', code: 'contract-unsupported', message };
-    throw new Error(message);
+test('the start gate (D48, D108): core refusing an app is 422 with its D105 body, as given', async () => {
+  for (const body of [
+    core.operationalBlock({ id: 'com.example.notes', auraContract: 2 })!,
+    core.operationalBlock({ id: 'com.example.notes', setup: { fields: [] } })!,
+  ]) {
+    async function* refused(): AsyncGenerator<NexusProgressEvent, null, unknown> {
+      yield { type: 'error', code: body.error, message: body.message, body };
+      throw new Error(body.message);
+    }
+    const gate = installGate(deps(), TERMINAL, new Request('http://shell.test/api/nexus/install', { method: 'POST' }), undefined);
+    const r = await read(await runInstall(refused(), gate));
+    assert.equal(r.status, 422);
+    assert.deepEqual(r.body, JSON.parse(JSON.stringify(body)));
   }
-  const gate = installGate(deps(), TERMINAL, new Request('http://shell.test/api/nexus/install', { method: 'POST' }), undefined);
-  const r = await read(await runInstall(refused(), gate));
-  assert.deepEqual([r.status, r.body.error, r.body.message], [422, 'contract-unsupported', message]);
+  assert.equal(core.operationalBlock({ id: 'com.example.notes', auraContract: 2 })!.message,
+    'com.example.notes is built for Aura contract 2; this AuraOS implements 1. Update AuraOS or install a version built for contract 1.');
 });
 
 test('stream C: an approved install grants the Context keys it names, attributed to the approver', async () => {

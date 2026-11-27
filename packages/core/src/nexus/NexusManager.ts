@@ -22,7 +22,7 @@ type OsEventBus = typeof OsEventBusSingleton;
 import { CatalogAggregator } from './CatalogAggregator.js';
 import { Installer, removeContained } from './Installer.js';
 import { NexusValidationError, validateStagedDir } from './Validator.js';
-import { contractRefusal } from '../contract/types.js';
+import { operationalBlock, OperationalBlockError } from '../contract/types.js';
 import { hostConflicts, isProtectedHostName, type HostClaim } from '../app-hosts/appHosts.js';
 import type { AppHostLifecycle, AppIdentityFacts, AppRestoreCheck } from '../app-hosts/lifecycle.js';
 import { fetchLocal } from './Fetchers/LocalFetcher.js';
@@ -445,12 +445,13 @@ export class NexusManager {
       // App host names are global: `{name}--{host}` must route to ONE app.
       keys.add(manifest.id); this.installing.add(manifest.id);
       yield { type: 'validate.done', manifest };
-      // D48: an app built for a newer Aura contract is refused before anyone is asked (install, update, patch activation).
-      const refused = contractRefusal(manifest);
-      if (refused) {
+      // The start gate (D48, D108 A1): an app this AuraOS would never start (a newer Aura contract,
+      // setup/profiles before the setup engine) is refused before anyone is asked (install, update, patch activation).
+      const blocked = operationalBlock(manifest);
+      if (blocked) {
         unmark();
-        yield { type: 'error', code: refused.code, message: refused.message };
-        throw new Error(refused.message);
+        yield { type: 'error', code: blocked.error, message: blocked.message, body: blocked };
+        throw new OperationalBlockError(blocked);
       }
 
       // ─── Identity: which installed app (if any) is this? ────────────────

@@ -190,26 +190,112 @@ test('install and patch activation refuse an app built for a newer contract: err
   assert.equal(c.value.id, 'io.shop.app');
 });
 
-test('registry load: an incompatible app is listed, audited through the hook, and never spawned or pooled', async () => {
-  const { AppManager } = await import('../dist/app-manager/AppManager.js');
-  const { AppRegistry } = await import('../dist/app-manager/AppRegistry.js');
-  const root = mkdtempSync(join(tmpdir(), 'aura-contract-reg-'));
-  const dir = join(root, 'apps', 'io.future.app');
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, 'app.manifest.json'), JSON.stringify({ ...base, id: 'io.future.app', auraContract: AURA_CONTRACT + 1, instanceMode: 'multi', warmPool: 1 }));
-  const scopeDef = { id: 'system', appsDir: join(root, 'apps'), dataDir: join(root, 'data'), immutable: true, priority: 0 };
-  const refused = [];
-  const reg = new AppRegistry([scopeDef], { onContractRefused: (r) => refused.push(r) });
-  reg.loadManifestFile(join(dir, 'app.manifest.json'), scopeDef);
-  assert.equal(reg.getById('io.future.app')?.auraContract, AURA_CONTRACT + 1, 'still listed');
-  assert.deepEqual(refused.map((r) => [r.subject, r.code]), [['io.future.app', 'contract-unsupported']]);
+// ── D108 A1/A2: the one start gate (newer contract, reserved setup/profiles) ─
 
+const gateWorld = async (apps) => {
+  const { AppManager } = await import('../dist/app-manager/AppManager.js');
+  const root = mkdtempSync(join(tmpdir(), 'aura-gate-'));
+  for (const [id, extra] of Object.entries(apps)) {
+    mkdirSync(join(root, 'apps', id), { recursive: true });
+    writeFileSync(join(root, 'apps', id, 'app.manifest.json'), JSON.stringify({ ...base, id, ...extra }));
+  }
   const dataDir = join(root, 'mgr');
   const rootfs = join(root, 'rootfs'); mkdirSync(rootfs);
   const mgr = new AppManager({ appsDir: join(root, 'apps'), dataDir, baseRootfs: rootfs, toolchainDir: join(dataDir, 'tc') });
   const sys = mgr.scopeRegistry.getAll().find((s) => s.id === 'system');
-  mgr.registry.loadManifestFile(join(dir, 'app.manifest.json'), sys);
-  await assert.rejects(mgr.start('io.future.app'), (e) => /is built for Aura contract 2; this AuraOS implements 1/.test(e.message));
-  mgr.scheduleRefill('io.future.app');
-  assert.equal(mgr.getInstancesByApp('io.future.app').length, 0, 'no instance, no pool member');
+  for (const id of Object.keys(apps)) mgr.registry.loadManifestFile(join(root, 'apps', id, 'app.manifest.json'), sys);
+  /** The spawn choke point with a resolved installation: the gate sits right after the run-as migration block. */
+  const spawnContext = (id) => mgr.spawnContext(id, `${id}-1`, {
+    manifest: mgr.registry.getById(id), runtime: { runtime: 'container', module: { runner: {} }, settings: {} }, installation: { installationId: `inst-${id}` },
+  });
+  return { root, mgr, spawnContext };
+};
+
+test('D108 A1: setup and profiles are reserved in the schema (kept, never dropped) and refused with a D105 body', async () => {
+  const { operationalBlock, declaredSetupKeys, operationalBlockOf, OperationalBlockError, RESERVED_SETUP_KEYS } = await import('../dist/contract/types.js');
+  assert.deepEqual([...RESERVED_SETUP_KEYS], ['setup', 'profiles']);
+  const m = parse({ setup: { fields: [{ id: 'url' }] }, profiles: [{ id: 'personal' }] });
+  assert.deepEqual(m.setup, { fields: [{ id: 'url' }] }, 'kept as declared');
+  assert.deepEqual(m.profiles, [{ id: 'personal' }]);
+  assert.deepEqual(declaredSetupKeys(m), ['setup', 'profiles']);
+  const b = operationalBlock(m);
+  assert.deepEqual({ ...b, message: undefined, hint: undefined }, {
+    error: 'setup-unsupported', category: 'unsupported-feature', state: 'blocked', manifestField: 'setup', target: 'com.example.notes', message: undefined, hint: undefined,
+  });
+  assert.match(b.message, /declares setup and profiles .*D108.*does not start the app unconfigured/);
+  assert.match(b.hint, /without setup\/profiles, or update AuraOS/);
+  assert.equal(operationalBlock(parse({ profiles: [] }))?.manifestField, 'profiles', 'an empty list is still a declaration');
+  // A newer contract wins (it says more), with the same body shape.
+  assert.deepEqual([operationalBlock(parse({ auraContract: 2, setup: {} }))?.error, operationalBlock(parse({ auraContract: 2 }))?.category], ['contract-unsupported', 'unsupported-operation']);
+  const err = new OperationalBlockError(b);
+  assert.equal(err.code, 'setup-unsupported');
+  assert.deepEqual(operationalBlockOf(err), b);
+  assert.equal(operationalBlockOf(new Error('x')), null);
+  assert.deepEqual(codes(parse({ auraContract: 1, setup: {} })), ['setup-unsupported'], 'aura dev validate: an error');
+  assert.equal(contractFindings(parse({ auraContract: 1, setup: {} }))[0].severity, 'error');
+});
+
+test('binding (D108): an app without setup, profiles or a newer contract passes the gate exactly as before', async () => {
+  const { operationalBlock } = await import('../dist/contract/types.js');
+  for (const over of [{}, { auraContract: 1 }, { auraContract: 1, metadata: { setup: 'x' } }]) assert.equal(operationalBlock(parse(over)), null, JSON.stringify(over));
+  const w = await gateWorld({ 'io.plain.app': { auraContract: 1, instanceMode: 'multi', warmPool: 1 } });
+  assert.equal(w.mgr.skipBlocked(w.mgr.registry.getById('io.plain.app'), 'test'), false, 'no loop skips it');
+  // Past the gate: whatever the start needs next (identities, homes) is the old path, never a gate refusal.
+  const r = await w.spawnContext('io.plain.app').then(() => null, (e) => e);
+  assert.ok(!r || r.name !== 'OperationalBlockError', `the gate let it through (${r?.name}: ${r?.message})`);
+  // startIntent goes on to pick (start) an instance as before; a fake stands in for the spawn.
+  const { AppManager } = await import('../dist/app-manager/AppManager.js');
+  const picked = [];
+  const fake = { registry: w.mgr.registry, getInstancesByApp: () => [], pickIntentInstance: async (m) => { picked.push(m.id); throw new Error('spawn stand-in'); } };
+  await assert.rejects(AppManager.prototype.startIntent.call(fake, { action: 'VIEW', appId: 'io.plain.app' }), /spawn stand-in/);
+  assert.deepEqual(picked, ['io.plain.app'], 'startIntent tries to start it as before');
+});
+
+test('D108 A2: the gate in spawnContext refuses every spawn; registry lists and audits it; loops skip; startIntent answers setup-required', async () => {
+  const { AppRegistry } = await import('../dist/app-manager/AppRegistry.js');
+  const w = await gateWorld({
+    'io.future.app': { auraContract: AURA_CONTRACT + 1, instanceMode: 'multi', warmPool: 1 },
+    'io.setup.app': { setup: { fields: [] }, componentType: 'service', instanceMode: 'single' },
+  });
+  // Registry: listed, the hook (the kernel's audit row) gets the body.
+  const blocked = [];
+  const scopeDef = { id: 'system', appsDir: join(w.root, 'apps'), dataDir: join(w.root, 'data'), immutable: true, priority: 0 };
+  const reg = new AppRegistry([scopeDef], { onBlocked: (b) => blocked.push(b) });
+  for (const id of ['io.future.app', 'io.setup.app']) reg.loadManifestFile(join(w.root, 'apps', id, 'app.manifest.json'), scopeDef);
+  assert.equal(reg.getById('io.setup.app')?.setup !== undefined, true, 'still listed, with its block');
+  assert.deepEqual(blocked.map((b) => [b.target, b.error]), [['io.future.app', 'contract-unsupported'], ['io.setup.app', 'setup-unsupported']]);
+  // The one gate: every spawn passes spawnContext.
+  for (const [id, code] of [['io.future.app', 'contract-unsupported'], ['io.setup.app', 'setup-unsupported']]) {
+    await assert.rejects(w.spawnContext(id), (e) => e.name === 'OperationalBlockError' && e.code === code && e.body.target === id);
+  }
+  // The loops skip instead of spawning to fail.
+  assert.equal(w.mgr.skipBlocked(w.mgr.registry.getById('io.setup.app'), 'test'), true);
+  w.mgr.scheduleRefill('io.future.app');
+  assert.equal(w.mgr.getInstancesByApp('io.future.app').length, 0, 'no pool member');
+  // startIntent: an additive answer, nothing spawned.
+  const r = await w.mgr.startIntent({ action: 'VIEW', appId: 'io.setup.app' });
+  assert.deepEqual([r.kind, r.appId, r.state, r.error.error, r.error.category], ['setup-required', 'io.setup.app', 'blocked', 'setup-unsupported', 'unsupported-feature']);
+  assert.equal(w.mgr.getInstancesByApp('io.setup.app').length, 0);
+});
+
+test('install, update and patch activation refuse setup/profiles before anyone is asked: the error event carries the D105 body', async () => {
+  const { NexusManager } = await import('../dist/nexus/NexusManager.js');
+  const root = mkdtempSync(join(tmpdir(), 'aura-setup-install-'));
+  const scope = (id, priority, immutable) => ({ id, appsDir: join(root, id, 'apps'), dataDir: join(root, id, 'data'), immutable, priority });
+  const scopes = [scope('system', 0, true), scope('global', 1, false), scope('user', 2, false)];
+  const mgr = new NexusManager({ scopes, rootDataDir: join(root, 'root') });
+  const dir = join(root, 'tree');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'app.manifest.json'), JSON.stringify({ ...base, id: 'io.shop.app', auraContract: 1, profiles: [{ id: 'team' }] }));
+  const asked = [];
+  const events = [];
+  const it = mgr.install({ ref: dir, scope: 'user', approval: async (b) => { asked.push(b); return true; } });
+  let error = null;
+  try { for (let c = await it.next(); !c.done; c = await it.next()) events.push(c.value); }
+  catch (e) { error = e; }
+  const ev = events.find((e) => e.type === 'error');
+  assert.deepEqual([ev?.code, ev?.body?.error, ev?.body?.manifestField, ev?.body?.category], ['setup-unsupported', 'setup-unsupported', 'profiles', 'unsupported-feature']);
+  assert.equal(error?.code, 'setup-unsupported');
+  assert.deepEqual(asked, []);
+  assert.equal(existsSync(join(scopes[2].appsDir, 'io.shop.app')), false);
 });

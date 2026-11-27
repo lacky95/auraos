@@ -71,3 +71,81 @@ export function contractRefusal(manifest: { id: string; auraContract?: number | 
 export const CONTRACT_AUDIT_ACTIONS = {
   refused: 'app.contract-refused',
 } as const;
+
+// ── The operational gate (D108 A1/A2): may this app start at all? ────────────
+
+/**
+ * Manifest keys reserved for D108 (operating profiles, app setup). The schema
+ * keeps them (opaque, never interpreted) so they are never dropped silently;
+ * until the setup engine exists an app that declares one is refused, not run
+ * unconfigured (fail closed).
+ */
+export const RESERVED_SETUP_KEYS = ['setup', 'profiles'] as const;
+export type ReservedSetupKey = (typeof RESERVED_SETUP_KEYS)[number];
+
+/** D105 categories a gate refusal carries (a subset of the error contract's `ErrorCategory`). */
+export type OperationalBlockCategory = 'unsupported-operation' | 'unsupported-feature';
+
+/**
+ * Why an app may not start, as a D105 error body (plain data: what an API
+ * answers, the CLI prints and the shell shows). `state` is the operational
+ * state the beta setup engine reports (`blocked` here: nothing on this
+ * AuraOS can make it startable; `setup-required` is reserved for the engine).
+ */
+export interface OperationalBlock {
+  error: 'contract-unsupported' | 'setup-unsupported';
+  category: OperationalBlockCategory;
+  state: 'blocked' | 'setup-required';
+  message: string;
+  hint: string;
+  /** The manifest field that causes it. */
+  manifestField: string;
+  target: string;
+}
+
+/** The reserved D108 keys a manifest declares (in RESERVED_SETUP_KEYS order). */
+export function declaredSetupKeys(manifest: Partial<Record<ReservedSetupKey, unknown>>): ReservedSetupKey[] {
+  return RESERVED_SETUP_KEYS.filter((k) => manifest[k] !== undefined && manifest[k] !== null);
+}
+
+/**
+ * The one start predicate (D108 A2, D36): null when the app may start, else
+ * why not. Evaluated at the spawn choke point (AppManager `spawnContext`), by
+ * the boot, enable and pool loops (which skip a blocked app), by `startIntent`
+ * (the `setup-required` result), at install (422) and by `aura dev validate`.
+ * Today: an unknown `auraContract` major, then a reserved D108 key. Apps
+ * with neither start exactly as before.
+ */
+export function operationalBlock(manifest: { id: string; auraContract?: number | null } & Partial<Record<ReservedSetupKey, unknown>>): OperationalBlock | null {
+  const major = contractRefusal(manifest);
+  if (major) {
+    return {
+      error: major.code, category: 'unsupported-operation', state: 'blocked', message: major.message, target: manifest.id,
+      hint: `update AuraOS, or install a version of ${manifest.id} built for Aura contract ${major.implemented}`, manifestField: 'auraContract',
+    };
+  }
+  const keys = declaredSetupKeys(manifest);
+  if (keys.length === 0) return null;
+  return {
+    error: 'setup-unsupported', category: 'unsupported-feature', state: 'blocked', target: manifest.id,
+    message: `${manifest.id} declares ${keys.join(' and ')} (operating profiles and app setup, D108); this AuraOS has no setup engine yet, so it does not start the app unconfigured`,
+    hint: `install a version of ${manifest.id} without ${keys.join('/')}, or update AuraOS to a release with app setup`,
+    manifestField: keys[0]!,
+  };
+}
+
+/** A refused start, as an error that carries its D105 body (`code` for clients that branch without `instanceof`). */
+export class OperationalBlockError extends Error {
+  override readonly name = 'OperationalBlockError';
+  readonly code: OperationalBlock['error'];
+  constructor(readonly body: OperationalBlock) {
+    super(body.message);
+    this.code = body.error;
+  }
+}
+
+/** The D105 body of a refused start, from any error, or null. */
+export function operationalBlockOf(err: unknown): OperationalBlock | null {
+  const b = (err as { body?: OperationalBlock } | null)?.body;
+  return err instanceof Error && b && (b.error === 'contract-unsupported' || b.error === 'setup-unsupported') && typeof b.message === 'string' ? b : null;
+}
