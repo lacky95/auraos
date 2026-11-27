@@ -10,7 +10,7 @@
  *   • Default unplaced views to a 40px cascade pattern so the first paint
  *     isn't a stack of perfectly-overlapping rectangles.
  *
- * Drag + resize are wired into `renderLayout()` in `pages/index.astro`
+ * Drag + resize are wired into `renderLayout()` in `desktop-pages/index.astro`
  * during Phase 3 — keeping the interaction logic centralized so it
  * composes with the keyed iframe reconciler (no slot rebuild on each
  * mouse-move).
@@ -31,7 +31,7 @@ const DEFAULT_H = 400;
 const CASCADE   = 40;
 
 /**
- * SSR slot style. The hydrated JS in `pages/index.astro` re-applies +
+ * SSR slot style. The hydrated JS in `desktop-pages/index.astro` re-applies +
  * re-clamps every slot's geometry against the actual viewport on mount,
  * so the values here only matter until hydration. We still emit them
  * with CSS `max-width`/`max-height` clamps to the viewport so a phone

@@ -1,6 +1,6 @@
 /**
  * The markup of one desktop activity slot (title bar + body), shared by the
- * browser (`createSlot` in pages/index.astro) and the server render of the
+ * browser (`createSlot` in desktop-pages/index.astro) and the server render of the
  * active workspace. Server and browser must produce the SAME structure: the
  * desktop script adopts the server-rendered slots in place instead of
  * recreating them, because recreating — or moving — an iframe reloads the app.

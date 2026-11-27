@@ -177,7 +177,7 @@ test('handler audit: one owner test; a member, a foreign owner and an app are no
 });
 
 test('D82 (C8): the desktop page lists only the signed-in user\'s windows; the handoff checks a member\'s instance and grant', () => {
-  const page = readFileSync(new URL('../src/pages/index.astro', import.meta.url), 'utf8');
+  const page = readFileSync(new URL('../src/desktop-pages/index.astro', import.meta.url), 'utf8');
   assert.match(page, /\(inst as \{ owner\?: string \}\)\.owner \?\? localOwnerId\(\)\) !== userId\) continue;/);
   const handoff = readFileSync(new URL('../src/pages/api/app-hosts/handoff.ts', import.meta.url), 'utf8');
   assert.match(handoff, /identity\.role !== 'owner' && !\(await memberMayOpen\(/);

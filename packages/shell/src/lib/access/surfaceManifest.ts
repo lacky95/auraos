@@ -136,7 +136,7 @@ export const SURFACE_MANIFEST: readonly AccessSurface[] = [
   {
     id: 'page-index',
     kind: 'page',
-    source: 'packages/shell/src/pages/index.astro',
+    source: 'packages/shell/src/desktop-pages/index.astro',
     paths: ['/'],
     page: '/',
     rule: {
@@ -148,7 +148,7 @@ export const SURFACE_MANIFEST: readonly AccessSurface[] = [
   {
     id: 'page-launcher',
     kind: 'page',
-    source: 'packages/shell/src/pages/launcher.astro',
+    source: 'packages/shell/src/desktop-pages/launcher.astro',
     paths: ['/launcher'],
     page: '/launcher',
     rule: { allow: ['owner'], target: 'system' },
@@ -156,7 +156,7 @@ export const SURFACE_MANIFEST: readonly AccessSurface[] = [
   {
     id: 'page-setup',
     kind: 'page',
-    source: 'packages/shell/src/pages/setup.astro',
+    source: 'packages/shell/src/desktop-pages/setup.astro',
     paths: ['/setup'],
     page: '/setup',
     // Acting on it needs a one-time host code (D8).
@@ -165,7 +165,7 @@ export const SURFACE_MANIFEST: readonly AccessSurface[] = [
   {
     id: 'page-login',
     kind: 'page',
-    source: 'packages/shell/src/pages/login.astro',
+    source: 'packages/shell/src/desktop-pages/login.astro',
     paths: ['/login'],
     page: '/login',
     rule: { allow: ['public'], target: 'session' },
@@ -173,7 +173,7 @@ export const SURFACE_MANIFEST: readonly AccessSurface[] = [
   {
     id: 'page-dev-notification-controls',
     kind: 'page',
-    source: 'packages/shell/src/pages/dev/notification-controls.astro',
+    source: 'packages/shell/src/desktop-pages/dev/notification-controls.astro',
     paths: ['/dev/notification-controls'],
     page: '/dev/notification-controls',
     // Answers 404 outside the dev server.

@@ -235,12 +235,12 @@ for (const f of files.values()) {
   f.lines = raw.split('\n').length;
   for (const im of parseImports(code)) {
     const res = resolveSpec(f.rel, im.spec);
-    edges.push({ from: f.rel, to: res.kind === 'file' || (res.kind === 'workspace' && res.target) ? res.target : null, ext: res.kind === 'external' ? res.target : null, spec: im.spec, type: im.type, line: im.line, res });
+    edges.push({ from: f.rel, to: res.kind === 'file' || (res.kind === 'workspace' && res.target) ? res.target : null, ext: res.kind === 'external' ? res.target : null, spec: im.spec, type: im.type, kind: im.kind, line: im.line, res });
   }
 }
 
 // shell layers: server = reachable from server entries, webshell = UI dirs and desktop pages
-const isWebshellFile = (r) => /^shell\/src\/(components|layouts|stores|styles)\//.test(r) || (/^shell\/src\/pages\//.test(r) && !/^shell\/src\/pages\/api\//.test(r)) || /\.(astro|tsx)$/.test(r) && r.startsWith('shell/');
+const isWebshellFile = (r) => /^shell\/src\/(components|layouts|stores|styles|desktop-pages)\//.test(r) || (/^shell\/src\/pages\//.test(r) && !/^shell\/src\/pages\/api\//.test(r)) || /\.(astro|tsx)$/.test(r) && r.startsWith('shell/');
 const isServerEntry = (r) => /^shell\/(src\/pages\/api\/|src\/middleware\.ts$|server\/|server\.mjs$|astro\.config\.mjs$)/.test(r);
 const out = new Map();
 for (const e of edges) if (e.to && files.has(e.to)) { if (!out.has(e.from)) out.set(e.from, []); out.get(e.from).push(e); }
@@ -324,7 +324,9 @@ for (const e of edges) {
   if (from.pkg === 'app-sdk' && e.res.kind === 'workspace' && e.res.pkg === 'core' && !e.type && e.res.sub === '.') add('sdk-core', `${e.from} -> @aura/core`, { from: e.from, line: e.line, detail: 'runtime import of the kernel root' });
   if (from.pkg === 'shell' && (from.layer === 'server' || from.layer === 'shared') && !e.type) {
     const toWeb = e.to && files.get(e.to)?.layer === 'webshell' && isWebshellFile(e.to);
-    if (toWeb || (e.ext && UI_PACKAGES.test(e.spec))) add('server-webshell', where, { from: e.from, line: e.line, detail: e.spec });
+    // D76 (Phase 6 W): the build config composes the Web Shell for `desktop` only, by one dynamic import.
+    const composes = e.from === 'shell/astro.config.mjs' && e.kind === 'dynamic' && e.to === 'shell/src/desktop-pages/integration.mjs';
+    if (!composes && (toWeb || (e.ext && UI_PACKAGES.test(e.spec)))) add('server-webshell', where, { from: e.from, line: e.line, detail: e.spec });
   }
 }
 

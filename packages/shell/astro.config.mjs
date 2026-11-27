@@ -1,12 +1,12 @@
 import { defineConfig, passthroughImageService } from 'astro/config';
 import node from '@astrojs/node';
-import react from '@astrojs/react';
 import tailwindcss from '@tailwindcss/vite';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { attachAppHosts, attachSio, attachWsProxy } from './server/attach.mjs';
 import { attachExecBridge } from './server/exec-bridge.mjs';
+import { compositionMarker, compositionOf } from './src/integrations/composition.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -99,10 +99,15 @@ function bootEntryPlugin() {
   };
 }
 
+// D76 (Phase 6 W): `AURA_COMPOSITION=server` builds without the Web Shell (src/integrations/composition.mjs);
+// the desktop half (React, the desktop pages) is loaded only for `desktop`.
+const COMPOSITION = compositionOf(process.env);
+const desktop = COMPOSITION === 'desktop' ? (await import('./src/desktop-pages/integration.mjs')).default() : [];
+
 export default defineConfig({
   output: 'server',
   adapter: node({ mode: 'standalone' }),
-  integrations: [react()],
+  integrations: [compositionMarker(COMPOSITION), ...desktop],
   // No image transcoding: the shell doesn't use astro:assets, so Sharp behind
   // `/_image` would only be an image decoder anyone can feed
   // (GHSA-26w7-cxv4-gfx2 was one). Apps: the same via auraAppIntegration.
@@ -164,7 +169,9 @@ export default defineConfig({
       // dies with "Failed to fetch dynamically imported module
       // .../astro:scripts/before-hydration.js" (dead clock, no notifications)
       // until the user reloads. Pre-bundling them at server start avoids it.
-      include: ['react-dom/client', 'react/jsx-runtime', 'react/jsx-dev-runtime', 'socket.io-client', '@aura/core > lucide'],
+      include: COMPOSITION === 'desktop'
+        ? ['react-dom/client', 'react/jsx-runtime', 'react/jsx-dev-runtime', 'socket.io-client', '@aura/core > lucide']
+        : [],
     },
     // SSR-process @aura/ui through Vite (it ships .css + .tsx). Vite would
     // otherwise treat workspace packages as external and Node's native

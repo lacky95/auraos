@@ -230,7 +230,7 @@ test('the login redirect keeps the page it was asked for, as a same-origin path 
 });
 
 test('the sign-in page returns to the validated next, with the fragment the browser kept', () => {
-  const src = fs.readFileSync(path.join(root, 'src/pages/login.astro'), 'utf8');
+  const src = fs.readFileSync(path.join(root, 'src/desktop-pages/login.astro'), 'utf8');
   assert.match(src, /const next = loginReturnPath\(Astro\.url\.searchParams\.get\('next'\)\) \?\? '\/';/);
   assert.match(src, /data-next=\{next\}/);
   assert.match(src, /location\.replace\(back\)/);
@@ -239,7 +239,7 @@ test('the sign-in page returns to the validated next, with the fragment the brow
 
 test('the desktop pages check the sign-in before rendering anything', () => {
   for (const page of ['index', 'launcher']) {
-    const front = fs.readFileSync(path.join(root, `src/pages/${page}.astro`), 'utf8').split('---')[1]!;
+    const front = fs.readFileSync(path.join(root, `src/desktop-pages/${page}.astro`), 'utf8').split('---')[1]!;
     const gate = front.indexOf('if (signIn) return signIn;');
     assert.ok(gate > front.indexOf('desktopSignIn(Astro)'), page);
     assert.ok(gate < front.indexOf('getAppManager()'), `${page}: before any app data`);
@@ -248,7 +248,7 @@ test('the desktop pages check the sign-in before rendering anything', () => {
 
 test('both auth pages set their headers before rendering anything', () => {
   for (const page of ['setup', 'login']) {
-    const src = fs.readFileSync(path.join(root, `src/pages/${page}.astro`), 'utf8');
+    const src = fs.readFileSync(path.join(root, `src/desktop-pages/${page}.astro`), 'utf8');
     const front = src.split('---')[1]!;
     assert.ok(front.includes('authPageHeaders()'), page);
     assert.ok(!src.includes('OSLayout'), page);

@@ -168,7 +168,7 @@ const { apps, enabledMap = {} } = Astro.props;
     outline: none;
   }
   /* Window-selection mode telegraph. `data-mode="active"` is flipped from
-     `pages/index.astro`'s `onModeChange` hook whenever the keyDispatcher
+     `desktop-pages/index.astro`'s `onModeChange` hook whenever the keyDispatcher
      enters Nav mode. Distinct from the plain focus state (filled
      background + static glow): in active mode the chip is UNFILLED
      (transparent background, primary-toned glyph) but has a pulsing
@@ -401,7 +401,7 @@ const { apps, enabledMap = {} } = Astro.props;
   // ─── Window-selection mode trigger ─────────────────────────────────────
   // The `◐` chip is keyboard-only by design: pressing Enter (or Space)
   // while it's focused dispatches a custom event the shell-level handler
-  // in `pages/index.astro` listens for. That handler toggles dispatcher
+  // in `desktop-pages/index.astro` listens for. That handler toggles dispatcher
   // mode → 'nav', which highlights the first visible window. A mouse
   // click on the chip is deliberately a no-op for now (the user wants to
   // reserve the click affordance for later use).
@@ -549,7 +549,7 @@ const { apps, enabledMap = {} } = Astro.props;
           const top5 = apps
             .filter((a) => a.enabled !== false)
             // Services have no UI and shouldn't squat a dock slot. Mirrors
-            // the SSR pinned-apps filter in pages/index.astro.
+            // the SSR pinned-apps filter in desktop-pages/index.astro.
             .filter((a) => a.manifest.componentType !== 'service')
             .sort((a, b) => {
               const am = mru[a.manifest.id] ?? 0;

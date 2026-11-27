@@ -4,6 +4,7 @@ import { defineMiddleware } from 'astro:middleware';
 import * as core from '@aura/core';
 import { noteClientConnected } from './lib/onboarding/index.js';
 import { startFlightService } from './lib/flight/service.js';
+import { compositionOf } from './integrations/composition.mjs';
 import { captureAccess, createAccessReporter } from './lib/access/guard.ts';
 import { GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
 import { shellFramePolicy } from './lib/desktop/shellFramePolicy.ts';
@@ -22,9 +23,10 @@ const starting = (body: Record<string, string>) => new Response(JSON.stringify(b
 
 async function kernelReady(path: string): Promise<Response | null> {
   const sys = core.getSystem();
-  if (!sys) return starting({ error: 'starting', detail: 'the kernel was not started (server.mjs or the dev plugin starts it)' });
-  if (sys.isReady()) return null;
+  if (sys?.isReady()) return null;
+  // The health probe (the updater, the Headless test) answers at once.
   if (path === '/api/auth/status') return starting({ login: 'starting' });
+  if (!sys) return starting({ error: 'starting', detail: 'the kernel was not started (server.mjs or the dev plugin starts it)' });
   let timer: ReturnType<typeof setTimeout> | undefined;
   const waited = await Promise.race([
     sys.ready.then(() => true, () => false),
@@ -43,7 +45,13 @@ const accessUnavailable = () => new Response(JSON.stringify({ error: 'access-una
   status: 503, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' },
 });
 
+// The `server` composition (D76, Phase 6 W) has no desktop: its root names the system, nothing more.
+const SERVER_ROOT = JSON.stringify({ system: 'aura', composition: 'server' });
+
 export const onRequest = defineMiddleware(async (ctx, next) => {
+  if (ctx.url.pathname === '/' && compositionOf(process.env) === 'server') {
+    return new Response(SERVER_ROOT, { status: 200, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
+  }
   const access = captureAccess(ctx);
   const notReady = await kernelReady(ctx.url.pathname);
   if (notReady) {
@@ -53,7 +61,7 @@ export const onRequest = defineMiddleware(async (ctx, next) => {
   core.getSystem()?.noteFirstRequest();
   // Free-flight activities (lib/flight/service.ts), a Web Shell feature: once per shell
   // build — a hot-swapped build takes over the previous one's listeners + notifications.
-  if (!flightServiceStarted && core.getSystem()?.status().composition !== 'server') {
+  if (!flightServiceStarted && compositionOf(process.env) !== 'server') {
     flightServiceStarted = true;
     try { startFlightService(); }
     catch (err) { console.warn(`[middleware] flight service start failed: ${(err as Error).message}`); }

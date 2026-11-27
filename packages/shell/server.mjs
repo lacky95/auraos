@@ -26,7 +26,7 @@
  * SSR. ASTRO_NODE_AUTOSTART=disabled stops it from opening its own server.
  */
 import http from 'node:http';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { attachShellServers } from './server/attach.mjs';
@@ -83,6 +83,14 @@ async function bootKernel(outDir) {
 }
 
 const buildDir = await initialBuildDir();
+// The build's composition (D76, src/integrations/composition.mjs) is the one this process serves.
+try {
+  const { composition } = JSON.parse(readFileSync(join(buildDir, '.aura-composition'), 'utf8'));
+  if (process.env.AURA_COMPOSITION && process.env.AURA_COMPOSITION !== composition) {
+    console.warn(`[shell] AURA_COMPOSITION=${process.env.AURA_COMPOSITION}, but the build is ${composition}: serving ${composition}`);
+  }
+  process.env.AURA_COMPOSITION = composition;
+} catch { /* a build from before Phase 6 W: the environment decides */ }
 if (!check) await bootKernel(buildDir);
 let current = await loadBuild(buildDir);
 let previous = null;

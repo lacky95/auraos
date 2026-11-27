@@ -1,7 +1,7 @@
 /**
  * "Go to task": where a notification's target context leads. DOM-free —
  * the window functions are injected (the shell page defines them on
- * `window` in pages/index.astro).
+ * `window` in desktop-pages/index.astro).
  *
  *   activity     → reveal that Activity's window (else launch context.appId)
  *   instance     → reveal that instance's window (else launch context.appId)

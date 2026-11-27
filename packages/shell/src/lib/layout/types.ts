@@ -1,6 +1,6 @@
 /**
  * Layout-manager SDK — the contract between the shell desktop
- * (`pages/index.astro` renderLayout) and a layout strategy.
+ * (`desktop-pages/index.astro` renderLayout) and a layout strategy.
  *
  * The core `layoutRegistry` (packages/core/src/layout) owns a strategy's
  * METADATA (id, name, icon — what `/api/os/layouts` lists). This module owns

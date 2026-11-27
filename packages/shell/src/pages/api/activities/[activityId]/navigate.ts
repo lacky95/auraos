@@ -14,7 +14,7 @@ import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
  *   • `pushHistory: false` — replace the URL without recording history.
  *     Use for redirects or to clear stale steps from the stack.
  *
- * On success emits `activity:navigated`; the shell's pages/index.astro
+ * On success emits `activity:navigated`; the shell's desktop-pages/index.astro
  * picks it up and updates the iframe `src` + view title in place — no new
  * layout slot is created.
  */

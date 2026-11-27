@@ -3,7 +3,7 @@
  *
  * Wires `lib/notifications/dialogs.ts` to the page:
  *   - the shared store (`getNotifications()`) feeds the controller;
- *   - window state comes from `window.auraViewDetail` (pages/index.astro),
+ *   - window state comes from `window.auraViewDetail` (desktop-pages/index.astro),
  *     changes from `aura:views.changed` (end of every renderLayout) plus a
  *     MutationObserver on `.app-slot` additions as a safety net;
  *   - "Answer" reveals through `window.auraRevealInstance`;

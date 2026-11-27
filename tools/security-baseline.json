@@ -346,70 +346,70 @@
     },
     {
       "check": "patterns/html-sink",
-      "file": "packages/shell/src/pages/dev/notification-controls.astro",
+      "file": "packages/shell/src/desktop-pages/dev/notification-controls.astro",
       "source": "<style set:html={themeCss}></style>",
       "reason": "Proven safe (review fixes, 2026-11-25): A DEV-only page (404 in production) whose CSS is built from constant token lists.",
       "owner": "shell/Settings UI owner; keep while the line is unchanged"
     },
     {
       "check": "patterns/html-sink",
-      "file": "packages/shell/src/pages/index.astro",
+      "file": "packages/shell/src/desktop-pages/index.astro",
       "source": "sk.innerHTML = renderSkeleton(v);",
       "reason": "Proven safe (review fixes, 2026-11-25): renderSkeleton() escapes appId and state with escapeHtml(); the rest is constant markup.",
       "owner": "shell/Settings UI owner; keep while the line is unchanged"
     },
     {
       "check": "patterns/html-sink",
-      "file": "packages/shell/src/pages/index.astro",
+      "file": "packages/shell/src/desktop-pages/index.astro",
       "source": "emptyEl.innerHTML = `",
       "reason": "Proven safe (review fixes, 2026-11-25): Constant markup; btnStyle is a string constant.",
       "owner": "shell/Settings UI owner; keep while the line is unchanged"
     },
     {
       "check": "patterns/html-sink",
-      "file": "packages/shell/src/pages/index.astro",
+      "file": "packages/shell/src/desktop-pages/index.astro",
       "source": "strip.innerHTML = `<span style=\"font-size:0.6rem; color: var(--aura-color-text-dim); letter-spacing:0.12em; align-self:center;\">MIN ▾</span>${",
       "reason": "Proven safe (review fixes, 2026-11-25): Minimized views: viewId and title through escapeAttr()/escapeHtml().",
       "owner": "shell/Settings UI owner; keep while the line is unchanged"
     },
     {
       "check": "patterns/html-sink",
-      "file": "packages/shell/src/pages/index.astro",
+      "file": "packages/shell/src/desktop-pages/index.astro",
       "source": "slot.innerHTML = slotInnerHtml({ minimizable: v.minimizable });",
       "reason": "Proven safe (review fixes, 2026-11-25): slotInnerHtml() is constant chrome markup (icons and style constants).",
       "owner": "shell/Settings UI owner; keep while the line is unchanged"
     },
     {
       "check": "patterns/html-sink",
-      "file": "packages/shell/src/pages/index.astro",
+      "file": "packages/shell/src/desktop-pages/index.astro",
       "source": "trail.innerHTML =",
       "reason": "Proven safe (review fixes, 2026-11-25): Breadcrumbs: paths and titles through escHtml(); styles are local constants.",
       "owner": "shell/Settings UI owner; keep while the line is unchanged"
     },
     {
       "check": "patterns/html-sink",
-      "file": "packages/shell/src/pages/index.astro",
+      "file": "packages/shell/src/desktop-pages/index.astro",
       "source": "trail.innerHTML = `<span class=\"crumb crumb-current\" style=\"${crumbCurrent}\">${escHtml(v.title)}</span>`;",
       "reason": "Proven safe (review fixes, 2026-11-25): Title through escHtml(); the style is a local constant.",
       "owner": "shell/Settings UI owner; keep while the line is unchanged"
     },
     {
       "check": "patterns/html-sink",
-      "file": "packages/shell/src/pages/index.astro",
+      "file": "packages/shell/src/desktop-pages/index.astro",
       "source": "layoutBtnHost.innerHTML = btns.map((b) =>",
       "reason": "Proven safe (review fixes, 2026-11-25): Action and title through escapeAttr(); `html` is the ChromeButton glyph from the shell's own built-in layout strategies (code, no data path).",
       "owner": "shell/Settings UI owner; keep while the line is unchanged"
     },
     {
       "check": "patterns/html-sink",
-      "file": "packages/shell/src/pages/index.astro",
+      "file": "packages/shell/src/desktop-pages/index.astro",
       "source": "sk.innerHTML = renderSkeleton(v);",
       "reason": "Proven safe (review fixes, 2026-11-25): renderSkeleton() escapes appId and state with escapeHtml(); the rest is constant markup.",
       "owner": "shell/Settings UI owner; keep while the line is unchanged"
     },
     {
       "check": "patterns/html-sink",
-      "file": "packages/shell/src/pages/index.astro",
+      "file": "packages/shell/src/desktop-pages/index.astro",
       "source": "<div class=\"app-slot\" data-view-id={sl.viewId} data-instance-id={sl.instanceId} data-activity-id={sl.activityId} data-ssr=\"1\" style={sl.style} set:html={sl.html}></div>",
       "reason": "Proven safe (review fixes, 2026-11-25): sl.html is slotInnerHtml() (constant chrome) around iframeHtml(), which escapes the frame URL and title with escapeHtml().",
       "owner": "shell/Settings UI owner; keep while the line is unchanged"

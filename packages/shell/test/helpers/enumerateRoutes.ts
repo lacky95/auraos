@@ -7,6 +7,7 @@
  * `theme.css.ts` is `/theme.css`), `index` collapses, and a request runs
  * `mod[method] ?? mod.ALL`, with HEAD falling back to GET.
  */
+import { DESKTOP_PAGES } from '../../src/integrations/composition.mjs';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -166,6 +167,20 @@ export function enumerateRoutes(pagesDir: string): RouteInventory {
     }
   };
   walk(pagesDir, []);
+  // Phase 6 W (D76): the desktop pages live in src/desktop-pages and are injected at their routes
+  // (src/integrations/composition.mjs). Every page file there must have a route, and each route counts.
+  const desktopDir = path.join(pagesDir, '..', 'desktop-pages');
+  if (fs.existsSync(desktopDir)) {
+    const injected = new Set(DESKTOP_PAGES.map((p) => p.file));
+    const files = (dir: string, rel = ''): string[] => fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+      e.isDirectory() ? files(path.join(dir, e.name), `${rel}${e.name}/`) : PAGE_EXTENSIONS.has(path.extname(e.name)) ? [`${rel}${e.name}`] : []);
+    for (const f of files(desktopDir)) if (!injected.has(f)) inventory.problems.push(`desktop-pages/${f}: no injected route`);
+    for (const p of DESKTOP_PAGES) {
+      const file = `../desktop-pages/${p.file}`;
+      claim(p.pattern, file);
+      inventory.pages.push({ route: p.pattern, file });
+    }
+  }
   return inventory;
 }
 
