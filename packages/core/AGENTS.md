@@ -17,7 +17,7 @@ It never presents anything, and it never transports anything itself. HTTP lives 
 
 ## Sectors (D97, owner-adopted)
 
-Sectors are logical groups over the existing directories. There is no sector directory, and nothing gets moved to make one. Each module (a top-level directory under `src/`) belongs to exactly one sector.
+Sectors are logical groups over the existing directories. There is no sector directory. Each module (a top-level directory under `src/`) belongs to exactly one sector.
 
 `tools/dep-check.mjs` reads the block below. Adding, removing or renaming a module without updating it fails `pnpm arch`.
 
@@ -34,7 +34,7 @@ presentation-contracts: theme layout keymap
 
 | Sector | Responsibility | Not here |
 |---|---|---|
-| **Foundation** (`types`, `logger`, `ipc`, `system`, `index`, `errors`) | the manifest schema and shared types, the error contract (`errors/contracts.ts`, error-messages Pass A), logging, the event-bus primitive (`OsEventBus`), system identity (D47); from Phase 6 the composition root `system/bootstrap.ts` (`bootSystem()`); `index.ts` is the public barrel | any domain logic. **Foundation is leaf-only:** apart from the composition root and the barrel, it imports no other sector |
+| **Foundation** (`types`, `logger`, `ipc`, `system`, `index`, `errors`) | the manifest schema and shared types, error contracts, logging, the event-bus primitive (`OsEventBus`), system identity (D47); from Phase 6 the composition root `system/bootstrap.ts` (`bootSystem()`); `index.ts` is the public barrel | any domain logic. **Foundation is leaf-only:** apart from the composition root and the barrel, it imports no other sector |
 | **Execution** (`app-manager`, `scopes`, `runtimes`) | the app, instance and activity lifecycle; supervision, services and pools; intents; sidecars, ports and mounts as runtime capabilities; the ARI and the runtime providers (`ContainerRunner`, `ProotRunner`); the spawn context | window flight and other presentation (debt); install and build policy |
 | **Identity & Security** (`auth`, `permissions`, `approvals`, `security`, `identity`) | users, sessions, principals; grants; the authorizer; the approval state machine; the D64 security options and policy records; the credential vault lives in `context/CredentialVault.ts` | transport-side enforcement, which is `packages/shell/src/lib/access` |
 | **Resource** (`context`, `users`, `homes`) | Context env and secrets (sealed), volumes, per-user data, Private and App Homes | mounts and ports (Execution until 5b G) |
