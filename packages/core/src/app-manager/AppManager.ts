@@ -449,7 +449,8 @@ export class AppManager {
       scopeRegistry: this.scopeRegistry,
       runner:        this.container,
       sourceMode:    (appId) => this.sourceModeOf(appId)?.mode ?? 'closed',
-      // D80: the consumer's process identity (an OS sidecar: as before, no cross-uid handling).
+      // D80 and the work/patches owner: the consumer's process identity (its latched identity;
+      // an OS sidecar: as before, no cross-uid handling).
       consumerIdentity: (consumer) => (isSidecarConsumer(consumer) ? null : this.processIdentityOf(consumer)),
       developerMode:   () => opts.developerMode?.() ?? false,
       runtimeOf:       (consumer) => this.instances.get(parentOfConsumer(consumer))?.sandbox,
@@ -468,11 +469,6 @@ export class AppManager {
       // Live OS sidecars that inherit the app's mounts (set below; the
       // callback only runs after construction).
       fanoutTargets: (instanceId) => this.osSidecars.fanoutTargets(instanceId),
-      // Who a consumer runs as (its latched identity), so a work/patches dir created for it is its own.
-      consumerIdentity: (instanceId) => {
-        const inst = this.instances.get(instanceId);
-        return inst?.uid && inst?.gid ? { uid: inst.uid, gid: inst.gid } : null;
-      },
     });
     this.portExpose  = new PortManager({
       dataDir:  opts.dataDir,

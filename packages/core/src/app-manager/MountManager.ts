@@ -253,9 +253,12 @@ interface MountManagerOpts {
   scopeRegistry: ScopeRegistry;
   runner: ContainerMountBackend;
   /**
-   * D80: the `uid:gid` a consumer's processes run as; null for a root
-   * consumer that keeps its capabilities (it writes anywhere). Absent: no
-   * cross-uid handling (tests, a host without app identities).
+   * D80: the `uid:gid` a consumer's processes run as (a non-root app uid or
+   * a session host's user, P5-2/P5-3/stream T); null for a root consumer that
+   * keeps its capabilities (it writes anywhere). Absent: no cross-uid handling
+   * (tests, a host without app identities). Also the owner of a `work` or
+   * `patches` source this manager creates for that consumer, so its
+   * always-rw mount is writable by the process that uses it.
    */
   consumerIdentity?(consumer: string): { uid: number; gid: number } | null;
   /** D80: Developer Mode is on (a writable source mount into another uid needs it). Absent: off. */
@@ -271,13 +274,6 @@ interface MountManagerOpts {
   fanoutTargets?(instanceId: string): FanoutTarget[];
   /** The target app's effective source mode; absent → every source is open. */
   sourceMode?(targetAppId: string): 'closed' | 'open';
-  /**
-   * The Linux identity a consumer instance runs as (a non-root app uid or a
-   * session host's user, P5-2/P5-3/stream T); null for root. A `work` or
-   * `patches` source this manager creates for that consumer is handed to it,
-   * so its always-rw mount is writable by the process that uses it.
-   */
-  consumerIdentity?(instanceId: string): { uid: number; gid: number } | null;
 }
 
 export class MountManager {
