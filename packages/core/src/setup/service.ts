@@ -573,10 +573,26 @@ export class SetupService implements SetupEngine {
     return true;
   }
 
+  /**
+   * Decision 13: the configuration a working app ran with before this
+   * reconfiguration: kept in memory during the run, else (after a kernel
+   * restart) P8's durable applied snapshot, only when its digest is the one
+   * the summary still holds as the last `ready` (P2 keeps it until markReady).
+   */
+  private async previousOf(ctx: Ctx, s: InstallationSetupSummary): Promise<{ desired: DesiredConfig | null; userDesired: DesiredConfig | null } | null> {
+    const mem = this.previous.get(ctx.installationId);
+    if (mem) return mem;
+    if ((s.state !== 'configuring' && s.state !== 'awaiting-approval') || !s.configDigest) return null;
+    const snap = await this.deps.store.readApplied(ctx.installationId).catch(() => null);
+    if (!snap || snap.configDigest !== s.configDigest || snap.grantDigest !== s.grantDigest || snap.userId !== ctx.userId) return null;
+    return { desired: snap.desired, userDesired: snap.userDesired };
+  }
+
   private async failRun(ctx: Ctx, s: InstallationSetupSummary, error: SetupErrorBody, r?: Resolution): Promise<SetupOutcome> {
     // Decision 13: before execution, a reconfiguration of a working app that fails leaves it working.
-    if ((s.state === 'configuring' || s.state === 'awaiting-approval') && this.previous.has(ctx.installationId)) {
-      const kept = await this.keepPrevious(ctx, s, error);
+    if (s.state === 'configuring' || s.state === 'awaiting-approval') {
+      const prev = await this.previousOf(ctx, s);
+      const kept = prev ? await this.keepPrevious(ctx, s, error, prev) : null;
       if (kept) return kept;
     }
     const body: SetupErrorBody = { ...error, state: 'setup-failed' };
@@ -599,8 +615,9 @@ export class SetupService implements SetupEngine {
    * other transition leads there; the configuration was initialized when it
    * first became ready, so no hook runs). Null when it can't be kept.
    */
-  private async keepPrevious(ctx: Ctx, s: InstallationSetupSummary, error: SetupErrorBody): Promise<SetupOutcome | null> {
-    const prev = this.previous.get(ctx.installationId);
+  private async keepPrevious(
+    ctx: Ctx, s: InstallationSetupSummary, error: SetupErrorBody, prev: { desired: DesiredConfig | null; userDesired: DesiredConfig | null },
+  ): Promise<SetupOutcome | null> {
     this.previous.delete(ctx.installationId);
     this.consumed.delete(ctx.installationId);
     if (!prev?.desired || !s.configDigest || !s.grantDigest) return null;
@@ -649,7 +666,8 @@ export class SetupService implements SetupEngine {
       const why = created.reason === 'too-many-pending' ? 'you already have an open approval request from here; answer it first'
         : created.reason === 'blocked' ? 'requests from here are blocked' : created.reason === 'rate-limited' ? 'too many requests; try again in a minute' : created.reason;
       const body = setupError('setup-blocked', `the approval for ${ctx.appId} could not be requested: ${why}`, { state: summary.state, target: ctx.appId });
-      const kept = this.previous.has(ctx.installationId) ? await this.keepPrevious(ctx, summary, body) : null;
+      const prevCfg = await this.previousOf(ctx, summary);
+      const kept = prevCfg ? await this.keepPrevious(ctx, summary, body, prevCfg) : null;
       return kept ?? this.refused(this.withSummary(ctx, summary), body, r);
     }
     const prev = summary.state;

@@ -296,6 +296,20 @@ test('item 6: a reconfiguration\'s approval denial before execution leaves the w
   assert.equal((await h.grants.listFor({ kind: 'app', id: w.appId })).length, 0, 'nothing granted');
 });
 
+test('item 6 (INT): a kernel restart while the reconfiguration waits: a denial still keeps the working app ready (durable applied snapshot)', async () => {
+  const w = await working();
+  const r = await w.svc.reconfigure(w.appId, { profile: 'more' }, OWNER);
+  assert.equal(r.status, 'on-hold');
+  w.restart(); // the in-memory previous configuration is gone; P8's sealed applied snapshot is not
+  await h.approvals.deny(r.approvalId, OPERATOR, 'no');
+  const out = await w.svc.resume(w.appId, OWNER);
+  assert.deepEqual([out.status, out.error.error, out.state.state], ['refused', 'approval-denied', 'ready']);
+  const s = await w.summary();
+  assert.deepEqual([s.state, s.configDigest, s.grantDigest, s.profile], ['ready', w.old.summary.configDigest, w.old.summary.grantDigest, 'plain']);
+  assert.equal((await w.record()).profile, 'plain', 'the desired record is written back');
+  assert.deepEqual(w.stopped, [], 'never stopped');
+});
+
 test('item 6: a validation failure before execution changes nothing (no write, no stop)', async () => {
   const w = await working();
   const r = await w.svc.reconfigure(w.appId, { values: { greeting: 'Not Valid!' } }, OWNER);

@@ -6,13 +6,13 @@ The sector rules are in `packages/core/AGENTS.md`. Design: D108 (`app-profiles-s
 
 - **`contracts.ts`** (contract leaf): states, the desired record, the resolution, digests, ports, D105 codes, the `app.setup.apply` payload, API/SDK views, hooks, audit, `app:setup-state`.
 - **`resolve.ts`** (P1): `resolveEffective(input, ports)`, the one pure resolver (never a fallback; `shared` refused until BT-M2); `autoSelectableProfile` (decision 3) and `profileOptions`.
-- **`merge.ts`** (P1): the merge rules (overlay over base, desired overrides, sorted request union, services by name, fields tightened never loosened) and `effectiveManifestView` (a simple app gets its base back).
+- **`merge.ts`** (P1): the merge rules and `effectiveManifestView` (a simple app gets its base back).
 - **`requirements.ts`** (P1): requirement evaluation through the `ResolverPorts`: explicit (`setup`/profile, level, `when`), implied (Private Home, `instance` network, resources) and derived (`requirementsOf()` → `FEATURE_OF_NEED`). Only `supported` meets one.
 - **`digest.ts`** (P1): `configDigestOf` (secrets by field name only) and `grantDigestOf` (`GrantBearing`), `sha256:<hex>` over canonical JSON.
 - **`store.ts`** (P2): `SetupConfigStore`, the sealed `app:config:*` records (`read`, `compareAndSet`, `update`, `forgetInstallation` revoking handles via `vaultHandleRevoker`).
 - **`state.ts`** (P2): `SetupStateMachine` over `AppHostStore.setSetup`: `state`, `begin`, `transition`, `progress`, `markReady` (the only way into `ready`), `desired` (tamper → `resetTampered`, once). Errors carry `code`.
 - **`values.ts`** (P4): values by reference only: `setupConfigView`; `sidecarSetupValues` (`fromSetup` → literal, `map` must hold it, arrays refused; `fromSecret` → `{field, handle}`, read at create by `vaultSecretReader`); `secretReadableWithoutGrant`; `generateSetupSecrets`.
-- **`service.ts`** (P3): `SetupService`, the engine (`SetupServiceContract` + the `SetupGate` AppManager asks). Proposals are resolved before any write; `configuring` writes step + record first; added privileges → one `app.setup.apply` (requester = the actor) bound to both digests; on consumption grants via the existing paths; init in the maintenance start; `ready` only by `markReady`.
+- **`service.ts`** (P3): `SetupService`, the engine and its gate. Resolve before writing; added privileges → one `app.setup.apply` bound to both digests; init in the maintenance start; `ready` only by `markReady`.
 - **`ports.ts`** (P3, types only): `SetupEngineDeps`, the P9 `HomeEnvironmentPort`, `SetupGate`/`SetupEngine`. Wired by `system/compose.ts` `createSetupEngine` into AppManager `opts.setup`; the shell uses `getAppManager().setup`.
 - **`approval.ts`**, **`hooks.ts`**, **`blocking.ts`** (P3): the approval payload and display (wording = @aura/ui `approvalSummary.ts`); `onSetup`/`onValidate` through the frozen `MaintenanceStarter` (none → fail closed); `blocked` on a lost grant, policy or feature, back to `ready` with the same digests.
 - **`change.ts`** (P8): change plan, `setup.renames`, applied snapshot, `SetupChangeContract`.
