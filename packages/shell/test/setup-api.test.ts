@@ -64,6 +64,8 @@ function fakeService(answer: SetupOutcome | (() => never) = { status: 'ready', s
     repair: change('repair') as SetupServiceContract['repair'],
     reconfigure: change('reconfigure') as SetupServiceContract['reconfigure'],
     selfConfig: async () => { throw new Error('not here'); },
+    secretHandles: async (_a, actor) => { calls.push({ op: 'secrets', actor }); return [{ handle: HANDLE, label: 'smtp' }]; },
+    askSecret: async (_a, field, actor) => { calls.push({ op: `askSecret:${field}`, actor }); return { approvalId: 'apr_1' }; },
   };
   return { svc, calls };
 }
@@ -85,16 +87,16 @@ const BEARER = { authorization: 'Bearer aura1.token' };
 
 async function call(
   op: SetupOp, who: Who, svc: SetupServiceContract | null,
-  opts: { method?: string; body?: unknown; raw?: string; headers?: Record<string, string>; app?: string; over?: Partial<SetupRouteDeps> } = {},
+  opts: { method?: string; body?: unknown; raw?: string; headers?: Record<string, string>; app?: string; field?: string; over?: Partial<SetupRouteDeps> } = {},
 ): Promise<{ status: number; body: Record<string, unknown> }> {
-  const method = opts.method ?? (['state', 'profiles', 'values'].includes(op) ? 'GET' : op === 'setValues' ? 'PUT' : 'POST');
+  const method = opts.method ?? (['state', 'profiles', 'values', 'secrets'].includes(op) ? 'GET' : op === 'setValues' ? 'PUT' : 'POST');
   const text = method === 'GET' ? undefined : opts.raw ?? (opts.body !== undefined ? JSON.stringify(opts.body) : undefined);
   const request = new Request(`http://shell/api/apps/${opts.app ?? APP}/setup`, {
     method,
     headers: { ...(text !== undefined ? { 'content-type': 'application/json' } : {}), ...BEARER, ...opts.headers },
     ...(text !== undefined ? { body: text } : {}),
   });
-  const res = await handleSetup({ request, params: { id: opts.app ?? APP }, cookies: {} as never }, op, deps(who, svc, opts.over));
+  const res = await handleSetup({ request, params: { id: opts.app ?? APP, ...(opts.field !== undefined ? { field: opts.field } : {}) }, cookies: {} as never }, op, deps(who, svc, opts.over));
   return { status: res.status, body: await res.json() as Record<string, unknown> };
 }
 
@@ -325,4 +327,26 @@ test('access manifest: another app\'s token is refused on every setup route, its
     assert.equal(await gate(terminal, 'instance-token', route, method), 'pass', `the Terminal: ${method} ${route}`);
     assert.equal(await gate(owner, 'login-session', route, method), 'pass', `the owner: ${method} ${route}`);
   }
+});
+
+// ── the owner's secret hand-off (D56): handle list and `ask` ────────────────
+
+test('secrets: the handle list (no value); ask: only a declared secret field, 202 with the approval, never a body value', async () => {
+  const { svc, calls } = fakeService();
+  const list = await call('secrets', asOwner, svc);
+  assert.equal(list.status, 200);
+  assert.deepEqual(list.body, [{ handle: HANDLE, label: 'smtp' }] as never);
+  const asked = await call('askSecret', asTerminal, svc, { field: 'password' });
+  assert.deepEqual([asked.status, asked.body.approvalId], [202, 'apr_1']);
+  const profileField = await call('askSecret', asOwner, svc, { field: 'teamKey' });
+  assert.equal(profileField.status, 202, 'a profile secret field counts');
+  for (const field of ['smtpHost', 'nope', '']) {
+    const r = await call('askSecret', asTerminal, svc, { field });
+    assert.equal(r.status, 422, field);
+    assert.equal(r.body.error, 'config-invalid');
+  }
+  assert.deepEqual(calls.map((c) => c.op), ['secrets', 'askSecret:password', 'askSecret:teamKey']);
+  assert.equal((await call('secrets', asOwner, null)).status, 503, 'no engine: unavailable, never an empty list');
+  const other = await call('askSecret', { principal: inst('com.example.other'), via: 'instance-token' }, svc, { field: 'password' });
+  assert.ok(other.status === 401 || other.status === 403, `another app is refused (${other.status})`);
 });

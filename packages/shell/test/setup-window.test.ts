@@ -294,6 +294,9 @@ test('no secret value in the DOM or a request: secrets are vault handles, `ask` 
     [`GET ${BASE}`]: [() => json(state())],
     [`GET ${BASE}/plan`]: [() => json(plan())],
     [`POST ${BASE}/plan`]: [() => json(plan())],
+    // No engine yet: the live `ask` route answers unavailable.
+    [`POST ${BASE}/secrets/password`]: [() => json({ error: 'unavailable', message: 'no engine' }, 503)],
+    [`GET ${BASE}/secrets`]: [() => json([{ handle: 'cred_existing', label: 'smtp' }])],
   });
   const w = mountSetupWindow(body, { appId: APP, appName: 'Mailer', launch: null, onReady: () => undefined }, { fetch: api.fetch });
   await tick();
@@ -305,9 +308,11 @@ test('no secret value in the DOM or a request: secrets are vault handles, `ask` 
   click(w.element, 'ask-secret');
   await tick();
   assert.equal(w.element.querySelector('[data-note]')?.textContent, SECRET_ASK_UNAVAILABLE);
+  assert.ok([...w.element.querySelectorAll('option')].some((o) => (o as HTMLOptionElement).value === 'cred_existing'), 'the vault picker offers the listed handle');
   click(w.element, 'next');
   await tick();
-  const sent = api.calls.filter((c) => c.method === 'POST');
+  assert.ok(api.calls.some((c) => c.method === 'POST' && c.url === `${BASE}/secrets/password` && c.body === undefined), 'ask through the setup API, no body');
+  const sent = api.calls.filter((c) => c.method === 'POST' && !c.url.includes('/secrets/'));
   assert.ok(sent.length >= 1);
   for (const c of sent) assert.ok(!JSON.stringify(c.body ?? {}).includes(LEAK_MARK));
   assert.deepEqual((sent[0]!.body as { values?: unknown }).values, { smtpHost: 'mail.example' }, 'plain values only');

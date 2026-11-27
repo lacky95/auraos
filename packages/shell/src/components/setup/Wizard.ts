@@ -52,6 +52,8 @@ export interface WizardModel {
   profile: string | null;
   /** field → vault handle picked in this run (names only). */
   secrets: Record<string, string>;
+  /** The vault handles the app already holds (the `source: vault` picker; names and handles only). */
+  handles: Array<{ handle: string; label?: string }>;
   problem: WizardProblem | null;
   /** A short note (e.g. what happened to a secret hand-off). */
   note: string | null;
@@ -209,7 +211,7 @@ export function renderWizard(root: HTMLElement, model: WizardModel, on: WizardCa
         form = renderFieldViews(section, plan.fields, {
           profile: model.profile,
           disabled: model.busy,
-          secrets: { handles: [], bound: model.secrets, onAsk: (name: string) => on.onAskSecret(name) } satisfies SecretFieldOptions,
+          secrets: { handles: model.handles, bound: model.secrets, onAsk: (name: string) => on.onAskSecret(name) } satisfies SecretFieldOptions,
         });
       } else if (model.step === 'requirements') {
         renderDependencies(section, { dependencies: [], requirements: plan.requirements, degraded: plan.degraded });

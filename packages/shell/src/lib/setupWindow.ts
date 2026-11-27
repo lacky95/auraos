@@ -118,7 +118,7 @@ export interface SetupWindow {
   refresh(): Promise<void>;
 }
 
-/** Until the setup API can create the owner's `credential.store` for a field (D108 P3/P5), `ask` says so. */
+/** When the setup API can't create the owner's `credential.store` for a field (no engine yet), `ask` says so. */
 export const SECRET_ASK_UNAVAILABLE = 'AuraOS cannot ask for this secret here yet: enter it with the CLI (aura secret ask, then --secret <field>=@vault:<handle>), or pick a stored one.';
 
 const POLL_MS = 2000;
@@ -156,7 +156,7 @@ export function mountSetupWindow(body: HTMLElement, opts: SetupWindowOptions, de
   body.appendChild(root);
 
   const model: WizardModel = {
-    appName: opts.appName, phase: 'loading', plan: null, step: null, state: null, profile: null, secrets: {},
+    appName: opts.appName, phase: 'loading', plan: null, step: null, state: null, profile: null, secrets: {}, handles: [],
     problem: null, note: null, approvalId: null, repair: false, busy: false,
   };
   /** The owner's proposal in this run (plain values and handles; never a secret value). */
@@ -324,8 +324,26 @@ export function mountSetupWindow(body: HTMLElement, opts: SetupWindowOptions, de
     await show(outcome.state, outcome);
   }
 
+  /** `ask` through the setup API (`POST …/setup/secrets/<field>` → the owner's credential.store request). */
+  async function askLive(field: string): Promise<{ approvalId: string } | { note: string }> {
+    const r = await call<{ approvalId?: unknown }>(`/secrets/${encodeURIComponent(field)}`, { method: 'POST' });
+    if (r.ok && typeof r.body.approvalId === 'string') return { approvalId: r.body.approvalId };
+    if (!r.ok && r.status !== 503) return { note: r.problem.message };
+    return { note: SECRET_ASK_UNAVAILABLE };
+  }
+
+  /** The handles the `vault` picker offers (best effort: none when the API can't list them). */
+  async function loadHandles(): Promise<void> {
+    const r = await call<unknown>('/secrets');
+    if (disposed || !r.ok || !Array.isArray(r.body)) return;
+    model.handles = r.body.filter((h): h is { handle: string; label?: string } =>
+      isRecord(h) && typeof h['handle'] === 'string' && (h['label'] === undefined || typeof h['label'] === 'string'))
+      .map((h) => ({ handle: h.handle, ...(h.label ? { label: h.label } : {}) }));
+    if (model.step === 'values') draw();
+  }
+
   async function ask(field: string): Promise<void> {
-    const handoff = deps.askSecret ? await deps.askSecret(opts.appId, field) : { note: SECRET_ASK_UNAVAILABLE };
+    const handoff = deps.askSecret ? await deps.askSecret(opts.appId, field) : await askLive(field);
     if (disposed) return;
     if ('approvalId' in handoff) {
       model.note = 'Enter the secret in AuraOS\'s own dialog. This form never sees it.';
@@ -344,6 +362,7 @@ export function mountSetupWindow(body: HTMLElement, opts: SetupWindowOptions, de
 
   draw();
   void refresh();
+  void loadHandles();
   return { element: root, dispose, refresh };
 }
 

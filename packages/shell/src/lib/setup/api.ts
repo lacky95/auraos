@@ -36,10 +36,10 @@ import { json } from '../approvals/service.ts';
 import { liveSetupService, SETUP_UNAVAILABLE } from './service.ts';
 
 /** The engine call a route makes. */
-export type SetupOp = 'state' | 'profiles' | 'plan' | 'values' | 'setValues' | 'apply' | 'resume' | 'repair' | 'reconfigure';
+export type SetupOp = 'state' | 'profiles' | 'plan' | 'values' | 'setValues' | 'apply' | 'resume' | 'repair' | 'reconfigure' | 'secrets' | 'askSecret';
 
 /** The calls that change something (the desktop's Origin for a cookie caller). */
-const CHANGES: ReadonlySet<SetupOp> = new Set(['setValues', 'apply', 'resume', 'repair', 'reconfigure']);
+const CHANGES: ReadonlySet<SetupOp> = new Set(['setValues', 'apply', 'resume', 'repair', 'reconfigure', 'askSecret']);
 /** The calls that take a proposal (`plan` only by POST). `resume` takes none: it continues the recorded run. */
 const PROPOSES: ReadonlySet<SetupOp> = new Set(['plan', 'setValues', 'apply', 'repair', 'reconfigure']);
 
@@ -261,6 +261,16 @@ export async function handleSetup(ctx: RouteCtx, op: SetupOp, deps: SetupRouteDe
       case 'profiles': return json(await svc.profiles(appId));
       case 'plan': return json(ctx.request.method === 'GET' ? await svc.plan(appId) : await svc.plan(appId, proposal));
       case 'values': return json(await svc.values(appId));
+      case 'secrets': return json(await svc.secretHandles(appId, actor));
+      case 'askSecret': {
+        // Only a secret field the app declares (base or a profile); the body carries nothing.
+        const field = ctx.params['field'] ?? '';
+        if (!secretFields(manifest).has(field)) {
+          const e = invalid(`${field || '(none)'} is not a secret field of ${appId}`, { manifestField: 'setup.fields' });
+          return json(e, errorStatus(e));
+        }
+        return json(await svc.askSecret(appId, field, actor), 202);
+      }
       default: {
         const o = await (op === 'resume' ? svc.resume(appId, actor) : svc[op](appId, proposal, actor));
         return json(o, outcomeStatus(o));

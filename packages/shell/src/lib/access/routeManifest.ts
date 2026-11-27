@@ -709,6 +709,10 @@ const routes: RouteAccessManifest['routes'] = {
   '/api/apps/[id]/setup/resume': { methods: { POST: SETUP_CHANGE } },
   '/api/apps/[id]/setup/repair': { methods: { POST: SETUP_CHANGE } },
   '/api/apps/[id]/setup/reconfigure': { methods: { POST: SETUP_CHANGE } },
+  // The owner's secret hand-off (D56): the handles this app holds (no value), and `ask`, which creates the
+  // owner's credential.store request for one secret field (the value is typed into the shell's dialog only).
+  '/api/apps/[id]/setup/secrets': { methods: { GET: SETUP_READ } },
+  '/api/apps/[id]/setup/secrets/[field]': { methods: { POST: SETUP_CHANGE } },
   // D108 value delivery: the app's own server reads its own effective setup
   // values by its instance token (SDK osClient.setup.config()); never a page,
   // never another installation's or user's values; secrets as handles only.

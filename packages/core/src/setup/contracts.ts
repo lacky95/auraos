@@ -554,6 +554,25 @@ export interface SetupServiceContract {
   reconfigure(appId: string, proposal: SetupProposal, actor: SetupActor): Promise<SetupOutcome>;
   /** The calling instance's own effective values (`/api/setup/self`). */
   selfConfig(instance: { appId: string; instanceId: string; userId?: string }): Promise<SetupConfigView>;
+  /**
+   * The vault handles this app already holds for the acting user (the
+   * `source: vault` picker, D56): names and handles, never a value.
+   */
+  secretHandles(appId: string, actor: SetupActor): Promise<SecretHandleOption[]>;
+  /**
+   * `source: ask` from the owner's side: creates the D56 `credential.store`
+   * request for this app and field (the owner types the value into the
+   * shell's own dialog; the app's handle is bound on approval). Only an
+   * active secret field of the app; never takes a value.
+   */
+  askSecret(appId: string, field: string, actor: SetupActor): Promise<{ approvalId: string }>;
+}
+
+/** One vault handle the setup can bind to a secret field (no value). */
+export interface SecretHandleOption {
+  handle: string;
+  /** The credential's name or label as the owner sees it. */
+  label?: string;
 }
 
 /** Compile-time proof that a setup refusal is a D105 body. */
