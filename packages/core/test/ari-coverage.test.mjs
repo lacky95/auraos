@@ -7,14 +7,15 @@
 //             Docker socket, a `proot` exec, a `/proc` scan, a runtime
 //             kind-string check, an `aura-${…instance…}` container name
 //   indirect  a runtime import of a file with a direct use (core), or a shell
-//             route reaching a kernel manager that holds the Docker mechanism
-//             (`mgr.mounts|portExpose|osSidecars|execBridge|container`)
+//             route reaching the container runner itself (`mgr.container`; the
+//             managers behind `mgr.mounts|portExpose|osSidecars|execBridge`
+//             hold no Docker mechanism since 5b-2 D and Phase 6 ari-rest)
 //
 // The provider boundary is the runtime modules and their runners. Everything
 // else that uses a runtime directly is either a listed, owner-approved
 // exemption (OS infrastructure, the host operator) or a BASELINE entry naming
-// its inventory row, its 5b-2 extraction row (stream D) and "at the latest
-// Phase 6" (owner decision 5). The baseline must shrink: an entry whose file no
+// its inventory row and its ledger row (PHASE6; only D-SDK is left after
+// Phase 6 ari-rest, owner decision 5). The baseline must shrink: an entry whose file no
 // longer uses a runtime fails until it is removed, and so does an inventory row
 // marked `bypass` that no baseline entry carries any more.
 //
