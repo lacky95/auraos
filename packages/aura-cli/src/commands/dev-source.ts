@@ -33,9 +33,12 @@ export interface AppSourceView {
   name:                 string;
   version:              string;
   scope:                'system' | 'global' | 'user';
-  /** The patch key (a system-app overlay: the system app's installation). */
-  installationId:       string;
-  activeInstallationId: string;
+  /**
+   * The patch key (a system-app overlay: the system app's installation).
+   * null: the app has no installation record (App Host) yet.
+   */
+  installationId:       string | null;
+  activeInstallationId: string | null;
   overlay:              boolean;
   mode:                 'closed' | 'open';
   defaultMode:          'closed' | 'open';
@@ -206,6 +209,18 @@ export function appFromArgOrCwd(app: string | undefined, cwd = process.cwd()): s
   fail('name the app (id or name), or run this inside its source or patch workspace');
 }
 
+/** Why an app without an installation record (App Host) has no patches or workspaces yet, and what repairs it. */
+export function noInstallationMessage(appId: string): string {
+  return `${appId} has no installation record yet, so it has no patch repository or workspaces. `
+    + 'The shell gives every app one when it discovers it; one it missed gets it at the next shell start '
+    + '(the boot migration).';
+}
+
+/** Patches and workspaces belong to an installation: fail clearly when the app has none. */
+export function requireInstallation<T extends Pick<AppSourceView, 'appId' | 'installationId'>>(v: T): asserts v is T & { installationId: string } {
+  if (!v.installationId) fail(noInstallationMessage(v.appId));
+}
+
 /**
  * The installation's patch repo (git; the series is created on the first
  * save): one dir per installation on the app-data volume, bound into this
@@ -213,6 +228,7 @@ export function appFromArgOrCwd(app: string | undefined, cwd = process.cwd()): s
  * `AURA_PATCHES_DIR` (tests only) puts it at `<dir>/<installationId>` instead.
  */
 export async function patchRepoOf(v: Pick<AppSourceView, 'appId' | 'installationId' | 'patches'>): Promise<string> {
+  requireInstallation(v);
   if (!/^[0-9a-f-]{8,64}$/i.test(v.installationId)) fail(`unexpected installation id '${v.installationId}'`);
   const override = patchesOverride();
   if (override) return join(override, v.installationId);
@@ -242,18 +258,24 @@ export function upstreamBase(v: AppSourceView): SeriesBase | null {
 
 // ─── dev status ─────────────────────────────────────────────────────────────
 
-export function printStatus(v: AppSourceView, local: { repo: string; head: string | null; active: string | null; patches: number; base: SeriesBase | null }): void {
+/** `local` null: the app has no installation record, so no patch repository. */
+export function printStatus(v: AppSourceView, local: { repo: string; head: string | null; active: string | null; patches: number; base: SeriesBase | null } | null): void {
   const short = (s?: string | null) => (s ? s.slice(0, 12) : color.dim('(none)'));
   console.log(`${color.bold(v.appId)} ${color.dim(`${v.name} ${v.version} · ${v.scope}${v.overlay ? ' (patched overlay of a system app)' : ''}`)}`);
   console.log(`  mode:       ${v.mode === 'open' ? color.green('open') : color.yellow('closed')}  ${color.dim(`(release default: ${v.defaultMode}; from ${v.modeFrom})`)}`);
   console.log(`  source:     ${v.source.path}  ${v.source.mounted ? (v.source.writable ? color.green('writable') : color.dim('read-only')) : color.yellow('not mounted')}`);
   const u = v.upstream;
   console.log(`  upstream:   ${u?.repository ?? color.dim('(no repository)')}${u?.commit ? ` @ ${short(u.commit)}` : ''}${u?.dirty ? color.yellow(' (released with uncommitted changes)') : ''}`);
-  if (local.base && local.base.commit !== u?.commit) {
-    console.log(`  base:       ${short(local.base.commit)} ${color.yellow('(the saved series is on another commit than the install)')}`);
+  if (!local) {
+    console.log(`  patches:    ${color.yellow('no installation record yet')}`);
+    warn(noInstallationMessage(v.appId));
+  } else {
+    if (local.base && local.base.commit !== u?.commit) {
+      console.log(`  base:       ${short(local.base.commit)} ${color.yellow('(the saved series is on another commit than the install)')}`);
+    }
+    console.log(`  patches:    ${local.patches ? `${local.patches} in ${local.repo} @ ${short(local.head)}` : color.dim('(none saved)')}`);
+    console.log(`  active:     ${local.active ? short(local.active) : color.dim('(no patches installed)')}${local.active && local.head && local.active !== local.head ? color.yellow('  (saved changes not activated yet)') : ''}`);
   }
-  console.log(`  patches:    ${local.patches ? `${local.patches} in ${local.repo} @ ${short(local.head)}` : color.dim('(none saved)')}`);
-  console.log(`  active:     ${local.active ? short(local.active) : color.dim('(no patches installed)')}${local.active && local.head && local.active !== local.head ? color.yellow('  (saved changes not activated yet)') : ''}`);
   console.log(`  workspace:  ${v.workspace ? v.workspace.path : color.dim(v.workspaces.length ? `(not bound; existing: ${v.workspaces.join(', ')})` : '(none)')}`);
   if (isBuiltInLater(v)) console.log(`  patching:   ${color.yellow(`built-in app — ${SYSTEM_APP_LATER_MESSAGE}`)}`);
   console.log(`  next:       ${v.next}`);
@@ -270,6 +292,11 @@ workspace. Binds a source view into this Terminal (read-only for closed
 installs). Use the paths it prints; never reach app source another way.`)
     .action(async (app: string | undefined, o: { json?: boolean }) => {
       const v = await getAppSource(appFromArgOrCwd(app), { ensure: true });
+      if (!v.installationId) {
+        if (o.json) { console.log(JSON.stringify({ ...v, patchRepo: null }, null, 2)); return; }
+        printStatus(v, null);
+        return;
+      }
       const repo = await patchRepoOf(v);
       const hasRepo = existsSync(join(repo, '.git'));
       const series = hasRepo ? safeSeries(repo) : null;

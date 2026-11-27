@@ -164,7 +164,7 @@ function rootHelp(program: Command, helper: Help): string {
   // From the registry, so a new resource type shows up here by itself.
   out.push('', `${color.bold('Short names:')} ${RESOURCES.map((r) => shortName(r)).join(' ')}`);
   out.push('', color.bold('Flags'));
-  for (const o of program.options.filter((x) => x.long !== '--version')) {
+  for (const o of program.options) {
     const desc = o.long === '--shell-url' ? 'Default: $OS_API_BASE or http://127.0.0.1:3000' : o.description;
     out.push(line(helper.optionTerm(o), desc));
   }
@@ -243,13 +243,23 @@ complete -o default -F _aura_complete aura
 
 // ─── Program ─────────────────────────────────────────────────────────────────
 
+/**
+ * `aura -V` / `aura --version`: only as the first argument (src/index.ts
+ * answers it before parsing). Commander matches a root option anywhere on the
+ * line, so a root `--version` swallowed a subcommand's own flag: `aura dev
+ * clone a b --version 1.2.0` printed the CLI version and cloned nothing.
+ */
+export function isVersionRequest(args: readonly string[]): boolean {
+  return args[0] === '-V' || args[0] === '--version';
+}
+
 export function buildProgram(): Command {
   const program = new Command();
 
   program
     .name('aura')
     .description('AuraOS control CLI — manage apps, instances, sidecars, capabilities and OS state.')
-    .version(VERSION)
+    // No `.version()`: see isVersionRequest.
     .option('--shell-url <url>', 'Override AuraOS shell URL (default: $OS_API_BASE or http://127.0.0.1:3000)')
     // Inherited by every subcommand created below: a stray extra argument is
     // an error instead of being silently dropped (`aura jump foo` used to open

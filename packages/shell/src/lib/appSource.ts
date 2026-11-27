@@ -66,6 +66,8 @@ export interface AppSourceDeps {
   };
   /** The App Host installation of an app in a scope (`apphost:install:*`), or null. */
   installationId(appId: string, scope: string): Promise<string | null>;
+  /** The boot backfill for one app: its missing installation and host (AppManager `syncAppHost`). */
+  syncAppHost(appId: string): Promise<string | null>;
   nexus: Pick<NexusManager, 'install' | 'setSourceMode' | 'rollbackTrees' | 'records'>;
 }
 
@@ -88,6 +90,7 @@ export function liveAppSourceDeps(authenticate: AppSourceDeps['authenticate'], a
     },
     mounts: mgr.mounts,
     installationId: async (appId, scope) => (await core.getAppHostServices().registry.findInstallation(appId, scope))?.installationId ?? null,
+    syncAppHost: (appId) => mgr.syncAppHost(appId),
     nexus: core.getNexusManager(),
   };
 }
@@ -127,7 +130,13 @@ function isOverlay(deps: AppSourceDeps, app: ScopedApp): boolean {
  */
 async function patchInstallation(deps: AppSourceDeps, app: ScopedApp): Promise<{ key: string | null; active: string | null; overlay: boolean }> {
   const overlay = isOverlay(deps, app);
-  const active = await deps.installationId(app.id, app.scopeId).catch(() => null);
+  let active = await deps.installationId(app.id, app.scopeId).catch(() => null);
+  if (!active) {
+    // A registered app without its installation (a clone before 0.0.50 never
+    // got one): the boot migration's idempotent sync, for this app only.
+    await deps.syncAppHost(app.id).catch(() => null);
+    active = await deps.installationId(app.id, app.scopeId).catch(() => null);
+  }
   const key = overlay ? await deps.installationId(app.id, 'system').catch(() => null) : active;
   return { key, active, overlay };
 }
