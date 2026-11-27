@@ -19,7 +19,7 @@ import type { ResolvedHome } from '../homes/types.js';
 import { authFailureReason, isAuthFailure, parseImageRef } from '../nexus/RegistryAuth.js';
 import type { PullCredential } from '../nexus/types.js';
 import {
-  SidecarIdentityError, SpecError, resolveSidecarSpec, specHash,
+  PrivateHomeSidecarError, SidecarIdentityError, SpecError, resolveSidecarSpec, specHash,
   type ResolvedSidecarSpec, type SidecarSetupValues, type SidecarSpawnRequest,
 } from './sidecar-spec.js';
 import { isEnvValueRef } from '../types/setupManifest.js';
@@ -147,6 +147,12 @@ interface SidecarManagerOpts {
    * when it can't be resolved, and the sidecar is then not created.
    */
   appHome(instanceId: string): Promise<ResolvedHome | null>;
+  /**
+   * D107-a (D108 P9): does `owner-environment` template `template` of this
+   * instance hold its own `home.private.sidecar:<template>` grant now? Asked
+   * only for a parent that runs with a Private Home. Absent: never.
+   */
+  ownerEnvironment?(instanceId: string, template: string): Promise<boolean>;
   /**
    * Stream C: the Context keys the parent's app holds now (declared AND
    * granted) and every Context key name (`known`), for `envInherit`.
@@ -356,6 +362,9 @@ export class SidecarManager {
     if (inst.privateHome) {
       const refusal = privateHomeSidecarRefusal(inst.runtime ?? 'unknown', inst.appId, spec.name, spec.network ?? 'shared');
       if (refusal) throw refusal;
+      // D107-a §4: a home sidecar of a Private Home instance gets that home and identity only as
+      // `owner-environment` with its own grant; anything else is refused, never given another home.
+      if (spec.inheritHome) await this.requireOwnerEnvironment(instanceId, inst.appId, spec);
     }
     const hash = specHash(spec);
     const container = this.wl().ref(instanceId, spec.name);
@@ -453,11 +462,15 @@ export class SidecarManager {
         ...(spec.network ? { network: spec.network } : {}),
         createdAt: new Date().toISOString(),
       };
-      // inheritHome: the parent's App Home (D65), the one its app process has; never a Private Home.
+      // inheritHome: the parent's App Home (D65), the one its app process has. A Private Home only for an
+      // authorized owner-environment sidecar of a Private Home instance (checked above, D107-a).
       let home: ResolvedHome | null = null;
       if (spec.inheritHome) {
         home = await this.opts.appHome(instanceId);
-        if (!home || home.kind === 'private') throw new Error(`sidecar ${spec.name}: the app's home can't be resolved, so inheritHome has nothing to mount; not created`);
+        if (!home) throw new Error(`sidecar ${spec.name}: the app's home can't be resolved, so inheritHome has nothing to mount; not created`);
+        if (home.kind === 'private' && !(inst.privateHome && spec.ownerEnvironment)) {
+          throw new Error(`sidecar ${spec.name}: the app runs with a Private Home, which only an authorized owner-environment sidecar shares; not created`);
+        }
       }
       const permissions = this.opts.registry.getById(inst.appId)?.permissions;
       const parentIdentity = this.opts.instance(instanceId)?.identity;
@@ -913,6 +926,29 @@ export class SidecarManager {
   }
 
   /** The workload as its runtime reports it: its name, state, tags (labels) and restarts. */
+  /**
+   * D107-a (D108 P9): a home sidecar of a Private Home instance. Only
+   * `home: owner-environment`, without privileges, capabilities, devices or
+   * its own user, and only while the template holds its own
+   * `home.private.sidecar:<template>` grant. Refused otherwise (D105 body),
+   * so it never gets a home and never runs as root.
+   */
+  private async requireOwnerEnvironment(instanceId: string, appId: string, spec: ResolvedSidecarSpec): Promise<void> {
+    const refuse = (message: string, code: 'requirement-unauthorized' | 'requirement-unsupported'): never => {
+      throw new PrivateHomeSidecarError(code, spec.template, message);
+    };
+    if (!spec.ownerEnvironment) {
+      refuse(`sidecar ${spec.name}: ${appId} runs with your Private Home, and template ${spec.template} asks for the app's home: `
+        + 'only a home: owner-environment sidecar with its own grant shares it; not created', 'requirement-unsupported');
+    }
+    if (spec.privileged || spec.capabilities.length || spec.devices.length || spec.user !== undefined) {
+      refuse(`sidecar ${spec.name}: template ${spec.template} sets privileges, capabilities, devices or its own user, so it can't get your Private Home; not created`, 'requirement-unsupported');
+    }
+    if (!(await this.opts.ownerEnvironment?.(instanceId, spec.template).catch(() => false))) {
+      refuse(`sidecar ${spec.name}: template ${spec.template} holds no home.private.sidecar:${spec.template} grant, so it gets no home; not created`, 'requirement-unauthorized');
+    }
+  }
+
   private async inspect(container: string): Promise<{ name: string; state: string; labels: Record<string, string>; restarts: number } | null> {
     const w = await this.wl().inspect(container);
     return w ? { name: w.ref, state: w.state, labels: w.tags, restarts: w.restarts } : null;

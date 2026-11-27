@@ -49,3 +49,10 @@ export {
 // ── P8 configuration and change management ─────────────────────────────────
 
 // ── P9 D107-a owner subset ──────────────────────────────────────────────────
+export {
+  grantHomePrivate, homePrivateAuthorized, loadHomePrivateFacts, privateHomeSpawnPort, privateHomeTeardown,
+  HomePrivateError, HOME_PRIVATE_AUDIT,
+  type HomePrivateDecision, type HomePrivateFacts, type HomePrivateFactsDeps, type HomePrivateFactsInput, type HomePrivateGrantDeps,
+  type HomePrivateGrantInput, type HomePrivateGrantResult, type HomePrivateRequest, type HomePrivateService, type PrivateHomeSpawnDeps,
+  type PrivateHomeSpawnPort, type PrivateHomeTeardownDeps, type PrivateHomeTeardownInput, type PrivateHomeTeardownResult,
+} from './homeEnvironment.js';

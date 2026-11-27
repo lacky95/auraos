@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { AppManifest } from '../types/manifest.js';
 import type { AuraErrorBody } from '../errors/contracts.js';
 import { SHARED_HOME_PATH } from './tool-provision.js';
-import { isEnvValueRef, type EnvValue } from '../types/setupManifest.js';
+import { isEnvValueRef, type EnvValue, type SidecarHome } from '../types/setupManifest.js';
 
 /**
  * What an app may ask the OS to start, and what it gets. Pure — every rule
@@ -113,6 +113,14 @@ export interface ResolvedSidecarSpec {
    */
   inheritHome?: true;
   /**
+   * D107 §4: `services[].home: owner-environment` (it also sets
+   * `inheritHome`). In an App Home instance it is exactly `inheritHome`; in
+   * a `private` instance it gets the instance's Private Home and the user's
+   * identity, only with its own `home.private.sidecar:<template>` grant
+   * (SidecarManager). Present only when set: every other spec hash is unchanged.
+   */
+  ownerEnvironment?: true;
+  /**
    * The template declares `tools`: the sidecar gets its OWN allowlist dir at
    * /aura/my-tools (SidecarManager provisions it — template list ∪ runtime
    * grants, ∩ the app's tools[]). Only the flag is part of the spec: the list
@@ -206,6 +214,41 @@ export class SidecarIdentityError extends SpecError {
   }
 }
 
+/**
+ * A template's home (D107 §4): `home`, else the `inheritHome` alias (`app`),
+ * else none. The manifest schema refuses a contradicting pair.
+ */
+export function templateHome(t: { home?: SidecarHome; inheritHome?: boolean }): SidecarHome {
+  return t.home ?? (t.inheritHome ? 'app' : 'none');
+}
+
+/**
+ * The network a template's sidecars get: `network`, else `instance` for a
+ * sidecar with a home (it holds the app's or the user's credentials), else
+ * `shared`. The one default (resolveSidecarSpec, privateHomeNetwork.ts).
+ */
+export function templateNetwork(t: { network?: 'instance' | 'shared'; home?: SidecarHome; inheritHome?: boolean }): 'instance' | 'shared' {
+  return t.network ?? (templateHome(t) !== 'none' ? 'instance' : 'shared');
+}
+
+/**
+ * D107-a (D108 P9): a home sidecar of a Private Home instance that may not
+ * share it (not `owner-environment`, unsafe template, or no
+ * `home.private.sidecar:<template>` grant). Not created; the D105 body
+ * names the missing grant or field.
+ */
+export class PrivateHomeSidecarError extends SpecError {
+  readonly body: AuraErrorBody;
+  constructor(readonly code: 'requirement-unauthorized' | 'requirement-unsupported', template: string, message: string) {
+    super(code === 'requirement-unauthorized' ? 403 : 409, message);
+    this.name = 'PrivateHomeSidecarError';
+    this.body = {
+      error: code, message, category: code === 'requirement-unauthorized' ? 'missing-permission' : 'unsupported-feature',
+      manifestField: `services[${template}].home`, missing: [`home.private.sidecar:${template}`],
+    };
+  }
+}
+
 export const SIDECAR_NAME_RE = /^[a-z][a-z0-9-]{0,47}$/;
 const ALLOWED_KEYS = new Set(['template', 'name', 'suffix', 'image', 'env', 'envInherit', 'command', 'mounts', 'tools', 'replace', 'takeover', 'wait']);
 
@@ -295,8 +338,11 @@ export function resolveSidecarSpec(req: SidecarSpawnRequest, ctx: ResolveContext
   if (tpl.tools && !ctx.can('sidecars.tools')) {
     throw new SpecError(403, `template '${tpl.name}' declares tools — ${ctx.appId} needs 'sidecars.tools' to grant tools to its sidecars (aura grant perms ${ctx.appId} sidecars.tools)`);
   }
-  if (tpl.inheritHome && (tpl.volumes ?? []).some((v) => v.target.replace(/\/+$/, '') === SHARED_HOME_PATH)) {
-    throw new SpecError(400, `template '${tpl.name}' sets inheritHome and also mounts a volume at ${SHARED_HOME_PATH} — drop one of them`);
+  // D107 §4: `home` (none | app | owner-environment); `inheritHome: true` is the alias of `app`.
+  const home = templateHome(tpl);
+  const inheritHome = home !== 'none';
+  if (inheritHome && (tpl.volumes ?? []).some((v) => v.target.replace(/\/+$/, '') === SHARED_HOME_PATH)) {
+    throw new SpecError(400, `template '${tpl.name}' sets ${tpl.home ? `home ${tpl.home}` : 'inheritHome'} and also mounts a volume at ${SHARED_HOME_PATH} — drop one of them`);
   }
   const volumes: ResolvedVolume[] = (tpl.volumes ?? []).map((v) => {
     if (v.volume || v.subpath) {
@@ -347,9 +393,10 @@ export function resolveSidecarSpec(req: SidecarSpawnRequest, ctx: ResolveContext
     inheritIdentity: tpl.inheritIdentity === true,
     inheritPermissions: tpl.inheritPermissions === true,
     inheritTools: tpl.inheritTools === true,
-    ...(tpl.inheritHome ? { inheritHome: true as const } : {}),
+    ...(inheritHome ? { inheritHome: true as const } : {}),
+    ...(home === 'owner-environment' ? { ownerEnvironment: true as const } : {}),
     ...(tpl.tools ? { ownTools: true as const } : {}),
-    ...((tpl.network ?? (tpl.inheritHome ? 'instance' : 'shared')) === 'instance' ? { network: 'instance' as const } : {}),
+    ...(templateNetwork(tpl) === 'instance' ? { network: 'instance' as const } : {}),
     ...(Object.keys(secretEnv).length ? { secretEnv } : {}),
     mounts,
   };

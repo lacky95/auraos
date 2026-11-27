@@ -155,6 +155,13 @@ export interface SpawnIdentity extends LinuxIdentity {
    * no-new-privileges (spawn/identityArgs.ts). Absent on legacy root.
    */
   approvedRoot?: true;
+  /**
+   * D107-a identity (A): an app process that runs as its user (`private`
+   * home environment, `home.private` grant), not a session host. It gets
+   * the plain identity flags (`--user <uid>:<gid>`, no capability), never the
+   * System Terminal's launcher model (spawn/identityArgs.ts).
+   */
+  userApp?: true;
 }
 
 export const ROOT_SPAWN_IDENTITY: Readonly<SpawnIdentity> = Object.freeze({ uid: 0, gid: 0, range: 'root' as const });
@@ -167,6 +174,12 @@ export interface SpawnIdentityRequest {
   /** Null until the spawn seam resolves installations (stream H/A). */
   installationId: string | null;
   userId?: string;
+  /**
+   * D107-a: the effective home environment of this start (`private` only
+   * when the setup's effective configuration says so and `home.private`
+   * counts; the kernel's `privateHome` port). Absent: `app`.
+   */
+  homeEnvironment?: 'app' | 'private';
 }
 
 export interface SpawnIdentityProvider {

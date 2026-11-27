@@ -17,11 +17,10 @@
 import type { AppManifest } from '../types/manifest.js';
 import { requireNetworkIsolation, type RuntimeModule } from '../runtimes/ari.js';
 import { RuntimeFeatureError } from '../runtimes/types.js';
+import { templateNetwork } from './sidecar-spec.js';
 
-/** The network a `services[]` template's sidecars get (the default of sidecar-spec.ts `resolveSidecarSpec`). */
-export function templateNetwork(t: { network?: 'instance' | 'shared'; inheritHome?: boolean }): 'instance' | 'shared' {
-  return t.network ?? (t.inheritHome ? 'instance' : 'shared');
-}
+/** The network a `services[]` template's sidecars get (the one default, sidecar-spec.ts). */
+export { templateNetwork };
 
 /**
  * Throws `RuntimeFeatureError` (`feature-unsupported`; `missing` names the

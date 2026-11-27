@@ -74,6 +74,16 @@ export function isSessionIdentity(identity: SpawnIdentity | undefined | null): b
 }
 
 /**
+ * A session HOST identity (stream T2, the System Terminal): a user identity
+ * whose container starts the launcher. A D107-a `userApp` (an app process
+ * running as its user) is a user identity but no session host: the plain
+ * identity flags, no service account.
+ */
+export function isSessionHostIdentity(identity: SpawnIdentity | undefined | null): boolean {
+  return isSessionIdentity(identity) && identity!.userApp !== true;
+}
+
+/**
  * The account name of a spawn identity: `app-<installation>` for an app
  * identity; a session identity's username (D69), unless it is not a safe
  * account name or one the base files use (`user-<uid>` then).
@@ -93,7 +103,7 @@ export function renderIdentityFiles(identity: SpawnIdentity, installationId: str
   const session = isSessionIdentity(identity);
   const gecos = session ? 'AuraOS user' : 'AuraOS app';
   // A session host's server runs as the Terminal service account (stream T2).
-  const service = session ? [{ name: TERMINAL_SERVICE_ACCOUNT, uid: TERMINAL_SERVICE_UID, gid: TERMINAL_SERVICE_GID, gecos: 'AuraOS Terminal server', home: '/nonexistent', shell: '/usr/sbin/nologin' }] : [];
+  const service = isSessionHostIdentity(identity) ? [{ name: TERMINAL_SERVICE_ACCOUNT, uid: TERMINAL_SERVICE_UID, gid: TERMINAL_SERVICE_GID, gecos: 'AuraOS Terminal server', home: '/nonexistent', shell: '/usr/sbin/nologin' }] : [];
   return {
     passwd: renderPasswd(BASE_PASSWD, [{ name, uid: identity.uid, gid: identity.gid, gecos }, ...service]),
     group: renderGroup(BASE_GROUP, [{ name, gid: identity.gid }, ...service.map((x) => ({ name: x.name, gid: x.gid }))]),
@@ -172,7 +182,7 @@ export function containerIdentityArgs(identity: SpawnIdentity | undefined, opts?
   if (!isNonRootIdentity(identity)) return [];
   if (!opts) throw new Error('a non-root app identity needs its identity files');
   return [
-    ...(isSessionIdentity(identity) ? sessionHostFlags() : processIdentityFlags(identity)),
+    ...(isSessionHostIdentity(identity) ? sessionHostFlags() : processIdentityFlags(identity)),
     ...identityFileMounts(opts.appDataVolume, opts.instanceId),
     '-e', `AURA_RUN_AS=${isSessionIdentity(identity) ? 'user' : 'app'}`,
     // No Astro telemetry state in the App Home (and no first-run notice).

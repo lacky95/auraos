@@ -23,11 +23,13 @@ const SESSION_HOST_APP_IDS: ReadonlySet<string> = new Set([TERMINAL_APP_ID]);
  * context (the `user-environment` execution context, homes/types.ts). The
  * one predicate the identity provider, the home request, the pool, the jump
  * guard and the session enders branch on; nothing else keys this on an app
- * id. Today the System Terminal's instances (D69); D107-a adds an instance
- * whose effective home is `private` (the `home.private` grant).
+ * id. The System Terminal's instances (D69), and (D107-a, D108 P9) an
+ * instance whose effective home environment is `private` (the setup's
+ * effective configuration, authorized by `home.private`): callers that know
+ * it pass `homeEnvironment`; `{appId}` alone answers for the Terminal only.
  */
-export function isUserEnvironment(instance: { appId: string }): boolean {
-  return SESSION_HOST_APP_IDS.has(instance.appId);
+export function isUserEnvironment(instance: { appId: string; homeEnvironment?: 'app' | 'private' }): boolean {
+  return SESSION_HOST_APP_IDS.has(instance.appId) || instance.homeEnvironment === 'private';
 }
 
 /** Apps that act for a user as the owner's agents (the shell relays their calls, D89 B4). */

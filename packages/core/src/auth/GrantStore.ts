@@ -107,6 +107,20 @@ export const credentialReadPermission = (name: string): string => `credential.re
 export const userScope = (userId: string): GrantScope => ({ kind: 'user', id: userId });
 
 /**
+ * A user's Private Home for an app (D107-a, D108 P9): `home.private` (the app
+ * process runs as that user with that user's Private Home) and
+ * `home.private.sidecar:<name>` (one `owner-environment` sidecar of such an
+ * instance gets the same). Same pattern as `credential.read:<NAME>`: an app
+ * subject, scope `{kind: 'user', id}` (the home's own user), pinned to the
+ * installation, never OS-wide. Given only on that user's forced + fresh
+ * `app.setup.apply` approval (core setup/homeEnvironment.ts
+ * `grantHomePrivate`), never by an install or update approval. The names are
+ * setup/contracts.ts `HOME_PRIVATE_PERMISSION` / `homePrivateSidecarPermission`
+ * (sidecar names: sidecar-spec.ts `SIDECAR_NAME_RE`).
+ */
+export const HOME_PRIVATE_PERMISSION_RE = /^home\.private(\.sidecar:[a-z][a-z0-9-]{0,47})?$/;
+
+/**
  * A key of the system Context reaching an app (stream C, Q7): one grant per
  * app and key, OS-wide, pinned to the app's install scope. It counts only
  * while the app also declares the key in its manifest `context[]`; given by
@@ -118,7 +132,7 @@ export const contextReadPermission = (key: string): string => `context.read:${ke
 
 export function isPrivilegedPermission(p: string): boolean {
   return (PRIVILEGED_PERMISSIONS as readonly string[]).includes(p) || KV_OS_WRITE_PERMISSION_RE.test(p)
-    || CREDENTIAL_READ_PERMISSION_RE.test(p) || CONTEXT_READ_PERMISSION_RE.test(p);
+    || CREDENTIAL_READ_PERMISSION_RE.test(p) || CONTEXT_READ_PERMISSION_RE.test(p) || HOME_PRIVATE_PERMISSION_RE.test(p);
 }
 
 const SUBJECT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
@@ -213,15 +227,18 @@ export class GrantStore {
       return;
     }
     if (!isPrivilegedPermission(permission)) {
-      throw new GrantError(400, `'${permission}' cannot be granted here — grantable: ${GRANTABLE_PERMISSIONS.join(', ')}, system.kv.os.<topic>.write, credential.read:<NAME>, context.read:<KEY>`);
+      throw new GrantError(400, `'${permission}' cannot be granted here — grantable: ${GRANTABLE_PERMISSIONS.join(', ')}, system.kv.os.<topic>.write, credential.read:<NAME>, context.read:<KEY>, home.private[.sidecar:<name>]`);
     }
     if (CONTEXT_READ_PERMISSION_RE.test(permission) && (subject.kind !== 'app' || scope.kind !== 'os')) {
       throw new GrantError(400, 'a context.read:<KEY> grant is an app\'s, OS-wide');
     }
     const credential = CREDENTIAL_READ_PERMISSION_RE.test(permission);
-    if (credential || scope.kind === 'user') {
-      if (!credential || scope.kind !== 'user' || subject.kind !== 'app' || typeof scope.id !== 'string' || !USER_ID.test(scope.id)) {
-        throw new GrantError(400, 'a credential.read:<NAME> grant is an app\'s, for one user\'s vault');
+    const home = HOME_PRIVATE_PERMISSION_RE.test(permission);
+    if (credential || home || scope.kind === 'user') {
+      if (!(credential || home) || scope.kind !== 'user' || subject.kind !== 'app' || typeof scope.id !== 'string' || !USER_ID.test(scope.id)) {
+        throw new GrantError(400, home
+          ? 'a home.private grant is an app\'s, for one user\'s own Private Home'
+          : 'a credential.read:<NAME> grant is an app\'s, for one user\'s vault');
       }
       return;
     }

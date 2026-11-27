@@ -399,7 +399,8 @@ test('inheritHome fails closed: no resolvable App Home, or a Private Home, creat
   const svc = [{ name: 'home', image: 'alpine:3', command: ['sleep', 'infinity'], volumes: [], inheritHome: true }];
   await assert.rejects(fixture(t, { services: svc, appHome: null }).mgr.spawn(INST, { template: 'home' }, { instanceId: INST }), /inheritHome has nothing to mount/);
   const priv = { kind: 'private', hostPath: '/data/aura/home/default', volumeSubpath: 'aura/home/default', logicalPath: '/home/aura', uid: 1000, gid: 1000, mode: 0o700 };
-  await assert.rejects(fixture(t, { services: svc, appHome: priv }).mgr.spawn(INST, { template: 'home' }, { instanceId: INST }), /inheritHome has nothing to mount/);
+  // D108 P9: a Private Home only for an authorized owner-environment sidecar of a Private Home instance.
+  await assert.rejects(fixture(t, { services: svc, appHome: priv }).mgr.spawn(INST, { template: 'home' }, { instanceId: INST }), /only an authorized owner-environment sidecar shares/);
   assert.equal(d.containers.get(`aura-${INST}--home`), undefined);
 });
 

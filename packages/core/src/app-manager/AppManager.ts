@@ -65,6 +65,7 @@ import { HomeDeniedError, type HomeResolver, type ResolvedHome } from '../homes/
 import { kernelHomeResolver } from '../homes/HomeResolver.js';
 import { isUserEnvironment, TERMINAL_APP_ID } from '../system/systemApps.js';
 import { requirePrivateHomeIsolation } from './privateHomeNetwork.js';
+import type { PrivateHomeSpawnPort } from '../setup/homeEnvironment.js';
 import { appJumpPermission } from '../auth/GrantStore.js';
 import {
   APP_ROOT_EXECUTION_OPTION, RootExecutionError, executionConfigOf, executionDecision, type AppRootExecutionPolicy, type ExecutionApproval,
@@ -220,6 +221,8 @@ export class AppManager {
   /** Phase 5 spawn seams, used only by `spawnContext`. */
   private readonly homes: HomeResolver;
   private readonly identities: SpawnIdentityProvider;
+  /** D107-a (D108 P9): the effective home environment of a start (setup/homeEnvironment.ts); absent: every app `app`. */
+  private readonly privateHome: PrivateHomeSpawnPort | null;
   /**
    * The identity, user, grant and audit services, handed in by the
    * composition point (the shell's kernel init; Phase 6 `bootSystem()`), so
@@ -310,6 +313,13 @@ export class AppManager {
     /** Spawn seams (Phase 5): see `spawnContext`. Defaults reproduce today. */
     homes?: HomeResolver;
     identities?: SpawnIdentityProvider;
+    /**
+     * D107-a (D108 P9): which starts run with their user's Private Home (the
+     * setup's effective `homeEnvironment: private`, re-authorized at each
+     * start), and which owner-environment sidecars share it. From the
+     * composition root (`privateHomeSpawnPort`); absent: none does.
+     */
+    privateHome?: PrivateHomeSpawnPort;
     /** Stream C: the granted-Context lookups; default GrantStore, the system Context and the vault. */
     context?: GrantedContextDeps;
     /**
@@ -449,6 +459,7 @@ export class AppManager {
         identity: async (userId) => this.auth().identity.ensureUser(userId),
       },
     );
+    this.privateHome = opts.privateHome ?? null;
     this.rootExecutionPolicy = opts.rootExecutionPolicy ?? (async () => {
       const store = this.auth().securityPolicy;
       return securityPolicyValue(await store.get(), APP_ROOT_EXECUTION_OPTION) === 'refuse' ? 'refuse' : 'approve';
@@ -543,11 +554,17 @@ export class AppManager {
         const manifest = inst ? this.registry.getById(inst.appId) : undefined;
         if (!inst || !manifest) return null;
         const scope = this.scopeRegistry.getById(manifest.scopeId);
+        // D107-a (D108 P9): an app instance running as its user (identity A) has that user's Private Home.
+        const userApp = inst.runAs === 'user' && !isUserEnvironment({ appId: inst.appId }) && !!inst.uid && !!inst.gid && !!inst.owner;
         return {
           appId: inst.appId, instanceDataDir: join(scope.dataDir, 'apps', inst.appId, instanceId),
           ...(inst.owner ? { owner: inst.owner } : {}),
           // D107 / D9: an instance with a Private Home gets no sidecar on the shared network.
-          ...(this.instanceHomes.get(instanceId)?.kind === 'private' ? { privateHome: true, runtime: inst.sandbox } : {}),
+          ...(this.instanceHomes.get(instanceId)?.kind === 'private' || userApp ? { privateHome: true, runtime: inst.sandbox } : {}),
+          // Its authorized owner-environment sidecars run as that user (B12 base: as the app process).
+          ...(userApp ? {
+            identity: { uid: inst.uid!, gid: inst.gid!, range: inst.owner === DEFAULT_OWNER_ID ? 'owner' as const : 'user' as const, userId: inst.owner!, userApp: true as const },
+          } : {}),
           // P5-3: its latched identity, for the aura-base inheritHome sidecar policy.
           ...(inst.runAs === 'app' && inst.uid && inst.gid ? { identity: { uid: inst.uid, gid: inst.gid, range: 'app' as const } } : {}),
           // An approved root request: uid 0 without capabilities, the same for its aura-base inheritHome sidecar.
@@ -555,6 +572,11 @@ export class AppManager {
         };
       },
       appHome: (instanceId) => this.appHomeOf(instanceId),
+      // D107-a: an owner-environment sidecar shares a Private Home only with its own grant, checked now.
+      ownerEnvironment: async (instanceId, template) => {
+        const inst = this.instances.get(instanceId);
+        return !!inst?.owner && !!this.privateHome && this.privateHome.sidecarAuthorized(inst.appId, inst.owner, template);
+      },
       context: (instanceId) => this.instanceContext(instanceId),
       changed: () => { void this.syncSidecars(2).catch(() => undefined); },
       // Private images: only the login of the app's own install source (pullCredentialFor).
@@ -2486,6 +2508,9 @@ export class AppManager {
     }
     // The user it is for: its owner, or the user a pool member is warmed for (D78; stream T keys the pool per user).
     const user = opts.owner ?? (opts.inPool ? this.poolHomeUser(appId, opts.manifest) : undefined);
+    // D107-a (D108 P9): the effective home environment, re-authorized now (a refusal throws, never `app`).
+    // `private`: identity (A), the user's uid with their Private Home; only for its own user, never a pool member.
+    const homeEnvironment = this.privateHome ? await this.privateHome.homeEnvironmentFor(appId, opts.inPool ? undefined : user) : 'app';
     // Owner decision 5-main item 3 (identity/execution.ts): a root request runs only with the owner's
     // approval of exactly its config; otherwise the app does not start. Never a silent escalation.
     const requested = executionConfigOf(opts.manifest);
@@ -2502,6 +2527,7 @@ export class AppManager {
     let identity = await this.identities.identityFor({
       appId, installationId: opts.installation.installationId, runAs: opts.installation.runAs ?? 'root',
       ...(user ? { userId: user } : {}),
+      ...(homeEnvironment === 'private' ? { homeEnvironment } : {}),
     });
     if (execution.kind === 'approved-root' && identity.range === 'root' && identity.uid === 0) {
       // Runtime root only: no capability, no-new-privileges, no socket (spawn/identityArgs.ts).
@@ -2511,7 +2537,13 @@ export class AppManager {
       throw new RuntimeCapabilityError(opts.runtime.runtime, ['identity'],
         `${appId} runs as its app identity, and runtime ${opts.runtime.runtime} can't enforce one: not started (no root fallback)`);
     }
-    const home = await this.homes.resolve(this.homeRequest(appId, opts.manifest, opts.installation.installationId, identity, opts.runtime.capabilities, user, !!opts.preview));
+    const home = await this.homes.resolve(this.homeRequest(appId, opts.manifest, opts.installation.installationId, identity, opts.runtime.capabilities, user, !!opts.preview,
+      isUserEnvironment({ appId, homeEnvironment })));
+    if (homeEnvironment === 'private' && ownerHomeAwaitsOwnership(home, identity.userId)) {
+      // No deploy window for an app: as the user it could read none of a root-owned home, and it never runs as root.
+      throw new HomeDeniedError('ownership-pending', `${appId}: your Private Home still belongs to root, so the app can't run with it: `
+        + 'run `aura admin homes ownership --dry-run`, then `--apply <digest>`. No root fallback.');
+    }
     if (isUserEnvironment({ appId }) && isNonRootIdentity(identity)
       && ownerHomeAwaitsOwnership(home, identity.userId)) {
       // The owner's Private Home is still root's (D70: only the owner-approved
@@ -2564,8 +2596,8 @@ export class AppManager {
   private homeRequest(
     appId: string, manifest: AppManifest, installationId: string, identity: { uid: number; gid: number } | undefined,
     runtime: ResolvedRuntime['capabilities'], user: string | undefined, preview = false,
+    userEnv = isUserEnvironment({ appId }),
   ): Parameters<HomeResolver['resolve']>[0] {
-    const userEnv = isUserEnvironment({ appId });
     return {
       installationId, environmentScope: manifest.environmentScope ?? 'global',
       executionContext: userEnv ? 'user-environment' : 'application',
@@ -2769,7 +2801,9 @@ export class AppManager {
       const runtime = await this.resolveRuntime(inst.appId, manifest, { sourceMode: this.sourceModeOf(inst.appId)?.mode ?? 'closed' });
       const identity = { uid: inst.uid ?? 0, gid: inst.gid ?? 0 };
       const user = inst.owner ?? (inst.inPool ? this.poolHomes.get(instanceId) || undefined : undefined);
-      const home = await this.homes.resolve(this.homeRequest(inst.appId, manifest, installation.installationId, identity, runtime.capabilities, user, !!inst.preview));
+      // D107-a: an adopted instance that runs as its user (`runAs: user`) is a user environment (its Private Home).
+      const home = await this.homes.resolve(this.homeRequest(inst.appId, manifest, installation.installationId, identity, runtime.capabilities, user, !!inst.preview,
+        isUserEnvironment({ appId: inst.appId }) || inst.runAs === 'user'));
       this.instanceHomes.set(instanceId, home);
       return home;
     } catch (err) {
