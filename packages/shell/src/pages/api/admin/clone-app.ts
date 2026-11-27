@@ -5,7 +5,7 @@ import {
 } from 'node:fs';
 import { join, resolve } from 'node:path';
 import {
-  getAppManager, rewriteAppIdentity,
+  getAppManager, getNexusManager, rewriteAppIdentity,
   type ManifestPatch, type ScopeDefinition, type ScopeId,
 } from '@aura/core';
 import { auditOwner, ownerAction } from '../../../lib/approvals/admin.ts';
@@ -141,8 +141,9 @@ export const POST: APIRoute = async (ctx) => {
   if (destExists && !body.force) {
     return json({ error: 'exists', message: `${dest} already exists. Pass force=true to overwrite.` }, 409);
   }
-  // Overwriting an EXISTING app replaces the code that runs under its id (and
-  // inherits its grants): the owner's decision (D50, lib/approvals/admin.ts).
+  // Overwriting an EXISTING app replaces the code that runs under its id: the
+  // owner's decision (D50, lib/approvals/admin.ts). Its grants are revoked
+  // (Hotfix 2, S1): the copy earns them again.
   // New clones — including same-id shadows in another scope, which don't
   // inherit scope-pinned grants — need nothing.
   if (destExists && body.force) {
@@ -150,7 +151,8 @@ export const POST: APIRoute = async (ctx) => {
       action: 'admin.change', level: 'session',
       payload: { op: 'clone-app.overwrite', sourceAppId, sourceScope, targetAppId, scope: targetScopeId },
       title: `Overwrite ${targetAppId} with a copy of ${sourceAppId}`,
-      details: [`Into scope: ${targetScopeId}`, `From scope: ${sourceScope}`, 'The code that runs under that app id is replaced.'],
+      details: [`Into scope: ${targetScopeId}`, `From scope: ${sourceScope}`, 'The code that runs under that app id is replaced.',
+        'Its grants are revoked; its files and data go to trash (data a kept uninstall left is set aside for that app).'],
     });
     if (admin instanceof Response) return admin;
     await auditOwner(admin, 'app.clone-overwrite', { target: `app:${targetAppId}`, detail: { sourceAppId, scope: targetScopeId } });
@@ -230,16 +232,16 @@ export const POST: APIRoute = async (ctx) => {
       // the overwrite the caller explicitly asked for.
       try { await mgr.stopAll(targetAppId); }
       catch (err) { warnings.push(`stopAll(${targetAppId}) failed: ${(err as Error).message} — continuing with the overwrite.`); }
-      // Move aside rather than rm -rf, so there's an undo window. Same trash
-      // root Nexus uninstall uses.
-      const trash = join(targetDef.dataDir, 'nexus', 'trash', `${targetAppId}-${ts}`);
-      mkdirSync(join(targetDef.dataDir, 'nexus', 'trash'), { recursive: true });
-      moveOrCopy(dest, trash);
-      warnings.push(`previous ${targetAppId} moved to ${trash}`);
-      // A stale Nexus install record now describes a directory that no longer
-      // matches the ref it names.
-      const record = join(targetDef.dataDir, 'nexus', 'installed', `${targetAppId}.json`);
-      if (existsSync(record)) rmSync(record, { force: true });
+      // Grants revoked, the tree to trash (an undo window), its stale install
+      // record dropped, kept data set aside for its installation (Nexus
+      // `setAsideForOverwrite`, shared with `aura dev new --force`).
+      try {
+        const aside = await getNexusManager().setAsideForOverwrite(targetAppId, targetScopeId);
+        if (aside.trash) warnings.push(`previous ${targetAppId} moved to ${aside.trash}`);
+        if (aside.retained) warnings.push(`data kept from the uninstalled ${targetAppId} was set aside for that app, not handed to this one`);
+      } catch (err) {
+        return json({ error: 'overwrite-failed', message: `could not set ${targetAppId} aside: ${(err as Error).message}; nothing was written.` }, 500);
+      }
     }
 
     mkdirSync(targetDef.appsDir, { recursive: true });
@@ -289,7 +291,7 @@ export const POST: APIRoute = async (ctx) => {
     // `app:installed` never fired and the clone never got an installation.
     try {
       mgr.reloadScopedApp(targetAppId);
-      const hostError = await mgr.syncAppHost(targetAppId);
+      const hostError = await mgr.syncAppHost(targetAppId, targetScopeId);
       if (hostError) warnings.push(`${targetAppId} has no installation record yet (${hostError}); a shell restart allocates it.`);
     } catch (err) {
       warnings.push(`registering ${targetAppId} failed: ${(err as Error).message}; the watcher and the next shell start reconcile it.`);
@@ -350,21 +352,6 @@ function copyTree(src: string, dst: string, excludes: string[], rootExcludes: st
 }
 
 
-/** Move a directory, falling back to copy+delete when rename(2) can't (cross
- *  device, busy mount). Destination must not exist. */
-function moveOrCopy(src: string, dst: string): void {
-  try {
-    renameSync(src, dst);
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code === 'EXDEV' || code === 'EBUSY' || code === 'EPERM') {
-      cpSync(src, dst, { recursive: true });
-      rmSync(src, { recursive: true, force: true });
-    } else {
-      throw err;
-    }
-  }
-}
 
 
 function json(payload: unknown, status = 200): Response {

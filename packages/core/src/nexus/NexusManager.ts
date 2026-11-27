@@ -47,6 +47,15 @@ import {
 import { compareVersions } from './version.js';
 import type { CatalogEntry } from './CatalogAggregator.js';
 
+/** A built-in system app cannot be deleted (D1): disable it, or fork it into user scope. */
+export class SystemAppRemovalError extends Error {
+  readonly code = 'system-app';
+  constructor(readonly appId: string) {
+    super(`${appId} is a built-in system app: it cannot be deleted, and its data stays. Disable it instead (aura disable app ${appId}).`);
+    this.name = 'SystemAppRemovalError';
+  }
+}
+
 /**
  * How a store entry relates to this installation — the one answer the store
  * UI renders its buttons from. Matches by id AND originId (AppIdentity), so an
@@ -774,26 +783,38 @@ export class NexusManager {
   }
 
   /**
-   * Delete an app from one scope, store-installed or not. In a mutable scope
-   * the app's data lives in its dir, so this is "Delete app data". A system
-   * app's data is elsewhere and its code can return with the repo, so its
-   * installation is only reserved. Returns whether a directory was removed.
+   * Delete an app from one scope, store-installed or not: "Delete app data"
+   * (its data lives in its dir in a mutable scope). A built-in system app is
+   * never deleted this way (D1): its code is the AuraOS repo's and its data
+   * stays; disable it instead. Returns whether a directory was removed.
    */
   async removeFromScope(appId: string, scopeId: ScopeId): Promise<{ removed: boolean; dest: string }> {
     if (!APP_ID_PATTERN.test(appId)) throw new Error(`invalid app id: ${appId}`);
     const def = this.scopeDefs.find((s) => s.id === scopeId);
     if (!def) throw new Error(`unknown scope: ${scopeId}`);
+    if (def.immutable) throw new SystemAppRemovalError(appId);
     const dest = join(def.appsDir, appId);
     const removed = existsSync(dest);
-    if (def.immutable) {
-      await this.hostLifecycle?.reserveApp(appId, scopeId);
-      removeContained(def.appsDir, appId);
-    } else {
-      await this.hostLifecycle?.retireApp(appId, scopeId);
-      await this.installerFor(scopeId).uninstall(appId, { purge: true });
-    }
+    await this.hostLifecycle?.retireApp(appId, scopeId);
+    await this.installerFor(scopeId).uninstall(appId, { purge: true });
     this.onAppChanged?.(appId);
     return { removed, dest };
+  }
+
+  /**
+   * Make room in a mutable scope for a local copy that replaces whatever is
+   * under `appId` (`aura dev clone --force`, `aura dev new --force`): the
+   * grants given to that id there are revoked first (new code earns them
+   * again), data a keep-data uninstall left is set aside for its
+   * installation, the old tree goes to trash and its install record is
+   * dropped (Installer `setAsideForOverwrite`). The caller stopped its
+   * instances, and registers the new copy (`reloadScopedApp` + `syncAppHost`).
+   */
+  async setAsideForOverwrite(appId: string, scopeId: ScopeId): Promise<{ trash: string | null; retained: boolean }> {
+    const installer = this.installerFor(scopeId);
+    await this.hostLifecycle?.revokeGrants(appId, scopeId);
+    const bound = await this.hostLifecycle?.boundInstallation(appId, scopeId);
+    return installer.setAsideForOverwrite(appId, bound?.state === 'reserved' ? bound.installationId : null);
   }
 
   /**

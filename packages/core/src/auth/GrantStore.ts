@@ -366,6 +366,21 @@ export class GrantStore {
   }
 
   /**
+   * Drop an app's grants for one install scope: those pinned to `appScope`,
+   * and unpinned ones (they would count in any scope). The app under that id
+   * and scope was deleted or replaced by another app, so nothing the owner
+   * granted to the previous one may pass to it (Hotfix 2, S1; temporary until
+   * grants are bound to the installation). Each revoke emits
+   * `permissions:changed`, so caches keyed on it (system modals) follow.
+   */
+  async revokeAppScope(appId: string, appScope: string): Promise<GrantRecord[]> {
+    const subject: GrantSubject = { kind: 'app', id: appId };
+    const drop = (await this.listFor(subject)).filter((g) => !g.appScope || g.appScope === appScope);
+    for (const g of drop) await this.revoke(subject, g.permission, g.scope ?? OS_SCOPE);
+    return drop;
+  }
+
+  /**
    * One-time migration (idempotent): stored grants of a deprecated permission
    * name (`notifications.desktopModal`) become the current name
    * (`notifications.systemModal`) — same subject, scope, appScope pinning,

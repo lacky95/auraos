@@ -11,7 +11,7 @@ export * from './StoreSubmitter.js';
 export { DEFAULT_INDEX, seedIndex } from './defaultIndex.js';
 export { Installer } from './Installer.js';
 export { removeInstalledApp } from './removeApp.js';
-export { NexusManager } from './NexusManager.js';
+export { NexusManager, SystemAppRemovalError } from './NexusManager.js';
 export type { InstallState } from './NexusManager.js';
 export { compareVersions } from './version.js';
 export { publishGit, publishOci } from './Publisher.js';

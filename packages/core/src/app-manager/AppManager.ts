@@ -86,6 +86,7 @@ import type { InterfaceView } from '../interfaces/InterfaceRegistry.js';
 import { keymapRegistry } from '../keymap/KeymapRegistry.js';
 import { ScopeRegistry } from '../scopes/ScopeRegistry.js';
 import type { ScopeDefinition, ScopeId } from '../scopes/types.js';
+import { readOriginId } from './AppIdentity.js';
 import { getAppHostServices } from '../app-hosts/services.js';
 import { appSourceFingerprint } from '../app-hosts/lifecycle.js';
 import { seedHomeAs } from './homeSeed.js';
@@ -497,24 +498,31 @@ export class AppManager {
 
   /**
    * An app discovered by clone, scaffold or a copied directory: its
-   * installation and host. The `app:installed` listener runs it; the clone
-   * route also awaits it, so a clone answers with its installation in place.
-   * Idempotent, and safe to run twice at once (the registry's writes are
-   * guarded). Resolves to why it failed, or null.
+   * installation and host. The `app:installed` listener runs it; the clone,
+   * scaffold and origin routes await it, so they answer with the installation
+   * in place. `scope`: the scope the app landed in (default: the registry's
+   * winner); a copy shadowed by a higher scope is synced from its own
+   * manifest. Idempotent, and safe to run twice at once (the registry's writes
+   * are guarded). Resolves to why it failed, or null.
    */
   async syncAppHost(
     appId: string,
+    scope?: ScopeId,
     lifecycle: Pick<ReturnType<typeof getAppHostServices>['lifecycle'], 'syncDiscovered'> = getAppHostServices().lifecycle,
   ): Promise<string | null> {
-    if (!this.appHostsReady) return null; // the boot migration covers it
+    // Before the boot migration ran, or when it failed: nothing has synced
+    // since, so say so (the migration covers it at the next shell start).
+    if (!this.appHostsReady) return 'app hosts are not ready (the boot migration has not completed)';
     const m = this.registry.getById(appId);
-    if (!m) return null;
+    const at = scope ?? m?.scopeId;
+    if (!at) return null;
     try {
-      const scope = this.scopeRegistry.getById(m.scopeId);
-      await lifecycle.syncDiscovered({
-        appId, originId: m.originId ?? null, scope: m.scopeId, source: appSourceFingerprint(scope, appId),
-      });
-      await this.blockForeignHosts(appId);
+      const def = this.scopeRegistry.getById(at);
+      const manifestPath = join(def.appsDir, appId, 'app.manifest.json');
+      if (m?.scopeId !== at && !existsSync(manifestPath)) return null;
+      const originId = m?.scopeId === at ? m.originId ?? null : readOriginId(manifestPath);
+      await lifecycle.syncDiscovered({ appId, originId, scope: at, source: appSourceFingerprint(def, appId) });
+      if (m?.scopeId === at) await this.blockForeignHosts(appId);
       return null;
     } catch (err) {
       console.warn(`[AppManager] app host sync for ${appId} failed: ${(err as Error).message}`);
@@ -538,10 +546,8 @@ export class AppManager {
     if (!scope) return { installation: null, error: `${appId} is not installed` };
     const found = await hosts.registry.findInstallation(appId, scope);
     if (found) return { installation: found };
-    if (!this.appHostsReady) {
-      return { installation: null, error: `${appId} has no installation record and the App Host boot migration has not completed (see the shell log)` };
-    }
-    const why = await this.syncAppHost(appId, hosts.lifecycle);
+    // Says why when it can't (also: the boot migration has not completed).
+    const why = await this.syncAppHost(appId, scope, hosts.lifecycle);
     const repaired = await hosts.registry.findInstallation(appId, scope);
     return repaired ? { installation: repaired }
       : { installation: null, error: `${appId} has no installation record and it could not be created${why ? ` (${why})` : ''}` };

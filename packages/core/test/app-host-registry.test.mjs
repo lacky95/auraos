@@ -16,7 +16,7 @@ import { AppHostRestoreError, createAppHostRegistry, sameAppSource } from '../di
 import { AppHostLifecycle } from '../dist/app-hosts/lifecycle.js';
 import { ManifestHostGuard, manifestHostClaim } from '../dist/app-hosts/manifestHostGuard.js';
 import { Installer, isTrashEntryOf, removeContained } from '../dist/nexus/Installer.js';
-import { NexusManager } from '../dist/nexus/NexusManager.js';
+import { NexusManager, SystemAppRemovalError } from '../dist/nexus/NexusManager.js';
 import { AppManager } from '../dist/app-manager/AppManager.js';
 import { AppRegistry } from '../dist/app-manager/AppRegistry.js';
 import { OsEventBus } from '../dist/ipc/OsEventBus.js';
@@ -29,6 +29,7 @@ const server = new KvServer();
 let redis;
 let registry;
 let lifecycle;
+let grants;
 const USER = { kind: 'user', userId: 'default' };
 const SRC = { kind: 'oci', ref: 'reg.example/apps/notes:1.0.0' };
 
@@ -44,8 +45,14 @@ after(async () => {
 beforeEach(async () => {
   await redis.flushall();
   registry = createAppHostRegistry(() => redis);
-  lifecycle = new AppHostLifecycle(registry);
+  grants = new GrantStore(() => redis);
+  // As app-hosts/services.ts wires it: grants follow the installation (Hotfix 2, S1).
+  lifecycle = new AppHostLifecycle(registry, null, { revokeAppGrants: (appId, scope) => grants.revokeAppScope(appId, scope) });
 });
+const BY = { by: { kind: 'system' } };
+// The delete-time cleanup below is tested on its own: these grants name some installation (S1(b) requires one).
+const grantApp = (id, permission = 'notifications.popup', appScope = 'user') => grants.grant({ kind: 'app', id }, permission, { ...BY, appScope, installationId: 'inst-any' });
+const grantsOf = async (id) => (await grants.listFor({ kind: 'app', id })).map((g) => `${g.permission}@${g.appScope ?? '*'}`).sort();
 
 const newInstall = (over = {}) => registry.createInstallation({
   appId: 'com.example.notes', originId: randomUUID(), scope: 'user', source: SRC, ...over,
@@ -360,7 +367,7 @@ test('clone: a landed app is announced once and has its own installation when th
   const ev = installedEvents(id);
   try {
     mgr.reloadScopedApp(id);
-    assert.equal(await mgr.syncAppHost(id, lifecycle), null);
+    assert.equal(await mgr.syncAppHost(id, undefined, lifecycle), null);
     // The watcher's own `add` comes later: the app is known by then, no second event.
     mgr.registry['loadManifestFile'](manifestPath, user);
     assert.deepEqual(ev.seen, [id], 'app:installed exactly once');
@@ -371,7 +378,7 @@ test('clone: a landed app is announced once and has its own installation when th
   assert.notEqual(inst.installationId, source.installation.installationId);
   assert.equal((await registry.listForApp(id)).length, 1, 'and its host');
   // The `app:installed` listener and the route may sync at once: still one installation.
-  await Promise.all([mgr.syncAppHost(id, lifecycle), mgr.syncAppHost(id, lifecycle)]);
+  await Promise.all([mgr.syncAppHost(id, undefined, lifecycle), mgr.syncAppHost(id, undefined, lifecycle)]);
   assert.equal((await registry.listInstallations(id)).length, 1);
 });
 
@@ -416,17 +423,95 @@ test('ensureInstallation (B7): find, else repair, then find; a failed repair say
     'an unreadable record throws: a start must not guess how it runs');
 });
 
-test('syncAppHost: says why it failed, and waits for the boot migration', async () => {
+test('syncAppHost: says why it failed, and that app hosts are not ready before the boot migration', async () => {
   const user = scopes()[2];
   const id = 'com.example.later';
   putApp(user, id);
   const mgr = landedAppManager(user);
   mgr.registry.reloadFromDisk(id);
-  assert.equal(await mgr.syncAppHost(id, { syncDiscovered: async () => { throw new Error('kv down'); } }), 'kv down');
+  assert.equal(await mgr.syncAppHost(id, undefined, { syncDiscovered: async () => { throw new Error('kv down'); } }), 'kv down');
   mgr.appHostsReady = false;
   let called = false;
-  assert.equal(await mgr.syncAppHost(id, { syncDiscovered: async () => { called = true; } }), null);
-  assert.equal(called, false, 'before the boot migration, which covers every app on disk');
+  assert.match(await mgr.syncAppHost(id, undefined, { syncDiscovered: async () => { called = true; } }), /not ready/,
+    'B8: no boot migration (failed or not run yet) is reported, not success');
+  assert.equal(called, false);
+});
+
+test('syncAppHost: a copy landed in a shadowed scope gets its own installation (B8)', async () => {
+  const [, global, user] = scopes();
+  const id = 'com.example.shadowed';
+  putApp(user, id, { originId: randomUUID() });
+  const gOrigin = randomUUID();
+  putApp(global, id, { originId: gOrigin });
+  const appRegistry = new AppRegistry([global, user]);
+  appRegistry.reloadFromDisk(id);
+  const fake = {
+    registry: appRegistry, appHostsReady: true,
+    scopeRegistry: { getById: (s) => (s === 'global' ? global : user) },
+    async blockForeignHosts() {},
+  };
+  const sync = AppManager.prototype.syncAppHost.bind(fake);
+  assert.equal(appRegistry.getById(id).scopeId, 'user', 'the user copy wins');
+  assert.equal(await sync(id, 'global', lifecycle), null);
+  const g = await registry.findInstallation(id, 'global');
+  assert.ok(g, 'the landed (global) copy has its installation');
+  assert.equal(g.originId, gOrigin, 'from its own manifest, not the winner');
+  assert.equal(await registry.findInstallation(id, 'user'), null, 'the winner is not touched');
+  assert.equal(await sync('com.example.nowhere', 'global', lifecycle), null, 'nothing landed there: nothing to do');
+});
+
+// ── grants follow the installation (Hotfix 2, S1) ──────────────────────────
+
+test('GrantStore.revokeAppScope: that scope and unpinned grants go; another scope\'s stay', async () => {
+  const id = 'com.example.granted';
+  await grantApp(id, 'notifications.popup', 'user');
+  await grants.grant({ kind: 'app', id }, 'notifications.locked', { ...BY, installationId: 'inst-any' });
+  await grantApp(id, 'terminal.embed', 'global');
+  await grants.grant({ kind: 'app', id }, 'credential.read:GEMINI_API_KEY', { ...BY, appScope: 'user', installationId: 'inst-any', scope: { kind: 'user', id: 'default' } });
+  const dropped = await grants.revokeAppScope(id, 'user');
+  assert.deepEqual(dropped.map((g) => g.permission).sort(), ['credential.read:GEMINI_API_KEY', 'notifications.locked', 'notifications.popup']);
+  assert.deepEqual(await grantsOf(id), ['terminal.embed@global']);
+});
+
+test('grants: the first installation keeps grants from before installations existed', async () => {
+  const id = 'com.example.old';
+  await grantApp(id);
+  await lifecycle.sync({ appId: id, originId: randomUUID(), scope: 'user', source: SRC });
+  assert.deepEqual(await grantsOf(id), ['notifications.popup@user']);
+});
+
+test('grants: deleting app data revokes them; an app created later under the id starts with none', async () => {
+  const id = 'com.example.deleted';
+  await lifecycle.sync({ appId: id, originId: randomUUID(), scope: 'user', source: SRC });
+  await grantApp(id);
+  await grantApp(id, 'terminal.embed', 'global');
+  await lifecycle.retireApp(id, 'user');
+  assert.deepEqual(await grantsOf(id), ['terminal.embed@global'], 'only the user-scope ones');
+  // A grant left behind by any other path still does not reach the next app.
+  await grantApp(id);
+  await lifecycle.sync({ appId: id, originId: randomUUID(), scope: 'user', source: { kind: 'local', ref: '/new' } });
+  assert.deepEqual(await grantsOf(id), ['terminal.embed@global']);
+});
+
+test('grants: another origin under the id (clone --force, origin --reassign) revokes; the same app keeps them', async () => {
+  const id = 'com.example.replaced';
+  const origin = randomUUID();
+  await lifecycle.sync({ appId: id, originId: origin, scope: 'user', source: SRC });
+  await grantApp(id);
+  await lifecycle.sync({ appId: id, originId: origin, scope: 'user', source: { ...SRC, ref: 'reg.example/apps/notes:1.1.0' } });
+  assert.deepEqual(await grantsOf(id), ['notifications.popup@user'], 'an update keeps them');
+  await lifecycle.sync({ appId: id, originId: randomUUID(), scope: 'user', source: SRC });
+  assert.deepEqual(await grantsOf(id), [], 'a new origin is another app');
+});
+
+test('grants: a failed revoke stops the replacement before a new installation exists', async () => {
+  const id = 'com.example.failclosed';
+  const life = new AppHostLifecycle(registry, null, { revokeAppGrants: async () => { throw new Error('kv down'); } });
+  const first = await life.sync({ appId: id, originId: randomUUID(), scope: 'user', source: SRC });
+  await assert.rejects(life.sync({ appId: id, originId: randomUUID(), scope: 'user', source: SRC }), /kv down/);
+  assert.equal((await registry.findInstallation(id, 'user')).installationId, first.installation.installationId);
+  await assert.rejects(life.retireApp(id, 'user'), /kv down/);
+  assert.equal((await registry.findInstallation(id, 'user')).state, 'active', 'nothing retired');
 });
 
 test('lifecycle: restore check covers same app, moved source, other app, unrecorded data', async () => {
@@ -690,6 +775,57 @@ test('nexus: another app under the id cannot reach retained data', async () => {
   assert.notEqual((await registry.findInstallation(id, 'user')).installationId, owner.installationId);
 });
 
+test('nexus: keep-data reinstall of the same app keeps its grants; another app under the id gets none (S1 deny path)', async () => {
+  const w = nexusWorld();
+  const id = 'com.example.notes';
+  const src = w.source('a', { id, originId: randomUUID() });
+  assert.ok((await w.run({ ref: src })).record);
+  await grantApp(id);
+  await w.nexus.uninstall(id);
+  assert.ok((await w.run({ ref: src })).record);
+  assert.deepEqual(await grantsOf(id), ['notifications.popup@user'], 'restored: the same app');
+  await w.nexus.uninstall(id);
+  const other = await w.run({ ref: w.source('b', { id, originId: randomUUID() }) });
+  assert.ok(other.record, String(other.error));
+  assert.deepEqual(await grantsOf(id), [], 'denied: another app');
+});
+
+test('nexus: a built-in system app is never deleted (D1): refused before anything changes', async () => {
+  const w = nexusWorld();
+  const [system] = w.defs;
+  const id = 'com.aura.docs';
+  putApp(system, id);
+  await lifecycle.sync({ appId: id, originId: randomUUID(), scope: 'system', source: { kind: 'system', ref: id } });
+  await assert.rejects(w.nexus.removeFromScope(id, 'system'), (e) => e instanceof SystemAppRemovalError && /built-in system app/.test(e.message));
+  assert.ok(existsSync(join(system.appsDir, id, 'app.manifest.json')), 'its code stays');
+  assert.equal((await registry.findInstallation(id, 'system')).state, 'active', 'its installation too');
+});
+
+test('nexus: setAsideForOverwrite revokes grants, trashes the tree, drops the record, sets kept data aside (B2/S2)', async () => {
+  const w = nexusWorld();
+  const id = 'com.example.notes';
+  assert.ok((await w.run({ ref: w.source('a', { id, originId: randomUUID() }) })).record);
+  const owner = await registry.findInstallation(id, 'user');
+  write(join(w.user.appsDir, id, id, 'notes.db'), 'mine');
+  await grantApp(id);
+  await w.nexus.uninstall(id); // keep data: the dir holds only its runtime data now
+  const aside = await w.nexus.setAsideForOverwrite(id, 'user');
+  assert.equal(aside.retained, true);
+  assert.equal(readFileSync(join(w.user.dataDir, 'nexus', 'retained', id, owner.installationId, id, 'notes.db'), 'utf8'), 'mine',
+    'kept for the installation it belongs to, not handed to the new app');
+  assert.equal(existsSync(join(w.user.appsDir, id)), false);
+  assert.deepEqual(await grantsOf(id), []);
+
+  // Over a live app: the whole tree to trash, the record gone.
+  assert.ok((await w.run({ ref: w.source('c', { id, originId: randomUUID() }) })).record);
+  const record = join(w.user.dataDir, 'nexus', 'installed', `${id}.json`);
+  assert.ok(existsSync(record));
+  const again = await w.nexus.setAsideForOverwrite(id, 'user');
+  assert.ok(again.trash && existsSync(join(again.trash, 'app.manifest.json')), 'moved, not deleted');
+  assert.equal(existsSync(record), false);
+  assert.equal(existsSync(join(w.user.appsDir, id)), false);
+});
+
 test('nexus: a changed source asks first, and confirming restores', async () => {
   const w = nexusWorld();
   const id = 'com.example.notes';
@@ -806,7 +942,9 @@ test('built-in: a same-id user copy never counts as the trusted system app (AppM
 // ── S1 (5-main): app grants are pinned to the installation they were given to ──
 // GrantStore + Authorizer + the Context lookup over the same Valkey as the
 // real installation lifecycle: what the owner granted reaches that
-// installation only, never a new app under the same id and scope.
+// installation only, never a new app under the same id and scope. The
+// lifecycle here has no delete-time revoke (Hotfix 2 `revokeGrants`): the
+// installation pin alone must be the gate.
 
 const S1_PERM = 'notifications.popup';
 function grantWorld() {
@@ -828,6 +966,7 @@ function grantWorld() {
 
 test('S1: the granted installation keeps its grants across a restart (a new Authorizer, a re-sync) and an update of that installation', async () => {
   const w = grantWorld();
+  const lifecycle = new AppHostLifecycle(registry);
   const id = 'com.example.granted';
   const originId = randomUUID();
   const first = await lifecycle.sync({ appId: id, originId, scope: 'user', source: SRC });
@@ -847,6 +986,7 @@ test('S1: the granted installation keeps its grants across a restart (a new Auth
 
 test('S1: rm app then dev new under the same id: the new installation inherits no grant, its Context keys included', async () => {
   const w = grantWorld();
+  const lifecycle = new AppHostLifecycle(registry);
   const id = 'com.example.recreated';
   const old = await lifecycle.sync({ appId: id, originId: randomUUID(), scope: 'user', source: SRC });
   await w.grant(id);
@@ -868,6 +1008,7 @@ test('S1: rm app then dev new under the same id: the new installation inherits n
 
 test('S1: keep-data uninstall, then a different-origin reinstall (deny) inherits nothing; the same origin restored keeps its grant', async () => {
   const w = grantWorld();
+  const lifecycle = new AppHostLifecycle(registry);
   const id = 'com.example.kept';
   const origin = randomUUID();
   await lifecycle.sync({ appId: id, originId: origin, scope: 'user', source: SRC });
@@ -895,6 +1036,7 @@ test('S1: keep-data uninstall, then a different-origin reinstall (deny) inherits
 
 test('S1: a replaced origin (dev origin --reassign, scaffold --force) is a new installation: the grant does not follow', async () => {
   const w = grantWorld();
+  const lifecycle = new AppHostLifecycle(registry);
   const id = 'com.example.reassigned';
   await lifecycle.sync({ appId: id, originId: randomUUID(), scope: 'user', source: SRC });
   await w.grant(id);
@@ -904,6 +1046,7 @@ test('S1: a replaced origin (dev origin --reassign, scaffold --force) is a new i
 
 test('S1 migration: grants from before 5-main are pinned once to their installation; one without is pinned to none and never inherited', async () => {
   const w = grantWorld();
+  const lifecycle = new AppHostLifecycle(registry);
   const legacy = (appId, permission, appScope) => redis.multi()
     .hset(`grant:app:${appId}`, `os|${permission}`, JSON.stringify({ subject: { kind: 'app', id: appId }, permission, scope: { kind: 'os' }, appScope, grantedAt: 1, grantedBy: { kind: 'system' } }))
     .sadd('grant:idx', `grant:app:${appId}`).exec();
