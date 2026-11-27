@@ -18,6 +18,8 @@ import { ManifestHostGuard, manifestHostClaim } from '../dist/app-hosts/manifest
 import { Installer, isTrashEntryOf, removeContained } from '../dist/nexus/Installer.js';
 import { NexusManager } from '../dist/nexus/NexusManager.js';
 import { AppManager } from '../dist/app-manager/AppManager.js';
+import { AppRegistry } from '../dist/app-manager/AppRegistry.js';
+import { OsEventBus } from '../dist/ipc/OsEventBus.js';
 
 const ROOT = mkdtempSync(join(tmpdir(), 'aura-apphost-'));
 const server = new KvServer();
@@ -321,6 +323,79 @@ test('lifecycle: clone and shadow get their own installations', async () => {
   const clone = await lifecycle.sync({ appId: 'com.example.notes.copy', originId, scope: 'user', source: { kind: 'local', ref: '/y' } });
   assert.equal(new Set([a, shadow, clone].map((x) => x.installation.installationId)).size, 3);
   assert.equal(new Set([a, shadow, clone].map((x) => x.record.baseName)).size, 3);
+});
+
+// A clone lands a directory and registers it itself (/api/admin/clone-app).
+// AppManager's constructor wires real runners, so (as app-preview.test.mjs
+// does) the prototype methods run against a small fake `this` around a real
+// AppRegistry and the real lifecycle.
+function landedAppManager(scope) {
+  const registry = new AppRegistry([scope]);
+  const fake = {
+    registry, appHostsReady: true, rebound: [],
+    scopeRegistry: { getById: () => scope },
+    mounts: { rebindTarget: async (id) => { fake.rebound.push(id); } },
+    refreshManifestDerived() {},
+    async blockForeignHosts() {},
+  };
+  for (const name of ['reloadScopedApp', 'reloadManifest', 'syncAppHost']) fake[name] = AppManager.prototype[name].bind(fake);
+  return fake;
+}
+function installedEvents(appId) {
+  const seen = [];
+  const on = (e) => { if (e.appId === appId) seen.push(e.appId); };
+  OsEventBus.on('app:installed', on);
+  return { seen, off: () => OsEventBus.off('app:installed', on) };
+}
+
+test('clone: a landed app is announced once and has its own installation when the route answers (D20)', async () => {
+  const user = scopes()[2];
+  const source = await lifecycle.sync({ appId: 'io.lakner.compass', originId: randomUUID(), scope: 'user', source: { kind: 'local', ref: '/src' } });
+  const id = 'com.aura.diagnostics';
+  const manifestPath = putApp(user, id, { originId: randomUUID() });
+  const mgr = landedAppManager(user);
+  const ev = installedEvents(id);
+  try {
+    mgr.reloadScopedApp(id);
+    assert.equal(await mgr.syncAppHost(id, lifecycle), null);
+    // The watcher's own `add` comes later: the app is known by then, no second event.
+    mgr.registry['loadManifestFile'](manifestPath, user);
+    assert.deepEqual(ev.seen, [id], 'app:installed exactly once');
+  } finally { ev.off(); }
+  assert.deepEqual(mgr.rebound, [id]);
+  const inst = await registry.findInstallation(id, 'user');
+  assert.ok(inst, 'the clone has an installation record');
+  assert.notEqual(inst.installationId, source.installation.installationId);
+  assert.equal((await registry.listForApp(id)).length, 1, 'and its host');
+  // The `app:installed` listener and the route may sync at once: still one installation.
+  await Promise.all([mgr.syncAppHost(id, lifecycle), mgr.syncAppHost(id, lifecycle)]);
+  assert.equal((await registry.listInstallations(id)).length, 1);
+});
+
+test('clone: a silent reloadManifest of a landed app hides it from the watcher (the 0.0.49 clone bug)', () => {
+  const user = scopes()[2];
+  const id = 'com.example.silent';
+  const manifestPath = putApp(user, id);
+  const mgr = landedAppManager(user);
+  const ev = installedEvents(id);
+  try {
+    mgr.reloadManifest(id);
+    mgr.registry['loadManifestFile'](manifestPath, user);
+    assert.deepEqual(ev.seen, [], 'no app:installed: nothing would allocate its installation');
+  } finally { ev.off(); }
+});
+
+test('syncAppHost: says why it failed, and waits for the boot migration', async () => {
+  const user = scopes()[2];
+  const id = 'com.example.later';
+  putApp(user, id);
+  const mgr = landedAppManager(user);
+  mgr.registry.reloadFromDisk(id);
+  assert.equal(await mgr.syncAppHost(id, { syncDiscovered: async () => { throw new Error('kv down'); } }), 'kv down');
+  mgr.appHostsReady = false;
+  let called = false;
+  assert.equal(await mgr.syncAppHost(id, { syncDiscovered: async () => { called = true; } }), null);
+  assert.equal(called, false, 'before the boot migration, which covers every app on disk');
 });
 
 test('lifecycle: restore check covers same app, moved source, other app, unrecorded data', async () => {

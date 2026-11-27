@@ -494,20 +494,30 @@ export class AppManager {
     }
   }
 
-  /** An app discovered by clone, scaffold or a copied directory. */
-  private async syncAppHost(appId: string): Promise<void> {
-    if (!this.appHostsReady) return;
+  /**
+   * An app discovered by clone, scaffold or a copied directory: its
+   * installation and host. The `app:installed` listener runs it; the clone
+   * route also awaits it, so a clone answers with its installation in place.
+   * Idempotent, and safe to run twice at once (the registry's writes are
+   * guarded). Resolves to why it failed, or null.
+   */
+  async syncAppHost(
+    appId: string,
+    lifecycle: Pick<ReturnType<typeof getAppHostServices>['lifecycle'], 'syncDiscovered'> = getAppHostServices().lifecycle,
+  ): Promise<string | null> {
+    if (!this.appHostsReady) return null; // the boot migration covers it
     const m = this.registry.getById(appId);
-    if (!m) return;
+    if (!m) return null;
     try {
-      const { lifecycle } = getAppHostServices();
       const scope = this.scopeRegistry.getById(m.scopeId);
       await lifecycle.syncDiscovered({
         appId, originId: m.originId ?? null, scope: m.scopeId, source: appSourceFingerprint(scope, appId),
       });
       await this.blockForeignHosts(appId);
+      return null;
     } catch (err) {
       console.warn(`[AppManager] app host sync for ${appId} failed: ${(err as Error).message}`);
+      return (err as Error).message;
     }
   }
 
@@ -3460,7 +3470,10 @@ export class AppManager {
   /**
    * Re-read ONE app's manifest from disk and rebuild every projection derived
    * from it. Emits nothing — for callers that changed a manifest in place (a
-   * cap grant, a clone) and have no business claiming the app was installed.
+   * cap grant, an origin) and have no business claiming the app was installed.
+   * Never for a directory that just landed (use `reloadScopedApp`): the app
+   * would be registered silently, the watcher's later `add` would no longer
+   * count as new, and `app:installed` (its installation) would never come.
    */
   reloadManifest(appId: string): void {
     this.registry.reloadFromDisk(appId);

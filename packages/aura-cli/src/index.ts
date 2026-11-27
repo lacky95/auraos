@@ -1,6 +1,10 @@
-import { buildProgram } from './program.js';
+import { VERSION, buildProgram, isVersionRequest } from './program.js';
 
-buildProgram().parseAsync(process.argv).catch((err: Error) => {
-  console.error(err.message);
-  process.exit(1);
-});
+if (isVersionRequest(process.argv.slice(2))) {
+  console.log(VERSION);
+} else {
+  buildProgram().parseAsync(process.argv).catch((err: Error) => {
+    console.error(err.message);
+    process.exit(1);
+  });
+}

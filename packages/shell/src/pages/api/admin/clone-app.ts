@@ -273,11 +273,19 @@ export const POST: APIRoute = async (ctx) => {
     }
 
     // chokidar picks the new dir up on its own within ~100 ms, but a CLI that
-    // immediately runs `aura app start` would race it. Reload explicitly, the
-    // same way /api/admin/manifest-edit does after a direct file write.
-    // reloadManifest also rebuilds the manifest-derived projections (intents,
-    // keymaps, interfaces); reloadFromDisk alone would leave them stale.
-    try { mgr.reloadManifest(targetAppId); } catch { /* watcher will reconcile */ }
+    // immediately runs `aura app start` would race it. Register it explicitly
+    // the way a Nexus install does (`reloadScopedApp`: manifest-derived
+    // projections, mounts re-bound onto the new dir, `app:installed`), then
+    // wait for its installation and host (D20: a clone is a new installation).
+    // A silent `reloadManifest` here hid the app from the watcher's `add`, so
+    // `app:installed` never fired and the clone never got an installation.
+    try {
+      mgr.reloadScopedApp(targetAppId);
+      const hostError = await mgr.syncAppHost(targetAppId);
+      if (hostError) warnings.push(`${targetAppId} has no installation record yet (${hostError}); a shell restart allocates it.`);
+    } catch (err) {
+      warnings.push(`registering ${targetAppId} failed: ${(err as Error).message}; the watcher and the next shell start reconcile it.`);
+    }
 
     return json({
       ok: true, sourceAppId, sourceScope, targetAppId, scope: targetScopeId,

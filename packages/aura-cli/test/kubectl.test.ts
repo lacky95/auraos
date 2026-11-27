@@ -11,7 +11,7 @@ import { renderObjects, parseOutput } from '../src/lib/output.js';
 import { table, visibleWidth } from '../src/lib/format.js';
 import { matchInstance, ownersOf } from '../src/lib/resolve.js';
 import { LEGACY_GROUPS, LEGACY_HINTS } from '../src/lib/deprecate.js';
-import { buildProgram, completions, HELP_SECTIONS, RESOURCE_VERBS } from '../src/program.js';
+import { buildProgram, completions, HELP_SECTIONS, isVersionRequest, RESOURCE_VERBS } from '../src/program.js';
 
 const hidden = (c: Command) => Boolean((c as unknown as { _hidden?: boolean })._hidden);
 
@@ -244,4 +244,17 @@ test('deleting an app says it deletes the app data (D20 "Delete app data")', () 
   assert.match(find(program, 'delete')!.description(), /Delete apps with all their data/);
   const help = HELP_SECTIONS.flatMap((s) => s.lines).find(([usage]) => usage.startsWith('aura rm app'));
   assert.equal(help?.[1], 'Delete apps and all their data');
+});
+
+test('--version is the CLI version only as the first argument; a subcommand keeps its own --version', async () => {
+  assert.ok(isVersionRequest(['--version']) && isVersionRequest(['-V']));
+  assert.ok(!isVersionRequest(['dev', 'clone', 'a.b.c', 'a.b.d', '--version', '1.2.0']));
+  const program = buildProgram();
+  assert.ok(!program.options.some((o) => o.long === '--version'), 'no root option to swallow it');
+  const find = (c: Command, name: string) => c.commands.find((x) => x.name() === name)!;
+  const clone = find(find(program, 'dev'), 'clone');
+  let seen: { version?: string; name?: string } | undefined;
+  clone.action((_s: string, _t: string, o: { version?: string; name?: string }) => { seen = o; });
+  await program.parseAsync(['dev', 'clone', 'io.a.src', 'io.a.dst', '--name', 'D', '--version', '1.2.0'], { from: 'user' });
+  assert.deepEqual([seen?.name, seen?.version], ['D', '1.2.0']);
 });

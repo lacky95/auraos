@@ -58,6 +58,9 @@ let kernel: AuraMount[];
 let audits: unknown[];
 /** Previews the fake AppManager started: instanceId → { appId, appDir, workspace, owner }. */
 let previews: Map<string, { appId: string; appDir: string; workspace: string; owner: string }>;
+/** Apps with no installation record yet, and the apps `syncAppHost` gave one. */
+let unallocated: Set<string>;
+let synced: string[];
 
 const put = (p: string, text: string) => { mkdirSync(join(p, '..'), { recursive: true }); writeFileSync(p, text); };
 const writeApp = (dir: string, m: Record<string, unknown>, body = 'v1\n') => {
@@ -144,7 +147,8 @@ function deps(): AppSourceDeps {
         for (const m of kernel) if (m.targetAppId === appId && m.kind === 'source' && deps().apps.sourceMode(appId)?.mode === 'closed') m.mode = 'ro';
       },
     },
-    installationId: async (appId, scope) => `inst-${scope}-${appId.replace(/\./g, '-')}`,
+    installationId: async (appId, scope) => (unallocated.has(appId) ? null : `inst-${scope}-${appId.replace(/\./g, '-')}`),
+    syncAppHost: async (appId) => { synced.push(appId); unallocated.delete(appId); return null; },
     nexus,
   };
 }
@@ -155,6 +159,8 @@ beforeEach(async () => {
   kernel = [];
   audits = [];
   previews = new Map();
+  unallocated = new Set();
+  synced = [];
   root = mkdtempSync(join(tmpdir(), 'aura-src-'));
   const scope = (id: core.ScopeId, priority: number, immutable: boolean) =>
     ({ id, appsDir: join(root, id, 'apps'), dataDir: join(root, id, 'data'), immutable, priority }) as core.ScopeDefinition;
@@ -190,6 +196,16 @@ test('status by id or name: a closed install\'s source view is bound read-only i
 
   assert.equal((await read(await appSourceStatus(req('POST', { app: 'nope' }), 'com.aura.terminal', deps(), true))).status, 404);
   assert.equal((await read(await appSourceStatus(req('POST', { app: 'io.shop.app' }), 'io.proot.app', deps(), true))).status, 409);
+});
+
+test('an app without its installation (a clone before 0.0.50) gets it on the first status, once', async () => {
+  unallocated.add('io.shop.app');
+  const r = await read(await appSourceStatus(req('POST', { app: 'io.shop.app' }), 'com.aura.terminal', deps(), true));
+  assert.equal(r.status, 200);
+  assert.deepEqual([r.body.installationId, r.body.activeInstallationId], ['inst-global-io-shop-app', 'inst-global-io-shop-app']);
+  assert.deepEqual(synced, ['io.shop.app']);
+  await read(await appSourceStatus(req('POST', { app: 'io.shop.app' }), 'com.aura.terminal', deps(), true));
+  assert.deepEqual(synced, ['io.shop.app'], 'an app that has one is never synced here');
 });
 
 test('a system app is closed: its source view is read-only too, and it cannot be opened', async () => {
