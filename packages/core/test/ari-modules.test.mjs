@@ -31,7 +31,8 @@ const mgrOf = (extra = {}) => {
 test('CR: one containerName(); the runtime modules import no app-manager code at runtime (D97)', () => {
   assert.equal(containerName('com.aura.terminal-3'), 'aura-com.aura.terminal-3');
   assert.equal(containerName('a:b/c'), 'aura-a_b_c');
-  for (const f of ['container/index.ts', 'proot/index.ts', 'proot/actions.ts', 'proot/diagnostics.ts', 'proot/host.ts', 'hostTools.ts', 'respawn.ts', 'builtins/index.ts']) {
+  for (const f of ['container/index.ts', 'container/diagnostics.ts', 'container/endpoints.ts', 'container/networks.ts', 'proot/index.ts', 'proot/actions.ts',
+    'proot/diagnostics.ts', 'proot/host.ts', 'proot/orphans.ts', 'hostTools.ts', 'respawn.ts', 'spawnSpec.ts', 'builtins/index.ts']) {
     const src = readFileSync(new URL(`../src/runtimes/${f}`, import.meta.url), 'utf8');
     for (const line of src.split('\n').filter((l) => /^import .*app-manager\//.test(l))) {
       assert.match(line, /^import type /, `${f}: ${line}`);
@@ -183,4 +184,37 @@ test('RS: init respawns through the normal start, emits app:respawned once, maps
   } finally { OsEventBus.off?.('app:respawned', on); }
   assert.deepEqual(starts, [['io.p.a', { userId: 'u2' }]], 'only the plain app, as its owner (C8)');
   assert.deepEqual(events, [{ from: 'io.p.a-1', to: 'io.p.a-7', appId: 'io.p.a' }]);
+});
+
+// ── 5b-2 D: the moved groups, driven by the kernel over the reference mock (no Docker) ─────────────
+
+test('D-X: the exec bridge reads logs through the runtime\'s `logs` and refuses a sidecar session without `workloads` (mock, no engine)', async () => {
+  const { ExecBridge } = await import('../dist/app-manager/ExecBridge.js');
+  const mock = mockProvider();
+  await mock.runner.spawn('org.mock.app-2', 'org.mock.app', 4701, { id: 'org.mock.app' }, { instanceToken: { token: 't', nonce: 'n' } });
+  const bridge = new ExecBridge({
+    instance: (id) => ({ appId: 'org.mock.app', instanceId: id, state: 'resumed' }),
+    runner: () => mock.runner,
+    logs: () => mock.logs,
+    workloads: () => undefined,
+    sidecars: () => [{ id: 'w-1', service: 'db', backend: 'container', state: 'running' }],
+    sessionContext: async () => { throw new Error('not reached'); },
+  });
+  const got = [];
+  await (await bridge.logs('org.mock.app-2', {}, (s, d) => got.push([s, d.toString()]))).done;
+  assert.deepEqual(got, [['out', 'org.mock.app-2 started\n']]);
+  await assert.rejects(bridge.run('org.mock.app-2', { cmd: ['true'] }, { sidecar: 'db' }), (e) => e.status === 409 && e.code === 'runtime-unsupported');
+  // A provider refusal by code maps to the bridge's answer (not-running → 409), never by message.
+  await assert.rejects(bridge.logs('org.mock.gone', {}, () => {}), (e) => e.status === 409 && e.code === 'not-running');
+});
+
+test('D-B, D-P: builds and port exposure go through the groups; the container module declares both, PRoot and the mock neither', () => {
+  const mgr = mgrOf({ runtimes: [mockProvider()] });
+  const withBuild = mgr.runtimes.list().filter((m) => m.build).map((m) => m.descriptor.id);
+  const withEndpoints = mgr.runtimes.list().filter((m) => m.endpoints).map((m) => m.descriptor.id);
+  assert.deepEqual([withBuild, withEndpoints], [['container'], ['container']]);
+  const src = readFileSync(new URL('../src/app-manager/AppManager.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(src, /this\.container\.(buildApp|provisionApp)\b/, 'builds never call the concrete runner (D-B)');
+  const pm = readFileSync(new URL('../src/app-manager/PortManager.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(pm, /execFile|['"]docker['"]/, 'PortManager holds no Docker mechanism (D-P)');
 });

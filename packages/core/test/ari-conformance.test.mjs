@@ -28,6 +28,7 @@ mkdirSync(ROOTFS);
 /** A runner stub: the real capability declaration, a recorded endpoint for `known-1`. */
 const stub = (capabilities, host) => ({
   capabilities,
+  toolsDir: (id) => join(TMP, 'tools', id),
   getHost: (id) => (id === 'known-1' ? host : null),
   getPort: (id) => (id === 'known-1' ? 4123 : null),
 });

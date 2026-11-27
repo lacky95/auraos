@@ -28,6 +28,7 @@ import { PortAllocator } from './PortAllocator.js';
 import { LifecycleStateMachine } from './LifecycleStateMachine.js';
 import { ProotRunner, killProcessGroup } from './ProotRunner.js';
 import { BASE_IMAGE } from './BaseImage.js';
+import { buildSpawnSpec, runnerContextOf } from '../runtimes/spawnSpec.js';
 import { ContainerRunner } from './ContainerRunner.js';
 import { appFingerprint, buildFailureReason, discardBuildStaging, installBuild, prepareBuildStaging, prodCapability, sdkFingerprint, serveState, writeBuildStamp, type ServeState } from './appBuild.js';
 import { needsProvisioning, refreshAuraPackages } from './provisioning.js';
@@ -2658,7 +2659,8 @@ export class AppManager {
         runAs: isSessionIdentity(nonRoot) ? 'user' : nonRoot ? 'app' : 'root', uid: ident.uid, gid: ident.gid,
         approvedRoot: spawnCtx.identity?.approvedRoot === true ? true : undefined,
       });
-      const pid = await runner.spawn(instanceId, appId, port, manifest, {
+      // The one spec of this start (5b-2 D `buildSpawnSpec`): A4 strips host paths for a runtime without hostFilesystem.
+      const spec = buildSpawnSpec({ instanceId, appId, port, manifest, context: {
         ...spawnCtx,
         ...(installation ? { installationId: installation.installationId } : {}),
         appDir,
@@ -2672,7 +2674,8 @@ export class AppManager {
         // A preview runs the user's own workspace, not the installed source.
         sourceMode,
         ...(opts.preview ? { preview: opts.preview.workspace } : {}),
-      });
+      } }, runtime.capabilities);
+      const pid = await runner.spawn(spec.instanceId, spec.appId, spec.port, spec.manifest, runnerContextOf(spec));
       const lifecycle = runner.lifecycleStatus(instanceId) ?? undefined;
       this.upsertInstance(instanceId, appId, {
         pid, port, startedAt: new Date(), inPool: opts.inPool, owner, lifecycle,
