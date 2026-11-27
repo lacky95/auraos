@@ -165,8 +165,8 @@ export interface SpecEnvResolver {
  * server-side read of the app's own secret handles.
  */
 export interface SidecarSetupValues extends SpecEnvResolver {
-  /** The value behind the app's handle, or null when it is not the app's to read. Never logged. */
-  readSecret(handle: string): Promise<string | null>;
+  /** The value behind the app's handle for the referenced field, or null when it is not the app's to read. Never logged. */
+  readSecret(ref: SecretEnvRef): Promise<string | null>;
 }
 
 export interface ResolveContext {

@@ -492,7 +492,7 @@ export class SetupService implements SetupEngine {
     if (!active.length) return false;
     const inst = Object.fromEntries(active.filter(([, f]) => f.scope !== 'user'));
     const user = Object.fromEntries(active.filter(([, f]) => f.scope === 'user'));
-    const base = { userId: ctx.userId, appId: ctx.appId, installationId: ctx.installationId };
+    const base = { userId: ctx.userId, appId: ctx.appId, installationId: ctx.installationId, audit: (e: Parameters<SetupEngineDeps['audit']>[0]) => this.audit(e) };
     const made = await generateSetupSecrets(this.deps.vault, { ...base, fields: inst, have: desired.secrets });
     const madeUser = Object.keys(user).length ? await generateSetupSecrets(this.deps.vault, { ...base, fields: user, have: userDesired?.secrets ?? {} }) : {};
     if (!Object.keys(made).length && !Object.keys(madeUser).length) return false;
@@ -859,7 +859,7 @@ export class SetupService implements SetupEngine {
     if (!effective) return null;
     const userId = this.deps.ownerId;
     return sidecarSetupValues(effective, vaultSecretReader({
-      vault: this.deps.vault, userId, appId, installationId: effective.installationId,
+      vault: this.deps.vault, userId, appId, installationId: effective.installationId, secrets: effective.secrets,
       readGranted: (name) => this.deps.readGranted(appId, userId, name),
       audit: (e) => this.audit(e),
     }));

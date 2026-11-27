@@ -450,6 +450,13 @@ export interface RuntimeWorkloadCreate {
   owner?: string;
   /** Inherited, then the spec's own (the runtime adds HOME and the identity after it). */
   env: Record<string, string>;
+  /**
+   * D108 setup secrets by variable (they win over `env`; HOME and the
+   * identity still win over them). Owner decision 3: the runtime never puts
+   * one on a process argument line (container: a 0600 env file that lives
+   * only for the create). Present only when there is one.
+   */
+  secretEnv?: Record<string, string>;
   /** D89: its own workload token when the spec inherits the identity. */
   token: string | null;
   /** D65: the parent's App Home when the spec inherits it. */
@@ -518,7 +525,7 @@ export interface RuntimeWorkloads {
   /** The env an instance's own workload runs with. */
   instanceEnv(instanceId: string): Promise<Record<string, string>>;
   /** Runs the spec's one-shot seed in a throwaway workload on its storage; throws with its output. */
-  seed(req: { instanceId: string; spec: ResolvedSidecarSpec; env: Record<string, string> }): Promise<void>;
+  seed(req: { instanceId: string; spec: ResolvedSidecarSpec; env: Record<string, string>; secretEnv?: Record<string, string> }): Promise<void>;
   /** Creates the workload (not started); its id. Throws, leaving nothing behind. */
   create(req: RuntimeWorkloadCreate): Promise<string>;
   /** Starts a created workload and checks it stays up; on failure it is removed and the call throws with its last words. */

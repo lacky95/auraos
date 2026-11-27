@@ -28,17 +28,26 @@
  *     configuration at all (resolve.ts) and so no resolver.
  *
  * A secret value is never in the spec, its hash, a record, an error, an
- * audit entry or a log: the spec carries `{field, handle}` (that is what the
- * spec hash covers), and the value goes only into the container's env.
+ * audit entry, a log or a process argument (owner decision 3): the spec
+ * carries `{field, handle}` (that is what the spec hash covers), and the
+ * value goes only into the container's env, through a 0600 env file that
+ * lives only for the `docker create` (runtimes/container/sidecars.ts). Env
+ * delivery itself is the documented alpha limitation (the value is in the
+ * container's config, `docker inspect`); file delivery through ARI is beta.
+ * `fromSetup` literals are configuration, not secrets: they stay `-e`.
+ * The app server gets no setup value as env at all (only `/api/setup/self`).
  *
  * A sidecar gets a secret only through its app's own handle: the handle must
  * resolve in the installation owner's vault to THIS app, and either be the
- * installation's generated secret (bound to this installation) or the app
- * must hold a counting `credential.read:<NAME>` grant, exactly as the app's
- * own `credentials.get` would (`secretReadableWithoutGrant`, the shell's
- * lib/credentials.ts uses the same rule).
+ * installation's current generated secret of the referenced field (owner
+ * decision 2: installation- and purpose-bound) or the app must hold a
+ * counting `credential.read:<NAME>` grant, exactly as the app's own
+ * `credentials.get` would (`secretReadableWithoutGrant`, the shell's
+ * lib/credentials.ts uses the same rule). Generation, every read and the
+ * revocation by delete-app-data are audited (`vault.generated`,
+ * `vault.read`, `vault.revoked`), never with a value or handle.
  */
-import type { CredentialVault, SetupSecretBinding } from '../context/CredentialVault.js';
+import { setupSecretName, type CredentialVault, type SetupSecretBinding } from '../context/CredentialVault.js';
 import type { ConfigField, ConfigValue } from '../config/schema.js';
 import type { EnvValue, FromSetupRef } from '../types/setupManifest.js';
 import type { AuditInput } from '../auth/AdminAudit.js';
@@ -94,8 +103,12 @@ export function setupEnvLiteral(value: ConfigValue, ref: FromSetupRef, env: stri
 
 // ── sidecars ────────────────────────────────────────────────────────────────
 
-/** Reads a secret value by the app's handle, server-side; null when it is not this app's to read. */
-export type SecretReader = (handle: string) => Promise<string | null>;
+/**
+ * Reads a secret value server-side for one env reference: the field the
+ * reference names and the app's handle in that field. Null when it is not
+ * this app's to read for that field.
+ */
+export type SecretReader = (ref: SecretEnvRef) => Promise<string | null>;
 
 /**
  * The sidecar env resolver of an effective configuration. The env of a
@@ -124,14 +137,38 @@ export function sidecarSetupValues(effective: EffectiveConfig, readSecret: Secre
   };
 }
 
+/** The installation's current secret handles, by field (its effective configuration's `secrets`). */
+export interface InstallationSecrets {
+  installationId: string;
+  secrets: Readonly<Record<string, string>>;
+}
+
 /**
- * A generated setup secret of THIS installation needs no `credential.read`
- * grant: nobody typed it, and it exists only for this installation's app.
- * Anything else read by an app (a secret the owner typed or picked) needs
- * the owner's grant. One rule for the kernel and the shell.
+ * Owner decision 2 (D108): a generated setup secret needs no
+ * `credential.read` grant for the app whose setup generated it, and only
+ * while it is still that setup's secret:
+ *   - installation-bound: generated for THIS installation (the vault's
+ *     binding), so another installation of the same app needs the grant;
+ *   - purpose-bound: `handle` is the installation's CURRENT handle of the
+ *     field it was generated for (`current.secrets[binding.field]`), and a
+ *     reference that names a field (a sidecar's `fromSecret`) names that
+ *     same field. A handle read for another field, or one a reconfiguration
+ *     or update dropped, needs the grant;
+ *   - a secret anybody typed or picked (no binding), another app's, or
+ *     another user's: never (the caller checks the app holds the handle).
+ * Revocation (owner revoke, delete-app-data) removes the entry, so the next
+ * read fails. One rule for the kernel and the shell (lib/credentials.ts).
  */
-export function secretReadableWithoutGrant(held: { installation?: SetupSecretBinding }, installationId: string | null | undefined): boolean {
-  return !!installationId && held.installation?.installationId === installationId;
+export function secretReadableWithoutGrant(
+  held: { installation?: SetupSecretBinding },
+  current: InstallationSecrets | null | undefined,
+  handle: string,
+  field?: string,
+): boolean {
+  const b = held.installation;
+  if (!b || !current || !current.installationId || b.installationId !== current.installationId) return false;
+  if (field !== undefined && field !== b.field) return false;
+  return Object.prototype.hasOwnProperty.call(current.secrets, b.field) && current.secrets[b.field] === handle;
 }
 
 export interface VaultSecretReaderOptions {
@@ -140,23 +177,26 @@ export interface VaultSecretReaderOptions {
   userId: string;
   appId: string;
   installationId: string;
+  /** The installation's current secret handles by field (the effective configuration's `secrets`). */
+  secrets: Readonly<Record<string, string>>;
   /** Does `appId` hold a counting `credential.read:<name>` grant in `userId`'s vault (GrantStore + appGrantCounts)? */
   readGranted(name: string): Promise<boolean>;
   /** The `vault.read` audit entry (no value). */
   audit?(entry: AuditInput): Promise<void>;
 }
 
-/** The server-side secret read of a sidecar spawn: the app's own handle, or nothing. */
+/** The server-side secret read of a sidecar spawn: the app's own handle, or nothing. One `vault.read` audit row per read. */
 export function vaultSecretReader(o: VaultSecretReaderOptions): SecretReader {
-  return async (handle) => {
+  return async ({ field, handle }) => {
     const held = await o.vault.resolve(o.userId, handle);
     if (!held || held.consumer !== o.appId) return null;
-    if (!secretReadableWithoutGrant(held, o.installationId) && !(await o.readGranted(held.name))) return null;
+    const generated = secretReadableWithoutGrant(held, { installationId: o.installationId, secrets: o.secrets }, handle, field);
+    if (!generated && !(await o.readGranted(held.name))) return null;
     const value = await o.vault.reveal(o.userId, held.name, o.appId);
     try {
       await o.audit?.({
         by: { kind: 'system' }, action: 'vault.read', target: `vault:${held.name}`, outcome: value === null ? 'failed' : 'ok',
-        detail: { name: held.name, app: o.appId, installation: o.installationId, user: o.userId, via: 'setup-env' },
+        detail: { name: held.name, app: o.appId, installation: o.installationId, user: o.userId, field, via: 'setup-env', grant: generated ? 'setup-generated' : 'credential.read' },
       });
     } catch { /* the audit trail must not fail the spawn */ }
     return value;
@@ -174,14 +214,25 @@ export function vaultSecretReader(o: VaultSecretReaderOptions): SecretReader {
  */
 export async function generateSetupSecrets(
   vault: Pick<CredentialVault, 'generate'>,
-  o: { userId: string; appId: string; installationId: string; fields: Readonly<Record<string, ConfigField>>; have: Readonly<Record<string, string>> },
+  o: {
+    userId: string; appId: string; installationId: string; fields: Readonly<Record<string, ConfigField>>; have: Readonly<Record<string, string>>;
+    /** One `vault.generated` row per generate call (no value, no handle); `created: false` when the vault already held it. */
+    audit?(entry: AuditInput): Promise<void>;
+  },
 ): Promise<Record<string, string>> {
   const out: Record<string, string> = {};
   for (const [name, f] of Object.entries(o.fields).sort(([a], [b]) => a.localeCompare(b))) {
     if (f.type !== 'secret' || f.secret.source !== 'generate' || name in o.have) continue;
-    out[name] = (await vault.generate(o.userId, {
+    const made = await vault.generate(o.userId, {
       consumer: o.appId, installationId: o.installationId, field: name, ...(f.secret.length !== undefined ? { length: f.secret.length } : {}),
-    })).handle;
+    });
+    out[name] = made.handle;
+    try {
+      await o.audit?.({
+        by: { kind: 'system' }, action: 'vault.generated', target: `vault:${setupSecretName(o.installationId, name)}`, outcome: 'ok',
+        detail: { name: setupSecretName(o.installationId, name), app: o.appId, installation: o.installationId, field: name, user: o.userId, created: made.created },
+      });
+    } catch { /* the audit trail must not fail the setup */ }
   }
   return out;
 }

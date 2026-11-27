@@ -116,6 +116,7 @@ function deps(): ApprovalRouteDeps & CredentialDeps {
     } as never,
     grants: {} as never,
     appBinding: async () => ({ scope: undefined, installationId: null }),
+    setupSecrets: async () => null,
   };
 }
 
