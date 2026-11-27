@@ -15,7 +15,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   ProvisionWatch, nextHealthDeadline, needsProvisioning,
-  PROVISION_BEGIN, PROVISION_END, PROVISION_SHELL, RAW_START_SHELL,
+  PROVISION_BEGIN, PROVISION_END, PROVISION_SHELL, RAW_START_SHELL, PENDING_BUILDS_FILE,
 } from '../dist/app-manager/provisioning.js';
 
 // ── ProvisionWatch ────────────────────────────────────────────────────────
@@ -180,5 +180,53 @@ test('the provisioning shell brackets its work in markers', () => {
 
 test('an app without its own pnpm workspace does not install into the OS workspace', () => {
   assert.match(PROVISION_SHELL, /if \[ ! -f pnpm-workspace\.yaml \]; then PNPM_SCOPE="--ignore-workspace"; fi/);
-  assert.match(PROVISION_SHELL, /\$PNPM install \$PNPM_SCOPE --frozen-lockfile 2>&1 \|\| \$PNPM install \$PNPM_SCOPE 2>&1/);
+  assert.match(PROVISION_SHELL, /\$PNPM install \$PNPM_SCOPE \$SCRIPTS --frozen-lockfile 2>&1 \|\| \$PNPM install \$PNPM_SCOPE \$SCRIPTS 2>&1/);
+});
+
+// ── install scripts a store install skipped (PENDING_BUILDS_FILE) ─────────
+/** An installed app with a pending-builds list, and an npm stand-in that logs its calls. */
+function pendingApp() {
+  const d = appDir({ name: 'p', dependencies: { astro: '^7' } }, { astro: true, aura: true });
+  writeFileSync(join(d, PENDING_BUILDS_FILE), 'p (postinstall)\nesbuild@0.27.7 (postinstall)\n');
+  const bin = mkdtempSync(join(tmpdir(), 'aura-prov-bin-'));
+  writeFileSync(join(bin, 'npm'), '#!/bin/sh\necho "npm $*" >> calls.log\n');
+  chmodSync(join(bin, 'npm'), 0o755);
+  const run = (env) => execFileSync('bash', ['-c', `set -e\n${PROVISION_SHELL}`],
+    { cwd: d, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, ...env }, encoding: 'utf-8' });
+  const calls = () => (existsSync(join(d, 'calls.log')) ? readFileSync(join(d, 'calls.log'), 'utf-8') : '');
+  return { d, run, calls };
+}
+
+test('the app\'s own container runs the skipped install scripts: dependencies first, then the app\'s, then the list is gone', () => {
+  const { d, run, calls } = pendingApp();
+  const out = run({ AURA_DEP_BUILDS: '1' });
+  assert.ok(out.indexOf(PROVISION_BEGIN) < out.indexOf('esbuild@0.27.7') && out.indexOf('esbuild') < out.indexOf(PROVISION_END), 'bracketed');
+  assert.deepEqual(calls().trim().split('\n'), [
+    'npm rebuild --foreground-scripts',
+    ...['preinstall', 'install', 'postinstall', 'prepublish', 'preprepare', 'prepare', 'postprepare'].map((s) => `npm run --ignore-scripts --if-present ${s}`),
+  ]);
+  assert.equal(existsSync(join(d, PENDING_BUILDS_FILE)), false);
+  assert.ok(!run({ AURA_DEP_BUILDS: '1' }).includes(PROVISION_BEGIN), 'done once');
+});
+
+test('a sandbox that shares the master (PRoot, or no AURA_DEP_BUILDS) never runs an install script', () => {
+  for (const env of [{ AURA_DEP_BUILDS: '0' }, { AURA_DEP_BUILDS: '' }]) {
+    const { d, run, calls } = pendingApp();
+    const out = run(env);
+    assert.match(out, /WARNING: install scripts not run \(this sandbox shares the master\): p \(postinstall\) esbuild@0\.27\.7/);
+    assert.equal(calls(), '', 'npm not called');
+    assert.equal(existsSync(join(d, PENDING_BUILDS_FILE)), true, 'still pending');
+  }
+});
+
+test('the first-start fallback install runs scripts only in the app\'s own container', () => {
+  for (const [env, flag] of [[{ AURA_DEP_BUILDS: '1' }, ''], [{ AURA_DEP_BUILDS: '0' }, ' --ignore-scripts']]) {
+    const d = appDir({ name: 'f', dependencies: { astro: '^7' } });
+    const bin = mkdtempSync(join(tmpdir(), 'aura-prov-bin-'));
+    writeFileSync(join(bin, 'npm'), '#!/bin/sh\necho "npm $*" >> calls.log\nmkdir -p node_modules/.bin && : > node_modules/.bin/astro && chmod +x node_modules/.bin/astro\n');
+    chmodSync(join(bin, 'npm'), 0o755);
+    execFileSync('bash', ['-c', `set -e\n${PROVISION_SHELL}`], { cwd: d, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, ...env }, encoding: 'utf-8' });
+    assert.equal(readFileSync(join(d, 'calls.log'), 'utf-8'), `npm install${flag} --prefer-offline\n`);
+  }
+  assert.match(PROVISION_SHELL, /\$PNPM install \$PNPM_SCOPE \$SCRIPTS --frozen-lockfile/);
 });

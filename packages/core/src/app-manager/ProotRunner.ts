@@ -177,6 +177,9 @@ export class ProotRunner implements SandboxRunner {
       // prod = start from the app's build (matches its sources), dev = astro
       // dev; read by ASTRO_START_SHELL (appBuild.ts serveState).
       AURA_SERVE: serveState(ctx.appDir, manifest).mode,
+      // PRoot shares the master: never an install script here (provisioning.ts),
+      // whatever the shell's env or an OS Context key says.
+      AURA_DEP_BUILDS: '0',
       // Statically known: AppManager runs inside the Docker container and
       // every spawn we do is wrapped in PRoot. Baking the tag here means the
       // /root/.bashrc snippet that renders the prompt never has to shell out

@@ -6,6 +6,15 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { AppManifestSchema, type AppManifest } from '../types/manifest.js';
+import type { AuraErrorBody } from '../errors/contracts.js';
+
+/** An install refused before the owner's approval and before anything was written, with its D105 body. */
+export class InstallRefusedError extends Error {
+  constructor(public readonly body: AuraErrorBody) {
+    super(body.message);
+    this.name = 'InstallRefusedError';
+  }
+}
 
 export class NexusValidationError extends Error {
   constructor(public readonly issues: string[]) {

@@ -52,6 +52,10 @@ function isOrasAvailable(): boolean {
   catch { return false; }
 }
 
+/** An @aura/* entry `aura sdk install` accepts (the name becomes a path, both a registry ref). */
+const AURA_DEP_NAME = /^@aura\/[a-z0-9][a-z0-9._-]*$/;
+const AURA_DEP_VERSION = /^[~^]?\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
+
 /** Discover @aura/* deps from the cwd's package.json. Reads two fields:
  *
  *   • `auraDependencies` — preferred for user/global-scope apps. npm/pnpm
@@ -85,6 +89,11 @@ function discoverDeps(cwd: string): Array<{ fullName: string; basename: string; 
   for (const [fullName, spec] of Object.entries(merged)) {
     if (!fullName.startsWith('@aura/')) continue;
     if (typeof spec !== 'string' || spec === 'workspace:*' || spec.startsWith('workspace:')) continue;
+    // Anything else could name a path outside node_modules/@aura (as a scaffold refuses it).
+    if (!AURA_DEP_NAME.test(fullName) || !AURA_DEP_VERSION.test(spec)) {
+      console.error(color.yellow(`[sdk] ${JSON.stringify(fullName).slice(0, 80)}: not an @aura/<name>: x.y.z entry — skipped`));
+      continue;
+    }
     const version = spec.replace(/^[~^]/, '');
     const basename = fullName.replace(/^@aura\//, '');
     out.push({ fullName, basename, version });

@@ -25,14 +25,34 @@
  *     install — but now brackets that work in markers. A runner watching the
  *     log knows the app is being prepared rather than failing to start, and
  *     holds the boot budget open instead of killing it.
+ *
+ * Install scripts never run as root in the shell (owner 2026-11-27: "without
+ * allowing untrusted scripts to execute as root"). provisionApp installs
+ * unprivileged with scripts off (unprivilegedInstall.ts); the scripts it
+ * skipped are listed in PENDING_BUILDS_FILE and run by the entrypoint in the
+ * app's own container (AURA_DEP_BUILDS=1, ContainerRunner), as the app. A
+ * sandbox that shares the master (PRoot) never runs install scripts.
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
+import { installStoreDepsUnprivileged, type StoreInstallOpts } from './unprivilegedInstall.js';
 
 /** Printed by the synthesised entrypoint around the provisioning block. */
 export const PROVISION_BEGIN = '@@aura:provision:begin@@';
 export const PROVISION_END   = '@@aura:provision:end@@';
+
+/**
+ * The install scripts a shell-side install skipped (one per line), for the
+ * app's own sandbox to run at its next start. Inside node_modules, so a fresh
+ * install (or deleting node_modules) clears it with the tree it belongs to.
+ */
+export const PENDING_BUILDS_FILE = 'node_modules/.aura-pending-builds';
+
+/** Root lifecycle scripts `npm install` runs after the dependencies, in its order. */
+const ROOT_INSTALL_SCRIPTS = ['preinstall', 'install', 'postinstall', 'prepublish', 'preprepare', 'prepare', 'postprepare'] as const;
+/** A dependency's install scripts (`npm rebuild` runs them; binding.gyp alone means `node-gyp rebuild`). */
+const DEP_INSTALL_SCRIPTS = ['preinstall', 'install', 'postinstall'] as const;
 
 /**
  * Absolute ceiling on provisioning, so a wedged install still fails rather
@@ -95,10 +115,17 @@ fi
 if [ ! -d node_modules/@aura ] && grep -qE '"(aura)?[dD]ependencies"|"@aura/' package.json 2>/dev/null; then
   PROVISION=1
 fi
+if [ -f ${PENDING_BUILDS_FILE} ]; then
+  PROVISION=1
+fi
 if [ "$PROVISION" = 1 ]; then
   # Bracket the slow part so the runner can tell "being prepared" from
   # "failing to boot" and hold its health budget open. See provisioning.ts.
   echo "${PROVISION_BEGIN}"
+  # Install scripts run only in the app's own container (the runner sets
+  # AURA_DEP_BUILDS=1), never in a sandbox that shares the master (PRoot).
+  SCRIPTS=""
+  if [ "\${AURA_DEP_BUILDS:-0}" != 1 ]; then SCRIPTS="--ignore-scripts"; fi
   if ${npmMissing}; then
     # Install with the package manager the lockfile belongs to. A pnpm
     # project installed by npm resolves from scratch and can miss
@@ -113,11 +140,26 @@ if [ "$PROVISION" = 1 ]; then
       PNPM_SCOPE=""
       if [ ! -f pnpm-workspace.yaml ]; then PNPM_SCOPE="--ignore-workspace"; fi
       echo "[\${APP_ID:-app}] pnpm install via '\$PNPM' (dependencies not yet installed)..."
-      \$PNPM install \$PNPM_SCOPE --frozen-lockfile 2>&1 || \$PNPM install \$PNPM_SCOPE 2>&1 \\
+      \$PNPM install \$PNPM_SCOPE \$SCRIPTS --frozen-lockfile 2>&1 || \$PNPM install \$PNPM_SCOPE \$SCRIPTS 2>&1 \\
         || echo "[\${APP_ID:-app}] WARNING: pnpm install exited non-zero (often just ignored build scripts) — trying to boot anyway"
     else
       echo "[\${APP_ID:-app}] npm install (dependencies not yet installed)..."
-      npm install --prefer-offline 2>&1 || npm install
+      npm install \$SCRIPTS --prefer-offline 2>&1 || npm install \$SCRIPTS
+    fi
+  fi
+  if [ -f ${PENDING_BUILDS_FILE} ]; then
+    if [ -z "\$SCRIPTS" ]; then
+      # The install scripts the store install skipped in the shell, run here
+      # as the app: the dependencies' (npm rebuild), then the app's own, in
+      # npm install's order (--ignore-scripts: exactly that script, no pre/post).
+      echo "[\${APP_ID:-app}] running the dependency install scripts in the app's sandbox: \$(tr '\\n' ' ' < ${PENDING_BUILDS_FILE})"
+      if npm rebuild --foreground-scripts 2>&1${ROOT_INSTALL_SCRIPTS.map((s) => ` && npm run --ignore-scripts --if-present ${s} 2>&1`).join('')}; then
+        rm -f ${PENDING_BUILDS_FILE}
+      else
+        echo "[\${APP_ID:-app}] WARNING: a dependency install script failed (retried at the next start) — trying to boot anyway"
+      fi
+    else
+      echo "[\${APP_ID:-app}] WARNING: install scripts not run (this sandbox shares the master): \$(tr '\\n' ' ' < ${PENDING_BUILDS_FILE})"
     fi
   fi
   if [ ! -d node_modules/@aura ] && grep -qE '"(aura)?[dD]ependencies"|"@aura/' package.json 2>/dev/null; then
@@ -239,11 +281,54 @@ function referencesAuraPackages(appDir: string): boolean {
 }
 
 /**
- * Install an app's dependencies in place.
- *
- * Runs in the OS container against the app's directory on the shared data
- * volume — the same directory the app container later bind-mounts, so the
- * work is visible to it. `onLine` receives command output for progress.
+ * The install scripts an install with scripts off skipped: the app's own
+ * lifecycle scripts and every installed package with an install script (or a
+ * binding.gyp). Symlinks are not followed.
+ */
+export function pendingDependencyBuilds(appDir: string): string[] {
+  const out: string[] = [];
+  const pkg = readPkg(join(appDir, 'package.json'));
+  for (const s of ROOT_INSTALL_SCRIPTS) if (pkg?.scripts?.[s]) out.push(`${pkg.name ?? 'app'} (${s})`);
+  const seen = new Set<string>();
+  const walk = (nm: string, depth: number): void => {
+    let names: string[];
+    try { names = readdirSync(nm); } catch { return; }
+    for (const name of names) {
+      if (name.startsWith('.')) continue;
+      const dir = join(nm, name);
+      if (!isDir(dir)) continue;
+      if (name.startsWith('@')) { walk(dir, depth); continue; }
+      const dep = readPkg(join(dir, 'package.json'));
+      if (!dep) continue;
+      const scripts = DEP_INSTALL_SCRIPTS.filter((s) => dep.scripts?.[s]);
+      if (scripts.length || existsSync(join(dir, 'binding.gyp'))) {
+        const id = `${dep.name ?? name}@${dep.version ?? '?'}`;
+        if (!seen.has(id)) { seen.add(id); out.push(`${id} (${scripts.length ? scripts.join(', ') : 'binding.gyp'})`); }
+      }
+      if (depth < 12) walk(join(dir, 'node_modules'), depth + 1);
+    }
+  };
+  walk(join(appDir, 'node_modules'), 0);
+  return out;
+}
+
+function isDir(p: string): boolean {
+  try { return lstatSync(p).isDirectory(); } catch { return false; }
+}
+
+function readPkg(p: string): { name?: string; version?: string; scripts?: Record<string, string> } | null {
+  try { return JSON.parse(readFileSync(p, 'utf-8')) as { name?: string; version?: string; scripts?: Record<string, string> }; }
+  catch { return null; }
+}
+
+/**
+ * Install an app's dependencies at install time (Nexus install, update, patch
+ * activation), never as root and never running an install script: the
+ * unprivileged install (unprivilegedInstall.ts) as the install user, scripts
+ * off, in a work dir; node_modules is then moved into the app dir — the dir
+ * the app's sandbox later mounts. The scripts it skipped go to
+ * PENDING_BUILDS_FILE for the app's own sandbox. `onLine` receives command
+ * output for progress.
  *
  * Never throws for a failed `aura sdk install`: an app that declares no
  * `@aura/*` package, or a registry that is briefly down, must not turn a
@@ -254,31 +339,20 @@ export async function provisionApp(
   appDir:   string,
   onLine?:  (line: string) => void,
   runtime:  AppRuntime = 'astro',
+  /** The unprivileged install's paths and identity (tests). */
+  install:  Partial<Pick<StoreInstallOpts, 'paths' | 'env' | 'uid' | 'gid'>> = {},
 ): Promise<ProvisionResult> {
-  const result: ProvisionResult = { ran: [], warnings: [] };
-  if (!existsSync(join(appDir, 'package.json'))) return result;
-
-  if (npmMissing(appDir, runtime)) {
-    result.ran.push('npm install');
-    const code = await run('npm', ['install', '--prefer-offline'], appDir, onLine);
-    if (code !== 0) {
-      // --prefer-offline can fail on a stale/partial cache; the retry is the
-      // same fallback the entrypoint has always had.
-      onLine?.('npm install --prefer-offline failed, retrying online…');
-      const retry = await run('npm', ['install'], appDir, onLine);
-      if (retry !== 0) throw new Error(`npm install failed in ${appDir} (exit ${retry})`);
-    }
-  }
-
-  if (referencesAuraPackages(appDir) && !existsSync(join(appDir, 'node_modules', '@aura'))) {
-    result.ran.push('aura sdk install');
-    const code = await run('aura', ['sdk', 'install', '--quiet'], appDir, onLine);
-    if (code !== 0) {
-      // Left to the entrypoint to retry at launch, which is why that fallback
-      // stays. Surfaced rather than swallowed so a broken registry is visible.
-      result.warnings.push(
-        `aura sdk install failed (exit ${code}) — @aura/* packages will be pulled at first launch instead`,
-      );
+  if (!existsSync(join(appDir, 'package.json'))) return { ran: [], warnings: [] };
+  const npm = npmMissing(appDir, runtime);
+  // A fresh node_modules replaces the app's, @aura/* included.
+  const sdk = referencesAuraPackages(appDir) && (npm || !existsSync(join(appDir, 'node_modules', '@aura')));
+  if (!npm && !sdk) return { ran: [], warnings: [] };
+  const result = await installStoreDepsUnprivileged(appDir, { ...install, npm, sdk, ...(onLine ? { onLine } : {}) });
+  if (npm && existsSync(join(appDir, 'node_modules'))) {
+    const pending = pendingDependencyBuilds(appDir);
+    if (pending.length) {
+      writeFileSync(join(appDir, PENDING_BUILDS_FILE), `${pending.join('\n')}\n`);
+      result.warnings.push(`install scripts not run by the install; a container sandbox runs them at the app's first start: ${pending.join(', ')}`);
     }
   }
   return result;

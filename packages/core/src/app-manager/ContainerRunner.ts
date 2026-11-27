@@ -779,6 +779,9 @@ export class ContainerRunner implements SandboxRunner {
       // astro dev. Read by ASTRO_START_SHELL; also tells an adopted container
       // apart. Apps with their own entrypoint ignore it.
       '-e', `AURA_SERVE=${serveState(ctx.appDir, manifest).mode}`,
+      // The app's own container: the entrypoint may run the install scripts a
+      // store install skipped in the shell (provisioning.ts PENDING_BUILDS_FILE).
+      '-e', 'AURA_DEP_BUILDS=1',
       // Hostname override read by bashrc.aura.sh's PS1. We also set the
       // kernel hostname via --hostname above, but a process can sethostname()
       // away from that; the env stays put across `docker exec` invocations

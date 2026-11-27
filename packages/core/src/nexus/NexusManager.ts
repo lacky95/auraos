@@ -17,12 +17,13 @@ import type { AppManifest } from '../types/manifest.js';
 import type { OsEventBus as OsEventBusSingleton } from '../ipc/OsEventBus.js';
 import type { ScopeDefinition, ScopeId } from '../scopes/types.js';
 import { portAppDirForScope } from '../scopes/portability.js';
+import { refusedStoreInstallFiles } from '../scopes/scaffoldPayload.js';
 import { Resolver } from './Resolver.js';
 
 type OsEventBus = typeof OsEventBusSingleton;
 import { CatalogAggregator } from './CatalogAggregator.js';
 import { Installer, removeContained } from './Installer.js';
-import { NexusValidationError, validateStagedDir } from './Validator.js';
+import { InstallRefusedError, NexusValidationError, validateStagedDir } from './Validator.js';
 import { hostConflicts, isProtectedHostName, type HostClaim } from '../app-hosts/appHosts.js';
 import type { AppHostLifecycle, AppIdentityFacts, AppRestoreCheck } from '../app-hosts/lifecycle.js';
 import { fetchLocal } from './Fetchers/LocalFetcher.js';
@@ -445,6 +446,21 @@ export class NexusManager {
       let manifest = validateStagedDir(stagingDir);
       // App host names are global: `{name}--{host}` must route to ONE app.
       keys.add(manifest.id); this.installing.add(manifest.id);
+      // The shell installs the app's dependencies (provisionApp, unprivileged,
+      // scripts off) from its package.json, package-lock.json and .npmrc:
+      // none of them may steer that install. Refused before the owner's
+      // approval and before anything is written.
+      const refused = refusedStoreInstallFiles(stagingDir);
+      if (refused.length) {
+        throw new InstallRefusedError({
+          error: 'refused-file',
+          message: `${manifest.id} contains ${refused.length === 1 ? 'an install input' : 'install inputs'} the shell does not install from: ${refused.map((r) => r.file).join(', ')}. Nothing was installed.`,
+          category: 'invalid-request',
+          hint: 'Publish the app with registry dependencies, a registry package-lock.json and the AuraOS .npmrc only; anything else belongs to the app\'s own sandbox (its entrypoint).',
+          target: manifest.id,
+          details: { refused },
+        });
+      }
       yield { type: 'validate.done', manifest };
 
       // ─── Identity: which installed app (if any) is this? ────────────────

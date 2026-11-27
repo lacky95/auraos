@@ -21,7 +21,14 @@
  * The install itself runs with SCAFFOLD_INSTALL_ARGS (no lifecycle scripts,
  * no pnpmfile) and as an unprivileged uid (app-manager/unprivilegedInstall.ts).
  * The template `aura dev new` renders passes all of this unchanged.
+ *
+ * A store app (Nexus install, update, patch activation) is checked by
+ * refusedStoreInstallFiles: the shell installs its dependencies with npm, from
+ * package.json, package-lock.json and .npmrc only, so those are the inputs
+ * that may not steer it.
  */
+import { existsSync, lstatSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { AURA_NPMRC } from './portability.js';
 
 export interface ScaffoldPayloadFile { relPath: string; content: string; mode?: number }
@@ -62,7 +69,73 @@ export function refusedScaffoldFiles(files: readonly ScaffoldPayloadFile[]): Sca
   return out;
 }
 
-function refusedPackageJson(content: string): ScaffoldFileRefusal[] {
+/** The registry a lockfile may resolve from (npm maps it onto the configured registry, replace-registry-host). */
+const LOCK_REGISTRY = 'https://registry.npmjs.org/';
+
+/** The settings of an .npmrc: its lines without comments and blanks. */
+function npmrcSettings(content: string): string[] {
+  return content.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#') && !l.startsWith(';'));
+}
+
+/**
+ * The inputs of a store app's dependency install the shell refuses (Nexus,
+ * owner 2026-11-27: "without allowing untrusted scripts to execute as root").
+ * The shell installs from package.json, package-lock.json and .npmrc alone
+ * (app-manager/unprivilegedInstall.ts installStoreDepsUnprivileged), so:
+ *   • .npmrc: only AURA_NPMRC's settings (its comments may differ); any other
+ *     setting can change the registry, re-enable scripts or name a binary npm runs
+ *   • package.json: dependencies that are not registry packages, malformed
+ *     `@aura/*` entries (as for a scaffold; package-manager fields stay: npm
+ *     does not read `pnpm`, and the app's sandbox installs with its own choice)
+ *   • package-lock.json: links and entries resolved from anywhere but the registry
+ *   • a symlink in place of one of these files
+ * pnpm-workspace.yaml and a pnpmfile are pnpm's: the shell never runs pnpm on
+ * a store app, only the app's own sandbox does.
+ */
+export function refusedStoreInstallFiles(appDir: string): ScaffoldFileRefusal[] {
+  const out: ScaffoldFileRefusal[] = [];
+  const read = (name: string): string | null => {
+    const p = join(appDir, name);
+    if (!existsSync(p) && !isLink(p)) return null;
+    if (!lstatSync(p).isFile()) { out.push({ file: name, reason: 'not a regular file (a symlink or directory)' }); return null; }
+    return readFileSync(p, 'utf-8');
+  };
+  const npmrc = read('.npmrc');
+  if (npmrc !== null) {
+    const allowed = new Set(npmrcSettings(AURA_NPMRC));
+    const foreign = npmrcSettings(npmrc).filter((l) => !allowed.has(l));
+    if (foreign.length) {
+      out.push({ file: '.npmrc', reason: `only the AuraOS .npmrc is accepted; refused setting${foreign.length > 1 ? 's' : ''}: ${foreign.map((l) => l.split('=')[0]!.trim()).join(', ').slice(0, 200)}` });
+    }
+  }
+  const pkg = read('package.json');
+  if (pkg !== null) out.push(...refusedPackageJson(pkg, { packageManagerFields: false }));
+  const lock = read('package-lock.json');
+  if (lock !== null) out.push(...refusedPackageLock(lock));
+  return out;
+}
+
+function isLink(p: string): boolean {
+  try { return lstatSync(p).isSymbolicLink(); } catch { return false; }
+}
+
+function refusedPackageLock(content: string): ScaffoldFileRefusal[] {
+  let lock: { packages?: Record<string, { resolved?: unknown; link?: unknown }> };
+  try { lock = JSON.parse(content) as typeof lock; } catch { return [{ file: 'package-lock.json', reason: 'not JSON' }]; }
+  const out: ScaffoldFileRefusal[] = [];
+  for (const [key, entry] of Object.entries(lock.packages ?? {})) {
+    if (!key || !entry || typeof entry !== 'object') continue;
+    const at = `package-lock.json: ${key.slice(0, 120)}`;
+    if (entry.link) out.push({ file: at, reason: 'a local link, not a registry package' });
+    else if (entry.resolved !== undefined && !(typeof entry.resolved === 'string' && entry.resolved.startsWith(LOCK_REGISTRY))) {
+      out.push({ file: at, reason: `resolved from "${String(entry.resolved).slice(0, 80)}", not from ${LOCK_REGISTRY}` });
+    }
+    if (out.length >= 20) break;
+  }
+  return out;
+}
+
+function refusedPackageJson(content: string, opts: { packageManagerFields?: boolean } = {}): ScaffoldFileRefusal[] {
   let pkg: Record<string, unknown>;
   try {
     const parsed: unknown = JSON.parse(content);
@@ -72,7 +145,7 @@ function refusedPackageJson(content: string): ScaffoldFileRefusal[] {
     return [{ file: 'package.json', reason: 'not a JSON object' }];
   }
   const out: ScaffoldFileRefusal[] = [];
-  for (const field of PACKAGE_MANAGER_FIELDS) {
+  for (const field of opts.packageManagerFields === false ? [] : PACKAGE_MANAGER_FIELDS) {
     if (pkg[field] !== undefined) out.push({ file: `package.json: ${field}`, reason: 'selects or configures the package manager the shell runs' });
   }
   for (const field of DEP_FIELDS) {

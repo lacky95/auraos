@@ -205,8 +205,10 @@ for (const id of ['com.aura.terminal', 'com.aura.settings']) {
     const path = process.env.PATH;
     process.env.PATH = `${tools.bin}:${path}`;
     try {
-      await assert.rejects(provisionApp(sysDir), /npm install failed/, 'unported, it would not install');
-      const prov = await provisionApp(appDir);
+      // The unprivileged store install, as the test's own user (the stand-ins live in a 0700 temp dir).
+      const inst = { uid: process.getuid(), gid: process.getgid(), paths: { storeDir: join(root, 'istore'), toolsDir: join(root, 'itools'), workDir: join(root, 'iwork') } };
+      await assert.rejects(provisionApp(sysDir, undefined, 'astro', inst), /npm install failed/, 'unported, it would not install');
+      const prov = await provisionApp(appDir, undefined, 'astro', inst);
       assert.deepEqual(prov.ran, ['npm install', 'aura sdk install']);
     } finally { process.env.PATH = path; }
     assert.equal(needsProvisioning(appDir), false);

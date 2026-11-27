@@ -7,7 +7,9 @@
  * whose dialog shows the binding and the PermissionDiff. Nothing in the
  * request body can approve an install: `autoApprove` is gone.
  */
+import { InstallRefusedError } from '@aura/core';
 import type { AccessPrincipal, ApprovalLevel, InstallBinding, InstallRecord, NexusProgressEvent, PermissionDiff } from '@aura/core';
+import { errorResponse } from '../appResponse.ts';
 import { installDisplay, installLevel } from './display.ts';
 import { actionGate, json, presentedApproval, type ApprovalServiceDeps } from './service.ts';
 
@@ -66,6 +68,8 @@ export async function runInstall(
     }
     return json({ ok: true, record: cursor.value });
   } catch (err) {
+    // Refused before approval, nothing written (e.g. foreign install inputs): the D105 body, 400.
+    if (err instanceof InstallRefusedError) return errorResponse(400, err.body);
     return json({ error: (err as Error).message }, 500);
   }
 }
