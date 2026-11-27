@@ -1,0 +1,101 @@
+{
+  "example": {
+    "files": {
+      "apt/apt.conf.d/90aura-infra": "// AuraOS infrastructure configuration (D94): managed, do not edit.\nAcquire::http::Proxy \"http://proxy.corp.example:3128\";\nAcquire::https::Proxy \"http://proxy.corp.example:3128\";\nAcquire::http::Proxy::artifactory.corp.example \"DIRECT\";\nAcquire::https::Proxy::artifactory.corp.example \"DIRECT\";\nAcquire::https::CAInfo \"/etc/aura/infra/ca-bundle.pem\";\n",
+      "apt/mirrors": "deb.debian.org\thttps://artifactory.corp.example/debian-remote\nsecurity.debian.org\thttps://artifactory.corp.example/debian-security-remote\n",
+      "artifacts.rewrites": "https://download.docker.com/\thttps://artifactory.corp.example/docker-static/\nhttps://github.com/\thttps://artifactory.corp.example/github-releases/\n",
+      "ca-bundle.pem": "-----BEGIN CERTIFICATE-----\nPUBLIC-ROOTS\n-----END CERTIFICATE-----\n-----BEGIN CERTIFICATE-----\nCORP-ROOT\n-----END CERTIFICATE-----\n",
+      "ca-certificates/aura-infra-corp-root.crt": "-----BEGIN CERTIFICATE-----\nCORP-ROOT\n-----END CERTIFICATE-----\n",
+      "corporate-ca.pem": "-----BEGIN CERTIFICATE-----\nCORP-ROOT\n-----END CERTIFICATE-----\n",
+      "gitconfig": "# AuraOS infrastructure configuration (D94): system layer, managed. ~/.gitconfig wins.\n[include]\n\tpath = /etc/gitconfig\n[http]\n\tsslCAInfo = /etc/aura/infra/ca-bundle.pem\n[url \"https://git.corp.example/mirror/github/\"]\n\tinsteadOf = https://github.com/\n",
+      "npmrc": "# AuraOS infrastructure configuration (D94): global layer, managed. ~/.npmrc and a project .npmrc win.\nregistry=https://artifactory.corp.example/api/npm/npm-remote/\n@corp:registry=https://artifactory.corp.example/api/npm/npm-local/\nproxy=http://proxy.corp.example:3128\nhttps-proxy=http://proxy.corp.example:3128\nnoproxy=.corp.example,10.0.0.0/8,artifactory.corp.example,localhost,127.0.0.1,::1,.localhost,aura-shell,aura-net,.aura-net\ncafile=/etc/aura/infra/ca-bundle.pem\n",
+      "oci/mirrors": "docker.io\tartifactory.corp.example/docker-remote\nghcr.io\tartifactory.corp.example/ghcr-remote\n",
+      "xdg/pip/pip.conf": "# AuraOS infrastructure configuration (D94): system layer, managed. User and venv pip.conf win.\n[global]\nindex-url = https://artifactory.corp.example/api/pypi/pypi-remote/simple\ncert = /etc/aura/infra/ca-bundle.pem\n",
+      "xdg/uv/uv.toml": "# AuraOS infrastructure configuration (D94): system layer, managed. ~/.config/uv/uv.toml and the project win.\nnative-tls = true\n\n[[index]]\nurl = \"https://artifactory.corp.example/api/pypi/pypi-remote/simple\"\ndefault = true\n"
+    },
+    "env": {
+      "COREPACK_NPM_REGISTRY": "https://artifactory.corp.example/api/npm/npm-remote",
+      "CURL_CA_BUNDLE": "/etc/aura/infra/ca-bundle.pem",
+      "GIT_CONFIG_SYSTEM": "/etc/aura/infra/gitconfig",
+      "HTTPS_PROXY": "http://proxy.corp.example:3128",
+      "HTTP_PROXY": "http://proxy.corp.example:3128",
+      "NODE_EXTRA_CA_CERTS": "/etc/aura/infra/corporate-ca.pem",
+      "NODE_OPTIONS": "--disable-warning=UNDICI-EHPA",
+      "NODE_USE_ENV_PROXY": "1",
+      "NO_PROXY": ".corp.example,10.0.0.0/8,artifactory.corp.example,localhost,127.0.0.1,::1,.localhost,aura-shell,aura-net,.aura-net",
+      "NPM_CONFIG_GLOBALCONFIG": "/etc/aura/infra/npmrc",
+      "REQUESTS_CA_BUNDLE": "/etc/aura/infra/ca-bundle.pem",
+      "SSL_CERT_FILE": "/etc/aura/infra/ca-bundle.pem",
+      "XDG_CONFIG_DIRS": "/etc/aura/infra/xdg:/etc/xdg",
+      "http_proxy": "http://proxy.corp.example:3128",
+      "https_proxy": "http://proxy.corp.example:3128",
+      "no_proxy": ".corp.example,10.0.0.0/8,artifactory.corp.example,localhost,127.0.0.1,::1,.localhost,aura-shell,aura-net,.aura-net"
+    },
+    "systemPaths": {
+      "/etc/apt/apt.conf.d/90aura-infra": "apt/apt.conf.d/90aura-infra",
+      "/usr/local/etc/npmrc": "npmrc",
+      "/usr/local/share/ca-certificates/aura-infra": "ca-certificates"
+    }
+  },
+  "proxy-only": {
+    "files": {
+      "apt/apt.conf.d/90aura-infra": "// AuraOS infrastructure configuration (D94): managed, do not edit.\nAcquire::https::Proxy \"http://proxy.corp.example:3128\";\n",
+      "npmrc": "# AuraOS infrastructure configuration (D94): global layer, managed. ~/.npmrc and a project .npmrc win.\nhttps-proxy=http://proxy.corp.example:3128\nnoproxy=localhost,127.0.0.1,::1,.localhost,aura-shell,aura-net,.aura-net\n"
+    },
+    "env": {
+      "HTTPS_PROXY": "http://proxy.corp.example:3128",
+      "NODE_OPTIONS": "--disable-warning=UNDICI-EHPA",
+      "NODE_USE_ENV_PROXY": "1",
+      "NO_PROXY": "localhost,127.0.0.1,::1,.localhost,aura-shell,aura-net,.aura-net",
+      "NPM_CONFIG_GLOBALCONFIG": "/etc/aura/infra/npmrc",
+      "https_proxy": "http://proxy.corp.example:3128",
+      "no_proxy": "localhost,127.0.0.1,::1,.localhost,aura-shell,aura-net,.aura-net"
+    },
+    "systemPaths": {
+      "/etc/apt/apt.conf.d/90aura-infra": "apt/apt.conf.d/90aura-infra",
+      "/usr/local/etc/npmrc": "npmrc"
+    }
+  },
+  "ca-replace": {
+    "files": {
+      "apt/apt.conf.d/90aura-infra": "// AuraOS infrastructure configuration (D94): managed, do not edit.\nAcquire::https::CAInfo \"/etc/aura/infra/ca-bundle.pem\";\n",
+      "ca-bundle.pem": "-----BEGIN CERTIFICATE-----\nCORP-ROOT\n-----END CERTIFICATE-----\n",
+      "ca-certificates/aura-infra-corp-root.crt": "-----BEGIN CERTIFICATE-----\nCORP-ROOT\n-----END CERTIFICATE-----\n",
+      "corporate-ca.pem": "-----BEGIN CERTIFICATE-----\nCORP-ROOT\n-----END CERTIFICATE-----\n",
+      "gitconfig": "# AuraOS infrastructure configuration (D94): system layer, managed. ~/.gitconfig wins.\n[include]\n\tpath = /etc/gitconfig\n[http]\n\tsslCAInfo = /etc/aura/infra/ca-bundle.pem\n",
+      "npmrc": "# AuraOS infrastructure configuration (D94): global layer, managed. ~/.npmrc and a project .npmrc win.\ncafile=/etc/aura/infra/ca-bundle.pem\n",
+      "xdg/pip/pip.conf": "# AuraOS infrastructure configuration (D94): system layer, managed. User and venv pip.conf win.\n[global]\ncert = /etc/aura/infra/ca-bundle.pem\n",
+      "xdg/uv/uv.toml": "# AuraOS infrastructure configuration (D94): system layer, managed. ~/.config/uv/uv.toml and the project win.\nnative-tls = true\n"
+    },
+    "env": {
+      "CURL_CA_BUNDLE": "/etc/aura/infra/ca-bundle.pem",
+      "GIT_CONFIG_SYSTEM": "/etc/aura/infra/gitconfig",
+      "NODE_EXTRA_CA_CERTS": "/etc/aura/infra/corporate-ca.pem",
+      "NODE_OPTIONS": "--use-openssl-ca",
+      "NPM_CONFIG_GLOBALCONFIG": "/etc/aura/infra/npmrc",
+      "REQUESTS_CA_BUNDLE": "/etc/aura/infra/ca-bundle.pem",
+      "SSL_CERT_FILE": "/etc/aura/infra/ca-bundle.pem",
+      "XDG_CONFIG_DIRS": "/etc/aura/infra/xdg:/etc/xdg"
+    },
+    "systemPaths": {
+      "/etc/apt/apt.conf.d/90aura-infra": "apt/apt.conf.d/90aura-infra",
+      "/usr/local/etc/npmrc": "npmrc",
+      "/usr/local/share/ca-certificates/aura-infra": "ca-certificates"
+    }
+  },
+  "http-index": {
+    "files": {
+      "npmrc": "# AuraOS infrastructure configuration (D94): global layer, managed. ~/.npmrc and a project .npmrc win.\nregistry=http://npm.internal/\n",
+      "xdg/pip/pip.conf": "# AuraOS infrastructure configuration (D94): system layer, managed. User and venv pip.conf win.\n[global]\nindex-url = http://pypi.internal/simple\ntrusted-host = pypi.internal\n",
+      "xdg/uv/uv.toml": "# AuraOS infrastructure configuration (D94): system layer, managed. ~/.config/uv/uv.toml and the project win.\n\n[[index]]\nurl = \"http://pypi.internal/simple\"\ndefault = true\n"
+    },
+    "env": {
+      "COREPACK_NPM_REGISTRY": "http://npm.internal",
+      "NPM_CONFIG_GLOBALCONFIG": "/etc/aura/infra/npmrc",
+      "XDG_CONFIG_DIRS": "/etc/aura/infra/xdg:/etc/xdg"
+    },
+    "systemPaths": {
+      "/usr/local/etc/npmrc": "npmrc"
+    }
+  }
+}
