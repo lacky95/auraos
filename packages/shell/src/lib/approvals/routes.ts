@@ -6,7 +6,13 @@
  *   POST   /api/approvals                 a requester asks: `user.confirm`, `os.context.write`
  *   GET    /api/approvals/<id>            its requester polls (or the owner's desktop reads it)
  *   POST   /api/approvals/<id>/approve    the owner in the shell's own document, or the host operator
- *   POST   /api/approvals/<id>/deny       the same; `{block: true}` also blocks the requesting app
+ *   POST   /api/approvals/<id>/deny       the same; `{block: true}` also blocks the requesting app;
+ *                                         `{feedback}` (D102): the owner's optional words for the requester
+ *   POST   /api/approvals/<id>/hold       D102 Later: the owner, in the shell's own document only; a
+ *                                         deferrable request stays pending (authorizes nothing) for up
+ *                                         to 24 h and gets one important notification whose Review
+ *                                         reopens this dialog
+ *   POST   /api/approvals/<id>/cancel     D102: the requester withdraws its own open request
  *   POST   /api/approvals/<id>/consume    the requester uses up a `user.confirm` approval
  *   DELETE /api/approvals/blocked/<app>   the owner (or operator) lifts a block
  *
@@ -37,8 +43,9 @@ import {
   confirmDisplay, confirmPayload, contextDisplay, contextWrite, credentialAsk, requesterReason, type CredentialAsk,
 } from './display.ts';
 import {
-  approvalsChanged, approvalsVersion, blockableApp, json, ownerView, refusal, requestApproval, requesterSummary,
-  requesterView, waitForApprovals, consumeApproval, type ApprovalServiceDeps,
+  approvalsChanged, approvalsVersion, blockableApp, cancelStale, endHoldNotice, json, ownerView, postHoldNotice,
+  reconcileHoldNotices, refusal, requestApproval, requesterSummary, requesterView, waitForApprovals, consumeApproval,
+  type ApprovalServiceDeps,
 } from './service.ts';
 
 export const MAX_BODY_BYTES = 8 * 1024;
@@ -48,6 +55,11 @@ export const LONG_POLL_MS = 25_000;
 const PASSWORD_FIELD = 'password';
 /** The approve request of a `credential.store` carries the secret the owner typed in this field (D56). */
 const SECRET_FIELD = 'secret';
+/** The deny request's optional words for the requester (D102). */
+const FEEDBACK_FIELD = 'feedback';
+/** How often the desktop's poll also removes stale hold notices (D102). */
+export const NOTICE_RECONCILE_MS = 60_000;
+let lastReconcile = 0;
 
 export interface OwnerSession { userId: string; sessionId: string; username: string }
 
@@ -126,6 +138,11 @@ export async function listApprovals(ctx: RouteCtx, deps: ApprovalRouteDeps): Pro
     await waitForApprovals(seen, LONG_POLL_MS, request.signal);
   }
   const [pending, blocked, via] = await Promise.all([deps.store.listPending(), deps.store.listBlocked(), freshVia(deps.scheme(ctx), deps)]);
+  // D102: a notice whose request ended while nobody removed it (expiry, a restart) goes away here too.
+  if (Date.now() - lastReconcile > NOTICE_RECONCILE_MS) {
+    lastReconcile = Date.now();
+    void reconcileHoldNotices(deps).catch(() => undefined);
+  }
   return json({ version: approvalsVersion(), freshVia: via, pending: pending.map((r) => ({ ...ownerView(r), freshVia: via })), blocked });
 }
 
@@ -207,10 +224,15 @@ export async function decideApproval(
   const { request } = ctx;
   if (!id || !core.isApprovalId(id)) return refusal('not-found');
   if (decision === 'consume') return consumeConfirm(request, id, deps);
-  if (decision !== 'approve' && decision !== 'deny') return json({ error: 'not-found' }, 404);
+  if (decision === 'cancel') return cancelOwn(request, id, deps);
+  if (decision !== 'approve' && decision !== 'deny' && decision !== 'hold') return json({ error: 'not-found' }, 404);
   const body = await readBody(request);
   if (body instanceof Response) return body;
-  if (body['operatorCode'] !== undefined) return operatorDecision(id, decision, body, deps);
+  if (body['operatorCode'] !== undefined) {
+    // Later is the owner's, in the desktop: the operator decides or leaves it.
+    if (decision === 'hold') return json({ error: 'owner-required', message: 'Later is chosen in the AuraOS desktop.' }, 403);
+    return operatorDecision(id, decision, body, deps);
+  }
 
   // The owner, in the shell's own document. Never a token or a key.
   if (request.headers.has('authorization')) return refusal('not-a-decider');
@@ -223,6 +245,16 @@ export async function decideApproval(
   const record = await deps.store.get(id);
   if (!record) return refusal('not-found');
   const { owner } = shell;
+
+  if (decision === 'hold') return holdRequest(record, owner, deps);
+  // D102: revalidate the original request before it is approved.
+  if (decision === 'approve' && record.state === 'pending' && deps.revalidate) {
+    const why = await deps.revalidate(record, 'decide');
+    if (why) {
+      await cancelStale(deps, record, why);
+      return json({ error: 'stale', message: `This request is no longer valid (${why}) and was cancelled.` }, 409);
+    }
+  }
 
   // D56: the secret is typed only here, in the shell's dialog, and goes straight to the owner's vault.
   let credential: { ask: CredentialAsk; value: string } | null = null;
@@ -257,8 +289,10 @@ export async function decideApproval(
   };
   const decider = core.approvalDecider(principal, { fresh });
   if (!decider) return refusal('not-a-decider');
-  const result = decision === 'approve' ? await deps.store.approve(id, decider) : await deps.store.deny(id, decider);
+  const feedback = decision === 'deny' ? core.denialFeedback(body[FEEDBACK_FIELD]) : undefined;
+  const result = decision === 'approve' ? await deps.store.approve(id, decider) : await deps.store.deny(id, decider, feedback);
   if (!result.ok) return refusal(result.reason);
+  await endHoldNotice(deps, result.record);
   if (credential) {
     try {
       await deps.storeCredential!(owner.userId, credential.ask, credential.value, result.record);
@@ -276,8 +310,56 @@ export async function decideApproval(
   approvalsChanged();
   await recordDecision(deps, core.userAttribution({ userId: owner.userId, sessionId: owner.sessionId }), result.record, decision, {
     decidedBy: `owner ${owner.userId}`, fresh, ...(block ? { blocked: appId } : {}),
+    ...(record.heldAt !== undefined ? { fromHold: true } : {}), ...(feedback ? { feedback: true } : {}),
   });
   return json({ ok: true, state: result.record.state, ...(block ? { blocked: appId } : {}) });
+}
+
+/** D102 Later: hold a deferrable request, post its one notice, audit it. */
+async function holdRequest(record: ApprovalRecord, owner: OwnerSession, deps: ApprovalRouteDeps): Promise<Response> {
+  const principal: AccessPrincipal = {
+    kind: 'user', userId: owner.userId, role: 'owner', sessionId: owner.sessionId, verification: 'verified',
+  };
+  const decider = core.approvalDecider(principal);
+  if (!decider) return refusal('not-a-decider');
+  const result = await deps.store.hold(record.id, decider);
+  if (!result.ok) return refusal(result.reason);
+  const held = await postHoldNotice(deps, result.record);
+  approvalsChanged();
+  try {
+    await deps.audit({
+      by: core.userAttribution({ userId: owner.userId, sessionId: owner.sessionId }), action: 'approval.held',
+      target: `approval:${record.id}`, outcome: 'ok',
+      detail: {
+        action: record.action, level: record.level, title: record.display.title,
+        requestedBy: requesterSummary(record.requester), heldUntil: held.expiresAt,
+      },
+    });
+  } catch { /* the audit trail must not fail the request */ }
+  return json({ ok: true, state: held.state, heldAt: held.heldAt, expiresAt: held.expiresAt });
+}
+
+/** D102: the requester withdraws its own open request (Ctrl-C in the CLI). */
+async function cancelOwn(request: Request, id: string, deps: ApprovalRouteDeps): Promise<Response> {
+  const principal = await deps.authenticate(request);
+  if (principal instanceof Response) return principal;
+  const requester = core.approvalRequester(principal);
+  if (!requester) return refusal('not-a-requester');
+  const record = await deps.store.get(id);
+  // Someone else's id reads as unknown, as on GET.
+  if (!record || !core.sameRequester(requester, record.requester)) return refusal('not-found');
+  const result = await deps.store.cancel(id, { kind: 'requester', requester });
+  if (!result.ok) return refusal(result.reason);
+  await endHoldNotice(deps, result.record);
+  approvalsChanged();
+  try {
+    await deps.audit({
+      by: requester.kind === 'user' ? core.userAttribution({ userId: requester.userId }) : { kind: 'system' },
+      action: 'approval.withdrawn', target: `approval:${id}`, outcome: 'ok',
+      detail: { action: record.action, title: record.display.title, requestedBy: requesterSummary(record.requester) },
+    });
+  } catch { /* best effort */ }
+  return json({ ok: true, state: result.record.state });
 }
 
 async function recordDecision(
@@ -316,8 +398,17 @@ async function operatorDecision(
   if (decision === 'approve' && record.action === 'credential.store') {
     return json({ error: 'dialog-required', message: 'A secret is typed only into the AuraOS desktop\'s own dialog. Approve it there, or deny it here.' }, 409);
   }
-  const result = decision === 'approve' ? await deps.store.approve(id, { kind: 'operator' }) : await deps.store.deny(id, { kind: 'operator' });
+  if (decision === 'approve' && record.state === 'pending' && deps.revalidate) {
+    const why = await deps.revalidate(record, 'decide');
+    if (why) {
+      await cancelStale(deps, record, why);
+      return json({ error: 'stale', message: `This request is no longer valid (${why}) and was cancelled.` }, 409);
+    }
+  }
+  const feedback = decision === 'deny' ? core.denialFeedback(body[FEEDBACK_FIELD]) : undefined;
+  const result = decision === 'approve' ? await deps.store.approve(id, { kind: 'operator' }) : await deps.store.deny(id, { kind: 'operator' }, feedback);
   if (!result.ok) return refusal(result.reason);
+  await endHoldNotice(deps, result.record);
   approvalsChanged();
   await recordDecision(deps, core.operatorAttribution(), result.record, decision, { decidedBy: 'host operator' });
   return json({ ok: true, state: result.record.state });

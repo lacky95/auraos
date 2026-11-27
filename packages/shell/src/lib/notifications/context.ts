@@ -6,6 +6,10 @@
  *   activity     → reveal that Activity's window (else launch context.appId)
  *   instance     → reveal that instance's window (else launch context.appId)
  *   app          → launch / focus the app (context.appId ?? context.id)
+ *   approval     → D102: Review, the shell's own owner dialog for that held
+ *                  request (`window.auraOpenApproval`). Only on AuraOS's own
+ *                  items (senderKey `auraos`), never on a locked screen's
+ *                  view; core already drops the kind from any other sender.
  *   task, installation, custom → no target yet: no button, label only
  */
 import type { Notification } from './api.ts';
@@ -18,6 +22,8 @@ export interface WindowHost {
   auraRevealInstance?: (instanceId: string, activityId?: string) => unknown;
   auraHasWindow?: (instanceId: string, activityId?: string) => boolean;
   auraLaunchApp?: (appId: string) => unknown;
+  /** D102: reopen a held approval in the owner dialog (lib/approvals/ownerDialog.ts). */
+  auraOpenApproval?: (approvalId: string) => Promise<string>;
 }
 
 export interface ContextTarget {
@@ -25,22 +31,37 @@ export interface ContextTarget {
   actionable: boolean;
   /** Text shown next to / on the action. */
   label: string;
+  /** The action button's text when it is not "Go to task" (D102: "Review"). */
+  action?: string;
 }
+
+/** Where a notification's context comes from, for the kinds only AuraOS may use. */
+export type ContextSource = Pick<Notification, 'senderKey'> & { lockscreen?: true; redacted?: true };
 
 const KIND_LABEL: Record<string, string> = {
   activity: 'window', instance: 'app', app: 'app', task: 'task', installation: 'installation', custom: '',
 };
 
-export function contextTarget(ctx: Context | undefined | null): ContextTarget | null {
+export const APPROVAL_CONTEXT_LABEL = 'A request waiting for your decision';
+
+export function contextTarget(ctx: Context | undefined | null, source?: ContextSource): ContextTarget | null {
   if (!ctx) return null;
+  if (ctx.kind === 'approval') {
+    const review = source?.senderKey === 'auraos' && !source.lockscreen && !source.redacted;
+    return review ? { actionable: true, label: APPROVAL_CONTEXT_LABEL, action: 'Review' } : { actionable: false, label: APPROVAL_CONTEXT_LABEL };
+  }
   const actionable = ctx.kind === 'activity' || ctx.kind === 'instance' || ctx.kind === 'app';
   const label = ctx.label?.trim() || (KIND_LABEL[ctx.kind] ? `${KIND_LABEL[ctx.kind]} ${ctx.appId ?? ctx.id}` : ctx.id);
   return { actionable, label };
 }
 
 /** Perform "Go to task". Returns what happened (for tests and status text). */
-export async function goToContext(ctx: Context | undefined | null, host: WindowHost): Promise<'revealed' | 'launched' | 'none'> {
+export async function goToContext(ctx: Context | undefined | null, host: WindowHost, source?: ContextSource): Promise<'revealed' | 'launched' | 'opened' | 'none'> {
   if (!ctx) return 'none';
+  if (ctx.kind === 'approval') {
+    if (!contextTarget(ctx, source)?.actionable || typeof host.auraOpenApproval !== 'function') return 'none';
+    return (await host.auraOpenApproval(ctx.id)) === 'opened' ? 'opened' : 'none';
+  }
   const launch = async (appId: string | undefined) => {
     if (!appId || typeof host.auraLaunchApp !== 'function') return 'none' as const;
     await host.auraLaunchApp(appId);

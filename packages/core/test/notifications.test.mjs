@@ -962,3 +962,20 @@ test('popupDurationMs: optional, round-trips, negatives → -1, max 24 h, null o
   assert.equal(e.timeoutMs, 60000);
   for (const n of [a, b, c, d, e]) await svc.forceRemove(n.id);
 });
+
+test('D102: context kind approval is AuraOS\'s own; from an app it is dropped with a warning', async () => {
+  const ctx = { kind: 'approval', id: 'apr_AAAAAAAAAAAAAAAAAAAAAA', label: 'Review' };
+  const sys = await svc.create({ title: 'Open the source of Notes', type: 'locked', priority: 'high', visibility: 'private', context: ctx }, SYSTEM_CALLER);
+  assert.deepEqual(sys.notification.context, ctx);
+  assert.equal(sys.notification.type, 'locked');
+  const app = await svc.create({ title: 'fake approval', context: ctx }, APP);
+  assert.equal(app.notification.context, undefined);
+  assert.ok(app.warnings.some((w) => w.field === 'context' && w.code === 'ignored-field'));
+  // Not by an update either.
+  const own = await svc.create({ title: 'mine', context: { kind: 'task', id: 't1' } }, APP);
+  const upd = await svc.update(own.notification.id, { context: ctx }, APP, own.senderToken);
+  assert.deepEqual(upd.notification.context, { kind: 'task', id: 't1' });
+  // AuraOS removes its own pointer.
+  const gone = await svc.removeBySender(sys.notification.id, SYSTEM_CALLER);
+  assert.equal(gone.state, 'removed');
+});

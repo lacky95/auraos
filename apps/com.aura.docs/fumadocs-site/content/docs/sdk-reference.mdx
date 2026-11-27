@@ -517,9 +517,10 @@ perch on a screen edge as a tab. The full guide is [Flights](/docs/flights).
 |---|---|---|
 | `context.get` | `(key: string) => Promise<string \| null>` | **(S)** A Context key the manifest declares in `context[]`; `null` when not set. Undeclared: `OsError` 403 `context-undeclared`. |
 | `approvals.request` | `(ask: { action, payload?, level?, reason? } \| { approvalId }) => Promise<{ approved, outcome, approvalId? }>` | **(B+S)** Asks the owner; the `approvalId` is a single-use grant for `X-Aura-Approval`. Creating one needs `user.confirm`. |
-| `credentials.request` | `(req: { name, label?, purpose?, scope?: 'app' \| { app } }) => Promise<{ ok: true, handle, name } \| { ok: false, outcome }>` | **(B+S)** The owner types the secret into AuraOS's dialog; you get a handle, never the value (D56). Needs `credentials.request`. |
+| `credentials.request` | `(req: { name, label?, purpose?, scope?: 'app' \| { app } }, opts?) => Promise<{ ok: true, handle, name } \| { ok: false, outcome, approvalId?, feedback?, heldUntil? }>` | **(B+S)** The owner types the secret into AuraOS's dialog; you get a handle, never the value (D56). Needs `credentials.request`. |
 | `credentials.get` | `(handle: string) => Promise<string \| null>` | **(S)** The value, on your server. The first read waits for the owner's `fresh` approval, which grants `credential.read:<NAME>` until revoked. `null`: refused, unknown or revoked. |
-| `approvals.wait` / `approvals.get` | `(approvalId) => …` | **(B+S)** Wait for / read an approval this app asked for. |
+| `approvals.wait` / `approvals.get` | `(approvalId, opts?) => …` | **(B+S)** Wait for / read an approval this app asked for. Outcomes: `approved`, `denied` (with the owner's optional `feedback`), `expired`, `cancelled`, `blocked`, `busy`, `unavailable`; with `{ returnOnHold: true }` also `on_hold` (`heldUntil`) when the owner chose Later ([Approvals](/docs/approvals)). |
+| `approvals.cancel` | `(approvalId) => Promise<boolean>` | **(B+S)** Withdraw a request this app no longer needs. |
 | `permissions.has` | `(permission: string) => Promise<boolean>` | **(B+S)** Whether the app holds it now (manifest, grants, access mode). |
 | `permissions.check` | `(permissions: string[]) => Promise<Record<string, boolean>>` | **(B+S)** Up to 32 at once. |
 | `theme.*` | `getSelection, list, setForTone, getActiveId, getModePreference, getMode, setMode, getPalette, getDesignFramework, get, getStrategy, onChange, onModeChange` | The theme calls above, namespaced. |

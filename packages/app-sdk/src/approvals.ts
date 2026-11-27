@@ -42,15 +42,21 @@ export type ApprovalLevel = 'session' | 'fresh';
  * `approved` (or used up already); `denied`; `expired`; `blocked` (the owner
  * blocked requests from this app); `busy` (one request of this instance is
  * already waiting, or too many); `unavailable` (no dialog could be shown, an
- * unknown id).
+ * unknown id). D102: `cancelled` (withdrawn, or no longer valid); `on_hold`
+ * (the owner chose Later; only with `returnOnHold`, the request stays
+ * pending and authorizes nothing: wait again with the same `approvalId`).
  */
-export type ApprovalOutcome = 'approved' | 'denied' | 'expired' | 'blocked' | 'busy' | 'unavailable';
+export type ApprovalOutcome = 'approved' | 'denied' | 'expired' | 'blocked' | 'busy' | 'cancelled' | 'on_hold' | 'unavailable';
 
 export interface ApprovalResult {
   approved: boolean;
   outcome: ApprovalOutcome;
   /** The grant; present once an approval exists (also when it was refused). */
   approvalId?: string;
+  /** D102: the owner's optional words with a denial, to adapt your plan. Grants nothing. */
+  feedback?: string;
+  /** D102, `on_hold`: until when the owner may still decide (ms since the epoch). */
+  heldUntil?: number;
 }
 
 export interface ApprovalAsk {
@@ -71,10 +77,18 @@ export interface ApprovalWaitOptions {
   pollMs?: number;
   /** Server side: another instance token than `AURA_INSTANCE_TOKEN`. */
   token?: string;
+  /**
+   * D102, server side: when the owner puts the request on hold, return
+   * `{ outcome: 'on_hold' }` at once instead of waiting (up to 24 hours).
+   */
+  returnOnHold?: boolean;
 }
 
-const NO = (outcome: ApprovalOutcome, approvalId?: string): ApprovalResult =>
-  ({ approved: false, outcome, ...(approvalId ? { approvalId } : {}) });
+const NO = (outcome: ApprovalOutcome, approvalId?: string, extra: { feedback?: unknown; heldUntil?: unknown } = {}): ApprovalResult => ({
+  approved: false, outcome, ...(approvalId ? { approvalId } : {}),
+  ...(outcome === 'denied' && typeof extra.feedback === 'string' && extra.feedback ? { feedback: extra.feedback } : {}),
+  ...(outcome === 'on_hold' && typeof extra.heldUntil === 'number' ? { heldUntil: extra.heldUntil } : {}),
+});
 
 function base(): string {
   return osBase({ mode: isBrowser() ? 'relative' : 'server' });
@@ -92,6 +106,7 @@ function outcomeOf(state: unknown): ApprovalOutcome | null {
     case 'approved': case 'consumed': return 'approved';
     case 'denied': return 'denied';
     case 'expired': return 'expired';
+    case 'cancelled': return 'cancelled';
     default: return 'unavailable';
   }
 }
@@ -149,8 +164,25 @@ export class ApprovalsApi {
     return this.poll(approvalId, opts);
   }
 
+  /**
+   * D102: withdraw a request this app asked for and no longer needs (pending,
+   * held, or approved and not yet used). True when it was withdrawn.
+   */
+  async cancel(approvalId: string, opts: { token?: string } = {}): Promise<boolean> {
+    const url = `${base()}/api/approvals/${encodeURIComponent(approvalId)}/cancel`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...osAuthHeaders(url, opts.token !== undefined ? { token: opts.token } : {}) },
+      body: '{}',
+    });
+    return res.ok;
+  }
+
   /** The approval's state as its requester sees it, or null when unknown. */
-  async get(approvalId: string, opts: { token?: string } = {}): Promise<{ id: string; action: string; level: ApprovalLevel; state: string; expiresAt: number } | null> {
+  async get(approvalId: string, opts: { token?: string } = {}): Promise<{
+    id: string; action: string; level: ApprovalLevel; state: string; expiresAt: number;
+    /** D102 */ class?: 'forced' | 'deferrable'; heldAt?: number; feedback?: string;
+  } | null> {
     const url = `${base()}/api/approvals/${encodeURIComponent(approvalId)}`;
     const res = await fetch(url, { headers: { accept: 'application/json', ...osAuthHeaders(url, opts.token !== undefined ? { token: opts.token } : {}) } });
     if (res.status === 404) return null;
@@ -169,7 +201,7 @@ export class ApprovalsApi {
         window.removeEventListener('message', onMessage);
         if (d.ok === true && d.approvalId === approvalId) { resolve({ approved: true, outcome: 'approved', approvalId }); return; }
         const e = d.error;
-        resolve(NO(e === 'denied' || e === 'expired' ? e : 'unavailable', approvalId));
+        resolve(NO(e === 'denied' || e === 'expired' || e === 'cancelled' ? e : 'unavailable', approvalId, d as { feedback?: unknown }));
       };
       window.addEventListener('message', onMessage);
       postToShell({ type: 'aura.approval.request', requestId: rid, approvalId });
@@ -184,7 +216,9 @@ export class ApprovalsApi {
       const view = await this.get(approvalId, opts);
       if (!view) return NO('unavailable', approvalId);
       const outcome = outcomeOf(view.state);
-      if (outcome) return outcome === 'approved' ? { approved: true, outcome, approvalId } : NO(outcome, approvalId);
+      if (outcome) return outcome === 'approved' ? { approved: true, outcome, approvalId } : NO(outcome, approvalId, view);
+      // D102: held by the owner; still pending, authorizes nothing.
+      if (opts.returnOnHold && typeof view.heldAt === 'number') return NO('on_hold', approvalId, { heldUntil: view.expiresAt });
       const now = Date.now();
       if (opts.timeoutMs !== undefined && now - started >= opts.timeoutMs) return NO('expired', approvalId);
       if (typeof view.expiresAt === 'number' && now > view.expiresAt + 1000) return NO('expired', approvalId);

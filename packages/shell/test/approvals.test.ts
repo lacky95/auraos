@@ -60,6 +60,10 @@ class MemoryStore {
   async approve(id: string, by: ApprovalDecider) { return this.apply(id, { type: 'approve', by }); }
   async deny(id: string, by: ApprovalDecider) { return this.apply(id, { type: 'deny', by }); }
   async consume(id: string, claim: ApprovalClaim) { return this.apply(id, { type: 'consume', claim }); }
+  // D102 (not used here; approval-hold.test.ts covers them).
+  async hold(id: string, by: ApprovalDecider) { return this.apply(id, { type: 'hold', by }); }
+  async cancel(id: string, by: core.ApprovalCanceller) { return this.apply(id, { type: 'cancel', by }); }
+  async setNotice(id: string, notice: string | null) { return this.apply(id, { type: 'notice', notice }); }
   async isBlocked(appId: string) { return this.blocked.has(appId); }
   async block(appId: string, by: string) { this.blocked.set(appId, { at: this.now, by }); }
   async unblock(appId: string) { return this.blocked.delete(appId); }

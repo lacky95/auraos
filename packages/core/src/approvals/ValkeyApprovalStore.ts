@@ -3,7 +3,9 @@
  *
  *   approval:<id>                  the record (JSON), kept APPROVAL_KEEP_MS past expiresAt
  *                                  so a polling requester still reads `expired`
- *   approval:slot:<requester>      the requester's one pending id, until expiresAt
+ *   approval:slot:<requester>      the requester's one open id (pending, held or approved
+ *                                  and not yet used), until expiresAt; asking again for
+ *                                  the same thing answers with it (D102 resume)
  *   approval:pending               pending ids by creation time, for the dialog queue
  *   approval:blocked               appId → {at, by}: "Deny and block requests from this app"
  *   ratelimit:approval:<r>:<min>   creates per requester per minute
@@ -23,8 +25,8 @@ import {
   transitionApproval, type ApprovalEvent,
 } from './state.js';
 import {
-  MAX_PENDING_PER_REQUESTER,
-  type ApprovalClaim, type ApprovalDecider, type ApprovalRecord, type ApprovalRequest,
+  FINAL_APPROVAL_STATES, MAX_PENDING_PER_REQUESTER,
+  type ApprovalCanceller, type ApprovalClaim, type ApprovalDecider, type ApprovalRecord, type ApprovalRequest,
   type ApprovalRequester, type ApprovalResult, type ApprovalStore,
 } from './types.js';
 
@@ -40,19 +42,26 @@ export const APPROVAL_CREATES_PER_MINUTE = 6;
 const CAS_ATTEMPTS = 5;
 
 // The slot can hold MAX_PENDING_PER_REQUESTER ids only when that is 1; a test pins it.
+// ARGV[6]: the slot value the caller saw and may replace ('' = none): an
+// approved request still waiting for its use, or a dead id.
 const CREATE = `
-if redis.call('EXISTS', KEYS[2]) == 1 then return 0 end
+local cur = redis.call('GET', KEYS[2])
+if cur and cur ~= ARGV[6] then return 0 end
 redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
 redis.call('SET', KEYS[2], ARGV[3], 'PX', ARGV[4])
 redis.call('ZADD', KEYS[3], ARGV[5], ARGV[3])
 return 1`;
 
+// ARGV[5]: '1' the record leaves the dialog queue (no longer pending).
+// ARGV[6]: '1' the record is final: its slot is freed. ARGV[7]: else the
+// slot's new TTL in ms ('' = unchanged), when it still points at this id.
 const SWAP = `
 if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
 redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3])
-if ARGV[5] == '1' then
-  if redis.call('GET', KEYS[2]) == ARGV[4] then redis.call('DEL', KEYS[2]) end
-  redis.call('ZREM', KEYS[3], ARGV[4])
+if ARGV[5] == '1' then redis.call('ZREM', KEYS[3], ARGV[4]) end
+if redis.call('GET', KEYS[2]) == ARGV[4] then
+  if ARGV[6] == '1' then redis.call('DEL', KEYS[2])
+  elseif ARGV[7] ~= '' then redis.call('PEXPIRE', KEYS[2], ARGV[7]) end
 end
 return 1`;
 
@@ -94,22 +103,24 @@ export class ValkeyApprovalStore implements ApprovalStore {
   }
 
   /**
-   * A new pending record. A requester holds one pending request at a time:
-   * the same request again (action and payload hash) answers with the one it
-   * already holds, anything else is `too-many-pending` until that one is
-   * decided or expires. Blocked apps and requesters over the rate limit are
-   * refused first.
+   * A new pending record. A requester holds one open request at a time: the
+   * same request again (action and payload hash) answers with the one it
+   * already holds, pending, held or approved and not yet used (D102: a
+   * re-run resumes the original request, never a duplicate). A different
+   * request is `too-many-pending` while that one is pending or held; an
+   * approved one waiting for its use does not block it. Blocked apps and
+   * requesters over the rate limit are refused first.
    */
   async create(request: ApprovalRequest): Promise<ApprovalResult> {
     const appId = requesterAppId(request.requester);
     if (appId && await this.isBlocked(appId)) return { ok: false, reason: 'blocked' };
 
     const slot = slotKey(request.requester);
-    const held = await this.heldBy(slot);
-    if (held) {
-      return held.action === request.action && held.payloadHash === request.payloadHash
-        ? { ok: true, record: held }
-        : { ok: false, reason: 'too-many-pending' };
+    const seen = (await this.redis().get(slot)) ?? '';
+    const held = seen ? await this.get(seen) : null;
+    if (held && (held.state === 'pending' || held.state === 'approved')) {
+      if (held.action === request.action && held.payloadHash === request.payloadHash) return { ok: true, record: held, resumed: true };
+      if (held.state === 'pending') return { ok: false, reason: 'too-many-pending' };
     }
     if (await this.overLimit(slot)) return { ok: false, reason: 'rate-limited' };
 
@@ -118,7 +129,7 @@ export class ValkeyApprovalStore implements ApprovalStore {
     const won = await this.redis().eval(
       CREATE, 3, recordKey(record.id), slot, APPROVAL_PENDING_KEY,
       JSON.stringify(record), String(record.expiresAt - now + APPROVAL_KEEP_MS), record.id,
-      String(record.expiresAt - now), String(now),
+      String(record.expiresAt - now), String(now), seen,
     );
     return won === 1 ? { ok: true, record } : { ok: false, reason: 'too-many-pending' };
   }
@@ -147,8 +158,20 @@ export class ValkeyApprovalStore implements ApprovalStore {
     return this.apply(id, { type: 'approve', by });
   }
 
-  deny(id: string, by: ApprovalDecider): Promise<ApprovalResult> {
-    return this.apply(id, { type: 'deny', by });
+  deny(id: string, by: ApprovalDecider, feedback?: string): Promise<ApprovalResult> {
+    return this.apply(id, { type: 'deny', by, ...(feedback !== undefined ? { feedback } : {}) });
+  }
+
+  hold(id: string, by: ApprovalDecider): Promise<ApprovalResult> {
+    return this.apply(id, { type: 'hold', by });
+  }
+
+  cancel(id: string, by: ApprovalCanceller): Promise<ApprovalResult> {
+    return this.apply(id, { type: 'cancel', by });
+  }
+
+  setNotice(id: string, notice: string | null): Promise<ApprovalResult> {
+    return this.apply(id, { type: 'notice', notice });
   }
 
   consume(id: string, claim: ApprovalClaim): Promise<ApprovalResult> {
@@ -185,13 +208,6 @@ export class ValkeyApprovalStore implements ApprovalStore {
 
   // ── internals ─────────────────────────────────────────────────────────────
 
-  /** The pending record a requester's slot points at, or null. */
-  private async heldBy(slot: string): Promise<ApprovalRecord | null> {
-    const id = await this.redis().get(slot);
-    const record = id ? await this.get(id) : null;
-    return record?.state === 'pending' ? record : null;
-  }
-
   private async overLimit(slot: string): Promise<boolean> {
     const r = this.redis();
     const bucket = `ratelimit:${slot}:${Math.floor(this.now() / 60_000)}`;
@@ -215,11 +231,15 @@ export class ValkeyApprovalStore implements ApprovalStore {
         if (t.reason === 'expired' && record.state === 'pending') await this.apply(id, { type: 'expire' });
         return t;
       }
-      const leavesPending = record.state === 'pending' ? '1' : '0';
-      const ttl = Math.max(1, record.expiresAt - now + APPROVAL_KEEP_MS);
+      const next = t.record;
+      const leavesQueue = record.state === 'pending' && next.state !== 'pending' ? '1' : '0';
+      const final = FINAL_APPROVAL_STATES.has(next.state) ? '1' : '0';
+      // Held or approved: the slot lives as long as the record's new deadline.
+      const slotTtl = final === '0' && next.expiresAt !== record.expiresAt ? String(Math.max(1, next.expiresAt - now)) : '';
+      const ttl = Math.max(1, next.expiresAt - now + APPROVAL_KEEP_MS);
       const swapped = await r.eval(
         SWAP, 3, recordKey(id), slotKey(record.requester), APPROVAL_PENDING_KEY,
-        raw, JSON.stringify(t.record), String(ttl), id, leavesPending,
+        raw, JSON.stringify(next), String(ttl), id, leavesQueue, final, slotTtl,
       );
       if (swapped === 1) return { ok: true, record: t.record };
     }

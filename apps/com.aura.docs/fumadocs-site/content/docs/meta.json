@@ -12,6 +12,7 @@
     "cross-app-mounts",
     "interfaces",
     "notifications",
+    "approvals",
     "flights",
     "onboard-existing-apps",
     "bring-your-own-runtime",

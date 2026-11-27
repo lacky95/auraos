@@ -142,7 +142,8 @@ export interface Sender {
   actor?: SenderActor;
 }
 
-export type NotificationContextKind = 'activity' | 'instance' | 'task' | 'installation' | 'app' | 'custom';
+/** `approval` (D102): AuraOS's pointer to a held owner approval (`id` = its `apr_…` id); SYSTEM_CALLER only. */
+export type NotificationContextKind = 'activity' | 'instance' | 'task' | 'installation' | 'app' | 'custom' | 'approval';
 
 /** What the notification is about. */
 export interface NotificationContext {
