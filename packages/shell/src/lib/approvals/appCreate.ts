@@ -195,11 +195,15 @@ export interface CreateTarget {
   plan?: unknown;
 }
 
-/** Exactly what the approval binds (its `payloadHash`). Built the same on the request and on the retry. */
-export function createPayload(t: CreateTarget): Record<string, unknown> {
+/**
+ * Exactly what the approval binds (its `payloadHash`). Built the same on the request and on the retry,
+ * from the validated request: the files digest, the level the server derived from the manifest (owner
+ * decision 12: bound to the validated plan), the target, and the requester's summary and plan digests.
+ */
+export function createPayload(t: CreateTarget, level: ApprovalLevel): Record<string, unknown> {
   return {
     op: t.replaces ? `${t.via === 'clone' ? 'clone-app' : 'scaffold'}.overwrite` : 'app.create',
-    via: t.via, appId: t.appId, scope: t.scope, target: t.dest, filesDigest: t.files.digest,
+    via: t.via, appId: t.appId, scope: t.scope, target: t.dest, filesDigest: t.files.digest, level,
     ...(t.source ? { sourceAppId: t.source.appId, sourceScope: t.source.scope } : {}),
     ...(t.withData ? { withData: true } : {}),
     ...(t.summary !== undefined ? { summaryDigest: sha256(t.summary) } : {}),
@@ -265,13 +269,133 @@ export function createRequest(m: AppManifest, t: CreateTarget): AdminRequest {
   const what = t.via === 'clone' ? `a copy of ${t.source?.appId ?? 'another app'}` : 'a new scaffold';
   const risks = createRisks(m);
   const explanation = requesterExplanation(t.summary);
+  const level: ApprovalLevel = risks.length ? 'fresh' : 'session';
   return {
     action: t.replaces ? 'admin.change' : 'app.create',
-    level: risks.length ? 'fresh' : 'session',
-    payload: createPayload(t),
+    level,
+    payload: createPayload(t, level),
     title: t.replaces ? `Overwrite ${t.appId} with ${what}` : `Create the app ${m.name} (${t.appId})${t.via === 'clone' ? ` as ${what}` : ''}`,
     details: createDetails(m, t),
     ...(risks.length ? { highRisk: risks } : {}),
     ...(explanation ? { explanation } : {}),
   };
+}
+
+/**
+ * Owner decision 12: the approved request is revalidated before it executes. `again` is the request
+ * rebuilt from a full second validation (manifest parse, id, duplicates, level, files digest, target
+ * state) right before the first write; null when it is the same decision, else why not.
+ */
+export function changedSinceApproval(approved: AdminRequest, again: AdminRequest): string | null {
+  if (again.action !== approved.action) return `it is now ${again.action === 'admin.change' ? 'an overwrite' : 'a new app'}`;
+  if (again.level !== approved.level) return `its level is now ${again.level}`;
+  if (core.payloadHash(again.payload) !== core.payloadHash(approved.payload)) return 'its files, target or summary changed';
+  return null;
+}
+
+/** The answer when revalidation before execution fails: nothing was written. */
+export const revalidationRefusal = (why: string): InputRefusal => ({
+  status: 409,
+  body: {
+    error: 'changed-since-approval', category: 'conflict',
+    message: `The approved request no longer holds (${why}); nothing was written.`,
+    hint: 'Send the request again: the owner decides on what it is now.',
+  },
+});
+
+// ── the scaffold request, validated as a whole (owner decision 12) ──────────
+
+export const CREATE_SCOPES = ['system', 'global', 'user'] as const;
+export type CreateScope = (typeof CREATE_SCOPES)[number];
+const APP_ID_RE = /^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/;
+/** Scaffolding is tiny (the template is ~10 files, ~30 KB): a 1 MB ceiling catches misuse. */
+export const SCAFFOLD_MAX_BYTES = 1_000_000;
+
+/** What validation reads of the world: the scope's apps directory and whether a path exists. */
+export interface ScaffoldEnv {
+  appsDir(scope: CreateScope): string | null;
+  exists(path: string): boolean;
+}
+
+export interface ValidScaffold {
+  appId: string;
+  scope: CreateScope;
+  appsDir: string;
+  dest: string;
+  files: CreateFile[];
+  replacing: boolean;
+  manifest: AppManifest;
+  target: CreateTarget;
+  /** The owner-action request this validated request asks for. */
+  request: AdminRequest;
+}
+
+const refuse = (status: number, body: Record<string, unknown>): InputRefusal => ({ status, body });
+
+/**
+ * The whole validation of a scaffold request, before the owner is asked and again before it executes:
+ * id, files, size, scope, every path, duplicate targets, summary and plan, the manifest (parse, schema,
+ * id), the target's state (exists, overwrite, system scope), and the request it makes (action, level,
+ * payload with the files digest). Pure but for `env`.
+ */
+export function validateScaffold(body: Record<string, unknown>, env: ScaffoldEnv): ValidScaffold | InputRefusal {
+  const appId = body['appId'];
+  const files = body['files'];
+  const rawScope = body['scope'];
+  const scope: CreateScope = typeof rawScope === 'string' && (CREATE_SCOPES as readonly string[]).includes(rawScope) ? rawScope as CreateScope : 'user';
+  if (typeof appId !== 'string' || !APP_ID_RE.test(appId)) {
+    return refuse(400, {
+      error: 'invalid-app-id', category: !appId ? 'missing-input' : 'invalid-input',
+      message: `appId must match reverse-domain notation (got ${JSON.stringify(appId)}).`,
+      missing: [{ input: 'appId', kind: 'field', expects: 'reverse-domain id, e.g. com.example.notes' }],
+    });
+  }
+  if (!Array.isArray(files) || files.length === 0) {
+    return refuse(400, {
+      error: 'no-files', category: 'missing-input', message: 'files[] is required and must be non-empty.',
+      missing: [{ input: 'files', kind: 'field', expects: 'the rendered template: [{relPath, content, mode?}]' }],
+    });
+  }
+  const totalBytes = files.reduce((n: number, f) => n + (typeof (f as CreateFile)?.content === 'string' ? (f as CreateFile).content.length : 0), 0);
+  if (totalBytes > SCAFFOLD_MAX_BYTES) return refuse(413, { error: 'payload-too-large', category: 'invalid-input', bytes: totalBytes });
+  const appsDir = env.appsDir(scope);
+  if (!appsDir) {
+    return refuse(400, { error: 'unknown-scope', category: 'invalid-input', message: `Unknown scope '${scope}'. Expected one of: ${CREATE_SCOPES.join(', ')}.` });
+  }
+  const dest = join(appsDir, appId);
+  // Every file's resolved path stays under the app's own directory: no `..`, no absolute path, no
+  // manifest dropped into a sibling app.
+  for (const f of files as CreateFile[]) {
+    if (typeof f?.relPath !== 'string' || typeof f.content !== 'string') {
+      return refuse(400, { error: 'malformed-file', category: 'invalid-input', file: String(f?.relPath) });
+    }
+    if (f.relPath.startsWith('/') || f.relPath.includes('\0')) return refuse(400, { error: 'unsafe-path', category: 'invalid-input', file: f.relPath });
+    const resolved = posix.normalize(join(dest, f.relPath));
+    if (!resolved.startsWith(`${dest}/`) && resolved !== dest) {
+      return refuse(400, { error: 'path-escape', category: 'invalid-input', file: f.relPath, resolved });
+    }
+  }
+  const list = files as CreateFile[];
+  const dup = duplicateFile(list);
+  if (dup !== null) return refuse(422, { error: 'duplicate-file', category: 'invalid-input', file: dup, message: `files[] names ${dup} twice.` });
+  const inputs = checkCreateInputs(body['summary'], body['plan']);
+  if (inputs) return inputs;
+  const parsed = manifestFromFiles(list, appId);
+  if ('status' in parsed) return parsed;
+  const exists = env.exists(dest);
+  if (exists && body['force'] !== true) {
+    return refuse(409, { error: 'exists', category: 'conflict', message: `${dest} already exists. Pass force=true to overwrite.` });
+  }
+  const replacing = exists;
+  // A built-in app's code is the AuraOS repo's: never overwritten by a scaffold (D1).
+  if (replacing && scope === 'system') {
+    return refuse(409, { error: 'system-app', message: `${appId} is in the system scope (the AuraOS repo): a scaffold does not overwrite it. Use --scope user.` });
+  }
+  const target: CreateTarget = {
+    via: 'scaffold', appId, scope, dest, replaces: replacing,
+    files: { digest: filesDigest(list), count: list.length, bytes: totalBytes },
+    ...(body['summary'] !== undefined ? { summary: body['summary'] as string } : {}),
+    ...(body['plan'] !== undefined ? { plan: body['plan'] } : {}),
+  };
+  return { appId, scope, appsDir, dest, files: list, replacing, manifest: parsed.manifest, target, request: createRequest(parsed.manifest, target) };
 }
