@@ -28,6 +28,7 @@ import type {
 import type { CallerPrincipal } from './access/identify.ts';
 import { isOwnerPrincipal } from './access/identify.ts';
 import { ownerAction, type OwnerActionDeps } from './approvals/admin.ts';
+import { handOwnAppSourceToOwner } from './identityReports.ts';
 import { patchLevel, sourceOpenDetails, sourceOpenLevel } from './approvals/display.ts';
 import { installGate, runInstall } from './approvals/nexus.ts';
 import { json, type ApprovalServiceDeps } from './approvals/service.ts';
@@ -71,6 +72,8 @@ export interface AppSourceDeps {
   /** The boot backfill for one app: its missing installation and host (AppManager `syncAppHost`). */
   syncAppHost(appId: string): Promise<string | null>;
   nexus: Pick<NexusManager, 'install' | 'setSourceMode' | 'rollbackTrees' | 'records'>;
+  /** Open user-scope source becomes the owner's (identityReports `handOwnAppSourceToOwner`); a note, or null. */
+  handToOwner(appDir: string, appId: string): Promise<string | null>;
 }
 
 export function liveAppSourceDeps(authenticate: AppSourceDeps['authenticate'], approvals: ApprovalServiceDeps, owner: OwnerActionDeps): AppSourceDeps {
@@ -94,6 +97,7 @@ export function liveAppSourceDeps(authenticate: AppSourceDeps['authenticate'], a
     installationId: async (appId, scope) => (await core.getAppHostServices().registry.findInstallation(appId, scope))?.installationId ?? null,
     syncAppHost: (appId) => mgr.syncAppHost(appId),
     nexus: core.getNexusManager(),
+    handToOwner: handOwnAppSourceToOwner,
   };
 }
 
@@ -427,6 +431,11 @@ export async function setSourceMode(ctx: RouteCtx, appId: string | undefined, de
   catch (err) { return json({ error: 'not-installed', message: (err as Error).message }, 409); }
   // Closed: writable views of it come back read-only.
   if (mode === 'closed') await deps.mounts.rebindTarget(app.id);
+  // Open in the user scope: the owner's from now on (P5-2), as `aura dev new` and `aura dev clone` hand it over.
+  if (mode === 'open' && app.scopeId === 'user') {
+    const ownership = await deps.handToOwner(app.appDir, app.id);
+    if (ownership) console.warn(`[app-source] ${app.id}: ${ownership}`);
+  }
   try {
     await deps.approvals.audit({ by, action: `app.source.${mode === 'open' ? 'open' : 'close'}`, target: `app:${app.id}`, outcome: 'ok' });
   } catch { /* the audit trail must not fail the request */ }

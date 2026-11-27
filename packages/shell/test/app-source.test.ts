@@ -61,6 +61,8 @@ let previews: Map<string, { appId: string; appDir: string; workspace: string; ow
 /** Apps with no installation record yet, and the apps `syncAppHost` gave one. */
 let unallocated: Set<string>;
 let synced: string[];
+/** Source trees handed to the owner (`handToOwner`), as `appId`. */
+let handed: string[];
 
 const put = (p: string, text: string) => { mkdirSync(join(p, '..'), { recursive: true }); writeFileSync(p, text); };
 const writeApp = (dir: string, m: Record<string, unknown>, body = 'v1\n') => {
@@ -73,7 +75,7 @@ function apps(): ScopedApp[] {
   // The active copy of each id: user over global over system.
   const out = new Map<string, ScopedApp>();
   for (const s of [...scopes].sort((a, b) => a.priority - b.priority)) {
-    for (const id of ['io.shop.app', 'com.aura.terminal', 'io.lakner.terminalx', 'io.local.app']) {
+    for (const id of ['io.shop.app', 'io.shop.mine', 'com.aura.terminal', 'io.lakner.terminalx', 'io.local.app']) {
       const dir = join(s.appsDir, id);
       if (!existsSync(join(dir, 'app.manifest.json'))) continue;
       out.set(id, { ...core.validateStagedDir(dir), scopeId: s.id, appDir: dir } as ScopedApp);
@@ -150,6 +152,7 @@ function deps(): AppSourceDeps {
     installationId: async (appId, scope) => (unallocated.has(appId) ? null : `inst-${scope}-${appId.replace(/\./g, '-')}`),
     syncAppHost: async (appId) => { synced.push(appId); unallocated.delete(appId); return null; },
     nexus,
+    handToOwner: async (appDir, appId) => { assert.equal(appDir, apps().find((a) => a.id === appId)?.appDir); handed.push(appId); return null; },
   };
 }
 
@@ -161,6 +164,7 @@ beforeEach(async () => {
   previews = new Map();
   unallocated = new Set();
   synced = [];
+  handed = [];
   root = mkdtempSync(join(tmpdir(), 'aura-src-'));
   const scope = (id: core.ScopeId, priority: number, immutable: boolean) =>
     ({ id, appsDir: join(root, id, 'apps'), dataDir: join(root, id, 'data'), immutable, priority }) as core.ScopeDefinition;
@@ -240,6 +244,35 @@ test('opening needs the owner (202, then approved, then once); the open view is 
   const closed = await read(await setSourceMode({ request: req('POST', { mode: 'closed' }), cookies: {} as never }, 'io.shop.app', deps()));
   assert.deepEqual([closed.status, closed.body.mode], [200, 'closed']);
   assert.equal(kernel.find((m) => m.instanceId === 'com.aura.terminal')?.mode, 'ro');
+  assert.deepEqual(handed, [], 'a global-scope app\'s source is never handed to the owner');
+});
+
+test('B6: opening a user-scope install hands its source to the owner, as `aura dev new` does; closing does not', async () => {
+  const release = join(root, 'release-mine');
+  writeApp(release, { id: 'io.shop.mine', originId: O2.replace(/2$/, '3'), name: 'Mine', version: '1.0.0' });
+  const it = nexus.install({ ref: release, scope: 'user', approval: async () => true });
+  for (let c = await it.next(); !c.done; c = await it.next()) { /* to the end */ }
+  const ctx = (mode: string, headers: Record<string, string> = {}) => ({ request: req('POST', { mode }, headers), cookies: {} as never });
+  const first = await read(await setSourceMode(ctx('open'), 'io.shop.mine', deps()));
+  assert.equal(first.status, 202);
+  assert.deepEqual(handed, [], 'nothing before the owner approved');
+  assert.equal((await store.approve(first.body.approvalId as string, DECIDER)).ok, true);
+  const done = await read(await setSourceMode(ctx('open', { 'x-aura-approval': first.body.approvalId as string }), 'io.shop.mine', deps()));
+  assert.deepEqual([done.status, done.body.mode], [200, 'open']);
+  assert.deepEqual(handed, ['io.shop.mine']);
+  const closed = await read(await setSourceMode(ctx('closed'), 'io.shop.mine', deps()));
+  assert.deepEqual([closed.status, closed.body.mode], [200, 'closed']);
+  assert.deepEqual(handed, ['io.shop.mine'], 'closing changes no owner');
+});
+
+test('B6: a user-scope clone is handed to the owner after it landed and before it is registered, as a scaffold is', () => {
+  const src = readFileSync(new URL('../src/pages/api/admin/clone-app.ts', import.meta.url), 'utf8');
+  const hand = src.indexOf("if (targetScopeId === 'user') {\n      const ownership = await handOwnAppSourceToOwner(dest, targetAppId);");
+  assert.ok(hand > 0, 'clone-app hands a user-scope clone to the owner');
+  assert.ok(hand > src.indexOf('renameSync(staging, dest)'), 'after the tree landed');
+  assert.ok(hand < src.indexOf('mgr.reloadScopedApp(targetAppId)'), 'before it is registered and can start');
+  const scaffold = readFileSync(new URL('../src/pages/api/admin/scaffold.ts', import.meta.url), 'utf8');
+  assert.match(scaffold, /scope === 'user' \? await handOwnAppSourceToOwner\(dest, appId\)/, 'the same function as scaffold');
 });
 
 test('a workspace is created and bound writable at /mnt/aura/work/<app> in the calling Terminal only', async () => {

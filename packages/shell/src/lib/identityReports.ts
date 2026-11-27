@@ -201,7 +201,8 @@ export async function privilegeReview(): Promise<core.PrivilegeReview> {
 
 /**
  * P5-2 / stream T: an open user-scope app the owner creates now (`aura dev
- * new`) is the owner's from the start, as the ownership apply's
+ * new`, `aura dev clone`) or opens (`aura dev open`) is the owner's from
+ * then on, as the ownership apply's
  * `own-app-source` row (liveOwnershipSpecs above) hands over the ones that
  * existed before: the owner's Terminal runs as the owner's uid and edits,
  * commits and publishes it. node_modules stays the builder's. Before the
@@ -210,7 +211,7 @@ export async function privilegeReview(): Promise<core.PrivilegeReview> {
  */
 export async function handOwnAppSourceToOwner(dir: string, appId: string): Promise<string | null> {
   try {
-    // The report's rule exactly: open source in the user scope (a fresh scaffold has no install record: open).
+    // The report's rule exactly: open source in the user scope (a fresh scaffold or clone has no install record: open).
     const mgr = core.getAppManager();
     const scope = new core.ScopeRegistry({ systemAppsDir: mgr.registry.getAppsDir(), dataDir: dataDir() }).getById('user' as never);
     if (core.effectiveSourceMode(scope, { id: appId }).mode !== 'open') return null;

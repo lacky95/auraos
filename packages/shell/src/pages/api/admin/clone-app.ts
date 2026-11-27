@@ -9,6 +9,7 @@ import {
   type ManifestPatch, type ScopeDefinition, type ScopeId,
 } from '@aura/core';
 import { auditOwner, ownerAction } from '../../../lib/approvals/admin.ts';
+import { handOwnAppSourceToOwner } from '../../../lib/identityReports.ts';
 
 /**
  * Server-side app cloning — the engine behind `aura dev clone`.
@@ -270,6 +271,13 @@ export const POST: APIRoute = async (ctx) => {
           warnings.push(`--with-data copy failed: ${(err as Error).message}`);
         }
       }
+    }
+
+    // The owner's own copy is the owner's (P5-2), exactly as a scaffold is:
+    // the owner's Terminal runs as the owner's uid (stream T) and edits it.
+    if (targetScopeId === 'user') {
+      const ownership = await handOwnAppSourceToOwner(dest, targetAppId);
+      if (ownership) warnings.push(`${targetAppId}: ${ownership}`);
     }
 
     // chokidar picks the new dir up on its own within ~100 ms, but a CLI that
