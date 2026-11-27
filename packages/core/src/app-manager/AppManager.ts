@@ -62,6 +62,10 @@ import { migratePhase5Context } from '../context/migratePhase5.js';
 import type { ContextMigrationDeps } from '../context/migratePhase5.js';
 import { defaultKv } from '@aura/kv-store';
 import { appOwnershipSpecs, applyAppOwnership } from '../identity/appOwnership.js';
+import { ownershipJournalPath } from '../identity/ownershipApply.js';
+import { runAsMigrationBlock, type RunAsOwnershipInput } from '../identity/runAsOwnership.js';
+import { installationAppHomes } from '../homes/appHomeAdmin.js';
+import type { AppRunAsMigration } from '../app-hosts/contracts.js';
 import { RuntimeCapabilityError } from '../runtimes/types.js';
 import { BASE_GROUP, BASE_PASSWD, identityAccountName, isNonRootIdentity, isSessionIdentity } from './spawn/identityArgs.js';
 import { renderGroup, renderPasswd, type PasswdEntry } from '../identity/passwd.js';
@@ -1905,13 +1909,16 @@ export class AppManager {
     appId: string, instanceId: string,
     opts: {
       manifest: AppManifest; runtime: ResolvedRuntime; owner?: string; inPool?: boolean; preview?: boolean;
-      installation: { installationId: string; runAs?: AppRunAs; execution?: ExecutionApproval } | null;
+      installation: { installationId: string; runAs?: AppRunAs; execution?: ExecutionApproval; runAsMigration?: AppRunAsMigration } | null;
     },
   ): Promise<Pick<InstanceSpawnContext, 'home' | 'identity' | 'contextEnv'>> {
     // instanceId: a runtime handle only, for the log line below and the vault audit row; never a durable reference (D85 A7).
     if (!opts.installation) {
       throw new HomeDeniedError('installation-unresolved', `${appId}: its installation identity is unavailable, so it has no App Home; not started`);
     }
+    // A run-as migration that did not finish: its storage may be half handed over (identity/runAsOwnership.ts).
+    const migrating = runAsMigrationBlock(appId, opts.installation);
+    if (migrating) throw new HomeDeniedError('ownership-pending', migrating);
     // The user it is for: its owner, or the user a pool member is warmed for (D78; stream T keys the pool per user).
     const user = opts.owner ?? (opts.inPool ? this.poolHomeUser(appId, opts.manifest) : undefined);
     // Owner decision 5-main item 3 (identity/execution.ts): a root request runs only with the owner's
@@ -2201,7 +2208,9 @@ export class AppManager {
    * start too: an `app` installation must never start as root because Valkey
    * hiccuped.
    */
-  async installationRunAs(appId: string): Promise<{ installationId: string; runAs?: AppRunAs; execution?: ExecutionApproval } | null> {
+  async installationRunAs(appId: string): Promise<{
+    installationId: string; runAs?: AppRunAs; execution?: ExecutionApproval; runAsMigration?: AppRunAsMigration; runAsJournal?: string;
+  } | null> {
     const scope = this.registry.getScopeId(appId);
     if (!scope) return null;
     let inst;
@@ -2217,7 +2226,38 @@ export class AppManager {
     }
     return inst ? {
       installationId: inst.installationId, ...(inst.runAs ? { runAs: inst.runAs } : {}), ...(inst.execution ? { execution: inst.execution } : {}),
+      ...(inst.runAsMigration ? { runAsMigration: inst.runAsMigration } : {}), ...(inst.runAsJournal ? { runAsJournal: inst.runAsJournal } : {}),
     } : null;
+  }
+
+  /**
+   * The inputs of the run-as migration of an installed app to `runAs`
+   * (identity/runAsOwnership.ts; owner decision 5-main, run-as reversible):
+   * its managed storage (instance data dirs, App Homes, dev caches) and both
+   * identities. The flip to `app` allocates the app identity, as its first
+   * app start would. A System Terminal is refused: its instances run as
+   * their user (stream T), never by runAs.
+   */
+  async runAsOwnershipInput(appId: string, runAs: AppRunAs): Promise<RunAsOwnershipInput & { runAsMigration?: AppRunAsMigration }> {
+    const manifest = this.registry.getById(appId);
+    if (!manifest) throw new Error(`unknown app: ${appId}`);
+    if (TERMINAL_SESSION_APPS.has(appId)) throw new Error(`${appId}: its instances run as their user (stream T); run-as does not apply`);
+    const installation = await this.installationRunAs(appId);
+    if (!installation) throw new HomeDeniedError('installation-unresolved', `${appId} has no recorded installation`);
+    const current = installation.runAs ?? 'root';
+    const appIdentity = await this.identities.identityFor({ appId, installationId: installation.installationId, runAs: 'app' });
+    const root = { uid: 0, gid: 0 };
+    const app = { uid: appIdentity.uid, gid: appIdentity.gid };
+    const previous = installation.runAsJournal ? ownershipJournalPath(this.dataDir, installation.runAsJournal) : null;
+    return {
+      appId, installationId: installation.installationId, runAs,
+      appDataRoot: join(this.scopeRegistry.getById(manifest.scopeId).dataDir, 'apps', appId), appDir: manifest.appDir,
+      devServed: manifest.runtime !== 'raw' && serveState(manifest.appDir, manifest).mode !== 'prod',
+      appHomes: installationAppHomes(this.dataDir, installation.installationId),
+      from: current === 'app' ? app : root, to: runAs === 'app' ? app : root,
+      previousJournal: previous,
+      ...(installation.runAsMigration ? { runAsMigration: installation.runAsMigration } : {}),
+    };
   }
 
   /** The last start of each app under `runAs: app` (the privilege review), since this shell started. */

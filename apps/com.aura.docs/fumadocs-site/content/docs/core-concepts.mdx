@@ -119,7 +119,9 @@ capabilities. An app that really needs root inside its container can
 - Not approved (or denied, or turned off with the security option
   `app-root-execution`): the app is installed but does not start ("root
   execution not approved"). It is never run as root, or as anything else,
-  silently. Approve it later with `aura admin apps run-as <app> root`.
+  silently. Approve it later with `aura admin apps run-as <app> root` (when it
+  ran as its app identity, a dry run of moving its data back comes first; then
+  `--apply <digest>`).
 - It is runtime root only: still no capabilities, `no-new-privileges`, no
   Docker socket and no host access. Privileged sidecars keep their own
   mechanism (`services[]` templates and `sidecars.privileged`); installing
