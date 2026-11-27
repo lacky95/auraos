@@ -25,7 +25,7 @@ import { kvServer, defaultKv, defaultRedis, closeSharedRedis } from '@aura/kv-st
 import { ensureSystemIdentity } from './systemIdentity.js';
 import { bootstrapKv } from './kvBootstrap.js';
 import { BOOTSTRAP_VERSION, writeBootStatus } from './status.js';
-import { composeKernel } from './compose.js';
+import { composeKernel, createSetupEngine } from './compose.js';
 import type {
   BootHook, BootHookContext, BootOptions, BootStatus, Composition, ShutdownReason, SystemHandle,
 } from './types.js';
@@ -248,6 +248,8 @@ async function bootKernel(state: SystemState, { first }: { first: boolean }): Pr
     contractScan: scanContractSources,
     auth: getAuthServices,
     appHosts: getAppHostServices,
+    // D108: the setup engine (its start gate, the setup API's service).
+    setup: (m) => createSetupEngine(m),
     ...(state.opts.developerMode ? { developerMode: state.opts.developerMode } : {}),
     probeIdmappedMounts: true,
   });

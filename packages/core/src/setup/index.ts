@@ -28,6 +28,17 @@ export {
 } from './state.js';
 
 // ── P3 engine, gate, hooks ──────────────────────────────────────────────────
+export { SetupService, SetupEngineError, MAX_INIT_ATTEMPTS } from './service.js';
+export {
+  setupApplyPayload, setupApprovalItems, setupApplyDisplay, setupRequesterLabel, askSecretName, askSecretDisplay, missingAuthorizations, approvable,
+  type SetupApprovalItem,
+} from './approval.js';
+export { runSetupHooks, migrateConfig, needsHooks, appWords, SetupHookError, NO_MAINTENANCE_HINT, type RunSetupHooksInput } from './hooks.js';
+export { blockingDecision, BlockingWatcher, type BlockingDecision, type BlockingWatcherDeps } from './blocking.js';
+export type {
+  ApprovedRequests, HomeEnvironmentPort, ResolverPortsQuery, SetupAdds, SetupAppManifest, SetupApprovals, SetupEngine, SetupEngineDeps,
+  SetupGate, SetupGateDecision, SetupGrantWriter,
+} from './ports.js';
 
 // ── P4 value delivery ───────────────────────────────────────────────────────
 export {

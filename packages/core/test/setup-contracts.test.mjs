@@ -80,8 +80,9 @@ test('the Open WebUI example (review §2.6) parses: fields, secrets by reference
   assert.equal(core.isEnvValueRef(m.services[0].env.WEBUI_AUTH), true);
   assert.equal(core.isEnvValueRef(m.services[0].env.PLAIN), false);
   assert.equal(core.declaresSetup(m), true);
-  // A1 stays until the engine (P3) swaps the gate: such an app is still refused, never run unconfigured.
-  assert.equal(core.operationalBlock(m)?.error, 'setup-unsupported');
+  // P3: the setup engine's gate decides; without the engine such an app is refused, never run unconfigured.
+  assert.equal(core.operationalBlock(m), null);
+  assert.equal(core.setupEngineMissing(m)?.error, 'setup-unsupported');
 });
 
 // ── overlay allowlist (decision 4) ──────────────────────────────────────────

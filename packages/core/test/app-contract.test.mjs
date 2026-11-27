@@ -211,36 +211,36 @@ const gateWorld = async (apps) => {
   return { root, mgr, spawnContext };
 };
 
-test('D108 A1: setup and profiles are reserved in the schema (kept, never dropped) and refused with a D105 body', async () => {
-  const { operationalBlock, declaredSetupKeys, operationalBlockOf, OperationalBlockError, RESERVED_SETUP_KEYS } = await import('../dist/contract/types.js');
+test('D108 A1 + P3: setup and profiles are kept by the schema; the static gate leaves them to the setup engine; without the engine they are refused with a D105 body', async () => {
+  const { operationalBlock, declaredSetupKeys, operationalBlockOf, OperationalBlockError, RESERVED_SETUP_KEYS, setupEngineMissing } = await import('../dist/contract/types.js');
   assert.deepEqual([...RESERVED_SETUP_KEYS], ['setup', 'profiles']);
-  // P0 (7c): the real schema replaced the opaque reservation; the blocks are still kept, never dropped.
   const m = parse({ setup: { fields: { url: { type: 'string', title: 'URL' } } }, profiles: [{ id: 'personal', title: 'Personal' }] });
   assert.deepEqual(m.setup.fields, { url: { type: 'string', title: 'URL' } }, 'kept as declared');
   assert.deepEqual(m.profiles.map((p) => p.id), ['personal']);
   assert.deepEqual(declaredSetupKeys(m), ['setup', 'profiles']);
-  const b = operationalBlock(m);
-  // The D105 error body (errors/contracts.ts AuraErrorBody): only its fields, the state under details.
+  assert.equal(operationalBlock(m), null, 'P3: the setup engine decides (its gate in spawnContext), not the static predicate');
+  const b = setupEngineMissing(m);
   assert.deepEqual({ ...b, message: undefined, hint: undefined }, {
     error: 'setup-unsupported', category: 'unsupported-feature', manifestField: 'setup', target: 'com.example.notes', docs: 'app-contract',
     details: { state: 'blocked' }, message: undefined, hint: undefined,
   });
-  const D105_FIELDS = ['error', 'message', 'reason', 'category', 'hint', 'docs', 'permission', 'holder', 'capability', 'missing', 'suggest', 'manifestField', 'policy', 'target', 'approvalId', 'details'];
+  const D105_FIELDS = ['error', 'message', 'reason', 'category', 'hint', 'docs', 'permission', 'holder', 'capability', 'missing', 'suggest', 'manifestField', 'policy', 'target', 'approvalId', 'details', 'state'];
   for (const body of [b, operationalBlock(parse({ auraContract: 2 }))]) {
     assert.deepEqual(Object.keys(body).filter((k) => !D105_FIELDS.includes(k)), [], 'no field outside the D105 body');
   }
   assert.match(b.message, /declares setup and profiles .*D108.*does not start the app unconfigured/);
-  assert.match(b.hint, /without setup\/profiles, or update AuraOS/);
-  assert.equal(operationalBlock({ id: 'com.example.notes', profiles: [] })?.manifestField, 'profiles', 'an empty list is still a declaration');
+  assert.equal(setupEngineMissing({ id: 'com.example.notes', profiles: [] })?.manifestField, 'profiles', 'an empty list is still a declaration');
+  assert.equal(setupEngineMissing(parse({})), null);
   assert.equal(AppManifestSchema.safeParse({ ...base, profiles: [] }).success, false, 'P0: an empty profiles list is a schema error');
-  // A newer contract wins (it says more), with the same body shape.
   assert.deepEqual([operationalBlock(parse({ auraContract: 2, setup: {} }))?.error, operationalBlock(parse({ auraContract: 2 }))?.category], ['contract-unsupported', 'unsupported-operation']);
   const err = new OperationalBlockError(b);
   assert.equal(err.code, 'setup-unsupported');
   assert.deepEqual(operationalBlockOf(err), b);
   assert.equal(operationalBlockOf(new Error('x')), null);
-  assert.deepEqual(codes(parse({ auraContract: 1, setup: {} })), ['setup-unsupported'], 'aura dev validate: an error');
-  assert.equal(contractFindings(parse({ auraContract: 1, setup: {} }))[0].severity, 'error');
+  const gate = (await import('../dist/contract/types.js')).setupGateBlock('com.example.notes', 'setup-required', 'setup-required', 'm', 'h');
+  assert.deepEqual(operationalBlockOf(new OperationalBlockError(gate)), gate, 'a needs-setup body travels the same way');
+  assert.equal(gate.category, 'needs-setup');
+  assert.deepEqual(codes(parse({ auraContract: 1, setup: {} })), [], 'aura dev validate: no A1 error once the engine exists');
 });
 
 test('binding (D108): an app without setup, profiles or a newer contract passes the gate exactly as before', async () => {
@@ -259,7 +259,7 @@ test('binding (D108): an app without setup, profiles or a newer contract passes 
   assert.deepEqual(picked, ['io.plain.app'], 'startIntent tries to start it as before');
 });
 
-test('D108 A2: the gate in spawnContext refuses every spawn; registry lists and audits it; loops skip; startIntent answers setup-required', async () => {
+test('D108 A2 (no setup engine): the gate in spawnContext refuses every spawn; registry lists and audits only the contract major; loops skip; startIntent answers setup-required', async () => {
   const { AppRegistry } = await import('../dist/app-manager/AppRegistry.js');
   const w = await gateWorld({
     'io.future.app': { auraContract: AURA_CONTRACT + 1, instanceMode: 'multi', warmPool: 1 },
@@ -271,7 +271,7 @@ test('D108 A2: the gate in spawnContext refuses every spawn; registry lists and 
   const reg = new AppRegistry([scopeDef], { onBlocked: (b) => blocked.push(b) });
   for (const id of ['io.future.app', 'io.setup.app']) reg.loadManifestFile(join(w.root, 'apps', id, 'app.manifest.json'), scopeDef);
   assert.equal(reg.getById('io.setup.app')?.setup !== undefined, true, 'still listed, with its block');
-  assert.deepEqual(blocked.map((b) => [b.target, b.error]), [['io.future.app', 'contract-unsupported'], ['io.setup.app', 'setup-unsupported']]);
+  assert.deepEqual(blocked.map((b) => [b.target, b.error]), [['io.future.app', 'contract-unsupported']], 'a setup app is the engine\'s, not incompatible');
   // The one gate: every spawn passes spawnContext.
   for (const [id, code] of [['io.future.app', 'contract-unsupported'], ['io.setup.app', 'setup-unsupported']]) {
     await assert.rejects(w.spawnContext(id), (e) => e.name === 'OperationalBlockError' && e.code === code && e.body.target === id);
@@ -286,7 +286,7 @@ test('D108 A2: the gate in spawnContext refuses every spawn; registry lists and 
   assert.equal(w.mgr.getInstancesByApp('io.setup.app').length, 0);
 });
 
-test('install, update and patch activation refuse setup/profiles before anyone is asked: the error event carries the D105 body', async () => {
+test('install, update and patch activation no longer refuse setup/profiles (P3: the engine sets them up after install)', async () => {
   const { NexusManager } = await import('../dist/nexus/NexusManager.js');
   const root = mkdtempSync(join(tmpdir(), 'aura-setup-install-'));
   const scope = (id, priority, immutable) => ({ id, appsDir: join(root, id, 'apps'), dataDir: join(root, id, 'data'), immutable, priority });
@@ -297,13 +297,9 @@ test('install, update and patch activation refuse setup/profiles before anyone i
   writeFileSync(join(dir, 'app.manifest.json'), JSON.stringify({ ...base, id: 'io.shop.app', auraContract: 1, profiles: [{ id: 'team', title: 'Team' }] }));
   const asked = [];
   const events = [];
-  const it = mgr.install({ ref: dir, scope: 'user', approval: async (b) => { asked.push(b); return true; } });
-  let error = null;
+  const it = mgr.install({ ref: dir, scope: 'user', approval: async (b) => { asked.push(b); return false; } });
   try { for (let c = await it.next(); !c.done; c = await it.next()) events.push(c.value); }
-  catch (e) { error = e; }
-  const ev = events.find((e) => e.type === 'error');
-  assert.deepEqual([ev?.code, ev?.body?.error, ev?.body?.manifestField, ev?.body?.category], ['setup-unsupported', 'setup-unsupported', 'profiles', 'unsupported-feature']);
-  assert.equal(error?.code, 'setup-unsupported');
-  assert.deepEqual(asked, []);
-  assert.equal(existsSync(join(scopes[2].appsDir, 'io.shop.app')), false);
+  catch { /* the declined approval */ }
+  assert.equal(events.some((e) => e.type === 'error' && e.code === 'setup-unsupported'), false);
+  assert.equal(asked.length, 1, 'it reached the owner\'s install approval');
 });

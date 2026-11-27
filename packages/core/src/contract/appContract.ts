@@ -23,11 +23,11 @@
  */
 import type { AppManifest } from '../types/manifest.js';
 import { toolsGrant } from '../capabilities/tool-allowlist.js';
-import { AURA_CONTRACT, contractRefusal, declaredSetupKeys, operationalBlock, type ContractStatus } from './types.js';
+import { AURA_CONTRACT, contractRefusal, type ContractStatus } from './types.js';
 
 export {
   AURA_CONTRACT, CONTRACT_AUDIT_ACTIONS, CONTRACT_UNSUPPORTED, contractRefusal, declaredSetupKeys, operationalBlock,
-  OperationalBlockError, operationalBlockOf, refuseUnknownMajor, RESERVED_SETUP_KEYS,
+  OperationalBlockError, operationalBlockOf, refuseUnknownMajor, RESERVED_SETUP_KEYS, setupEngineMissing,
 } from './types.js';
 export type { ContractKind, ContractStatus, MajorRefusal, OperationalBlock, OperationalBlockState, ReservedSetupKey } from './types.js';
 
@@ -91,11 +91,6 @@ export function contractFindings(m: ContractManifest): ContractFinding[] {
   } else if (refused) {
     // An error: AuraOS refuses to install or start the app (D48).
     out.push({ severity: 'error', code: refused.code, path: 'auraContract', message: refused.message });
-  }
-  // D108 A1: reserved until the setup engine exists; AuraOS refuses to install or start the app.
-  if (declaredSetupKeys(m).length > 0) {
-    const block = operationalBlock({ id: (m as { id?: string }).id ?? 'this app', setup: m.setup, profiles: m.profiles })!;
-    out.push({ severity: 'error', code: block.error, path: block.manifestField, message: `${block.message} (${block.hint})` });
   }
   (m.services ?? []).forEach((s, i) => {
     if (PRIVILEGED_SIDECAR(s) && !d.privileged && !d.docker) {

@@ -1,20 +1,22 @@
 /**
  * The one way the server layer reaches the setup engine (D108,
  * core setup/contracts.ts `SetupServiceContract`). The engine is a kernel
- * module (P3); the routes under `/api/apps/<id>/setup/**` and the app list
- * call it only through `liveSetupService()`.
+ * module (P3, core `setup/service.ts`), built by the composition root over
+ * the AppManager (`createSetupEngine`); the routes under
+ * `/api/apps/<id>/setup/**`, the app list and `/api/setup/self` call it only
+ * through `liveSetupService()`.
  *
- * Until the engine is wired, the accessor answers null and every setup route
+ * A kernel composed without the engine answers null: every setup route
  * answers 503 `unavailable` (never a made-up success, never a fallback
- * configuration). An app that declares setup is refused at its start anyway
- * (D108 A1, contract/types.ts `operationalBlock`).
+ * configuration), and an app that declares setup is refused at its start
+ * (contract/types.ts `setupEngineMissing`).
  */
 import * as core from '@aura/core';
 import type { OperationalState, SetupServiceContract } from '@aura/core';
 
-/** The setup engine, or null while this build has none (D108 P3 wires core's engine here). */
+/** The setup engine of the running kernel, or null when it has none. */
 export function liveSetupService(): SetupServiceContract | null {
-  return null;
+  try { return core.getAppManager().setup ?? null; } catch { return null; }
 }
 
 /** The answer of every setup route while there is no engine: a D105-shaped body, 503. */
