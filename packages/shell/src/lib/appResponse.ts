@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import { auraErrorOf, getAppManager, lifecyclePath, RELAY_CLAIM_HEADER, sourceClosedBody } from '@aura/core';
+import { releaseReadOnlyFailure } from './releaseReadOnly.ts';
 import { relayClaimFor, type RelaySigner } from './access/relay.ts';
 import type { AppManifest, AppInstance, AuraErrorBody } from '@aura/core';
 
@@ -245,6 +246,9 @@ export function failureBody(err: unknown, audience: ErrorAudience, opts: Failure
   const carried = auraErrorOf(err);
   if (carried) return carried;
   if ((err as NodeJS.ErrnoException | null)?.code === 'EROFS') {
+    // A write into the running release (Normal mode, D34) names the system-patch workflow (6B.L).
+    const release = releaseReadOnlyFailure(err, opts.what);
+    if (release) return release;
     return opts.appId
       ? { status: 409, body: sourceClosedBody(opts.appId) }
       : { status: 409, body: { error: 'read-only', category: 'not-grantable', message: 'This is read-only here (a closed install, or the release).' } };
