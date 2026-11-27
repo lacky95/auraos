@@ -31,8 +31,8 @@ import {
   actionGate, json, liveApprovalDeps, presentedApproval, requesterSummary, type ApprovalServiceDeps,
 } from './service.ts';
 
-/** The owner's management actions, and opening an app's source (Track P, same flow). */
-export type AdminApprovalAction = Extract<ApprovalAction, `admin.${string}` | 'app.source.open'>;
+/** The owner's management actions, opening an app's source (Track P) and activating system patches (7b): same flow. */
+export type AdminApprovalAction = Extract<ApprovalAction, `admin.${string}` | 'app.source.open' | 'system.patch.activate'>;
 
 /** One owner-management request, as its route validated it. */
 export interface AdminRequest {
@@ -47,6 +47,8 @@ export interface AdminRequest {
   highRisk?: readonly ApprovalRisk[];
   /** An app's own words that go with it (its manifest's reason), shown only under the dialog's label. */
   reason?: string;
+  /** The exact change approved, as a unified diff (a system patch activation, D68 "exact diff review"). */
+  diff?: string;
   /**
    * The owner's desktop session alone is not enough: the change is confirmed
    * in the shell's approval dialog (Settings) or by the host operator.
@@ -133,6 +135,7 @@ async function approvedRequest(
       ...adminDisplay(req.title, req.details ?? [], by),
       ...(req.highRisk?.length ? { highRisk: [...req.highRisk] } : {}),
       ...(req.reason ? { reason: req.reason } : {}),
+      ...(req.diff ? { diff: req.diff } : {}),
     }),
   });
 }

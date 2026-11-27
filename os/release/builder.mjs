@@ -20,7 +20,8 @@
 //   source     fetch into the bare mirror aura/release/mirror.git (D94 git config), never /workspace
 //   verify     the signed release metadata against commit and tree (D71) BEFORE anything of it runs
 //   stage      git archive → releases/.staging-<job>; its tree must equal the verified tree (no .git)
-//   series     the D68 series slot: the empty series in Phase 6 (series-slot.mjs)
+//   series     the D68 series slot (series-slot.mjs, Phase 7b): the store's active series (or the one
+//              passed) read, validated and applied whole to the staging tree; a conflict = needs-repair
 //   images     aura-shell:<fp> and aura-base:<fp> through BuildKit; reused when the fingerprint exists
 //   base-check node -v of both images against engines.node of the staged package.json
 //   deps       pnpm install --frozen-lockfile in a throwaway container (offline first, then the network)
@@ -37,6 +38,11 @@
 //                     [--channel signed|main] [--maturity M] [--ref REF] [--expect-commit SHA]
 //                     [--keys DIR]... [--key FILE]... [--pin ID]... [--composition desktop|server]
 //                     [--infra FILE] [--first-install] [--job ID]
+//                     [--series-dir DIR | --series-store DIR --series-rev REV | --no-series]
+//                     [--validate-only] [--image-change-approved] [--expect-series-digest D]
+//   builder.mjs series-plan --series-dir DIR [--commit SHA]   (Phase 7b: what an operator authorizes)
+//   builder.mjs series-import --data-root D --series-dir DIR --digest D [--source S] [--ref R] [--by TEXT]
+//   (build … --series-store S --series-rev R --mark-installed: an install-time series, approved + active on success)
 //   builder.mjs status --data-root D
 //   builder.mjs gc --data-root D [--data-volume V]
 import { spawn, spawnSync } from 'node:child_process';
@@ -55,7 +61,9 @@ import { imageFingerprint, satisfiesNode, targetsOf } from './images.mjs';
 import {
   COMPLETE_MARKER, RELEASE_RECORD, STAGING_PREFIX, assertReleaseId, layout, newJobId, subpathOf,
 } from './layout.mjs';
-import { seriesForBuild } from './series-slot.mjs';
+import {
+  EMPTY_SERIES_DIGEST, SeriesSlotError, applyToStaging, importStore, markInstalled, readSeriesInput, seriesForBuild, seriesIdentity, touchedComponents,
+} from './series-slot.mjs';
 
 export const RELEASE_RECORD_VERSION = 1;
 export const COMPOSITIONS = Object.freeze(['desktop', 'server']);
@@ -68,7 +76,7 @@ export const BUILD_STEPS = Object.freeze([
   { key: 'source', label: 'Source fetched into the mirror' },
   { key: 'verify', label: 'Release verified (signature, commit, tree)' },
   { key: 'stage', label: 'Staging tree extracted and matches the verified tree' },
-  { key: 'series', label: 'System patch series recorded (empty in Phase 6)' },
+  { key: 'series', label: 'System patch series validated and applied (D68)' },
   { key: 'images', label: 'Images built or reused' },
   { key: 'base-check', label: 'Image Node versions satisfy engines.node' },
   { key: 'deps', label: 'Dependencies installed (frozen lockfile, throwaway container)' },
@@ -275,6 +283,7 @@ export function buildContainerArgs({ name, image, dataVolume, stagingSub, storeS
   return a;
 }
 
+const touchedNote = (series) => (series.touched?.length ? ` (system patches touch ${series.touched.map((t) => t.component).join(', ')})` : '');
 const shortHash = (o) => createHash('sha256').update(JSON.stringify(o)).digest('hex').slice(0, 8);
 
 /** Release id: `<version or "main">-<commit12>-<inputs8>`. */
@@ -405,18 +414,69 @@ export async function build(o) {
     const sourceComps = sourceComponents(staging);
     done('stage', `staged tree = verified tree ${sel.gitTree}`);
 
-    // 5. series slot (D68)
+    // 5. series slot (D68, Phase 7b): the WHOLE series applied to the full source tree (D73),
+    // with the one patch library; a patch that does not apply is "needs repair" (nothing else runs).
     begin('series');
-    let series;
-    try { series = seriesForBuild({ seriesFile: L.series, requested: o.series ?? null }); } catch (e) {
-      throw new BuildError(e.code ?? 'series', e.message, { exit: 3 });
+    const imageFps = (dir) => {
+      const t = targetsOf(existsSync(join(dir, 'Dockerfile')) ? readFileSync(join(dir, 'Dockerfile'), 'utf8') : '');
+      const shellT = t.includes(SHELL_TARGET) ? SHELL_TARGET : SHELL_TARGET_PRE_L;
+      if (!t.includes(shellT) || !t.includes(BASE_TARGET)) return null;
+      return { base: imageFingerprint(dir, BASE_TARGET, { extra: infra.digest ?? '' }).fingerprint, shell: imageFingerprint(dir, shellT, { extra: infra.digest ?? '' }).fingerprint };
+    };
+    let read = null;
+    try { read = await seriesForBuild({ store: L.seriesStore, requested: o.series ?? null }); } catch (e) {
+      if (e instanceof SeriesSlotError) throw new BuildError(e.code, e.message, { exit: 3 });
+      throw e;
     }
-    done('series', `empty series ${series.digest}`);
+    const enabled = read ? read.patches.filter((p) => p.enabled) : [];
+    let series = { digest: EMPTY_SERIES_DIGEST, base: null, order: [] };
+    let rebuildsImage = false;
+    let upstreamImages = null;
+    if (read) {
+      const ident = await seriesIdentity(read, sel.commit);
+      upstreamImages = imageFps(staging);
+      if (enabled.length) {
+        const r = await applyToStaging({ staging, mirror: L.mirror, commit: sel.commit, patches: read.patches });
+        if (!r.ok) {
+          const e = new BuildError('needs-repair', `patch ${r.failed.index + 1} "${r.failed.subject}" (${r.failed.file}) does not apply to ${sel.commit.slice(0, 12)}`
+            + `${r.conflicts.length ? `: conflicts in ${r.conflicts.join(', ')}` : ''} (${r.message})`, { exit: 3 });
+          e.repair = { release: sel.meta?.version ?? null, commit: sel.commit, rev: read.rev, patch: { file: r.failed.file, subject: r.failed.subject, sha256: r.failed.sha256 ?? null },
+            index: r.failed.index, reason: 'conflict', conflicts: r.conflicts, message: r.message };
+          job.repair = e.repair;
+          throw e;
+        }
+      }
+      const patched = imageFps(staging);
+      rebuildsImage = Boolean(upstreamImages && patched && (upstreamImages.base !== patched.base || upstreamImages.shell !== patched.shell));
+      const touched = await touchedComponents(read.patches, sourceComps);
+      series = {
+        digest: ident.digest,
+        base: { commit: sel.commit, version: channel === 'signed' ? sel.meta.version : null },
+        order: enabled.map((p) => ({ file: p.file, sha256: p.sha256, subject: p.subject })),
+        disabled: read.patches.filter((p) => !p.enabled).map((p) => ({ file: p.file, sha256: p.sha256, subject: p.subject })),
+        target: { kind: 'system' },
+        rev: read.rev,
+        declaredBase: read.series.base,
+        rebased: read.series.base.commit !== sel.commit,
+        binding: ident.binding,
+        flags: read.flags,
+        touched,
+        rebuildsImage,
+      };
+    }
+    job.series = series.order.length || series.disabled?.length ? { digest: series.digest, rev: series.rev ?? null, patches: series.order.length, rebuildsImage } : null;
+    done('series', read ? `${series.order.length} patch(es) applied${series.disabled?.length ? `, ${series.disabled.length} disabled` : ''} (${series.digest})${rebuildsImage ? ', changes the images' : ''}` : `no series ${series.digest}`);
 
     const version = channel === 'signed' ? sel.meta.version : (pkg.version ?? null);
     const id = releaseIdOf({ version: channel === 'signed' ? version : null, commit: sel.commit, seriesDigest: series.digest, composition, infraDigest: infra.digest });
     job.input.releaseId = id;
-    if (existsSync(join(L.release(id), COMPLETE_MARKER))) {
+    if (o.expectSeriesDigest && o.expectSeriesDigest !== series.digest) {
+      refuse('series-moved', `the series is ${series.digest}, not the approved ${o.expectSeriesDigest}: approve the new revision`);
+    }
+    if (rebuildsImage && !o.validateOnly && !o.imageChangeApproved) {
+      refuse('image-change-unapproved', 'the series changes what the AuraOS images are built from: the image is built only after the activation was approved');
+    }
+    if (!o.validateOnly && existsSync(join(L.release(id), COMPLETE_MARKER))) {
       // The same inputs were built before (a rollback target, a retried install): reuse it.
       for (const k of ['images', 'base-check', 'deps', 'build', 'check', 'manifest', 'finalize']) step(k, 'skipped', `release ${id} exists`);
       removeTree(staging);
@@ -440,10 +500,13 @@ export async function build(o) {
     if (!hasBuildx && secretIds.length) refuse('legacy-builder', 'build secrets are configured (D94) but buildx (BuildKit) is missing: the legacy builder would put them at risk; install the buildx plugin');
     const images = {};
     for (const [key, target, repo] of [['base', BASE_TARGET, 'aura-base'], ['shell', shellTarget, 'aura-shell']]) {
-      const { fingerprint } = imageFingerprint(staging, target, { extra: infra.digest ?? '' });
+      // Validating an unapproved series that changes the images: its code is built and checked
+      // in the UPSTREAM images (an image build runs Dockerfile steps on the privileged side).
+      const fingerprint = o.validateOnly && rebuildsImage ? upstreamImages[key] : imageFingerprint(staging, target, { extra: infra.digest ?? '' }).fingerprint;
       const tag = `${repo}:${fingerprint}`;
       images[key] = tag;
       if ((await run(docker, ['image', 'inspect', '--format', '{{.Id}}', tag])).code === 0) { log(`images: reuse ${tag}`); continue; }
+      if (o.validateOnly && rebuildsImage) refuse('upstream-image-missing', `the upstream image ${tag} is not there to validate an image-changing series in; build the release without the series first`);
       const args = hasBuildx ? ['buildx', 'build', '--load'] : ['build'];
       args.push('--target', target, '-t', tag, '-f', join(staging, 'Dockerfile'));
       for (const [k, v] of Object.entries(infra.buildArgs)) args.push('--build-arg', `${k}=${v}`);
@@ -521,7 +584,7 @@ export async function build(o) {
     begin('build');
     const b = await run(docker, [...buildContainerArgs({ ...base, name: shName('build'), network: 'none', env }), 'os/release/build.sh', 'build'],
       { timeoutMs: timeouts.build, name: shName('build') });
-    if (b.code) throw new BuildError('build', `the release build failed: ${b.out.trim().split('\n').slice(-8).join(' / ')}`);
+    if (b.code) throw new BuildError('build', `the release build failed${touchedNote(series)}: ${b.out.trim().split('\n').slice(-8).join(' / ')}`);
     const appsLine = b.out.trim().split('\n').reverse().find((l) => l.startsWith('{"apps":'));
     const apps = appsLine ? JSON.parse(appsLine).apps : [];
     done('build', `${apps.filter((a) => a.built).length} system app build(s)`);
@@ -529,13 +592,33 @@ export async function build(o) {
     begin('check');
     const c = await run(docker, [...buildContainerArgs({ ...base, name: shName('check'), network: 'none', env }), 'os/release/build.sh', 'check'],
       { timeoutMs: timeouts.check, name: shName('check') });
-    if (c.code) throw new BuildError('check', `server.mjs --check failed: ${c.out.trim().split('\n').slice(-6).join(' / ')}`);
+    if (c.code) throw new BuildError('check', `server.mjs --check failed${touchedNote(series)}: ${c.out.trim().split('\n').slice(-6).join(' / ')}`);
     done('check', 'build loaded, servers attached');
+
+    // D73: each touched component is built and deployed in this composition, or named as not deployed.
+    const builtNames = new Set(apps.filter((a) => a.built).map((a) => a.id).concat(sourceComps.filter((x) => x.kind === 'package').map((x) => x.name)));
+    if (series.touched) {
+      for (const t of series.touched) {
+        t.built = t.kind === 'os' || t.kind === 'root' ? null : builtNames.has(t.component);
+        t.deployed = t.kind === 'os' || t.kind === 'root' ? true : builtNames.has(t.component);
+      }
+    }
+    if (o.validateOnly) {
+      // Phase 7b: an unapproved series was applied, built and checked in throwaway containers.
+      // Nothing is finalized; the approved activation builds again with the same inputs.
+      removeTree(staging);
+      job.validated = { id, commit: sel.commit, version, composition, provenance: provenanceOf({ channel, signed: channel === 'signed' && sel.signed === true, seriesLength: series.order.length }),
+        series: { ...series, binding: { ...series.binding, composition } }, images };
+      for (const k of ['manifest', 'finalize', 'gc']) step(k, 'skipped', 'validation only');
+      finalized = true;
+      return finish({ ok: true, id, reused: false, validated: job.validated });
+    }
 
     // 11. manifest
     begin('manifest');
     const signed = channel === 'signed' && sel.signed === true;
     const provenance = provenanceOf({ channel, signed, seriesLength: series.order.length });
+    if (series.binding) series.binding = { ...series.binding, composition };
     const builtComps = [
       ...sourceComps.filter((x) => x.kind === 'package').map((x) => ({ name: x.name, kind: 'package' })),
       { name: 'shell-bundle', kind: 'shell', composition, outDir: 'packages/shell/dist-prod' },
@@ -554,8 +637,12 @@ export async function build(o) {
         // main channel: unsigned, so a securityUpdate claim is never honoured (D71)
         : { signed: false, metaDigest: null, securityUpdate: false },
       provenance,
-      ...(provenance === 'locally-modified' ? { base: { commit: sel.commit, version } } : {}),
-      series: { digest: series.digest, base: series.base, order: series.order },
+      ...(provenance === 'locally-modified' ? {
+        base: { commit: sel.commit, version },
+        // D71: what this locally modified release is based on; it is never itself "signed".
+        basedOn: { version, commit: sel.commit, metaDigest: signed ? sel.metaDigest : null, signed },
+      } : {}),
+      series,
       composition,
       components: {
         source: sourceComps,
@@ -613,7 +700,8 @@ export async function build(o) {
   function finish(result) {
     if (result) job.phase = 'done';
     job.finishedAt = new Date().toISOString();
-    if (result) job.result = { id: result.id, reused: result.reused };
+    if (result) job.result = { id: result.id, reused: result.reused, ...(result.validated ? { validated: true } : {}) };
+    if (result?.validated) job.phase = 'validated';
     step('complete', 'done');
     return result ? { ...result, job: jobId } : null;
   }
@@ -636,6 +724,16 @@ export function status(dataRoot) {
 
 // ── CLI ─────────────────────────────────────────────────────────────────────
 
+/** --series-dir DIR | --series-store DIR --series-rev REV | --no-series; none of them: the store's active series. */
+function seriesArg(a) {
+  if (a['no-series'] === true) return { none: true };
+  if (typeof a['series-dir'] === 'string') return { dir: a['series-dir'] };
+  // --series-rev alone: a revision of this data root's store.
+  const store = typeof a['series-store'] === 'string' ? a['series-store'] : (a['data-root'] ? layout(a['data-root']).seriesStore : null);
+  if (store && typeof a['series-rev'] === 'string') return { store, rev: a['series-rev'] };
+  return null;
+}
+
 const jsonOut = (o) => process.stdout.write(`${JSON.stringify(o, null, 2)}\n`);
 
 export async function main(argv = process.argv.slice(2)) {
@@ -656,8 +754,47 @@ export async function main(argv = process.argv.slice(2)) {
           infra: typeof a.infra === 'string' ? JSON.parse(readFileSync(a.infra, 'utf8')) : null,
           firstInstall: a['first-install'] === true,
           jobId: typeof a.job === 'string' ? a.job : undefined,
+          series: seriesArg(a),
+          validateOnly: a['validate-only'] === true,
+          imageChangeApproved: a['image-change-approved'] === true,
+          expectSeriesDigest: typeof a['expect-series-digest'] === 'string' ? a['expect-series-digest'] : undefined,
         });
-        jsonOut({ ok: true, id: r.id, reused: r.reused, job: r.job, provenance: r.release?.provenance, images: r.release?.images });
+        // Install-time patches: the operator-authorized store revision becomes approved and active.
+        const sa = seriesArg(a);
+        if (a['mark-installed'] === true && sa?.store) markInstalled({ store: sa.store, rev: sa.rev });
+        jsonOut({
+          ok: true, id: r.id, reused: r.reused, job: r.job, provenance: r.release?.provenance ?? r.validated?.provenance, images: r.release?.images,
+          ...(r.validated ? { validated: true, series: r.validated.series } : { series: r.release?.series }),
+        });
+        return 0;
+      }
+      case 'series-plan': {
+        // What an operator authorizes before an install-time series is built (Phase 7b I):
+        // read and validated without git or any build; the digest is the one the build will have on --commit.
+        if (!a['series-dir']) return usage();
+        const read = await readSeriesInput({ dir: a['series-dir'] });
+        const commit = typeof a.commit === 'string' ? a.commit : read.series.base.commit;
+        const { digest } = await seriesIdentity(read, commit);
+        jsonOut({
+          ok: true, digest, base: read.series.base, buildsOn: commit, rebased: commit !== read.series.base.commit,
+          patches: read.patches.map((p) => ({
+            file: p.file, subject: p.subject, sha256: p.sha256, enabled: p.enabled,
+            files: p.validation.files.map((x) => ({ path: x.path, status: x.status, added: x.addedBytes })),
+            flags: p.validation.flags.map((x) => x.message),
+          })),
+        });
+        return 0;
+      }
+      case 'series-import': {
+        // Install-time patches (Phase 7b I): the authorized series becomes the store, with its history,
+        // and a handoff for the kernel's audit at first boot (patch.saved + patch.install-authorized).
+        if (!a['data-root'] || !a['series-dir'] || typeof a.digest !== 'string') return usage();
+        const L = layout(a['data-root']);
+        const rev = importStore({ store: L.seriesStore, dir: a['series-dir'], source: String(a.source ?? a['series-dir']), by: String(a.by ?? 'the operator') });
+        const handoff = join(a['data-root'], 'aura/install/patches-authorization.json');
+        mkdirSync(dirname(handoff), { recursive: true });
+        writeJsonDurable(handoff, { v: 1, source: String(a.source ?? ''), ref: typeof a.ref === 'string' ? a.ref : null, digest: a.digest, rev, by: String(a.by ?? 'the operator'), at: new Date().toISOString() });
+        jsonOut({ ok: true, store: L.seriesStore, rev });
         return 0;
       }
       case 'status': {
@@ -675,8 +812,8 @@ export async function main(argv = process.argv.slice(2)) {
       default: return usage();
     }
   } catch (e) {
-    if (e instanceof BuildError || e instanceof LockError) {
-      jsonOut({ ok: false, code: e.code, step: e.step ?? null, error: e.message });
+    if (e instanceof BuildError || e instanceof LockError || e instanceof SeriesSlotError) {
+      jsonOut({ ok: false, code: e.code, step: e.step ?? null, error: e.message, ...(e.repair ? { repair: e.repair } : {}), ...(e.refused ? { refused: e.refused } : {}) });
       return e.exit ?? 3;
     }
     throw e;

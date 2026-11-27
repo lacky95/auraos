@@ -2835,6 +2835,11 @@ export class AppManager {
   }
 
   /** Filesystem root where every app lives. Forwarded from AppRegistry. */
+  /** The data volume's name (the release builder mounts subpaths of it; Phase 7b system patches). */
+  dataVolumeName(): string {
+    return this.container.sidecarRuntime().appDataVolume;
+  }
+
   getAppsDir(): string {
     return this.registry.getAppsDir();
   }

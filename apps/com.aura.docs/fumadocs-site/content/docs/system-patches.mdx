@@ -1,0 +1,124 @@
+---
+title: System patches
+description: Change AuraOS itself on a Normal-mode install with aura system patch start, save and activate — the exact diff, your password, a checked build, an atomic switch and automatic rollback; how patches survive updates, what "needs repair" means, security updates, and install-time patches.
+---
+
+A Normal-mode AuraOS runs a **read-only, verified release**. To change AuraOS
+itself (the kernel, the shell, a built-in app such as the Terminal), you keep
+the change as a **system patch series**: ordered git patches on top of the
+release. Your change never edits the release; every activation builds a new
+release from *upstream + your series*.
+
+<Callout type="info">
+**Developer Mode** works differently: you change `/workspace` and commit with
+git. `aura system patch` answers there with that hint. System patches are for
+installs that run from a release (fresh installs from `install.sh`).
+</Callout>
+
+## The workflow
+
+```sh
+aura system patch start            # a writable checkout at /mnt/aura/work/system:
+                                   # the running release + the active series
+# edit, test, git commit (one commit = one patch)
+aura system patch save -m "what"   # a new series revision; validated, nothing runs
+aura system patch diff             # the exact change
+aura system patch activate         # see below
+aura system patch status           # the release, its provenance, the series
+```
+
+An agent in your System Terminal may run `start` and `save` (drafting).
+Activation is always yours.
+
+## What `activate` does
+
+1. **Validate, unprivileged.** The release and the whole series are built and
+   checked (`server.mjs --check`) in throwaway containers: no Docker socket,
+   no home, no secrets. A patch that does not apply, a failed build or check
+   stops here; the running release is untouched.
+2. **Your approval of the exact diff, with your password.** The dialog shows
+   the base release, the series revision and digest, the ordered patches and
+   their flags (binary, mode, image or dependency changes), the components the
+   series touches, and the full diff. A desktop session alone is not enough;
+   on the host, `aura approve <id>` works too. The approval binds that exact
+   revision, base, order, enabled flags and composition: any change needs a
+   new approval.
+3. **The approved build.** Only now is an image rebuilt if the series changes
+   the Dockerfile or the files the images copy ("Rebuilds the AuraOS images").
+4. **The switch.** Atomic, with a data snapshot, writes held until the new
+   release is healthy, and an **automatic rollback** if it is not.
+   A series that touches the Terminal warns that active sessions end; by
+   default it switches on the next start.
+
+<Callout type="warn">
+**Alpha status:** the release switch (step 4) arrives with Phase 6's release
+activation. Until then `activate` validates, asks for your approval, builds the
+approved release and stops; the audit trail records that it was not activated.
+</Callout>
+
+The running release is then shown as **"locally modified (N system patches),
+based on signed <version>"**. A locally modified release is never presented as
+maintainer-signed. A patch can never change the release keys or the verifier.
+
+## Disable, enable
+
+```sh
+aura system patch disable 2        # a new revision without patch 2 (one click)
+aura system patch enable 2         # apply it again (your password)
+```
+
+Both make a new revision; activate it to take effect.
+
+## Updates and "needs repair"
+
+On every release update the active series is applied to the new release.
+
+- **All patches apply:** the update carries your series; you approve the update
+  as usual.
+- **A patch no longer applies** (a conflict, or the build fails): the patch is
+  marked **needs repair** with the reason and the files, you get a
+  notification, and you choose **Update without this patch** (the default: it
+  is disabled in a new revision and stays in the store) or **Hold update**.
+- **Repair:** `aura system patch start --base <new release>`, fix, `save`,
+  `activate`.
+
+### Security updates
+
+A release whose **signed** metadata marks it as a security update is never
+blocked by a patch: with the default policy `follow-signed`, "Hold" is not
+offered; the update goes ahead without the failing patch, which is marked needs
+repair, and you are notified. The local policy `security-update-policy: hold`
+(set with your password, audited) offers "Hold" and keeps showing "security
+update held by local policy" until you apply it. The signed metadata itself is
+never changed.
+
+## Install-time patches
+
+```sh
+sh install.sh --patches ./my-series                # a directory: aura-patches.yaml + patches/
+sh install.sh --patches https://git.example/p.git \
+  --patches-ref <40-hex commit> --accept-patches <series digest>   # unattended
+```
+
+The upstream release is verified first; then the series is validated and
+shown (source, pinned commit, patches, flags, **series digest**) and you
+authorize it by typing the start of the digest, or with `--accept-patches`
+unattended. Nothing is built before that. The first release is built with the
+series (locally modified, based on the verified release); the series and its
+git history become the system patch store, so updates, repair, disable and
+rollback work as above. If the patched release fails to build, the install
+stops with no active release and keeps the store for inspection; it never
+falls back to an unpatched install on its own. `--config` and `--patches`
+combine; `--developer --patches` is refused.
+
+The series file is written by `aura system patch save` as JSON (which is also
+YAML); the installer reads only that saved form.
+
+## Where things are
+
+| What | Where |
+|---|---|
+| The store (git history = the registry) | `/data/patches/system` (`refs/aura/active`, `refs/aura/approved/<n>`) |
+| Your workspaces | `/data/aura/workspaces/<user>/system/<n>`, bound at `/mnt/aura/work/system` |
+| Needs repair | `/data/aura/release/needs-repair.json`, `aura system patch status` |
+| Audit | `patch.saved`, `patch.activated`, `patch.activation-failed`, `patch.rolled-back`, `patch.needs-repair`, `patch.disabled`, `patch.enabled` |

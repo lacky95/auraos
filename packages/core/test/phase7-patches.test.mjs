@@ -55,8 +55,8 @@ test('series v2: saves target, sha256 and enabled; a v1 file reads as v2; the ne
   const store = join(u.root, 'store');
   const saved = saveSeries(store, { target: APP, base: { repository: u.repo, commit: u.base }, patches: u.patches, message: 's' });
   const text = readFileSync(join(store, 'aura-patches.yaml'), 'utf8');
-  assert.match(text, /^v: 2$/m);
-  assert.match(text, /kind: app/);
+  assert.match(text, /^  "v": 2,$/m, 'v2, written as JSON (YAML too; the builder reads it without a YAML parser)');
+  assert.match(text, /"kind": "app"/);
   assert.equal(saved.series.patches.every((p) => /^[0-9a-f]{64}$/.test(p.sha256) && p.enabled === true), true);
   assert.deepEqual(parseSeries(formatSeries(saved.series)), saved.series, 'round trip');
   // v1 (Track P): app + file/subject only.

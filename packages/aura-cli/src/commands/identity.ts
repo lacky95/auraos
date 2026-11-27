@@ -5,6 +5,7 @@ import { inSandbox, isRunnerShellUrl, isTrustedShellUrl, resolveIdentity, shellF
 import { issueSetupCode, SetupCodeRefused, type SetupTicketInput } from '../lib/setup-ticket.js';
 // The file-only entry, like setup tickets: no Valkey, no server runtime.
 import { reidentifySystem } from '@aura/core/system-identity';
+import { registerSystemPatch } from './systemPatch.js';
 
 export type WhoamiResult =
   | { state: 'verified'; identity: Record<string, string>; login?: Record<string, string> }
@@ -127,7 +128,8 @@ export function registerIdentity(program: Command): void {
       return printCode({ purpose: 'reset', username: name });
     });
 
-  const system = program.command('system').description('This Aura\'s identity (host commands).');
+  const system = program.command('system').description('This Aura\'s identity (host commands) and system patches (D68).');
+  registerSystemPatch(system);
   system
     .command('reidentify')
     .description('Host command: give a copied /data a new systemId and system key (D47). Run it with the shell stopped.')

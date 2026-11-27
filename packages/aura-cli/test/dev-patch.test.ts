@@ -235,10 +235,12 @@ test('patch start + save: patches/NNNN-*.patch and aura-patches.yaml in one patc
   assert.deepEqual(git(repo, 'show', '--name-only', '--format=', 'HEAD').split('\n').sort(),
     ['aura-patches.yaml', 'patches/0001-Status-shows-busy.patch']);
   const yaml = readFileSync(join(repo, 'aura-patches.yaml'), 'utf-8');
-  assert.match(yaml, /^v: 2$/m, 'series v2 (Phase 7a)');
-  assert.match(yaml, new RegExp(`appId: ${APP.replace(/\./g, '\\.')}`));
-  assert.match(yaml, /sha256: [0-9a-f]{64}\n\s+enabled: true/);
-  assert.match(yaml, new RegExp(`commit: ${git(w.upstream, 'rev-parse', 'HEAD')}`));
+  assert.match(yaml, /^  "v": 2,$/m, 'series v2 (Phase 7a), written as JSON (7b: YAML too, readable without a YAML parser)');
+  const doc = JSON.parse(yaml);
+  assert.equal(doc.target.appId, APP);
+  assert.match(doc.patches[0].sha256, /^[0-9a-f]{64}$/);
+  assert.equal(doc.patches[0].enabled, true);
+  assert.equal(doc.base.commit, git(w.upstream, 'rev-parse', 'HEAD'));
   // A second start binds the same workspace; a fresh one replays the saved series.
   const again = await quiet(() => startWorkspace(APP));
   assert.equal(again.created, false);
@@ -294,7 +296,7 @@ test('update: a compatible upstream keeps the patch and installs; a conflict nam
   const text = readFileSync(join(w.wsRoot, String(installedN), 'status.js'), 'utf-8');
   assert.match(text, /"busy"/);
   assert.match(text, /"v2"/);
-  assert.match(readFileSync(join(repo, 'aura-patches.yaml'), 'utf-8'), new RegExp(`commit: ${compatible}`), 'the series moved to the new base');
+  assert.match(readFileSync(join(repo, 'aura-patches.yaml'), 'utf-8'), new RegExp(`"commit": "${compatible}"`), 'the series moved to the new base');
   const activations = seen.filter((r) => r.url === `/api/apps/${APP}/activate`).length;
   const head = git(repo, 'rev-parse', 'HEAD');
 

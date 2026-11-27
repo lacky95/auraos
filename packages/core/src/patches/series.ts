@@ -32,61 +32,16 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join, resolve } from 'node:path';
-import { parse, stringify } from 'yaml';
-import { z } from 'zod';
+import { join, resolve } from 'node:path';
+import { parse } from 'yaml';
 import { MOUNT_ROOT_PATH, PATCHES_DIR_NAME, WORK_DIR_NAME } from '../app-manager/contracts.js';
+import { amApply } from './apply.js';
 import { seriesDigest, sha256Hex } from './digest.js';
-import type { PatchTarget } from './types.js';
+import { formatSeriesText, normalizeSeriesDoc, PATCHES_DIR, SERIES_FILE } from './seriesFile.js';
+
+export { PATCHES_DIR, SERIES_FILE };
+import type { ApplyResult, PatchTarget, Series, SeriesBase, SeriesPatch } from './types.js';
 import { validatePatch, type PatchValidation } from './validate.js';
-
-export const SERIES_FILE = 'aura-patches.yaml';
-export const PATCHES_DIR = 'patches';
-
-const BaseSchema = z.object({
-  /** Clone URL of the upstream repo (absent: a base only this machine has). */
-  repository: z.string().min(1).optional(),
-  /** Upstream commit the series applies to. */
-  commit:     z.string().regex(/^[0-9a-f]{7,64}$/, 'a commit hash'),
-  /** Subdirectory of the repo that is the app (monorepo apps). */
-  path:       z.string().min(1).refine((p) => !p.startsWith('/') && !p.split('/').includes('..'), 'a relative path').optional(),
-  /** The release the base commit belongs to (system series, 7b). */
-  release:    z.string().min(1).optional(),
-});
-
-const PatchSchema = z.object({
-  file:    z.string().regex(/^patches\/[^/]+\.patch$/, 'patches/<name>.patch'),
-  subject: z.string(),
-  /** sha256 of the patch file's bytes; computed on read when absent (v1). */
-  sha256:  z.string().regex(/^[0-9a-f]{64}$/, 'a sha256').optional(),
-  /** false: kept in the series but not applied (its flag is part of the digest). */
-  enabled: z.boolean().default(true),
-});
-
-const TargetSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('app'), appId: z.string().min(1), scope: z.enum(['global', 'user']).optional() }),
-  z.object({ kind: z.literal('system') }),
-]);
-
-const SeriesV2Schema = z.object({
-  v:       z.literal(2),
-  target:  TargetSchema,
-  base:    BaseSchema,
-  patches: z.array(PatchSchema).default([]),
-});
-
-/** v1 (Track P, before Phase 7): `app: <id>`, patches without sha256 or flag. Read only. */
-const SeriesV1Schema = z.object({
-  app:     z.string().min(1),
-  base:    BaseSchema,
-  patches: z.array(PatchSchema.pick({ file: true, subject: true })).default([]),
-}).transform((s) => ({ v: 2 as const, target: { kind: 'app' as const, appId: s.app }, base: s.base, patches: s.patches.map((p) => ({ ...p, enabled: true })) }));
-
-export const SeriesSchema = z.union([SeriesV2Schema, SeriesV1Schema]);
-
-export type SeriesBase  = z.infer<typeof BaseSchema>;
-export type SeriesPatch = z.infer<typeof PatchSchema>;
-export type Series      = z.infer<typeof SeriesV2Schema>;
 
 /** The app a series patches, or null for a system series. */
 export const seriesAppId = (s: Series): string | null => (s.target.kind === 'app' ? s.target.appId : null);
@@ -156,30 +111,11 @@ function identityArgs(cwd: string): string[] {
 export function parseSeries(text: string): Series {
   let doc: unknown;
   try { doc = parse(text); } catch (err) { throw new SeriesError(`${SERIES_FILE}: ${(err as Error).message}`); }
-  const versioned = !!doc && typeof doc === 'object' && 'v' in (doc as object);
-  const r = (versioned ? SeriesV2Schema : SeriesSchema).safeParse(doc);
-  if (!r.success) {
-    throw new SeriesError(`${SERIES_FILE}: ${r.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ')}`);
-  }
-  return r.data;
+  try { return normalizeSeriesDoc(doc); } catch (err) { throw new SeriesError((err as Error).message); }
 }
 
-/** The series file text: always v2. */
-export function formatSeries(s: Series): string {
-  const base: SeriesBase = {
-    ...(s.base.repository ? { repository: s.base.repository } : {}),
-    commit: s.base.commit,
-    ...(s.base.path ? { path: s.base.path } : {}),
-    ...(s.base.release ? { release: s.base.release } : {}),
-  };
-  const target = s.target.kind === 'app'
-    ? { kind: 'app', appId: s.target.appId, ...(s.target.scope ? { scope: s.target.scope } : {}) }
-    : { kind: 'system' };
-  return stringify({
-    v: 2, target, base,
-    patches: s.patches.map((p) => ({ file: p.file, subject: p.subject, ...(p.sha256 ? { sha256: p.sha256 } : {}), enabled: p.enabled !== false })),
-  });
-}
+/** The series file text: always v2, written as JSON (which is YAML): seriesFile.ts. */
+export const formatSeries = (s: Series): string => formatSeriesText(s);
 
 /** The series in a patch repo, at `rev` (a commit) or in the work tree. null: no series yet. */
 export function readSeries(repoDir: string, rev?: string): Series | null {
@@ -371,20 +307,6 @@ export function saveSeries(repoDir: string, input: { target: PatchTarget; base: 
   return { commit: git(repoDir, ['rev-parse', 'HEAD']).trim(), changed: true, series };
 }
 
-export type ApplyResult =
-  | { ok: true; applied: number; head: string }
-  | {
-      ok: false;
-      applied: number;
-      /** The first patch that does not apply, 0-based in the series. */
-      failed: SeriesPatch & { index: number };
-      /** Files with conflicts (three-way merge), when git named them. */
-      conflicts: string[];
-      message: string;
-      /** true: the work tree was left mid-`git am` for repair (`keepConflict`). */
-      inProgress: boolean;
-    };
-
 /**
  * Apply patches in order onto the work tree's HEAD with `git am --3way`, one
  * commit per patch. Stops at the first patch that does not apply and names
@@ -399,26 +321,7 @@ export function applySeries(
   // Disabled patches stay in the series but are not applied; the rest are validated first.
   const active = patches.map((p, index) => ({ p, index })).filter(({ p }) => p.enabled !== false);
   assertPatchesValid(opts.target ?? { kind: 'app', appId: '' }, active.map(({ p }) => p));
-  const dir = mkdtempSync(join(tmpdir(), 'aura-apply-'));
-  const id = identityArgs(workTree);
-  try {
-    for (let n = 0; n < active.length; n++) {
-      const { p, index: i } = active[n]!;
-      const file = join(dir, basename(p.file));
-      writeFileSync(file, p.content);
-      try {
-        git(workTree, [...id, 'am', '-q', '--3way', '--keep-cr', file]);
-      } catch (err) {
-        const conflicts = (tryGitRaw(workTree, ['diff', '--name-only', '--diff-filter=U']) ?? '').split('\n').filter(Boolean);
-        const message = gitError(err);
-        if (!opts.keepConflict) tryGit(workTree, [...id, 'am', '--abort']);
-        return { ok: false, applied: n, failed: { ...p, index: i }, conflicts, message, inProgress: !!opts.keepConflict };
-      }
-    }
-    return { ok: true, applied: active.length, head: git(workTree, ['rev-parse', 'HEAD']).trim() };
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+  return amApply(workTree, patches, { keepConflict: opts.keepConflict, gitArgs: safeDirectoryArgs(workTree), env: GIT_ENV });
 }
 
 /**

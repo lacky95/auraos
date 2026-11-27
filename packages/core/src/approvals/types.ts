@@ -75,12 +75,21 @@ export const FINAL_APPROVAL_STATES: ReadonlySet<ApprovalState> = new Set(['denie
  *                      its rollback tree (`/api/apps/<id>/activate`)
  *   app.source.open    open an installed app's source for direct development
  *                      (`/api/apps/<id>/source-mode`, `aura dev open`)
+ *
+ * System patches (Phase 7b, D68):
+ *   system.patch.activate  build and activate a release with a system patch
+ *                      series revision (`/api/admin/system-patches`, `aura
+ *                      system patch activate`, `enable`): always `fresh`; the
+ *                      payload binds the release, the full PatchBinding
+ *                      (base, revision, digest, order, disabled, composition)
+ *                      and the touched components (D73)
  */
 export const APPROVAL_ACTIONS = [
   'nexus.install', 'nexus.update', 'os.context.write', 'user.confirm', 'app.adapter-change',
   'credential.store', 'credential.read',
   'admin.grant', 'admin.revoke', 'admin.api-key', 'admin.manifest-edit', 'admin.read', 'admin.change',
   'app.patch.activate', 'app.source.open',
+  'system.patch.activate',
 ] as const;
 export type ApprovalAction = (typeof APPROVAL_ACTIONS)[number];
 

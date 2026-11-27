@@ -203,7 +203,7 @@ test('base check: images whose Node is older than engines.node are refused befor
   assert.doesNotMatch(s.fake.calls(), /os\/release\/build\.sh/);
 });
 
-test('provenance: main is upstream-unsigned and never a security update; a system patch series is refused in Phase 6', async () => {
+test('provenance: main is upstream-unsigned and never a security update; a malformed series input is refused', async () => {
   const s = setup();
   const r = await s.go({ channel: 'main', trust: undefined });
   assert.equal(r.release.provenance, 'upstream-unsigned');
@@ -221,14 +221,9 @@ test('provenance: main is upstream-unsigned and never a security update; a syste
   const again = await s.go({ composition: 'server' });
   assert.equal(again.reused, true);
   assert.equal(again.id, server.id);
-  // Phase 7's series input and the series file are refused (nothing would apply them).
+  // Phase 7b: a series input that is not a series is refused (release-series.test.mjs covers series).
   const e1 = await err(s.go({ series: { base: null, order: [{ file: '0001.patch', sha256: 'x' }] } }));
-  assert.equal(e1.code, 'series-unsupported');
-  mkdirSync(join(s.data, 'patches/system'), { recursive: true });
-  writeFileSync(s.L.series, 'patches: []\n');
-  const e2 = await err(s.go());
-  assert.equal(e2.code, 'series-unsupported');
-  assert.match(e2.message, /Phase 7 \(D68\)/);
+  assert.equal(e1.code, 'usage');
 });
 
 test('GC keeps current and previous (and the new release); other releases and stale staging go', async () => {

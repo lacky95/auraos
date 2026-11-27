@@ -6,6 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ROOT, V, commitAll, git, makeRepo, release, throwawayKey, tmp, write } from './release-fixtures.mjs';
@@ -63,10 +64,99 @@ function signedSource({ tamper = false, version = '0.1.0' } = {}) {
   return { url: `file://${dir}`, dir, key, keyFile, commit: r.commit };
 }
 
-test('--patches is refused: install-time patches arrive with Phase 7', () => {
-  const r = install(['--patches', '/x']);
-  assert.equal(r.status, 64);
-  assert.match(r.out, /Phase 7 \(D68\)/);
+/** A system patch series directory (saved form) on `commit` of `srcDir`: one edit per [subject, path, text]. */
+function seriesOn(srcDir, commit, edits) {
+  const work = tmp('aura-inst-series-work-');
+  git(work, 'clone', '-q', srcDir, '.');
+  git(work, 'checkout', '-q', commit);
+  for (const [subject, path, text] of edits) { write(work, path, text); git(work, 'add', '-A'); git(work, '-c', 'user.name=t', '-c', 'user.email=t@x.invalid', 'commit', '-qm', subject); }
+  const out = tmp('aura-inst-series-out-');
+  git(work, 'format-patch', '-q', '--zero-commit', '--no-signature', '--no-numbered', '-o', out, `${commit}..HEAD`);
+  const dir = tmp('aura-inst-series-');
+  mkdirSync(join(dir, 'patches'));
+  const patches = readdirSync(out).sort().map((f, i) => {
+    const content = readFileSync(join(out, f), 'utf8');
+    writeFileSync(join(dir, 'patches', f), content);
+    return { file: `patches/${f}`, subject: edits[i][0], sha256: createHash('sha256').update(content).digest('hex'), enabled: true };
+  });
+  writeFileSync(join(dir, 'aura-patches.yaml'), `${JSON.stringify({ v: 2, target: { kind: 'system' }, base: { commit }, patches }, null, 2)}\n`);
+  return dir;
+}
+
+test('--patches: argument rules (Normal Mode only, a pinned commit for git URLs)', () => {
+  assert.equal(install(['--developer', '--patches', tmp()]).status, 64);
+  assert.match(install(['--patches', 'https://example.invalid/p.git']).out, /needs --patches-ref <commit>/);
+  assert.match(install(['--patches', 'https://example.invalid/p.git', '--patches-ref', 'main']).out, /full commit hash/);
+  assert.equal(install(['--patches-ref', 'a'.repeat(40)]).status, 64);
+  assert.equal(install(['--patches', '/nonexistent-dir']).status, 64);
+});
+
+test('--patches: validated and authorized before any build; the patched first release and the store with history', () => {
+  const key = throwawayKey();
+  const src = auraSource(key, { extra: (d) => write(d, 'packages/core/src/probe/probe.ts', 'export const PROBE = "upstream";\n') });
+  const keyFile = join(tmp(), 'release.pub');
+  writeFileSync(keyFile, key.pem);
+  const series = seriesOn(src.dir, src.commit, [['probe: patched', 'packages/core/src/probe/probe.ts', 'export const PROBE = "patched";\n']]);
+  const base = ['--source', `file://${src.dir}`, '--trusted-key', keyFile, '--patches', series];
+  // Unattended without the digest: refused, nothing built.
+  const f1 = fakeBin();
+  const r1 = install(base, { fake: f1 });
+  assert.equal(r1.status, 3, r1.out);
+  const digest = /unattended: authorize the series with --accept-patches (sha256:[0-9a-f]{64})/.exec(r1.out)?.[1];
+  assert.ok(digest, r1.out);
+  assert.match(r1.out, /patch +probe: patched/);
+  assert.doesNotMatch(r1.calls, /builder\.mjs build /, 'nothing built before the authorization');
+  // A wrong digest: refused before any build.
+  const r2 = install([...base, '--accept-patches', `sha256:${'0'.repeat(64)}`]);
+  assert.equal(r2.status, 3);
+  assert.match(r2.out, /does not match the series digest/);
+  assert.doesNotMatch(r2.calls, /builder\.mjs build /);
+  // Authorized: the first release is patched, locally-modified, and the store keeps the series as approved + active.
+  const f3 = fakeBin();
+  const r3 = install([...base, '--accept-patches', digest], { fake: f3 });
+  assert.equal(r3.status, 3, r3.out);
+  assert.match(r3.out, /patch series authorized \(sha256:[0-9a-f]{64}\) and stored as revision [0-9a-f]{40}/);
+  assert.match(r3.out, /release \S+ built \(read-only, current\)/);
+  const ptr = JSON.parse(readFileSync(join(f3.data, 'aura/release/pointer.json'), 'utf8'));
+  const rec = JSON.parse(readFileSync(join(f3.data, 'releases', ptr.current, 'release.json'), 'utf8'));
+  assert.equal(rec.provenance, 'locally-modified');
+  assert.equal(rec.series.digest, digest);
+  assert.equal(rec.basedOn.signed, true);
+  assert.match(readFileSync(join(f3.data, 'releases', ptr.current, 'packages/core/src/probe/probe.ts'), 'utf8'), /patched/);
+  const store = join(f3.data, 'patches/system');
+  const rev = git(store, 'rev-parse', 'HEAD');
+  assert.equal(git(store, 'rev-parse', 'refs/aura/active'), rev);
+  assert.equal(git(store, 'rev-parse', 'refs/aura/approved/1'), rev);
+  assert.match(git(store, 'log', '-1', '--format=%s'), /install: imported from .* by the operator/);
+  const hand = JSON.parse(readFileSync(join(f3.data, 'aura/install/patches-authorization.json'), 'utf8'));
+  assert.equal(hand.digest, digest);
+  assert.equal(hand.rev, rev);
+});
+
+test('--patches: a series on another base aborts; a refused or failing series leaves no active release', () => {
+  const key = throwawayKey();
+  const src = auraSource(key);
+  const keyFile = join(tmp(), 'release.pub');
+  writeFileSync(keyFile, key.pem);
+  const other = seriesOn(src.dir, git(src.dir, 'rev-parse', 'HEAD~1'), [['x', 'README.md', 'other\n']]);
+  const r = install(['--source', `file://${src.dir}`, '--trusted-key', keyFile, '--patches', other, '--accept-patches', 'sha256:00']);
+  assert.equal(r.status, 3, r.out);
+  assert.match(r.out, /is based on [0-9a-f]{40}, not on the selected release/);
+  const anchor = seriesOn(src.dir, src.commit, [['key', 'os/release-keys/evil.pub', 'x\n']]);
+  const r2 = install(['--source', `file://${src.dir}`, '--trusted-key', keyFile, '--patches', anchor, '--accept-patches', 'sha256:00']);
+  assert.equal(r2.status, 3, r2.out);
+  assert.match(r2.out, /patch series was refused/);
+  assert.match(r2.out, /trust anchor/);
+  const ok = seriesOn(src.dir, src.commit, [['p', 'README.md', 'patched\n']]);
+  const f = fakeBin();
+  const plan = install(['--source', `file://${src.dir}`, '--trusted-key', keyFile, '--patches', ok], { fake: f });
+  const digest = /--accept-patches (sha256:[0-9a-f]{64})/.exec(plan.out)[1];
+  const f2 = fakeBin();
+  const r3 = install(['--source', `file://${src.dir}`, '--trusted-key', keyFile, '--patches', ok, '--accept-patches', digest], { fake: f2, env: { FAKE_FAIL_BUILD: '1' } });
+  assert.equal(r3.status, 1, r3.out);
+  assert.match(r3.out, /store is kept for inspection/);
+  assert.equal(existsSync(join(f2.data, 'aura/release/pointer.json')), false, 'no active release');
+  assert.ok(existsSync(join(f2.data, 'patches/system/aura-patches.yaml')));
 });
 
 test('--check-only: a green preflight writes nothing', () => {

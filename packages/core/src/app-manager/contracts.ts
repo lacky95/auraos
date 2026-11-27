@@ -16,6 +16,14 @@ export const MOUNT_ROOT_PATH = '/mnt/aura';
 export const WORK_DIR_NAME = 'work';
 /** Where `patches` mounts appear under a consumer's mount root. */
 export const PATCHES_DIR_NAME = 'patches';
+/**
+ * The `work` mount target of a SYSTEM patch workspace (Phase 7b, D68, D80:
+ * writable source mounts only for authorized patch workspaces): appears at
+ * `/mnt/aura/work/system`. App ids always contain a dot, so it names no app.
+ */
+export const SYSTEM_WORK_TARGET = 'system';
+/** A system patch workspace, relative to the root dataDir (nexus workspaceSubpath, installation `system`). */
+export const SYSTEM_WORKSPACE_SUBPATH = /^aura\/workspaces\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/system\/[1-9]\d{0,3}$/;
 
 /** An app dir that is a git work tree (`aura dev checkout`). */
 export function isDevCheckout(appDir: string): boolean {

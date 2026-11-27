@@ -266,6 +266,15 @@ const routes: RouteAccessManifest['routes'] = {
       POST: ownerManages('Saves the Developer Mode changes as patch files: the owner decides.'),
     },
   },
+  // Phase 7b (D68): system patches. Reading the state is the owner's (the Terminal included, D29);
+  // drafting (start, save, validate) is the owner's own Terminal; disable is one click, enable and
+  // activate need the password (lib/systemPatches.ts, ownerAction).
+  '/api/admin/system-patches': {
+    methods: {
+      GET: rule(OWNER, 'system', { guard: 'rule' }),
+      POST: ownerManages('System patches: drafting in the owner\'s Terminal; enable and activate need the owner\'s password (D68).'),
+    },
+  },
   '/api/admin/dev/restart': {
     methods: { POST: ownerManages('`aura dev rebuild|restart`, Developer Mode only: the owner decides.') },
   },

@@ -16,7 +16,8 @@
 //   aura/release/jobs/<job>.d/        per-job files (build secrets 0400, removed after the run)
 //   aura/release/snapshots/           data snapshots before the first write (stream U, Q35)
 //   aura/pnpm-store                   the shared pnpm store of the throwaway builds
-//   patches/system/aura-patches.yaml  the system patch series (Phase 7; the D68 slot)
+//   patches/system/                   the system patch store (Phase 7b): a git repository with
+//                                     aura-patches.yaml + patches/; refs/aura/active = the running series
 import { join } from 'node:path';
 
 export const RELEASES_DIR = 'releases';
@@ -59,6 +60,7 @@ export function layout(dataRoot) {
     snapshots: p(SNAPSHOTS_DIR),
     pnpmStore: p(PNPM_STORE_DIR),
     series: p(SYSTEM_SERIES_FILE),
+    seriesStore: p(SYSTEM_SERIES_DIR),
   };
 }
 

@@ -37,7 +37,12 @@
 #   --keep-bootstrap-credentials   keep <state-dir>/credentials after the install (D94 O3)
 #   --node-image IMAGE       the Node image the helpers run in when the host has no node >= 20
 #   --yes, --unattended      never ask; refuse instead of prompting
-#   --patches DIR            refused: install-time patches arrive with Phase 7 (D68)
+#   --patches DIR|GIT-URL    install-time system patches (D68, Phase 7b): the series (aura-patches.yaml in
+#                            the saved form + patches/) is validated, shown and authorized BEFORE anything
+#                            is built; the first release is built with it (locally-modified, based on the
+#                            verified release); the series and its git history become the system patch store
+#   --patches-ref COMMIT     the pinned series commit (required for a git URL; never a branch)
+#   --accept-patches DIGEST  unattended: the series digest the operator authorized (else the install aborts)
 #
 # Exit codes: 0 ok · 1 install failed · 2 preflight failed · 3 refused (verification, policy) · 64 usage.
 set -eu
@@ -58,6 +63,9 @@ CRED_DIR=
 CHECK_ONLY=0
 PRINT_REQ=0
 UNATTENDED=0
+PATCHES=
+PATCHES_REF=
+ACCEPT_PATCHES=
 KEEP_CREDS=0
 ACCEPT_SHIPPED=0
 TRUSTED_KEYS=
@@ -88,7 +96,9 @@ while [ $# -gt 0 ]; do
     --keep-bootstrap-credentials) KEEP_CREDS=1 ;;
     --node-image) NODE_IMAGE=${2:?}; shift ;;
     --yes|--unattended) UNATTENDED=1 ;;
-    --patches) echo "install.sh: --patches: install-time system patches arrive with Phase 7 (D68). --config works today." >&2; exit 64 ;;
+    --patches) PATCHES=${2:?}; shift ;;
+    --patches-ref) PATCHES_REF=${2:?}; shift ;;
+    --accept-patches) ACCEPT_PATCHES=${2:?}; shift ;;
     -h|--help) usage ;;
     *) echo "install.sh: unknown option $1" >&2; usage ;;
   esac
@@ -97,6 +107,20 @@ done
 [ -t 0 ] || UNATTENDED=1
 case $CHANNEL in signed|main) ;; *) echo "install.sh: --channel must be signed or main" >&2; exit 64 ;; esac
 case $MATURITY in alpha|beta|stable) ;; *) echo "install.sh: --maturity must be alpha, beta or stable" >&2; exit 64 ;; esac
+if [ -n "$PATCHES" ]; then
+  [ "$MODE" = developer ] && { echo "install.sh: --patches is for Normal Mode installs; a Developer install changes AuraOS with git (D68)" >&2; exit 64; }
+  case $PATCHES in
+    *://*|*@*:*)
+      case $PATCHES_REF in
+        "") echo "install.sh: --patches <git URL> needs --patches-ref <commit> (a pinned commit, never a branch)" >&2; exit 64 ;;
+        *[!0-9a-f]*) echo "install.sh: --patches-ref must be a full commit hash (40 hex), not a branch or tag" >&2; exit 64 ;;
+      esac
+      [ ${#PATCHES_REF} -eq 40 ] || { echo "install.sh: --patches-ref must be a full commit hash (40 hex)" >&2; exit 64; } ;;
+    *) [ -d "$PATCHES" ] || { echo "install.sh: --patches $PATCHES is not a directory" >&2; exit 64; } ;;
+  esac
+elif [ -n "$PATCHES_REF$ACCEPT_PATCHES" ]; then
+  echo "install.sh: --patches-ref and --accept-patches go with --patches" >&2; exit 64
+fi
 
 # ── output: everything also goes to a log, redacted ─────────────────────────
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/auraos-install.XXXXXX")
@@ -456,6 +480,60 @@ finish_credentials() {
   fi
 }
 
+# ── install-time system patches (Phase 7b I, D68 §3) ─────────────────────────
+# The series is read and validated by the release builder's own copy of the patch library
+# (series-plan, --network none) AFTER the upstream release was verified and BEFORE anything is
+# built; the operator authorizes the exact series digest; the store keeps its history.
+runner() { docker run --rm --network none -e HOME=/tmp -v "$VOL:/data" -v "$INSTALLER_ROOT:$INSTALLER_ROOT:ro" -v "$TMP:$TMP:ro" "$RUNNER_TAG" "$@"; }
+install_patches() {
+  SDIR="$TMP/patches"
+  case $PATCHES in
+    *://*|*@*:*)
+      say "Fetching the system patch series $PATCHES at $PATCHES_REF (through the install's Git settings)"
+      logged git_net clone -q --no-checkout "$PATCHES" "$SDIR" || die 1 "fetching the patch series failed (see the log)"
+      logged git -C "$SDIR" checkout -q --detach "$PATCHES_REF" || die 3 "the patch series has no commit $PATCHES_REF"
+      PSRC=$(printf '%s' "$PATCHES" | sed 's#://[^/@]*@#://#') ;;
+    *)
+      mkdir -p "$SDIR/patches"
+      cp -p "$PATCHES/aura-patches.yaml" "$SDIR/" 2>/dev/null || die 3 "$PATCHES has no aura-patches.yaml"
+      for p in "$PATCHES"/patches/*.patch; do [ -f "$p" ] && cp -p "$p" "$SDIR/patches/"; done
+      PSRC=$(abspath "$PATCHES") ;;
+  esac
+  chmod -R a+rX "$SDIR"
+  prc=0; runner node "$BUILDER" series-plan --series-dir "$SDIR" --commit "$REL_COMMIT" > "$TMP/plan.json" 2>>"$LOG" || prc=$?
+  if [ "$prc" != 0 ]; then
+    redact < "$TMP/plan.json" | tee -a "$LOG"
+    die 3 "the patch series was refused (see above): nothing was built"
+  fi
+  DIGEST=$(sed -n 's/^  "digest": "\(sha256:[0-9a-f]*\)".*/\1/p' "$TMP/plan.json" | head -1)
+  PBASE=$(sed -n '/"base": {/,/}/s/^ *"commit": "\([0-9a-f]*\)".*/\1/p' "$TMP/plan.json" | head -1)
+  [ -n "$DIGEST" ] || die 1 "cannot read the series plan (see the log)"
+  [ "$PBASE" = "$REL_COMMIT" ] || die 3 "the patch series is based on $PBASE, not on the selected release $REL_COMMIT: rebase it, or select that release with --ref"
+  say "System patches to apply on top of the verified release $REL_VERSION ($REL_COMMIT):"
+  say "  source  $PSRC${PATCHES_REF:+ @ $PATCHES_REF}"
+  node_lines=$(grep -c '"subject"' "$TMP/plan.json" || true)
+  sed -n -e 's/^ *"subject": "\(.*\)",$/  patch   \1/p' -e 's/^ *"enabled": false,*$/          (disabled)/p' "$TMP/plan.json" | tee -a "$LOG"
+  grep -A1 '"flags": \[' "$TMP/plan.json" | sed -n 's/^ *"\(.*\)"$/  flag    \1/p' | tee -a "$LOG"
+  say "  ($node_lines patch file(s); the first release will be locally-modified, based on signed $REL_VERSION, never shown as signed)"
+  say "  series digest $DIGEST"
+  HEX=${DIGEST#sha256:}
+  if [ -n "$ACCEPT_PATCHES" ]; then
+    [ "${ACCEPT_PATCHES#sha256:}" = "$HEX" ] || die 3 "--accept-patches does not match the series digest $DIGEST: nothing was built"
+  elif [ "$UNATTENDED" = 1 ]; then
+    die 3 "unattended: authorize the series with --accept-patches $DIGEST (remote patch sources are never trusted silently)"
+  else
+    printf 'Type the first 12 characters of the series digest (%s…) to authorize it: ' "$(printf '%s' "$HEX" | cut -c1-4)" >/dev/tty
+    read -r answer </dev/tty || answer=
+    [ "$answer" = "$(printf '%s' "$HEX" | cut -c1-12)" ] || die 3 "the patch series was not authorized"
+  fi
+  irc=0; runner node "$BUILDER" series-import --data-root /data --series-dir "$SDIR" --digest "$DIGEST" --source "$PSRC" \
+    ${PATCHES_REF:+--ref "$PATCHES_REF"} --by "operator (install.sh $TS)" > "$TMP/import.json" 2>>"$LOG" || irc=$?
+  [ "$irc" = 0 ] || { redact < "$TMP/import.json" | tee -a "$LOG"; die 1 "importing the patch series into the store failed"; }
+  SREV=$(sed -n 's/^  "rev": "\([0-9a-f]*\)".*/\1/p' "$TMP/import.json")
+  ok "patch series authorized ($DIGEST) and stored as revision $SREV"
+  SERIES_ARGS="--series-rev $SREV --expect-series-digest $DIGEST --image-change-approved --mark-installed"
+}
+
 # ── 4. build and start ───────────────────────────────────────────────────────
 if [ "$MODE" = normal ]; then
   # The one release builder (Phase 6 stream B), THIS installer's copy, run in the builder runner
@@ -491,6 +569,8 @@ if [ "$MODE" = normal ]; then
   write_data "$P"
   ok "first-boot handoff written (system-mode normal, source.json${CONFIG:+, infrastructure seed})"
   helper build-inputs --state-dir "$STATE_DIR" ${CONFIG:+--config "$CONFIG"} > "$TMP/infra.json" || die 1 "rendering the build inputs failed"
+  SERIES_ARGS=
+  [ -n "$PATCHES" ] && install_patches
   BREF=$REL_REF
   [ "$CHANNEL" = main ] && BREF=$REL_COMMIT
   say "Building release $REL_VERSION ($REL_COMMIT) with the release builder (this takes a while)"
@@ -500,11 +580,12 @@ if [ "$MODE" = normal ]; then
       -v "$STATE_DIR:$STATE_DIR:ro" -v "$TMP:$TMP:ro" "$RUNNER_TAG" \
       node "$BUILDER" build --data-root /data --data-volume "$VOL" --fetch-from "$MIRROR" \
       --channel "$CHANNEL" --maturity "$MATURITY" --ref "$BREF" --expect-commit "$REL_COMMIT" $KEYARGS \
-      --infra "$TMP/infra.json" --first-install 2>&1 >"$TMP/build.json" || brc=$?; echo "$brc" > "$TMP/.brc"; } | redact | sed 's/^/  /' | tee -a "$LOG"
+      --infra "$TMP/infra.json" --first-install $SERIES_ARGS 2>&1 >"$TMP/build.json" || brc=$?; echo "$brc" > "$TMP/.brc"; } | redact | sed 's/^/  /' | tee -a "$LOG"
   rm -rf "$STATE_DIR/rendered/secrets" "$STATE_DIR/compose.secrets.yml"
   brc=$(cat "$TMP/.brc")
   if [ "$brc" != 0 ]; then
     redact < "$TMP/build.json" | tee -a "$LOG"
+    [ -n "$PATCHES" ] && say "The system patch store is kept for inspection in the data volume (patches/system); no release is active. Re-run without --patches for an unpatched install (never automatic)."
     [ "$brc" = 3 ] && die 3 "the release builder refused (see above): nothing was installed or started"
     die 1 "the release build failed (see above): nothing was started"
   fi

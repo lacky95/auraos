@@ -62,3 +62,51 @@ export interface PatchLimits {
   /** Largest patch file, bytes. */
   maxPatchBytes: number;
 }
+
+// ─── the series file (aura-patches.yaml v2; seriesFile.ts reads and writes it) ─
+
+/** What a series applies to. */
+export interface SeriesBase {
+  /** Clone URL of the upstream repo (absent: a base only this machine has). */
+  repository?: string;
+  /** Upstream commit the series applies to. */
+  commit: string;
+  /** Subdirectory of the repo that is the app (monorepo apps). */
+  path?: string;
+  /** The release the base commit belongs to (system series, 7b). */
+  release?: string;
+}
+
+/** One patch of a series. */
+export interface SeriesPatch {
+  /** `patches/<name>.patch`. */
+  file: string;
+  subject: string;
+  /** sha256 of the patch file's bytes; computed on read when absent (v1). */
+  sha256?: string;
+  /** false: kept in the series but not applied (its flag is part of the digest). */
+  enabled: boolean;
+}
+
+/** A series (always v2 in memory; v1 files are read into this shape). */
+export interface Series {
+  v: 2;
+  target: PatchTarget;
+  base: SeriesBase;
+  patches: SeriesPatch[];
+}
+
+/** The result of applying patches in order (`applySeries`, the release builder's series step). */
+export type ApplyResult =
+  | { ok: true; applied: number; head: string }
+  | {
+      ok: false;
+      applied: number;
+      /** The first patch that does not apply, 0-based in the series. */
+      failed: SeriesPatch & { index: number };
+      /** Files with conflicts (three-way merge), when git named them. */
+      conflicts: string[];
+      message: string;
+      /** true: the work tree was left mid-`git am` for repair (`keepConflict`). */
+      inProgress: boolean;
+    };

@@ -85,8 +85,8 @@ const HELPER_IMAGE = BASE_IMAGE;
  * Canonical mount root inside a consumer container. Provisioned at spawn by
  * `ContainerRunner`, so only containers started since that change have it.
  */
-export { MOUNT_ROOT_PATH, PATCHES_DIR_NAME, WORK_DIR_NAME } from './contracts.js';
-import { MOUNT_ROOT_PATH, PATCHES_DIR_NAME, WORK_DIR_NAME } from './contracts.js';
+export { MOUNT_ROOT_PATH, PATCHES_DIR_NAME, SYSTEM_WORK_TARGET, WORK_DIR_NAME } from './contracts.js';
+import { MOUNT_ROOT_PATH, PATCHES_DIR_NAME, SYSTEM_WORK_TARGET, SYSTEM_WORKSPACE_SUBPATH, WORK_DIR_NAME } from './contracts.js';
 /**
  * Legacy root, relative to the consumer's own `/data`. Every container has a
  * `/data` volume mount regardless of age, and docker leaves it a slave of the
@@ -426,6 +426,11 @@ export class MountManager {
   /** Shell-side path of what we'd mount FROM, for a target app. */
   private resolveSource(targetAppId: string, kind: MountKind, subpath?: string): string {
     if (kind === 'workspace') return WORKSPACE_DIR;
+    // A system patch workspace (7b): no app behind it; the caller (the owner's system-patch route) authorized it.
+    if (targetAppId === SYSTEM_WORK_TARGET) {
+      if (kind !== 'work' || !subpath || !SYSTEM_WORKSPACE_SUBPATH.test(subpath)) throw new Error(`invalid system workspace: ${JSON.stringify(subpath)}`);
+      return join(this.opts.dataDir, subpath);
+    }
     const manifest = this.opts.registry.getById(targetAppId);
     if (!manifest) throw new Error(`App not found: ${targetAppId}`);
     if (kind === 'work') {

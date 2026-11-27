@@ -128,6 +128,7 @@ export const HELP_SECTIONS: Array<{ title: string; lines: Array<[string, string]
     ['aura user reset-password <username>', 'Host: one-time password reset code'],
     ['aura admin user ...', 'Host: member accounts (D82): add · ls · disable|enable · reset-password · grant|revoke use|jump'],
     ['aura system reidentify', 'Host: new systemId and key for a copied /data'],
+    ['aura system patch start|save|activate', 'Normal Mode: patch AuraOS itself (status, diff, disable, enable)'],
     ['aura approve <id>', 'Host: approve (--deny) a pending owner approval as the operator'],
     ['aura secret ask <name>', 'Ask the owner to type a secret for an app (--for <app>) in the desktop dialog'],
     ['aura apikey ...', 'API keys for REST callers: create · ls · revoke'],
