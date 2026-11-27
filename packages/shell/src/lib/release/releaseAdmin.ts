@@ -250,7 +250,11 @@ export async function postRollback(ctx: RouteCtx, deps: ReleaseAdminDeps, body: 
   const act = await deps.activation();
   let target: { from: string; to: string };
   try { target = act.rollbackTarget(deps.dataDir); } catch (e) {
-    return json({ ok: false, error: (e as { code?: string }).code ?? 'no-previous', message: (e as Error).message }, 409);
+    const code = (e as { code?: string }).code ?? 'no-previous';
+    const message = code === 'no-release' ? 'This install does not run from a release.'
+      : code === 'previous-missing' ? 'The previous release is not on disk or incomplete: it cannot be rolled back to.'
+      : 'There is no previous release to roll back to (a rollback clears it; update to roll forward).';
+    return json({ ok: false, error: code, message }, 409);
   }
   const confirmInsecure = typeof body.confirmInsecure === 'string' ? body.confirmInsecure : undefined;
   const sec = act.rollbackSecurity(deps.dataDir, { ...target, ...(confirmInsecure ? { confirmInsecure } : {}) });
