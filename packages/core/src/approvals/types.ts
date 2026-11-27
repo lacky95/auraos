@@ -125,7 +125,7 @@ export const APPROVAL_CLASS: Readonly<Record<ApprovalAction, ApprovalClass>> = {
   'user.confirm': 'forced',
   'admin.change': 'forced',
   'os.context.write': 'deferrable',
-  'terminal.agent-hooks': 'deferrable',
+  'app.adapter-change': 'deferrable',
   'credential.store': 'deferrable',
   'credential.read': 'deferrable',
   'admin.grant': 'deferrable',
