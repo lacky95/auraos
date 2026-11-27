@@ -2,7 +2,7 @@
 // dependency-free twin of core `runtimes/container/limits.ts`. The builder runs
 // without a built core (install.sh, the runner image), so it cannot import it;
 // same names, same mapping, same validation, and packages/core/test/
-// builder-limits.test.mjs compares both on one table. Change them together.
+// builder-check.test.mjs compares both on one table. Change them together.
 //
 //   cpus         → --cpus=<n>
 //   memoryBytes  → --memory=<bytes> --memory-swap=<bytes>   (no swap beyond memory)
