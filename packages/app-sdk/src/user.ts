@@ -86,6 +86,8 @@ export interface ConfirmResult {
   confirmed: boolean;
   /** Present only when confirmed: single use, for your server to consume. */
   approvalId?: string;
+  /** D102: the owner's optional words when they denied it. Grants nothing. */
+  feedback?: string;
 }
 
 /** `user.confirm` refused the request itself (not a "no"). An `OsError`. */
@@ -175,12 +177,12 @@ export class UserApi {
     return new Promise((resolve) => {
       const onMessage = (ev: MessageEvent) => {
         if (!isFromShell(ev)) return;
-        const d = ev.data as { type?: unknown; requestId?: unknown; confirmed?: unknown; approvalId?: unknown } | null;
+        const d = ev.data as { type?: unknown; requestId?: unknown; confirmed?: unknown; approvalId?: unknown; feedback?: unknown } | null;
         if (!d || d.type !== 'aura.user.confirm.result' || d.requestId !== id) return;
         window.removeEventListener('message', onMessage);
         resolve(d.confirmed === true && typeof d.approvalId === 'string'
           ? { confirmed: true, approvalId: d.approvalId }
-          : NO);
+          : typeof d.feedback === 'string' && d.feedback ? { confirmed: false, feedback: d.feedback } : NO);
       };
       window.addEventListener('message', onMessage);
       postToShell({ type: 'aura.user.confirm.request', requestId: id, approvalId, level });

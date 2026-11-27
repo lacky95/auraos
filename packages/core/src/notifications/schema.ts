@@ -203,7 +203,7 @@ const ComponentsSchema = z.array(ComponentSchema).max(8).superRefine((list, ctx)
   : c)));
 
 export const ContextSchema = z.object({
-  kind: z.enum(['activity', 'instance', 'task', 'installation', 'app', 'custom']),
+  kind: z.enum(['activity', 'instance', 'task', 'installation', 'app', 'custom', 'approval']),
   id: z.string().min(1).max(200),
   appId: z.string().max(200).optional(),
   label: ShortText.optional(),

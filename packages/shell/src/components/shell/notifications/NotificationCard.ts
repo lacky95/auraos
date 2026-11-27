@@ -850,7 +850,7 @@ export function renderNotificationCard(n: Notification, opts: CardOptions): HTML
 
   // ── footer: context · Answer · Go to task ──
   const foot = el('div', 'aura-ntf-foot');
-  const target = contextTarget(n.context);
+  const target = contextTarget(n.context, n);
   if (target) {
     const ctx = el('span', 'aura-ntf-context', target.label);
     ctx.title = `About: ${target.label}`;
@@ -923,14 +923,15 @@ export function renderNotificationCard(n: Notification, opts: CardOptions): HTML
     });
     foot.appendChild(go);
   } else if (target?.actionable && !dialogMode) {
-    const go = el('button', 'aura-ntf-link-btn', 'Go to task');
+    const go = el('button', 'aura-ntf-link-btn', target.action ?? 'Go to task');
     go.type = 'button';
     go.dataset['focusKey'] = 'act:goto';
-    go.title = `Go to ${target.label}`;
+    go.title = target.action ? `${target.action}: ${target.label}` : `Go to ${target.label}`;
     go.addEventListener('click', async (e) => {
       e.stopPropagation();
-      const r = await goToContext(n.context, host);
-      if (r === 'none') setStatus(card, 'That window is not open any more');
+      const r = await goToContext(n.context, host, n);
+      // D102: Review of a request decided or expired meanwhile.
+      if (r === 'none') setStatus(card, n.context?.kind === 'approval' ? 'That request is no longer open' : 'That window is not open any more');
       else opts.onNavigated?.(n);
     });
     foot.appendChild(go);

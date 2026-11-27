@@ -266,6 +266,13 @@ login and no shared admin credential (`aura admin login`, `--save`,
   the server uses up once.
 - **On the host** (`docker exec -it aura-shell aura …`) the host operator acts
   directly, and `aura approve <id>` approves any pending request.
+- **Later** (D102): the owner may put a deferrable request (a grant, `aura dev
+  open`, `aura secret ask`, …) on hold. In a terminal the command keeps waiting
+  (Ctrl-C withdraws the request); without one (an agent) it exits with code
+  **75** and prints `{"approval":{"outcome":"on_hold","approvalId":…,"resume":…}}`.
+  Run the same command again to resume the same request. A denial prints the
+  owner's feedback, if any. `AURA_WAIT_ON_HOLD=1` always waits. See
+  [Approvals](/docs/approvals).
 - **Over plain HTTP** the desktop takes your password too (with a note that it
   travels unencrypted). With the security option `fresh-auth-require-https` on,
   it does not: approve such a request on HTTPS or on the host with

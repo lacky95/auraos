@@ -81,7 +81,7 @@ Every notification has:
 | `timeoutMs` | Lifetime: removed automatically (`removedReason: 'expired'`) after this many ms. Default: never. |
 | `popupDurationMs` | How long the **pop-up** shows (not the lifetime). See [Pop-ups](#pop-ups). |
 | `components[]` | Up to 8: inputs, choices, selects, buttons, progress. See [Components](#components). |
-| `context` | What it is about: `{ kind: 'activity' \| 'instance' \| 'task' \| 'installation' \| 'app' \| 'custom', id, appId?, label? }`. Separate from the sender. Activities and instances of your own app's windows give the user **Go to activity** (other contexts: **Go to task**) and decide where a dialogue opens. |
+| `context` | What it is about: `{ kind: 'activity' \| 'instance' \| 'task' \| 'installation' \| 'app' \| 'custom', id, appId?, label? }`. Separate from the sender. Activities and instances of your own app's windows give the user **Go to activity** (other contexts: **Go to task**) and decide where a dialogue opens. The kind `approval` is AuraOS's own (a held owner approval, whose **Review** reopens the approval dialog, see [Approvals](/docs/approvals)); from any other sender it is dropped with an `ignored-field` warning. |
 | `popup`, `blocking`, `scope` | Dialogue placement, see [Dialogues](#dialogues). |
 | `sender` | Set by the **server** from the caller's identity: `{ kind: 'app' \| 'agent' \| 'rest' \| 'auraos' \| 'unknown', id?, name?, attribution }`. A client can only add display hints (`sender.name`, `sender.icon`, `sender.actor.name`), which are marked *declared* / *unverified*. Identity fields in the body are ignored, and a warning says so. |
 

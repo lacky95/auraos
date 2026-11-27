@@ -4,8 +4,8 @@
  */
 import { createHash, randomBytes } from 'node:crypto';
 import {
-  APPROVAL_TTL_MS, FINAL_APPROVAL_STATES,
-  type ApprovalClaim, type ApprovalDecider, type ApprovalRecord, type ApprovalRefusal,
+  APPROVAL_TTL_MS, FINAL_APPROVAL_STATES, HOLD_TTL_MS, MAX_DENIAL_FEEDBACK,
+  type ApprovalCanceller, type ApprovalClaim, type ApprovalDecider, type ApprovalRecord, type ApprovalRefusal,
   type ApprovalRequest, type ApprovalRequester, type ApprovalState,
 } from './types.js';
 
@@ -86,7 +86,7 @@ export const sameRequester = (a: ApprovalRequester, b: ApprovalRequester): boole
 
 /** A new pending record. The store supplies the id and the clock. */
 export function newApprovalRecord(request: ApprovalRequest, id: string, now: number): ApprovalRecord {
-  return { id, ...request, state: 'pending', createdAt: now, expiresAt: now + APPROVAL_TTL_MS };
+  return { id, ...request, class: request.class ?? 'forced', state: 'pending', createdAt: now, expiresAt: now + APPROVAL_TTL_MS };
 }
 
 /** The state as of `now`: an open record past its deadline reads `expired`. */
@@ -95,9 +95,27 @@ export function effectiveApprovalState(record: Pick<ApprovalRecord, 'state' | 'e
   return now >= record.expiresAt ? 'expired' : record.state;
 }
 
+/**
+ * D102: the owner's denial feedback as stored: plain text (control
+ * characters other than newline and tab removed), trimmed, at most
+ * MAX_DENIAL_FEEDBACK characters. Undefined when there is nothing left.
+ */
+export function denialFeedback(x: unknown): string | undefined {
+  if (typeof x !== 'string') return undefined;
+  // eslint-disable-next-line no-control-regex
+  const clean = x.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029]/g, '').trim();
+  return clean ? [...clean].slice(0, MAX_DENIAL_FEEDBACK).join('') : undefined;
+}
+
 export type ApprovalEvent =
   | { type: 'approve'; by: ApprovalDecider }
-  | { type: 'deny'; by: ApprovalDecider }
+  | { type: 'deny'; by: ApprovalDecider; feedback?: string }
+  /** D102 Later: a deferrable pending record stays pending, with a longer deadline. */
+  | { type: 'hold'; by: ApprovalDecider }
+  /** D102: the requester withdraws, or the system cancels a stale request. */
+  | { type: 'cancel'; by: ApprovalCanceller }
+  /** The hold notification's id (null clears it). Not a state change. */
+  | { type: 'notice'; notice: string | null }
   | { type: 'consume'; claim: ApprovalClaim }
   /** Mark an open record that is past its deadline. */
   | { type: 'expire' };
@@ -115,12 +133,18 @@ function satisfiesLevel(record: ApprovalRecord, by: ApprovalDecider): boolean {
  * The one transition function. Pure: it returns a new record or a refusal,
  * and never changes `record`.
  *
- *   pending  + approve  → approved   (before expiresAt, level satisfied)
- *   pending  + deny     → denied     (before expiresAt)
+ *   pending  + approve  → approved   (before expiresAt, level satisfied;
+ *                                     expiresAt = now + APPROVAL_TTL_MS, D102)
+ *   pending  + deny     → denied     (before expiresAt; optional feedback)
+ *   pending  + hold     → pending    (deferrable, not held yet: heldAt,
+ *                                     expiresAt = createdAt + HOLD_TTL_MS)
+ *   pending | approved + cancel → cancelled  (the requester itself, or the system)
+ *   pending | approved + notice → same state, notice set or cleared
  *   approved + consume  → consumed   (before expiresAt, claim matches exactly)
  *   pending | approved + expire → expired   (at or after expiresAt)
  *
- * Everything else is refused, including any event on a final state.
+ * Everything else is refused, including any event on a final state. Holding
+ * never approves and can't be repeated, so it can't push the deadline.
  */
 export function transitionApproval(record: ApprovalRecord, event: ApprovalEvent, now: number): ApprovalTransition {
   const state = effectiveApprovalState(record, now);
@@ -136,10 +160,33 @@ export function transitionApproval(record: ApprovalRecord, event: ApprovalEvent,
     case 'approve':
       if (state !== 'pending') return { ok: false, reason: 'wrong-state' };
       if (!satisfiesLevel(record, event.by)) return { ok: false, reason: 'needs-fresh-auth' };
-      return { ok: true, record: { ...record, state: 'approved', decidedBy: event.by } };
-    case 'deny':
+      // D102: the use window starts at the explicit approve, held or not.
+      return { ok: true, record: { ...record, state: 'approved', decidedBy: event.by, approvedAt: now, expiresAt: now + APPROVAL_TTL_MS } };
+    case 'deny': {
       if (state !== 'pending') return { ok: false, reason: 'wrong-state' };
-      return { ok: true, record: { ...record, state: 'denied', decidedBy: event.by } };
+      const feedback = denialFeedback(event.feedback);
+      return { ok: true, record: { ...record, state: 'denied', decidedBy: event.by, ...(feedback ? { feedback } : {}) } };
+    }
+    case 'hold': {
+      if (state !== 'pending' || record.heldAt !== undefined) return { ok: false, reason: 'wrong-state' };
+      if (record.class !== 'deferrable') return { ok: false, reason: 'not-deferrable' };
+      return {
+        ok: true,
+        record: { ...record, heldAt: now, heldBy: event.by, expiresAt: Math.max(record.expiresAt, record.createdAt + HOLD_TTL_MS) },
+      };
+    }
+    case 'cancel': {
+      if (state !== 'pending' && state !== 'approved') return { ok: false, reason: 'wrong-state' };
+      const by = event.by;
+      if (by.kind === 'requester' && !sameRequester(by.requester, record.requester)) return { ok: false, reason: 'mismatch' };
+      const cancelledBy = by.kind === 'requester' ? 'requester' as const : `system:${by.reason}` as const;
+      return { ok: true, record: { ...record, state: 'cancelled', cancelledBy } };
+    }
+    case 'notice': {
+      if (state !== 'pending' && state !== 'approved') return { ok: false, reason: 'wrong-state' };
+      const { notice: _old, ...rest } = record;
+      return { ok: true, record: event.notice ? { ...rest, notice: event.notice } : rest };
+    }
     case 'consume': {
       if (state !== 'approved') return { ok: false, reason: 'wrong-state' };
       const c = event.claim;

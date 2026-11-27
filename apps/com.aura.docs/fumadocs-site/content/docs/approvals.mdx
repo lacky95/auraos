@@ -1,0 +1,110 @@
+---
+title: Approvals
+description: How the owner approves what apps, agents and the CLI ask for — the blocking dialog, forced and deferrable requests, Later and Review, denial feedback, credentials, the CLI and SDK results.
+---
+
+Some actions are the **owner's decision**: installing or updating an app, granting a
+privileged permission, opening an app's source, storing a secret for an app, and more.
+When an app, an agent or the CLI asks for one, AuraOS opens **its own dialog** in the
+desktop. The dialog's text is built by AuraOS from verified data, never from the
+requester's wording; the requester's own words appear only under a label that says so.
+
+The approval record is the **single source of truth**. A notification is never an
+approval: it can only point back at the dialog.
+
+## What the owner sees
+
+Every request first opens the **full blocking dialog**:
+
+- **Approve** wakes after a short delay (1.5 s) every time the dialog is shown, so a
+  click or an Enter that was meant for something else cannot approve it.
+- **Deny** has the first focus. **Esc always means Deny.**
+- **Feedback for the requester (optional):** words typed here go back to the requester
+  with the denial, so an agent can change its plan. They grant nothing.
+- **Deny and block this app** stops an app from asking again until you lift the block.
+- A request that needs a fresh confirmation asks for your password, in this dialog only.
+- A secret request (`credential.store`) asks for the secret, in this dialog only.
+
+## Forced and deferrable requests
+
+AuraOS decides the class of each request from its own catalog. A requester can never
+change it.
+
+| Class | Dialog | Examples |
+|---|---|---|
+| **Forced** | Approve or Deny now. Never becomes a notification. | Installing and updating apps, activating an app patch, an app running as root, cap and PRoot package installs, Developer Mode, security options, restarts and self-update, overwriting an app's code, an app's own `user.confirm` |
+| **Deferrable** | Approve, Deny, or **Later**. | Opening an app's source (`aura dev open`), grants and revokes, API keys, manifest edits, admin reads, Aura Context writes, Terminal agent hooks, storing or reading a secret |
+
+### Later and Review
+
+**Later** puts a deferrable request **on hold**:
+
+- The request stays pending and **authorizes nothing**, for up to **24 hours** from when
+  it was made.
+- AuraOS posts **one important notification**: it stays in the list, cannot be dismissed,
+  and a locked screen shows only "A request is waiting for your decision".
+- Its **Review** button reopens the **same dialog** (the Approve delay starts again; the
+  password and secret fields are empty). Approve or Deny there.
+- The notification goes away by itself when the request is approved, denied, withdrawn or
+  expires — wherever that happened (another tab, `aura approve` on the host). AuraOS never
+  adds an "approved" or "denied" notification; the outcome is in the audit log.
+
+Once approved, the requester has **10 minutes** to use the approval, once, for exactly the
+request you saw. Before you approve, and again before the requester uses it, AuraOS checks
+that the request is still valid (the requesting app is still installed, running and not
+blocked; the app a secret is for still exists). The requester's retry rebuilds the exact
+request, so a changed artifact, scope or permission set needs a new approval.
+
+## What the requester gets
+
+Outcomes are distinguishable: `approved`, `denied` (with the owner's feedback, if any),
+`expired`, `cancelled` (withdrawn by the requester, or no longer valid), and `on_hold`.
+
+### The CLI
+
+- In a terminal, the CLI shows the request, waits, and says once when it is put on hold.
+  **Ctrl-C withdraws** the request.
+- **Without a terminal (an agent)**, a request on hold ends the command with **exit code
+  75** and one JSON line on stdout:
+
+  ```json
+  {"approval":{"outcome":"on_hold","approvalId":"apr_…","title":"Open the source of Notes","heldUntil":"2026-11-28T10:05:00.000Z","resume":"Run the same command again (in this same app instance) to continue: it resumes this request, it does not ask again."}}
+  ```
+
+  `AURA_WAIT_ON_HOLD=1` waits instead.
+- **Run the same command again to resume.** AuraOS answers with the original request:
+  no duplicate request, no second notification. If you approved it meanwhile, the command
+  goes ahead at once.
+- Other outcomes print the same JSON line (`denied` with `feedback`, `expired`,
+  `cancelled`) when stdout is not a terminal.
+- On the host, `aura approve <id>` (and `--deny`) decides any pending or held request as
+  the operator.
+
+### The SDK
+
+| Call | D102 behaviour |
+|---|---|
+| `approvals.wait(id, { returnOnHold: true })` | Returns `{ outcome: 'on_hold', heldUntil }` at once when the owner chose Later. Without it, it keeps waiting until decided (up to 24 h). |
+| `approvals.request` / `wait` | A denial returns `{ outcome: 'denied', feedback? }`. |
+| `approvals.cancel(id)` | Withdraws a request your app no longer needs. |
+| `credentials.request(req, { returnOnHold })` | `{ ok: false, outcome, approvalId, feedback?, heldUntil? }`; asking again for the same name resumes the same request. |
+| `user.confirm` | `{ confirmed: false, feedback? }` when the owner denied with words. |
+
+## Secrets on hold
+
+A secret request (`osClient.credentials.request`, `aura secret ask`) works the same way.
+Its notification carries only the request, the requester, the secret's name and the app
+it is for, and the requester's labelled words: never the secret, a part of it or a hint.
+The secret is typed only in AuraOS's dialog, is not kept between Later and Review, and
+goes straight to your vault on Approve; the app gets a handle, never the value.
+
+## Under the hood
+
+- `POST /api/approvals/<id>/approve | deny | hold` — the owner, in the desktop (an
+  unlocked tab, never a token or an app); `deny` takes `{ feedback }`.
+- `POST /api/approvals/<id>/cancel` — the requester withdraws its own request.
+- `GET /api/approvals/<id>` — the requester reads `state`, `class`, `heldAt`,
+  `expiresAt`, `feedback` (denied) and `cancelledBy` (cancelled).
+- Audit entries: `approval.requested`, `approval.held`, `approval.approved` (with
+  `fromHold`), `approval.denied`, `approval.withdrawn`, `approval.cancelled`,
+  `approval.consumed`.

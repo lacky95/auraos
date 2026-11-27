@@ -145,6 +145,19 @@ export const POPUP_PERMISSION = 'notifications.popup';
 export const SYSTEM_MODAL_PERMISSION = 'notifications.systemModal';
 
 /** An app (not AuraOS) dialogue that blocks the whole shell. */
+/**
+ * D102: a context of kind `approval` points the shell's Review at a held
+ * owner approval. Only AuraOS itself (SYSTEM_CALLER) sets one; from anyone
+ * else it is dropped with a warning, so no app can dress a notification up
+ * as an approval request.
+ */
+export function approvalContextAllowed(caller: NotificationPrincipal, context: { kind: string }, warnings: NotificationWarning[]): boolean {
+  if (context.kind !== 'approval') return true;
+  if (caller.kind === 'system' && isSystemCaller(caller)) return true;
+  warnings.push({ code: 'ignored-field', field: 'context', message: "context kind 'approval' is reserved for AuraOS" });
+  return false;
+}
+
 export function isAppSystemModal(n: Pick<Notification, 'type' | 'scope' | 'blocking' | 'state'> & { caller?: NotificationCaller }): boolean {
   return n.type === 'dialogue' && n.state === 'active' && n.scope === 'system' && n.blocking === true
     && !(n.caller && isSystemCaller(n.caller)) && (n as { senderKey?: string }).senderKey !== 'auraos';
@@ -917,7 +930,7 @@ export class NotificationService {
       scope: fields.scope,
       ...(maximized ? { maximized: true } : {}),
       ...(p.components ? { components: p.components } : {}),
-      ...(p.context ? { context: p.context } : {}),
+      ...(p.context && approvalContextAllowed(caller, p.context, warnings) ? { context: p.context } : {}),
       caller: storedCallerOf(caller),
       sender: deriveSender(caller, p.sender),
       senderKey: senderKeyFor(caller),
@@ -968,7 +981,7 @@ export class NotificationService {
       setOpt('pinned', p.pinned);
       setOpt('popupDurationMs', p.popupDurationMs);
       setOpt('components', p.components);
-      setOpt('context', p.context);
+      setOpt('context', p.context && !approvalContextAllowed(caller, p.context, warnings) ? undefined : p.context);
       // (A kept app system dialog keeps popup true: it always opens at once.)
       if (p.popup !== undefined && !(rec.type === 'dialogue' && rec.scope === 'system' && !isSystemCaller(caller))) {
         const f = { popup: p.popup };

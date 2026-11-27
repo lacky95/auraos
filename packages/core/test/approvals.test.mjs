@@ -10,7 +10,8 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 
 import {
-  APPROVAL_ACTIONS, APPROVAL_STATES, APPROVAL_TTL_MS, APPROVAL_USES, MAX_PENDING_PER_REQUESTER,
+  APPROVAL_ACTIONS, APPROVAL_CLASS, APPROVAL_STATES, APPROVAL_TTL_MS, APPROVAL_USES, HOLD_TTL_MS, MAX_DENIAL_FEEDBACK,
+  MAX_PENDING_PER_REQUESTER, approvalClassOf, denialFeedback,
   approvalDecider, approvalRequester, canonicalJson, effectiveApprovalState, isApprovalId,
   newApprovalId, newApprovalRecord, payloadHash, PAYLOAD_HASH_RE, requesterKey, sameRequester,
   transitionApproval, SYSTEM_PRINCIPAL,
@@ -40,7 +41,7 @@ test('single use and a 10-minute expiry', () => {
   assert.equal(APPROVAL_TTL_MS, 600_000);
   assert.equal(APPROVAL_USES, 1);
   assert.equal(MAX_PENDING_PER_REQUESTER, 1);
-  assert.deepEqual([...APPROVAL_STATES], ['pending', 'approved', 'denied', 'consumed', 'expired']);
+  assert.deepEqual([...APPROVAL_STATES], ['pending', 'approved', 'denied', 'consumed', 'expired', 'cancelled']);
   assert.ok(APPROVAL_ACTIONS.includes('user.confirm'));
   // D50: the owner's management routes, asked for from a sandbox or through Settings.
   for (const a of ['admin.grant', 'admin.revoke', 'admin.api-key', 'admin.manifest-edit', 'admin.read', 'admin.change']) {
@@ -51,6 +52,7 @@ test('single use and a 10-minute expiry', () => {
   assert.equal(r.createdAt, T0);
   assert.equal(r.expiresAt, T0 + APPROVAL_TTL_MS);
   assert.equal(r.decidedBy, undefined);
+  assert.equal(r.class, 'forced', 'no class given: forced');
 });
 
 // ── payload hash ────────────────────────────────────────────────────────────
@@ -172,9 +174,18 @@ test('approved → consumed by the exact claim, once', () => {
 test('pending or approved → expired at the deadline', () => {
   const approved = transitionApproval(record(), { type: 'approve', by: OWNER }, T0 + 1).record;
   for (const r of [record(), approved]) {
-    const out = transitionApproval(r, { type: 'expire' }, T0 + APPROVAL_TTL_MS);
+    const out = transitionApproval(r, { type: 'expire' }, r.expiresAt);
     assert.equal(out.ok && out.record.state, 'expired', r.state);
   }
+});
+
+test('D102: the 10-minute use window starts at the approve', () => {
+  const at = T0 + APPROVAL_TTL_MS - 5;
+  const approved = transitionApproval(record(), { type: 'approve', by: OWNER }, at).record;
+  assert.equal(approved.approvedAt, at);
+  assert.equal(approved.expiresAt, at + APPROVAL_TTL_MS);
+  assert.equal(transitionApproval(approved, { type: 'consume', claim: claim() }, at + APPROVAL_TTL_MS - 1).ok, true);
+  assert.deepEqual(transitionApproval(approved, { type: 'consume', claim: claim() }, at + APPROVAL_TTL_MS), { ok: false, reason: 'expired' });
 });
 
 test('transitions never change the input record', () => {
@@ -193,7 +204,7 @@ test('a fresh approval needs a fresh password check', () => {
 
 test('nothing is approved, denied or consumed after the deadline', () => {
   const late = T0 + APPROVAL_TTL_MS;
-  const approved = transitionApproval(record(), { type: 'approve', by: OWNER }, T0 + 1).record;
+  const approved = transitionApproval(record(), { type: 'approve', by: OWNER }, T0).record;
   assert.deepEqual(transitionApproval(record(), { type: 'approve', by: OWNER }, late), { ok: false, reason: 'expired' });
   assert.deepEqual(transitionApproval(record(), { type: 'deny', by: OWNER }, late), { ok: false, reason: 'expired' });
   assert.deepEqual(transitionApproval(approved, { type: 'consume', claim: claim() }, late), { ok: false, reason: 'expired' });
@@ -204,7 +215,7 @@ test('nothing is approved, denied or consumed after the deadline', () => {
 
 test('expire before the deadline, or on a final state, is refused', () => {
   assert.deepEqual(transitionApproval(record(), { type: 'expire' }, T0 + APPROVAL_TTL_MS - 1), { ok: false, reason: 'wrong-state' });
-  for (const state of ['denied', 'consumed', 'expired']) {
+  for (const state of ['denied', 'consumed', 'expired', 'cancelled']) {
     assert.deepEqual(transitionApproval(record({ state }), { type: 'expire' }, T0 + APPROVAL_TTL_MS + 1), { ok: false, reason: 'wrong-state' }, state);
     assert.equal(effectiveApprovalState(record({ state }), T0 + APPROVAL_TTL_MS + 1), state, 'final states stay');
   }
@@ -221,9 +232,12 @@ test('an approved record cannot be approved or denied again', () => {
 });
 
 test('final states accept no event', () => {
-  for (const state of ['denied', 'consumed', 'expired']) {
-    const r = record({ state, decidedBy: OWNER });
-    for (const ev of [{ type: 'approve', by: OWNER_FRESH }, { type: 'deny', by: OWNER }, { type: 'consume', claim: claim() }]) {
+  for (const state of ['denied', 'consumed', 'expired', 'cancelled']) {
+    const r = record({ state, decidedBy: OWNER, class: 'deferrable' });
+    for (const ev of [
+      { type: 'approve', by: OWNER_FRESH }, { type: 'deny', by: OWNER }, { type: 'consume', claim: claim() },
+      { type: 'hold', by: OWNER }, { type: 'cancel', by: { kind: 'requester', requester: TERMINAL } }, { type: 'notice', notice: 'ntf_x' },
+    ]) {
       const out = transitionApproval(r, ev, T0 + 1);
       assert.equal(out.ok, false, `${state} + ${ev.type}`);
       assert.equal(out.reason, state === 'expired' ? 'expired' : 'wrong-state', `${state} + ${ev.type}`);
@@ -246,4 +260,86 @@ test('consume binds requester, action and payload hash', () => {
 
 test('an unknown event is refused', () => {
   assert.deepEqual(transitionApproval(record(), { type: 'nope' }, T0 + 1), { ok: false, reason: 'wrong-state' });
+});
+
+// ── D102: classes, hold, cancel, feedback ────────────────────────────────────
+
+const deferrable = (over = {}) => record({ action: 'app.source.open', class: 'deferrable', ...over });
+
+test('D102 catalog: installs and code are forced, agent asks are deferrable; admin.change by operation', () => {
+  for (const a of APPROVAL_ACTIONS) assert.ok(APPROVAL_CLASS[a] === 'forced' || APPROVAL_CLASS[a] === 'deferrable', a);
+  for (const a of ['nexus.install', 'nexus.update', 'app.patch.activate', 'user.confirm']) assert.equal(approvalClassOf(a, {}), 'forced', a);
+  for (const a of ['app.source.open', 'credential.store', 'credential.read', 'admin.grant', 'os.context.write']) assert.equal(approvalClassOf(a, {}), 'deferrable', a);
+  assert.equal(approvalClassOf('admin.change', { op: 'mount.workspace' }), 'deferrable');
+  for (const p of [{ op: 'os.restart' }, { op: 'os.self-update' }, { op: 'system-mode', mode: 'developer' }, { operation: 'cap.install', name: 'x' },
+    { securityOption: 'x', value: 1 }, { op: 'clone-app.overwrite' }, { op: 'notifications.release' }, {}, null]) {
+    assert.equal(approvalClassOf('admin.change', p), 'forced', JSON.stringify(p));
+  }
+});
+
+test('D102 hold: a deferrable pending request stays pending for up to 24 h from its creation', () => {
+  const at = T0 + 60_000;
+  const r = transitionApproval(deferrable(), { type: 'hold', by: OWNER }, at);
+  assert.equal(r.ok, true);
+  assert.equal(r.record.state, 'pending', 'still pending: authorizes nothing');
+  assert.equal(r.record.heldAt, at);
+  assert.deepEqual(r.record.heldBy, OWNER);
+  assert.equal(r.record.expiresAt, T0 + HOLD_TTL_MS);
+  assert.equal(HOLD_TTL_MS, 24 * 3600 * 1000);
+  // Held is not approved: nothing can be consumed.
+  assert.deepEqual(transitionApproval(r.record, { type: 'consume', claim: claim({ action: 'app.source.open' }) }, at + 1), { ok: false, reason: 'wrong-state' });
+});
+
+test('D102 hold: forced requests, a second hold and an expired request are refused', () => {
+  assert.deepEqual(transitionApproval(record(), { type: 'hold', by: OWNER }, T0 + 1), { ok: false, reason: 'not-deferrable' });
+  assert.deepEqual(transitionApproval(record({ class: undefined }), { type: 'hold', by: OWNER }, T0 + 1), { ok: false, reason: 'not-deferrable' }, 'no class = forced');
+  const held = transitionApproval(deferrable(), { type: 'hold', by: OWNER }, T0 + 1).record;
+  assert.deepEqual(transitionApproval(held, { type: 'hold', by: OWNER }, T0 + 2), { ok: false, reason: 'wrong-state' }, 'no second hold: the deadline is never pushed');
+  assert.deepEqual(transitionApproval(deferrable(), { type: 'hold', by: OWNER }, T0 + APPROVAL_TTL_MS), { ok: false, reason: 'expired' });
+  const approved = transitionApproval(deferrable(), { type: 'approve', by: OWNER }, T0 + 1).record;
+  assert.deepEqual(transitionApproval(approved, { type: 'hold', by: OWNER }, T0 + 2), { ok: false, reason: 'wrong-state' });
+});
+
+test('D102 held: approve gives the normal 10-minute window; deny works; past 24 h nothing does', () => {
+  const held = transitionApproval(deferrable(), { type: 'hold', by: OWNER }, T0 + 1).record;
+  const at = T0 + 20 * 3600 * 1000;
+  const a = transitionApproval(held, { type: 'approve', by: OWNER }, at);
+  assert.equal(a.ok && a.record.state, 'approved');
+  assert.equal(a.record.expiresAt, at + APPROVAL_TTL_MS);
+  assert.equal(transitionApproval(held, { type: 'deny', by: OWNER }, at).record.state, 'denied');
+  const late = T0 + HOLD_TTL_MS;
+  assert.deepEqual(transitionApproval(held, { type: 'approve', by: OWNER_FRESH }, late), { ok: false, reason: 'expired' });
+  assert.equal(effectiveApprovalState(held, late), 'expired');
+  assert.equal(transitionApproval(held, { type: 'expire' }, late).record.state, 'expired');
+  // Held fresh requests still need the password.
+  const heldFresh = transitionApproval(deferrable({ level: 'fresh' }), { type: 'hold', by: OWNER }, T0 + 1).record;
+  assert.deepEqual(transitionApproval(heldFresh, { type: 'approve', by: OWNER }, T0 + 2), { ok: false, reason: 'needs-fresh-auth' });
+});
+
+test('D102 cancel: only the requester itself or the system; pending, held or approved', () => {
+  const mine = { kind: 'requester', requester: TERMINAL };
+  for (const r of [deferrable(), transitionApproval(deferrable(), { type: 'hold', by: OWNER }, T0 + 1).record,
+    transitionApproval(deferrable(), { type: 'approve', by: OWNER }, T0 + 1).record]) {
+    const out = transitionApproval(r, { type: 'cancel', by: mine }, T0 + 2);
+    assert.equal(out.ok && out.record.state, 'cancelled');
+    assert.equal(out.record.cancelledBy, 'requester');
+  }
+  const other = { kind: 'requester', requester: { ...TERMINAL, instanceId: 'com.aura.terminal-9' } };
+  assert.deepEqual(transitionApproval(deferrable(), { type: 'cancel', by: other }, T0 + 2), { ok: false, reason: 'mismatch' });
+  const sys = transitionApproval(record(), { type: 'cancel', by: { kind: 'system', reason: 'gone' } }, T0 + 2);
+  assert.equal(sys.record.cancelledBy, 'system:gone');
+  assert.deepEqual(transitionApproval(sys.record, { type: 'approve', by: OWNER }, T0 + 3), { ok: false, reason: 'wrong-state' });
+});
+
+test('D102 deny feedback: plain text, capped, optional; notice is not a state change', () => {
+  const d = transitionApproval(record(), { type: 'deny', by: OWNER, feedback: '  use the staging token\u0007 instead  ' }, T0 + 1);
+  assert.equal(d.record.feedback, 'use the staging token instead');
+  assert.equal(transitionApproval(record(), { type: 'deny', by: OWNER, feedback: '   ' }, T0 + 1).record.feedback, undefined);
+  assert.equal(denialFeedback('x'.repeat(MAX_DENIAL_FEEDBACK + 50)).length, MAX_DENIAL_FEEDBACK);
+  assert.equal(denialFeedback(42), undefined);
+  assert.equal(denialFeedback('a\nb'), 'a\nb', 'new lines stay');
+  const n = transitionApproval(deferrable(), { type: 'notice', notice: 'ntf_abc123456' }, T0 + 1);
+  assert.equal(n.record.state, 'pending');
+  assert.equal(n.record.notice, 'ntf_abc123456');
+  assert.equal(transitionApproval(n.record, { type: 'notice', notice: null }, T0 + 2).record.notice, undefined);
 });

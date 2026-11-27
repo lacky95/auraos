@@ -20,7 +20,10 @@
  * on the host the operator acts directly.
  */
 import type { Command } from 'commander';
-import { approvalLines, postJson, waitForApproval, type ApprovalView } from '../lib/approval.js';
+import {
+  approvalLines, exitOnHold, outcomeText, postJson, printApprovalResult, waitForApproval, waitsOnHold,
+  type ApprovalView, type WaitResult,
+} from '../lib/approval.js';
 import { api } from '../lib/client.js';
 import { color, fail, info, ok, table } from '../lib/format.js';
 import { fmtTime } from './admin.js';
@@ -56,15 +59,27 @@ export function registerSecret(program: Command): void {
         name, scope, ...(o.purpose ? { purpose: o.purpose } : {}), ...(o.label ? { label: o.label } : {}),
       });
       if (asked.error || !asked.id) fail(asked.message ?? asked.error ?? 'the request was refused');
+      const id = asked.id!;
       if (asked.display) for (const line of approvalLines({ display: asked.display, level: asked.level ?? 'session' })) info(line);
-      info('Type the secret into the AuraOS desktop\'s dialog; it never passes through this terminal. Waiting…');
+      // D102: asked before and put on hold: an agent gets the structured answer at once.
+      if (asked.state === 'pending' && typeof asked.heldAt === 'number' && !waitsOnHold()) exitOnHold(id, asked, info);
+      if (asked.state !== 'approved') {
+        info('Type the secret into the AuraOS desktop\'s dialog; it never passes through this terminal. Waiting… (Ctrl-C withdraws the request)');
+      }
       const limit = o.wait ? Number(o.wait) : NaN;
-      const state = Number.isFinite(limit) && limit > 0
-        ? await Promise.race([waitForApproval(asked.id!), new Promise<'expired'>((r) => setTimeout(() => r('expired'), limit).unref())])
-        : await waitForApproval(asked.id!);
-      if (state !== 'approved') fail(`not stored: ${state}`);
+      const waiting = waitForApproval(id, {
+        onHold: (v) => info(`On hold in the AuraOS desktop until ${typeof v.expiresAt === 'number' ? new Date(v.expiresAt).toISOString() : 'later'}. Still waiting.`),
+      });
+      const r: WaitResult = Number.isFinite(limit) && limit > 0
+        ? await Promise.race([waiting, new Promise<WaitResult>((res) => setTimeout(() => res({ outcome: 'expired' }), limit).unref())])
+        : await waiting;
+      if (r.outcome === 'on_hold') exitOnHold(id, r.view ?? asked, info);
+      if (r.outcome !== 'approved') {
+        printApprovalResult(id, r);
+        fail(`not stored: ${outcomeText(r)}`);
+      }
       const got = await postJson<{ handle?: string; name?: string; error?: string; message?: string }>(
-        `/api/credentials/requests/${encodeURIComponent(asked.id!)}`, { name, scope },
+        `/api/credentials/requests/${encodeURIComponent(id)}`, { name, scope },
       );
       if (!got.handle) fail(got.message ?? got.error ?? 'no handle');
       info(`${got.name} is in your vault. The app reads it with this handle (the owner approves its first read):`);

@@ -40,12 +40,18 @@ globalThis.fetch = (async (input: unknown, init?: { method?: string; body?: stri
     const list = await new Promise<View[]>((r) => { release = r; });
     return json({ version: ++version, pending: list });
   }
-  const m = path.match(/^\/api\/approvals\/([^/]+)(?:\/(approve|deny))?$/);
+  const m = path.match(/^\/api\/approvals\/([^/]+)(?:\/(approve|deny|hold))?$/);
   if (m) {
     const view = views.get(decodeURIComponent(m[1]!));
     if (!view) return json({ error: 'not-found' }, 404);
     if (init?.method === 'POST') {
       decisions.push({ id: view.id, decision: m[2]!, body: JSON.parse(init.body ?? '{}') });
+      if (m[2] === 'hold') {
+        if (view['class'] !== 'deferrable') return json({ error: 'not-deferrable' }, 409);
+        view['heldAt'] = Date.now();
+        view['expiresAt'] = Date.now() + 86_400_000;
+        return json({ ok: true, state: 'pending', heldAt: view['heldAt'], expiresAt: view['expiresAt'] });
+      }
       view.state = m[2] === 'approve' ? 'approved' : 'denied';
       return json({ ok: true });
     }
@@ -64,6 +70,8 @@ const current = $<HTMLInputElement>('aura-owner-password-current');
 const cancel = $<HTMLButtonElement>('aura-owner-password-cancel');
 const block = $<HTMLButtonElement>('aura-owner-password-block');
 const approve = $<HTMLButtonElement>('aura-owner-password-submit');
+const later = $<HTMLButtonElement>('aura-owner-password-later');
+const feedback = $<HTMLTextAreaElement>('aura-owner-password-feedback');
 const focused = () => dom.document.activeElement as unknown as HTMLElement | null;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -138,7 +146,7 @@ test('the dialog is centred over the global reset, scrolls inside when short, an
   assert.match(styles, /#aura-owner-password \{[^}]*\binset:\s*0;/);
   assert.match(styles, /max-height:\s*calc\(100dvh - 32px\)/);
   assert.match(styles, /width:\s*min\(460px, calc\(100vw - 32px\)\)/);
-  assert.match(styles, /:is\(button, input\):focus\s*\{\s*outline:\s*2px solid/);
+  assert.match(styles, /:is\(button, input, textarea\):focus\s*\{\s*outline:\s*2px solid/);
   assert.equal(dlg.getAttribute('role'), 'dialog');
   assert.equal(dlg.getAttribute('aria-modal'), 'true');
   assert.equal(dlg.getAttribute('aria-labelledby'), 'aura-owner-password-title');
@@ -168,7 +176,7 @@ test('Tab and Shift+Tab cycle inside the dialog; arrows move between the answers
   await serve(view);
   assert.equal(focused(), cancel);
   key('Tab');
-  assert.equal(focused(), block, 'Approve is still disabled: Tab wraps to the first control');
+  assert.equal(focused(), feedback, 'Approve is still disabled: Tab wraps to the first control (the feedback box)');
   key('Tab', { shiftKey: true });
   assert.equal(focused(), cancel);
   await until(() => !approve.disabled, 'approve wakes', APPROVE_DELAY_MS + 500);
@@ -176,7 +184,7 @@ test('Tab and Shift+Tab cycle inside the dialog; arrows move between the answers
   key('Tab');
   assert.equal(focused(), approve);
   key('Tab');
-  assert.equal(focused(), block, 'from the last control back to the first');
+  assert.equal(focused(), feedback, 'from the last control back to the first');
   key('Tab', { shiftKey: true });
   assert.equal(focused(), approve, 'and backwards');
   key('ArrowLeft');
@@ -277,4 +285,94 @@ test('the password dialog: focus on the field, Enter submits there, Esc cancels'
   key('Escape');
   await closed();
   assert.deepEqual(settingsPosts, [{ type: 'aura.account.password.result', requestId: 'p1', ok: false, error: 'cancelled' }]);
+});
+
+// ── D102: Later, Review, feedback ──────────────────────────────────────────
+
+const openApproval = (id: string) => (dom as unknown as { auraOpenApproval: (id: string) => Promise<string> }).auraOpenApproval(id);
+
+test('D102: a forced request has no Later; a deferrable one does', async () => {
+  const forced = approval();
+  await serve(forced);
+  assert.equal(later.closest('[hidden]') !== null || later.hidden, true, 'forced: no Later');
+  key('Escape');
+  await closed();
+  decisions.splice(0);
+  const deferrable = approval({ action: 'app.source.open', class: 'deferrable' });
+  await serve(deferrable);
+  assert.equal(later.hidden, false);
+  assert.notEqual(focused(), later, 'Later never has the first focus');
+  key('Escape');
+  await closed();
+  assert.deepEqual(decisions.splice(0).map((d) => d.decision), ['deny'], 'Esc is Deny for deferrable requests too');
+});
+
+test('D102: Later holds it, answers no app, and it does not pop up again; Review reopens it with Approve inert again', async () => {
+  const view = approval({ action: 'app.source.open', class: 'deferrable', appId: 'com.example.notes' });
+  fromApp({ type: 'aura.approval.request', requestId: 'r-hold', approvalId: view.id });
+  await until(() => dlg.open, 'dialog open');
+  await until(() => !approve.disabled, 'approve wakes', APPROVE_DELAY_MS + 500);
+  later.click();
+  await closed();
+  assert.deepEqual(decisions.splice(0).map((d) => d.decision), ['hold']);
+  assert.deepEqual(posts.splice(0), [], 'the waiting app gets no answer: still pending');
+  // The poll lists it again, held: it stays closed.
+  await until(() => !!release, 'poll waiting');
+  const r = release!;
+  release = null;
+  r([view]);
+  await sleep(50);
+  assert.equal(dlg.open, false, 'a held request comes back only through Review');
+  // Review.
+  assert.equal(await openApproval(view.id), 'opened');
+  await until(() => dlg.open, 'reopened');
+  assert.equal(approve.disabled, true, 'the Approve delay starts again');
+  assert.equal(focused(), cancel);
+  await until(() => !approve.disabled, 'approve wakes', APPROVE_DELAY_MS + 500);
+  key('ArrowRight');
+  key('ArrowRight');
+  assert.equal(focused(), approve);
+  key('Enter');
+  await closed();
+  assert.deepEqual(decisions.splice(0).map((d) => d.decision), ['approve']);
+  assert.deepEqual(posts.splice(0), [{ type: 'aura.approval.result', requestId: 'r-hold', approvalId: view.id, ok: true }], 'the app gets its one answer now');
+});
+
+test('D102: Review of a request decided meanwhile opens nothing', async () => {
+  const view = approval({ class: 'deferrable', state: 'denied' });
+  assert.equal(await openApproval(view.id), 'denied');
+  await sleep(20);
+  assert.equal(dlg.open, false);
+  assert.equal(await openApproval('apr_not-a-real-id'), 'unavailable');
+});
+
+test('D102: Deny carries the owner\'s feedback to the server and the waiting app', async () => {
+  const view = approval({ action: 'user.confirm', appId: 'com.example.notes', class: 'forced', display: { title: 'CONFIRM', details: [], requestedBy: 'Notes' } });
+  fromApp({ type: 'aura.user.confirm.request', requestId: 'r-fb', approvalId: view.id });
+  await until(() => dlg.open, 'dialog open');
+  feedback.value = '  Not the production board.  ';
+  cancel.click();
+  await closed();
+  assert.deepEqual(decisions.splice(0).map((d) => [d.decision, d.body['feedback']]), [['deny', 'Not the production board.']]);
+  assert.deepEqual(posts.splice(0), [{ type: 'aura.user.confirm.result', requestId: 'r-fb', confirmed: false, feedback: 'Not the production board.' }]);
+  assert.equal(feedback.value, '', 'cleared');
+});
+
+test('D102: Later on a credential request clears the typed secret; Review starts empty', async () => {
+  const secret = $<HTMLInputElement>('aura-owner-password-secret');
+  const view = approval({ action: 'credential.store', class: 'deferrable', display: { title: 'STORE GITHUB_TOKEN', details: [], requestedBy: 'Terminal' } });
+  await serve(view);
+  secret.value = 'CANARY-secret';
+  later.click();
+  await closed();
+  const sent = decisions.splice(0);
+  assert.deepEqual(sent.map((d) => d.decision), ['hold']);
+  assert.ok(!JSON.stringify(sent).includes('CANARY'), 'Later never sends the secret');
+  assert.equal(secret.value, '');
+  await openApproval(view.id);
+  await until(() => dlg.open, 'reopened');
+  assert.equal(secret.value, '', 'nothing cached between hold and resume');
+  key('Escape');
+  await closed();
+  decisions.splice(0);
 });

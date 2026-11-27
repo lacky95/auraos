@@ -155,6 +155,14 @@ async function ensureAppManager() {
     void import('./lib/capabilities.js').then((m) => m.reconcileCapabilities())
       .catch((err) => console.warn(`[middleware] capability state reconcile failed: ${(err as Error).message}`));
 
+    // D102: hold notices whose approval ended while the shell was down.
+    // Detached and best effort, like the grant sweep below.
+    setTimeout(() => {
+      import('./lib/approvals/service.js')
+        .then((m) => m.reconcileHoldNotices(m.liveApprovalDeps()))
+        .catch((err) => console.warn(`[middleware] approval notice cleanup failed: ${(err as Error).message}`));
+    }, 0);
+
     // Terminal session grants whose session ended while the shell was down
     // (server/terminal-embed.mjs). Detached: it asks each running Terminal.
     setTimeout(() => {

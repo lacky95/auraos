@@ -9,7 +9,7 @@ import { join } from 'node:path';
 
 import { kvServer, createRedis } from '@aura/kv-store';
 import {
-  APPROVAL_CREATES_PER_MINUTE, APPROVAL_PENDING_KEY, APPROVAL_TTL_MS, FileSetupTickets, ValkeyApprovalStore,
+  APPROVAL_CREATES_PER_MINUTE, APPROVAL_PENDING_KEY, APPROVAL_TTL_MS, FileSetupTickets, HOLD_TTL_MS, ValkeyApprovalStore,
   createSetupTicket, defaultSetupTicketDir, payloadHash, requesterAppId,
 } from '../dist/index.js';
 
@@ -192,4 +192,86 @@ test('operator tickets: one subject each, peek does not use them up', async () =
   assert.throws(() => createSetupTicket(DATA_DIR, { purpose: 'operator' }, now));
   assert.throws(() => createSetupTicket(DATA_DIR, { purpose: 'reset', subject: 'x' }, now));
   assert.throws(() => createSetupTicket(DATA_DIR, { purpose: 'operator', subject: 'has space' }, now));
+});
+
+// ── D102: hold, resume, cancel ──────────────────────────────────────────────
+
+const OPEN = { title: 'Open the source of Notes', details: [], requestedBy: 'Terminal' };
+const openReq = (over = {}) => request({ action: 'app.source.open', class: 'deferrable', display: OPEN, payloadHash: payloadHash({ appId: 'notes' }), ...over });
+const openClaim = (over = {}) => claim({ action: 'app.source.open', payloadHash: payloadHash({ appId: 'notes' }), ...over });
+
+test('D102: a held request stays pending and queued, record and slot live 24 h', async () => {
+  const { record } = await store.create(openReq());
+  assert.equal(record.class, 'deferrable');
+  const h = await store.hold(record.id, OWNER);
+  assert.equal(h.ok, true);
+  assert.equal(h.record.state, 'pending');
+  assert.equal(h.record.expiresAt, record.createdAt + HOLD_TTL_MS);
+  const [listed] = await store.listPending();
+  assert.equal(listed.id, record.id);
+  assert.equal(typeof listed.heldAt, 'number');
+  const slotTtl = Math.max(...await Promise.all((await redis.keys('approval:slot:*')).map((k) => redis.pttl(k))));
+  assert.ok(slotTtl > APPROVAL_TTL_MS, `slot kept past 10 min (${slotTtl})`);
+  assert.ok(await redis.pttl(`approval:${record.id}`) > HOLD_TTL_MS - 1000);
+  clock += 2 * APPROVAL_TTL_MS;
+  assert.equal((await store.get(record.id)).state, 'pending', 'still open after 20 min');
+  assert.deepEqual(await store.create(openReq({ payloadHash: payloadHash({ other: 1 }) })), { ok: false, reason: 'too-many-pending' }, 'a held request still takes the one slot');
+  const again = await store.create(openReq());
+  assert.equal(again.record.id, record.id, 'asking again resumes it');
+  assert.equal(again.resumed, true);
+  assert.deepEqual(await store.consume(record.id, openClaim()), { ok: false, reason: 'wrong-state' }, 'held authorizes nothing');
+  clock += HOLD_TTL_MS;
+  assert.deepEqual(await store.approve(record.id, OWNER), { ok: false, reason: 'expired' }, 'past 24 h nothing is approved');
+  assert.deepEqual(await store.listPending(), []);
+});
+
+test('D102: forced requests cannot be held', async () => {
+  const { record } = await store.create(request());
+  assert.deepEqual(await store.hold(record.id, OWNER), { ok: false, reason: 'not-deferrable' });
+  assert.equal((await store.get(record.id)).heldAt, undefined);
+});
+
+test('D102: approved from hold: 10 minutes to use it, once; a re-run picks up the approved request', async () => {
+  const { record } = await store.create(openReq());
+  await store.hold(record.id, OWNER);
+  clock += 5 * 3600 * 1000;
+  const a = await store.approve(record.id, OWNER);
+  assert.equal(a.record.expiresAt, clock + APPROVAL_TTL_MS);
+  const again = await store.create(openReq());
+  assert.equal(again.record.id, record.id, 'resume returns the approved request, no duplicate');
+  assert.equal(again.record.state, 'approved');
+  assert.equal((await store.consume(record.id, openClaim())).ok, true);
+  assert.deepEqual(await store.consume(record.id, openClaim()), { ok: false, reason: 'wrong-state' }, 'single use');
+  const fresh = await store.create(openReq());
+  assert.notEqual(fresh.record.id, record.id, 'after the use, asking again is a new request');
+  assert.equal(fresh.resumed, undefined);
+});
+
+test('D102: an approved request waiting for its use does not block a different one', async () => {
+  const { record } = await store.create(openReq());
+  await store.approve(record.id, OWNER);
+  const other = await store.create(openReq({ payloadHash: payloadHash({ other: 2 }) }));
+  assert.equal(other.ok, true);
+  assert.equal((await store.consume(record.id, openClaim())).ok, true, 'the approved one is still usable');
+});
+
+test('D102: the requester withdraws; the slot frees; another requester cannot', async () => {
+  const { record } = await store.create(openReq());
+  await store.hold(record.id, OWNER);
+  assert.deepEqual(await store.cancel(record.id, { kind: 'requester', requester: NEXUS_OWNER }), { ok: false, reason: 'mismatch' });
+  const c = await store.cancel(record.id, { kind: 'requester', requester: TERMINAL });
+  assert.equal(c.record.state, 'cancelled');
+  assert.deepEqual(await store.listPending(), []);
+  assert.deepEqual(await store.approve(record.id, OWNER_FRESH), { ok: false, reason: 'wrong-state' });
+  assert.equal((await store.create(openReq({ payloadHash: payloadHash({ other: 3 }) }))).ok, true, 'slot freed');
+});
+
+test('D102: notice id on the record; deny keeps the owner feedback', async () => {
+  const { record } = await store.create(openReq());
+  await store.hold(record.id, OWNER);
+  assert.equal((await store.setNotice(record.id, 'ntf_abcdefghij')).record.notice, 'ntf_abcdefghij');
+  const d = await store.deny(record.id, OWNER, 'not today');
+  assert.equal(d.record.feedback, 'not today');
+  assert.equal(d.record.notice, 'ntf_abcdefghij', 'the shell removes the notice from it');
+  assert.deepEqual(await store.setNotice(record.id, null), { ok: false, reason: 'wrong-state' });
 });
