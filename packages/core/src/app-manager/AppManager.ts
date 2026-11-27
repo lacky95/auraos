@@ -2216,7 +2216,8 @@ export class AppManager {
     // the ~3s spawn cost. Only meaningful for multi-instance apps — for single
     // mode, a pool member would BE the singleton, and refills would race the
     // user's claim. Guarded explicitly.
-    if (manifest.warmPool > 0 && manifest.instanceMode === 'multi') {
+    // D107-a: never a pool member for an app that runs with its user's Private Home.
+    if (manifest.warmPool > 0 && manifest.instanceMode === 'multi' && this.setup?.effectiveHome?.(appId) !== 'private') {
       const claimed = this.claimFromPool(appId, userId);
       if (claimed) {
         this.scheduleRefill(appId);
@@ -2925,6 +2926,8 @@ export class AppManager {
     const setupView = this.setup && declaredSetupKeys(base).length
       ? await this.setupView(appId, base, opts.maintenance) : { manifest: base, digest: null, declares: false };
     const manifest = setupView.manifest;
+    // D107-a: an app that runs with its user's Private Home is never warmed (a pool member is for nobody).
+    if (opts.inPool && setupView.home === 'private') throw new PrivateHomePoolSkip(appId);
     // Survivors unknown (the boot scan failed): adopt them first, so this
     // spawn's port and instance name are not a survivor's.
     if (this.adoptionPending) {
@@ -3170,12 +3173,12 @@ export class AppManager {
   }
 
   /** The manifest a spawn uses (D108): the gate-validated effective view of a declaring app, else the base. */
-  private async setupView<M extends AppManifest>(appId: string, base: M, maintenance?: MaintenanceReason): Promise<{ manifest: M; digest: string | null; declares: boolean }> {
+  private async setupView<M extends AppManifest>(appId: string, base: M, maintenance?: MaintenanceReason): Promise<{ manifest: M; digest: string | null; declares: boolean; home?: 'app' | 'private' }> {
     if (!this.setup || declaredSetupKeys(base).length === 0) return { manifest: base, digest: null, declares: false };
     const installationId = await this.installationIdOf(appId);
     const d = installationId ? await this.setup.check(appId, base, { installationId, ...(maintenance ? { maintenance } : {}) }).catch(() => null) : null;
     return d?.ok && d.effective
-      ? { manifest: this.setup.manifestView(appId, base, d.effective), digest: d.effective.configDigest, declares: true }
+      ? { manifest: this.setup.manifestView(appId, base, d.effective), digest: d.effective.configDigest, declares: true, home: d.effective.homeEnvironment }
       : { manifest: base, digest: null, declares: true };
   }
 
@@ -3194,7 +3197,9 @@ export class AppManager {
     // the reconciler respawns instances after we've killed them all.
     if (this.uninstalling.has(appId)) return;
     const manifest = this.registry.getById(appId);
-    if (!manifest || manifest.warmPool <= 0 || manifest.instanceMode !== 'multi' || this.skipBlocked(manifest, 'pool refill')) return;
+    if (!manifest || manifest.warmPool <= 0 || manifest.instanceMode !== 'multi'
+      // D107-a: an app with its user's Private Home has no pool (known once its gate validated it).
+      || this.setup?.effectiveHome?.(appId) === 'private' || this.skipBlocked(manifest, 'pool refill')) return;
     const target   = manifest.warmPool;
     const inPool   = this.countPool(appId);
     const inFlight = this.refillInFlight.get(appId) ?? 0;
@@ -3206,6 +3211,7 @@ export class AppManager {
         console.log(`[AppManager] pool: ${appId} refilled with ${instanceId} (now ${this.countPool(appId)}/${target})`);
       })
       .catch((err) => {
+        if (err instanceof PrivateHomePoolSkip) return;   // not a failure: such an app has no pool
         console.warn(`[AppManager] pool: refill spawn for ${appId} failed: ${(err as Error).message}`);
       })
       .finally(() => {
@@ -4637,6 +4643,11 @@ const NO_ENDPOINTS: RuntimeEndpoints = {
   expose: async () => { throw new Error('capability-missing: portExpose (no installed runtime exposes ports)'); },
   remove: () => { throw new Error('capability-missing: portExpose (no installed runtime exposes ports)'); },
 };
+
+/** A warm-pool spawn of an app that runs with its user's Private Home: skipped, not failed (D107-a). */
+class PrivateHomePoolSkip extends Error {
+  constructor(appId: string) { super(`${appId} runs with its user's Private Home: no warm pool`); this.name = 'PrivateHomePoolSkip'; }
+}
 
 /**
  * Singleton stored on globalThis so it survives Vite 7's Environments API,
