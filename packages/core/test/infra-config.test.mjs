@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, readFileSync, readdirSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { ROOT, tmp } from './release-fixtures.mjs';
 import { CANARY, EXAMPLE, exampleFixture } from './infra-fixtures.mjs';
 
@@ -15,6 +15,7 @@ const STORE = await import(join(ROOT, 'os/infra/store.mjs'));
 const INST = await import(join(ROOT, 'os/install/installer.mjs'));
 const YAML = createRequire(import.meta.url)('yaml');
 
+const walk = (d) => readdirSync(d, { withFileTypes: true, recursive: true }).filter((e) => e.isFile()).map((e) => relative(d, join(e.parentPath ?? e.path, e.name)));
 const errorsOf = (text) => { try { C.parseInfraConfig(text); return []; } catch (e) { return e.errors.map((x) => `${x.path}: ${x.message}`); } };
 
 test('the YAML subset reads the D94 example exactly like the yaml package', () => {
@@ -101,7 +102,7 @@ test('build secrets: per-ecosystem files from the credentials; never in public o
   const f = exampleFixture();
   const cfg = C.parseInfraConfig(EXAMPLE).config;
   const s = SEC.renderBuildSecrets(cfg, f.creds);
-  assert.deepEqual(Object.keys(s).sort(), ['infra_apt_auth', 'infra_git', 'infra_mtls_artifactory_mtls_key', 'infra_npmrc', 'infra_pip', 'infra_proxy']);
+  assert.deepEqual(Object.keys(s).sort(), ['infra_apt_auth', 'infra_git', 'infra_mtls_artifactory_mtls_key', 'infra_npm_basic', 'infra_npmrc', 'infra_proxy']);
   assert.equal(s.infra_proxy, `http://${CANARY.proxy}@proxy.corp.example:3128/\n`);
   assert.match(s.infra_npmrc, /^\/\/artifactory\.corp\.example\/api\/npm\/npm-remote\/:_auth=/);
   assert.match(s.infra_apt_auth, /^machine artifactory\.corp\.example\/debian-remote login art password ART-CANARY-tok3n$/m);
@@ -109,9 +110,17 @@ test('build secrets: per-ecosystem files from the credentials; never in public o
   // The non-secret override and env carry none of it.
   const override = INST.renderInfraOverride(cfg, { publicDir: '/x', hasCorporateCa: true });
   assert.doesNotMatch(override + JSON.stringify(INST.proxyEnv(cfg)), /CANARY|PRIVATE KEY/);
-  assert.match(override, /dns: !reset \[\]/);
   assert.match(override, /NODE_EXTRA_CA_CERTS: \/etc\/aura\/infra-install\/corporate-ca.pem/);
-  assert.deepEqual(YAML.parse(override.replace(/!reset /, '')).services['aura-os'].volumes, ['/x:/etc/aura/infra-install:ro']);
+  const o = YAML.parse(override);
+  assert.deepEqual(o.services['aura-os'].volumes, ['/x:/etc/aura/infra-install:ro']);
+  // O11: dns: host is the default resolver, so the override sets no dns; the image args are registry prefixes only.
+  assert.equal(o.services['aura-os'].dns, undefined);
+  assert.deepEqual(o.services['aura-base'].build.args, { DOCKER_IO_REGISTRY: 'artifactory.corp.example/docker-remote' });
+  assert.deepEqual(o.services['aura-base'].build.additional_contexts, { 'aura-infra-public': '/x' });
+  for (const [dns, want] of [['[10.1.1.1]', ['10.1.1.1']], ['{ servers: [10.2.2.2], search: [corp.example] }', ['10.2.2.2']], ['default', undefined]]) {
+    const c = C.parseInfraConfig(`version: 1\nnetwork:\n  dns: ${dns}\n`).config;
+    assert.deepEqual(YAML.parse(INST.renderInfraOverride(c, { publicDir: '/x' })).services['aura-os'].dns, want, dns);
+  }
 });
 
 test('redactSecrets: userinfo, auth headers, npm auth, PEM keys and known values', () => {
@@ -163,8 +172,10 @@ test('installer stage: credentials 0600 outside the checkout, public and secret 
   for (const n of r.credentials) assert.equal(statSync(join(state, 'credentials', n)).mode & 0o777, 0o600);
   assert.equal(statSync(join(state, 'credentials')).mode & 0o777, 0o700);
   for (const id of r.secrets) assert.equal(statSync(join(state, 'rendered/secrets', id)).mode & 0o777, 0o600);
-  const publicText = ['compose.infra.yml', 'seed/config.yaml', 'rendered/public/ca.pem', 'rendered/public/corporate-ca.pem', 'rendered/public/proxy.env']
+  const pub = join(state, 'rendered/public');
+  const publicText = ['compose.infra.yml', 'seed/config.yaml', ...walk(pub).map((f) => join('rendered/public', f))]
     .map((p) => readFileSync(join(state, p), 'utf8')).join('\n');
+  for (const f of ['ca-bundle.pem', 'corporate-ca.pem', 'env', 'npmrc', 'gitconfig', 'apt/apt.conf.d/90aura-infra', 'manifest.json']) assert.ok(existsSync(join(pub, f)), f);
   assert.doesNotMatch(publicText, /CANARY|PRIVATE KEY/);
   const secretsOverride = readFileSync(join(state, 'compose.secrets.yml'), 'utf8');
   assert.doesNotMatch(secretsOverride, /CANARY/, 'the override names files, never values');
@@ -175,6 +186,9 @@ test('requirements and the deny audit read the Dockerfile and lockfile', () => {
   const cfg = C.parseInfraConfig(EXAMPLE).config;
   const req = INST.requirements(ROOT, cfg);
   assert.ok(req.images.some((i) => /^node:22/.test(i.image)));
+  assert.ok(req.images.some((i) => i.image === 'valkey/valkey:8-bookworm' && i.via === 'artifactory.corp.example/docker-remote/valkey/valkey:8-bookworm'));
+  assert.ok(req.clones.some((c) => c.url === 'https://github.com/proot-me/proot' && c.via.startsWith('https://git.corp.example/')));
+  assert.match(req.npm.pnpm, /^\d+\.\d+\.\d+$/, 'pnpm is pinned');
   assert.ok(req.npm.packages > 100);
   const open = C.parseInfraConfig('version: 1\npolicy:\n  publicFallback: deny\n').config;
   const hits = INST.auditPublic(ROOT, open);

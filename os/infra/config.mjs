@@ -235,32 +235,27 @@ export function toYaml(v, indent = 0) {
   const scalar = (x) => {
     if (x === null || x === undefined) return 'null';
     if (typeof x === 'boolean' || typeof x === 'number') return String(x);
-    if (x instanceof YamlTag) return `${x.tag} ${x.value === undefined ? '' : flowYaml(x.value)}`.trimEnd();
     return /^[A-Za-z0-9_./][A-Za-z0-9_./@+-]*$/.test(x) && !/^(true|false|null|~|-?\d+)$/.test(x) ? x : JSON.stringify(x);
   };
   if (Array.isArray(v)) {
     if (!v.length) return `${pad}[]\n`;
-    return v.map((x) => (x && typeof x === 'object' && !(x instanceof YamlTag)
+    return v.map((x) => (x && typeof x === 'object'
       ? `${pad}- ${toYaml(x, indent + 2).trimStart()}` : `${pad}- ${scalar(x)}\n`)).join('');
   }
-  if (v && typeof v === 'object' && !(v instanceof YamlTag)) {
+  if (v && typeof v === 'object') {
     const keys = Object.keys(v);
     if (!keys.length) return `${pad}{}\n`;
     return keys.map((k) => {
       const x = v[k];
       const key = scalar(k);
-      if (x && typeof x === 'object' && !(x instanceof YamlTag) && (Array.isArray(x) ? x.length : Object.keys(x).length)) {
+      if (x && typeof x === 'object' && (Array.isArray(x) ? x.length : Object.keys(x).length)) {
         return `${pad}${key}:\n${toYaml(x, indent + 2)}`;
       }
-      return `${pad}${key}: ${Array.isArray(x) ? '[]' : (x && typeof x === 'object' && !(x instanceof YamlTag)) ? '{}' : scalar(x)}\n`;
+      return `${pad}${key}: ${Array.isArray(x) ? '[]' : (x && typeof x === 'object') ? '{}' : scalar(x)}\n`;
     }).join('');
   }
   return `${pad}${scalar(v)}\n`;
 }
-const flowYaml = (v) => JSON.stringify(v);
-
-/** A tagged value for toYaml (compose's `!reset` / `!override`). */
-export class YamlTag { constructor(tag, value) { this.tag = tag; this.value = value; } }
 
 // ── schema ──────────────────────────────────────────────────────────────────
 
@@ -357,7 +352,7 @@ export function validateInfraConfig(input) {
       if (n.dns !== undefined) {
         const d = n.dns;
         const ips = (v, path) => list(v, path, (x, pp) => { if (typeof x !== 'string' || !isIP(x)) err(pp, 'expected an IP address'); });
-        if (d === 'host' || d === 'default') { /* host resolver | today's compose default */ } else if (Array.isArray(d)) {
+        if (d === 'host' || d === 'default') { /* the host's (Docker's) resolver: the default (O11) */ } else if (Array.isArray(d)) {
           ips(d, 'network.dns');
           if (!d.length) err('network.dns', 'an empty list: use dns: host');
         } else if (isObj(d)) {

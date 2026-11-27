@@ -1,3 +1,25 @@
+# ─── Build inputs (D94 IC-3) ──────────────────────────────────────────────────
+# BuildKit only (compose builds with it; the shell's BaseImage uses buildx).
+# Every RUN that downloads something sources os/infra/build-env.sh with:
+#   - the named context `aura-infra-public`: the infrastructure config's public
+#     render (proxy URLs without credentials, NO_PROXY, the CA bundle, npm/git/
+#     apt config, download rewrites). install.sh passes it with
+#     `additional_contexts`; without one it is the empty stage below, and the
+#     build is exactly the public default.
+#   - BuildKit secrets (infra_proxy[_http], infra_apt_auth, infra_npmrc,
+#     infra_npm_basic, infra_git), mounted for that RUN only: nothing secret
+#     reaches a layer, an ENV, an ARG or the history.
+# No corporate CA and no mirror is baked into an image (O7): both are only
+# mounted while a step runs.
+# DOCKER_IO_REGISTRY is the Docker Hub prefix of the base images
+# (registries.oci.mirrors["docker.io"]; the daemon pulls them, D94 §6.5).
+ARG DOCKER_IO_REGISTRY=docker.io
+
+FROM scratch AS aura-infra-public
+
+# Valkey binaries come from the official image (see the base stage).
+FROM ${DOCKER_IO_REGISTRY}/valkey/valkey:8-bookworm AS valkey
+
 # ─── Stage: aura-base ─────────────────────────────────────────────────────────
 # Sibling-container image used by ContainerRunner. Rooted at the FULL Debian
 # Bookworm node:22 image (not -slim) so apps get the familiar Debian
@@ -7,7 +29,7 @@
 # Build with:
 #   docker build -t aura-base -f Dockerfile --target aura-base .
 # Pinned to an exact Node 22 release (bump deliberately, with the lockfile).
-FROM node:22.23.5-bookworm AS aura-base
+FROM ${DOCKER_IO_REGISTRY}/library/node:22.23.5-bookworm AS aura-base
 # Keep the explicit `apt-get install` line for the AuraOS-specific extras
 # that aren't in the full node:22 base (ssh client+server, htop, dnsutils,
 # iproute2). Most of bash/coreutils/curl/git/procps/nano/less is already
@@ -18,7 +40,13 @@ FROM node:22.23.5-bookworm AS aura-base
 # (see apps/com.aura.terminal/tmux.conf). Without it in the image the terminal
 # silently falls back to a bare shell that dies with its PTY on every app
 # restart or code reload.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=bind,source=os/infra/build-env.sh,target=/run/aura-infra/build-env.sh \
+    --mount=type=bind,from=aura-infra-public,target=/etc/aura/infra \
+    --mount=type=secret,id=infra_proxy --mount=type=secret,id=infra_proxy_http \
+    --mount=type=tmpfs,target=/run/aura-build \
+    --mount=type=secret,id=infra_apt_auth,mode=0444 \
+    . /run/aura-infra/build-env.sh \
+ && apt-get update && apt-get install -y --no-install-recommends \
     openssh-client \
     openssh-server \
     tmux \
@@ -35,8 +63,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ZOT_VERSION to pull in upstream fixes — no source changes needed; just
 # rebuild aura-base.
 ARG ZOT_VERSION=v2.1.7
-RUN ARCH=$(dpkg --print-architecture) \
- && curl -fsSL "https://github.com/project-zot/zot/releases/download/${ZOT_VERSION}/zot-linux-${ARCH}-minimal" -o /usr/local/bin/zot \
+RUN --mount=type=bind,source=os/infra/build-env.sh,target=/run/aura-infra/build-env.sh \
+    --mount=type=bind,from=aura-infra-public,target=/etc/aura/infra \
+    --mount=type=secret,id=infra_proxy --mount=type=secret,id=infra_proxy_http \
+    --mount=type=tmpfs,target=/run/aura-build \
+    . /run/aura-infra/build-env.sh \
+ && ARCH=$(dpkg --print-architecture) \
+ && curl -fsSL "$(aura_url "https://github.com/project-zot/zot/releases/download/${ZOT_VERSION}/zot-linux-${ARCH}-minimal")" -o /usr/local/bin/zot \
  && chmod +x /usr/local/bin/zot \
  && zot --version
 
@@ -54,7 +87,7 @@ RUN mkdir -p /usr/local/libexec \
 # Debian-slim filesystem with the tools an app sandbox needs, exported as a
 # raw rootfs that PRoot can pivot into. Using debian-slim (not Alpine) keeps
 # glibc compatibility with host-side binaries bind-mounted into the rootfs.
-FROM debian:bookworm-slim AS base-rootfs
+FROM ${DOCKER_IO_REGISTRY}/library/debian:bookworm-slim AS base-rootfs
 
 # Base-rootfs essentials — every proot inherits these at /usr/bin via its own
 # rootfs (no cap-system involvement, on PATH by default). Anything more
@@ -65,7 +98,13 @@ FROM debian:bookworm-slim AS base-rootfs
 # htop, ps), and a baseline editor + pager (nano, less) are present so an
 # operator dropped into ANY app's terminal can debug, edit, and reach the
 # outside world without first installing a thing.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=bind,source=os/infra/build-env.sh,target=/run/aura-infra/build-env.sh \
+    --mount=type=bind,from=aura-infra-public,target=/etc/aura/infra \
+    --mount=type=secret,id=infra_proxy --mount=type=secret,id=infra_proxy_http \
+    --mount=type=tmpfs,target=/run/aura-build \
+    --mount=type=secret,id=infra_apt_auth,mode=0444 \
+    . /run/aura-infra/build-env.sh \
+ && apt-get update && apt-get install -y --no-install-recommends \
     bash \
     coreutils \
     curl \
@@ -86,9 +125,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # ─── Stage: base ──────────────────────────────────────────────────────────────
 # Same exact Node 22 release as aura-base.
-FROM node:22.23.5-bookworm-slim AS base
+FROM ${DOCKER_IO_REGISTRY}/library/node:22.23.5-bookworm-slim AS base
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=bind,source=os/infra/build-env.sh,target=/run/aura-infra/build-env.sh \
+    --mount=type=bind,from=aura-infra-public,target=/etc/aura/infra \
+    --mount=type=secret,id=infra_proxy --mount=type=secret,id=infra_proxy_http \
+    --mount=type=tmpfs,target=/run/aura-build \
+    --mount=type=secret,id=infra_apt_auth,mode=0444 \
+    . /run/aura-infra/build-env.sh \
+ && apt-get update && apt-get install -y --no-install-recommends \
     proot \
     bash \
     curl \
@@ -111,8 +156,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # valkey package, and this pins the exact version. All of its shared-library
 # deps (libssl3, libsystemd0, libgcrypt20, liblzma5, libzstd1, liblz4-1,
 # libcap2) are already in node:22-slim's bookworm base.
-COPY --from=valkey/valkey:8-bookworm /usr/local/bin/valkey-server /usr/local/bin/valkey-server
-COPY --from=valkey/valkey:8-bookworm /usr/local/bin/valkey-cli    /usr/local/bin/valkey-cli
+COPY --from=valkey /usr/local/bin/valkey-server /usr/local/bin/valkey-server
+COPY --from=valkey /usr/local/bin/valkey-cli    /usr/local/bin/valkey-cli
 
 # Docker CLI — ContainerRunner uses this to drive sibling-container spawns
 # via the host's docker daemon (socket bind-mounted from compose). Static
@@ -120,8 +165,13 @@ COPY --from=valkey/valkey:8-bookworm /usr/local/bin/valkey-cli    /usr/local/bin
 # Arch resolved at build time via `uname -m` so the same Dockerfile produces
 # a correct binary on both x86_64 hosts and Apple Silicon (linux/arm64 ⇒ aarch64).
 ARG DOCKER_VERSION=29.3.1
-RUN ARCH=$(uname -m) \
- && curl -fsSL "https://download.docker.com/linux/static/stable/${ARCH}/docker-${DOCKER_VERSION}.tgz" -o /tmp/docker.tgz \
+RUN --mount=type=bind,source=os/infra/build-env.sh,target=/run/aura-infra/build-env.sh \
+    --mount=type=bind,from=aura-infra-public,target=/etc/aura/infra \
+    --mount=type=secret,id=infra_proxy --mount=type=secret,id=infra_proxy_http \
+    --mount=type=tmpfs,target=/run/aura-build \
+    . /run/aura-infra/build-env.sh \
+ && ARCH=$(uname -m) \
+ && curl -fsSL "$(aura_url "https://download.docker.com/linux/static/stable/${ARCH}/docker-${DOCKER_VERSION}.tgz")" -o /tmp/docker.tgz \
  && tar -xzf /tmp/docker.tgz -C /tmp \
  && install -m 0755 /tmp/docker/docker /usr/local/bin/docker \
  && rm -rf /tmp/docker.tgz /tmp/docker \
@@ -133,8 +183,13 @@ RUN ARCH=$(uname -m) \
 # like dpkg: amd64, arm64). ORAS_VERSION is build-arg-bumpable; the artifact
 # format is OCI Distribution v1.1 which has been stable since 2023.
 ARG ORAS_VERSION=1.2.0
-RUN ARCH=$(dpkg --print-architecture) \
- && curl -fsSL "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_${ARCH}.tar.gz" -o /tmp/oras.tgz \
+RUN --mount=type=bind,source=os/infra/build-env.sh,target=/run/aura-infra/build-env.sh \
+    --mount=type=bind,from=aura-infra-public,target=/etc/aura/infra \
+    --mount=type=secret,id=infra_proxy --mount=type=secret,id=infra_proxy_http \
+    --mount=type=tmpfs,target=/run/aura-build \
+    . /run/aura-infra/build-env.sh \
+ && ARCH=$(dpkg --print-architecture) \
+ && curl -fsSL "$(aura_url "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_${ARCH}.tar.gz")" -o /tmp/oras.tgz \
  && tar -xzf /tmp/oras.tgz -C /tmp oras \
  && install -m 0755 /tmp/oras /usr/local/bin/oras \
  && rm -f /tmp/oras.tgz /tmp/oras \
@@ -147,11 +202,31 @@ RUN ARCH=$(dpkg --print-architecture) \
 # approach as the docker CLI: no repos, works on any host, arch resolved at
 # build time.
 ARG COMPOSE_VERSION=2.40.3
-RUN ARCH=$(uname -m) \
- && curl -fsSL "https://github.com/docker/compose/releases/download/v${COMPOSE_VERSION}/docker-compose-linux-${ARCH}" \
+RUN --mount=type=bind,source=os/infra/build-env.sh,target=/run/aura-infra/build-env.sh \
+    --mount=type=bind,from=aura-infra-public,target=/etc/aura/infra \
+    --mount=type=secret,id=infra_proxy --mount=type=secret,id=infra_proxy_http \
+    --mount=type=tmpfs,target=/run/aura-build \
+    . /run/aura-infra/build-env.sh \
+ && ARCH=$(uname -m) \
+ && curl -fsSL "$(aura_url "https://github.com/docker/compose/releases/download/v${COMPOSE_VERSION}/docker-compose-linux-${ARCH}")" \
       -o /usr/local/lib/docker/cli-plugins/docker-compose --create-dirs \
  && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose \
  && docker compose version
+
+# Docker buildx plugin (D94 IC-3, G5): BuildKit for the in-shell build paths
+# (BaseImage, and the release builder), so secret mounts and the named
+# infrastructure context work there too, not only in the host's compose build.
+ARG BUILDX_VERSION=0.29.1
+RUN --mount=type=bind,source=os/infra/build-env.sh,target=/run/aura-infra/build-env.sh \
+    --mount=type=bind,from=aura-infra-public,target=/etc/aura/infra \
+    --mount=type=secret,id=infra_proxy --mount=type=secret,id=infra_proxy_http \
+    --mount=type=tmpfs,target=/run/aura-build \
+    . /run/aura-infra/build-env.sh \
+ && ARCH=$(dpkg --print-architecture) \
+ && curl -fsSL "$(aura_url "https://github.com/docker/buildx/releases/download/v${BUILDX_VERSION}/buildx-v${BUILDX_VERSION}.linux-${ARCH}")" \
+      -o /usr/local/lib/docker/cli-plugins/docker-buildx \
+ && chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx \
+ && docker buildx version
 
 # Replace Debian's proot (5.3.x with EFAULT on Rust-compiled native modules
 # like Tailwind 4 Oxide / jiti) with a fresh build from upstream proot-me.
@@ -159,12 +234,31 @@ RUN ARCH=$(uname -m) \
 # `proot` is invoked by name. Without this, apps with native deps that hit
 # the EFAULT bug must opt out via `useProot: false` in their manifest —
 # which defeats the per-app-sandbox isolation we want.
-RUN git clone --depth 1 https://github.com/proot-me/proot /tmp/proot-src \
+# The clone goes through registries.git.rewrites (the rendered gitconfig).
+RUN --mount=type=bind,source=os/infra/build-env.sh,target=/run/aura-infra/build-env.sh \
+    --mount=type=bind,from=aura-infra-public,target=/etc/aura/infra \
+    --mount=type=secret,id=infra_proxy --mount=type=secret,id=infra_proxy_http \
+    --mount=type=tmpfs,target=/run/aura-build \
+    --mount=type=secret,id=infra_git \
+    . /run/aura-infra/build-env.sh \
+ && git clone --depth 1 https://github.com/proot-me/proot /tmp/proot-src \
  && make -C /tmp/proot-src/src -j$(nproc) \
  && install -m 0755 /tmp/proot-src/src/proot /usr/local/bin/proot \
  && rm -rf /tmp/proot-src
 
-RUN corepack enable && corepack prepare pnpm@latest --activate
+# pnpm, pinned (no @latest): corepack fetches it from registries.npm
+# (COREPACK_NPM_REGISTRY in the rendered env) with the build's credentials.
+# `pnpm --version` makes pnpm 12's launcher fetch its native binary now, through
+# the same config, instead of on the first boot.
+ARG PNPM_VERSION=12.18.0
+RUN --mount=type=bind,source=os/infra/build-env.sh,target=/run/aura-infra/build-env.sh \
+    --mount=type=bind,from=aura-infra-public,target=/etc/aura/infra \
+    --mount=type=secret,id=infra_proxy --mount=type=secret,id=infra_proxy_http \
+    --mount=type=tmpfs,target=/run/aura-build \
+    --mount=type=secret,id=infra_npm_basic --mount=type=secret,id=infra_npmrc \
+    . /run/aura-infra/build-env.sh \
+ && corepack enable && corepack prepare "pnpm@${PNPM_VERSION}" --activate \
+ && COREPACK_ENABLE_DOWNLOAD_PROMPT=0 pnpm --version
 
 WORKDIR /workspace
 
@@ -173,9 +267,6 @@ WORKDIR /workspace
 FROM base AS toolchain
 
 RUN mkdir -p /os/toolchain/bin /os/toolchain/lib
-
-# Claude Code CLI (available globally via node from base image)
-RUN npm install -g @anthropic-ai/claude-code 2>/dev/null || true
 
 # Copy system tools into toolchain so PRoot apps can bind-mount them selectively.
 # docker is here too so wildcard-cap apps (terminal) can drive sibling-container
@@ -208,7 +299,13 @@ COPY packages/app-sdk/package.json ./packages/app-sdk/package.json
 COPY packages/ui/package.json ./packages/ui/package.json
 COPY packages/aura-cli/package.json ./packages/aura-cli/package.json
 
-RUN pnpm install
+RUN --mount=type=bind,source=os/infra/build-env.sh,target=/run/aura-infra/build-env.sh \
+    --mount=type=bind,from=aura-infra-public,target=/etc/aura/infra \
+    --mount=type=secret,id=infra_proxy --mount=type=secret,id=infra_proxy_http \
+    --mount=type=tmpfs,target=/run/aura-build \
+    --mount=type=secret,id=infra_npmrc \
+    . /run/aura-infra/build-env.sh \
+ && pnpm install
 
 # ─── Stage: build ─────────────────────────────────────────────────────────────
 FROM deps AS build
@@ -264,7 +361,7 @@ COPY os/home-import/ /os/home-import/
 ENV HOME=/home/master
 
 # Corepack caches the pnpm binary under $HOME. The image already baked one
-# (`corepack prepare pnpm@latest --activate` → /root/.cache/node/corepack);
+# (`corepack prepare pnpm@${PNPM_VERSION} --activate` → /root/.cache/node/corepack);
 # moving HOME onto the volume orphaned it, so corepack tried to re-download
 # pnpm and BLOCKED on its interactive "Do you want to continue? [Y/n]" prompt
 # — compose gives this container a TTY, so nothing answered it and the OS
@@ -284,8 +381,6 @@ CMD ["sh", "-c", "mkdir -p /data/aura/home/master /data/aura/home/default && rm 
 # Used by docker-compose for local dev — code is volume-mounted from host
 FROM base AS development
 
-RUN corepack enable && corepack prepare pnpm@latest --activate
-
 ENV NODE_ENV=development
 ENV AURA_APPS_DIR=/workspace/apps
 ENV AURA_DATA_DIR=/data
@@ -297,11 +392,12 @@ ENV AURA_APP_PORT_END=4999
 EXPOSE 3000
 EXPOSE 4001-4100
 
-# Install Claude Code + toolchain at dev image build time. The host's bash/git/curl
-# are still copied into /os/toolchain/bin/ for opt-in per-app bind-mounts, but the
-# base-rootfs below also has its own copies (apps default to those).
-RUN npm install -g @anthropic-ai/claude-code 2>/dev/null || true && \
-    mkdir -p /os/toolchain/bin /os/toolchain/lib && \
+# The toolchain at dev image build time. The host's bash/git/curl are still
+# copied into /os/toolchain/bin/ for opt-in per-app bind-mounts, but the
+# base-rootfs below also has its own copies (apps default to those). Agent
+# CLIs (claude, codex, …) are not baked in: they come through the capability
+# system (`aura cap install`, the toolchain store on /data; audit #8).
+RUN mkdir -p /os/toolchain/bin /os/toolchain/lib && \
     cp $(which git) /os/toolchain/bin/git && \
     cp $(which curl) /os/toolchain/bin/curl && \
     cp $(which bash) /os/toolchain/bin/bash && \
@@ -347,7 +443,7 @@ COPY os/toolchain-path.sh /etc/profile.d/aura-toolchain.sh
 ENV HOME=/home/master
 
 # Corepack caches the pnpm binary under $HOME. The image already baked one
-# (`corepack prepare pnpm@latest --activate` → /root/.cache/node/corepack);
+# (`corepack prepare pnpm@${PNPM_VERSION} --activate` → /root/.cache/node/corepack);
 # moving HOME onto the volume orphaned it, so corepack tried to re-download
 # pnpm and BLOCKED on its interactive "Do you want to continue? [Y/n]" prompt
 # — compose gives this container a TTY, so nothing answered it and the OS

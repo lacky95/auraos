@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { createWriteStream, existsSync, mkdirSync, readFileSync, statSync, openSync, readSync, closeSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { createWriteStream, existsSync, mkdirSync, statSync, openSync, readSync, closeSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 
 /**
  * The `aura-base` image — what every `sandbox: "container"` app and every
@@ -13,11 +13,14 @@ import { join } from 'node:path';
  * and, when the image is missing, builds it from `/workspace/Dockerfile` in the
  * background. Container spawns wait for it through `whenBaseImageReady()`.
  *
- * The build pipes the Dockerfile on stdin and sends NO context: the
- * `aura-base` stage only has `RUN` lines, and the checkout is over a gigabyte.
- * The shell has no buildx, so this is the legacy builder — its
- * `Step N/M : <instruction>` lines are the progress. Never set
- * DOCKER_BUILDKIT=1 here: without buildx that fails outright.
+ * The build is BuildKit through the image's buildx plugin (D94 IC-3): the
+ * Dockerfile's network steps use secret, tmpfs and named-context mounts, which
+ * the legacy builder can't parse. The context is the Dockerfile's directory;
+ * BuildKit sends only the files a step references (the aura-base stage reads
+ * one, os/infra/build-env.sh), so the gigabyte checkout is not transferred.
+ * `#N [stage k/M] <instruction>` lines (`--progress=plain`) are the progress.
+ * A shell image without buildx (built before IC-3) can't build it: the error
+ * says to rebuild on the host, where compose builds with BuildKit.
  *
  * State lives in `<dataDir>/aura/first-boot/base-image.{json,log}` (same shape
  * as the self-updater's job files); `onChange()` listeners get every state
@@ -43,9 +46,14 @@ export interface BaseImageState {
   built?: boolean;
 }
 
-/** Parse one legacy-builder line: `Step 3/7 : RUN apt-get …` → { n: 3, of: 7, text }. */
+/**
+ * Parse one build progress line → { n, of, text }: BuildKit's plain progress
+ * `#6 [aura-base 2/4] RUN apt-get …` (also `[2/4]`), or the legacy builder's
+ * `Step 3/7 : RUN apt-get …`.
+ */
 export function parseBuildStep(line: string): { n: number; of: number; text: string } | null {
-  const m = /^Step (\d+)\/(\d+) : (.*)$/.exec(line.trim());
+  const t = line.trim();
+  const m = /^#\d+ \[(?:[^\]]*? )?(\d+)\/(\d+)\] (.*)$/.exec(t) ?? /^Step (\d+)\/(\d+) : (.*)$/.exec(t);
   if (!m) return null;
   const n = Number(m[1]);
   const of = Number(m[2]);
@@ -71,11 +79,13 @@ const defaultDeps: BaseImageDeps = {
   },
   build(image, dockerfile, onLine) {
     return new Promise((resolve) => {
-      const env = { ...process.env };
-      delete env['DOCKER_BUILDKIT'];
-      const child = spawn('docker', ['build', '-t', image, '--target', BASE_IMAGE_TARGET, '-'], {
-        stdio: ['pipe', 'pipe', 'pipe'], env,
-      });
+      if (spawnSync('docker', ['buildx', 'version'], { stdio: 'ignore', timeout: 15_000 }).status !== 0) {
+        onLine('[aura] this shell image has no docker buildx plugin, and the aura-base stage needs BuildKit: rebuild on the host (docker compose up -d --build)');
+        resolve(1);
+        return;
+      }
+      const child = spawn('docker', ['buildx', 'build', '--progress=plain', '--load', '-t', image, '--target', BASE_IMAGE_TARGET,
+        '-f', dockerfile, dirname(dockerfile)], { stdio: ['ignore', 'pipe', 'pipe'], env: process.env });
       const timer = setTimeout(() => { onLine(`[aura] build timed out after ${BUILD_TIMEOUT_MS / 60_000} min`); child.kill('SIGKILL'); }, BUILD_TIMEOUT_MS);
       let buf = '';
       const feed = (d: Buffer) => {
@@ -92,7 +102,6 @@ const defaultDeps: BaseImageDeps = {
         if (buf) onLine(buf);
         resolve(code ?? 1);
       });
-      child.stdin.end(readFileSync(dockerfile));
     });
   },
 };

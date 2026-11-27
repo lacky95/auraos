@@ -40,6 +40,13 @@ function setup({ present = false, results = [0] } = {}) {
   return { base, calls, states, dataDir };
 }
 
+test('parseBuildStep reads BuildKit plain-progress step lines', () => {
+  assert.deepEqual(parseBuildStep('#6 [aura-base 2/4] RUN apt-get update'), { n: 2, of: 4, text: 'RUN apt-get update' });
+  assert.deepEqual(parseBuildStep('#5 [3/7] RUN true'), { n: 3, of: 7, text: 'RUN true' });
+  assert.equal(parseBuildStep('#6 0.184 Get:1 http://deb.debian.org'), null);
+  assert.equal(parseBuildStep('#6 DONE 0.4s'), null);
+});
+
 test('parseBuildStep reads legacy-builder step lines', () => {
   assert.deepEqual(parseBuildStep('Step 3/7 : RUN apt-get update'), { n: 3, of: 7, text: 'RUN apt-get update' });
   assert.equal(parseBuildStep(' ---> Running in be80da6dd657'), null);

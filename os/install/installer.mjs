@@ -26,8 +26,10 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, wr
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  InfraConfigError, YamlTag, computeNoProxy, endpointsOf, parseInfraConfig, rewriteImage, rewriteUrl, toYaml, clientCertFor,
+  InfraConfigError, computeNoProxy, endpointsOf, parseInfraConfig, rewriteImage, rewriteUrl, toYaml, clientCertFor,
 } from '../infra/config.mjs';
+import { INFRA_ROOT, oci, proxy, renderInfra, trust } from '../infra/adapters/index.mjs';
+import { renderTree, writeTree } from '../infra/render.mjs';
 import { CredentialError, bootstrapName, checkConfigCredentials, knownSecretValues, readBootstrapCredential, redactSecrets, renderBuildSecrets } from '../infra/secrets.mjs';
 import { importSeedIfAbsent, infraDir, readStore, stageConfig, writeSeed } from '../infra/store.mjs';
 import { ReleaseVerifyError, gitTreeOfDir, main as verifierMain, parseArgs, selectRelease, emptyTrust, trustFrom } from '../release-verify.mjs';
@@ -35,7 +37,7 @@ import { ReleaseVerifyError, gitTreeOfDir, main as verifierMain, parseArgs, sele
 const say = (s = '') => process.stdout.write(`${s}\n`);
 const fail = (s) => process.stderr.write(`${s}\n`);
 
-export const SYSTEM_BUNDLES = ['/etc/ssl/certs/ca-certificates.crt', '/etc/pki/tls/certs/ca-bundle.crt', '/etc/ssl/cert.pem', '/etc/ssl/ca-bundle.pem'];
+export const { SYSTEM_BUNDLES, caBundle } = trust;
 
 function writeSecretFile(file, content) {
   writeFileSync(file, content, { mode: 0o600 });
@@ -47,36 +49,22 @@ const loadConfig = (file) => parseInfraConfig(readFileSync(file, 'utf8'));
 /** The proxy URL (without credentials) a config uses for https, or null. */
 const proxyOf = (cfg) => cfg.network?.proxy?.https ?? cfg.network?.proxy?.http ?? null;
 
-/** Non-secret proxy env (both cases, D94 §5.4). */
-export function proxyEnv(cfg) {
-  const p = cfg.network?.proxy;
-  if (!p) return {};
-  const env = {};
-  if (p.http) env.HTTP_PROXY = env.http_proxy = p.http;
-  if (p.https) env.HTTPS_PROXY = env.https_proxy = p.https;
-  env.NO_PROXY = env.no_proxy = computeNoProxy(cfg);
-  return env;
-}
+/** Non-secret proxy env (both cases, NO_PROXY computed; the proxy adapter). */
+export const proxyEnv = (cfg) => proxy.render(cfg, { noProxyExtra: [] }).env ?? {};
 
-/** The corporate CA PEMs of a staged/stored config (`files` keyed by store path). */
-const corporateCas = (cfg, files) => (cfg.trust?.caCertificates ?? []).map((c) => files[c.file]).filter(Boolean).join('');
-
-/** CA bundle: system roots (unless publicRoots: replace) + the corporate CAs. */
-export function caBundle(cfg, files, systemBundle) {
-  const corp = corporateCas(cfg, files);
-  if (cfg.trust?.publicRoots === 'replace') return corp;
-  const sys = systemBundle && existsSync(systemBundle) ? readFileSync(systemBundle, 'utf8') : '';
-  return `${sys}${sys && !sys.endsWith('\n') ? '\n' : ''}${corp}`;
-}
+const readText = (f) => (f && existsSync(f) ? readFileSync(f, 'utf8') : null);
 
 /**
- * compose.infra.yml: non-secret only (proxy env and build args without
- * credentials, NO_PROXY, the public context, the CA mount, DNS). Safe to keep.
+ * compose.infra.yml: non-secret only (the named build context with the
+ * adapters' public render, the base-image registry arg, the runtime proxy env
+ * and CA mount, DNS). Safe to keep. The image build reads proxy, CA and
+ * mirrors from the named context (os/infra/build-env.sh), not from build args.
  */
 export function renderInfraOverride(cfg, { publicDir, hasCorporateCa }) {
   const env = proxyEnv(cfg);
   const build = {};
-  if (Object.keys(env).length) build.args = env;
+  const args = oci.buildArgs(cfg);
+  if (Object.keys(args).length) build.args = args;
   build.additional_contexts = { 'aura-infra-public': publicDir };
   const os = { build: { ...build } };
   const runtimeEnv = { ...env };
@@ -84,12 +72,11 @@ export function renderInfraOverride(cfg, { publicDir, hasCorporateCa }) {
   if (Object.keys(runtimeEnv).length) os.environment = runtimeEnv;
   os.volumes = [`${publicDir}:/etc/aura/infra-install:ro`];
   const dns = cfg.network?.dns;
-  // O11: the host resolver is the default from Phase 6; compose still lists
-  // public DNS until IC-3 removes it, so `host` resets that list here.
-  if (dns === 'host') os.dns = new YamlTag('!reset', []);
-  else if (Array.isArray(dns)) os.dns = new YamlTag('!override', dns);
+  // O11: the host (Docker's) resolver is the default, so `host`/`default` set
+  // nothing; servers and search domains only when configured.
+  if (Array.isArray(dns)) os.dns = dns;
   else if (dns && typeof dns === 'object') {
-    if (dns.servers) os.dns = new YamlTag('!override', dns.servers);
+    if (dns.servers) os.dns = dns.servers;
     if (dns.search) os.dns_search = dns.search;
   }
   return '# Rendered by install.sh from the D94 infrastructure config: non-secret values only.\n'
@@ -134,8 +121,7 @@ function cmdNetConfig(a) {
   const out = resolve(a.out);
   mkdirSync(out, { recursive: true, mode: 0o700 });
   chmodSync(out, 0o700);
-  const systemBundle = a['system-bundle'] ?? SYSTEM_BUNDLES.find((f) => existsSync(f));
-  const bundle = caBundle(cfg, staged.files, systemBundle);
+  const bundle = caBundle(cfg, staged.files, readText(a['system-bundle'] ?? SYSTEM_BUNDLES.find((f) => existsSync(f))));
   writeSecretFile(join(out, 'ca.pem'), bundle);
   const curl = [];
   const git = [];
@@ -190,13 +176,14 @@ export function stage({ config: configFile, credentialsDir, stateDir, systemBund
     chmodSync(credDir, 0o700);
     for (const n of names) writeSecretFile(join(credDir, n), readFileSync(join(credentialsDir, n)));
   }
+  // The named build context `aura-infra-public` = the adapters' public render,
+  // the same tree the kernel renders into /data/aura/infra/generated (D36).
   const pub = join(S, 'rendered', 'public');
   rmSync(join(S, 'rendered'), { recursive: true, force: true });
   mkdirSync(pub, { recursive: true, mode: 0o755 });
-  const corp = corporateCas(cfg, staged.files);
-  writeFileSync(join(pub, 'corporate-ca.pem'), corp, { mode: 0o644 });
-  writeFileSync(join(pub, 'ca.pem'), caBundle(cfg, staged.files, systemBundle ?? SYSTEM_BUNDLES.find((f) => existsSync(f))), { mode: 0o644 });
-  writeFileSync(join(pub, 'proxy.env'), Object.entries(proxyEnv(cfg)).map(([k, v]) => `${k}=${v}`).join('\n') + '\n', { mode: 0o644 });
+  const sys = readText(systemBundle ?? SYSTEM_BUNDLES.find((f) => existsSync(f)));
+  writeTree(pub, renderTree(renderInfra(cfg, { root: INFRA_ROOT, files: staged.files, systemBundle: sys })).tree);
+  const corp = trust.corporateCas(cfg, staged.files);
   const secrets = renderBuildSecrets(cfg, names.length ? credDir : credentialsDir);
   const secDir = join(S, 'rendered', 'secrets');
   if (Object.keys(secrets).length) {
@@ -249,13 +236,24 @@ function cmdSelect(a) {
 }
 
 /** What an air-gapped or restricted network must mirror (D94 §6.1.5), from the Dockerfile and the lockfile. */
+/** The Dockerfile with every `${ARG}` replaced by its default (ARG NAME=default lines). */
+export function expandDockerfileArgs(df) {
+  const args = {};
+  for (const m of df.matchAll(/^ARG\s+([A-Za-z_][A-Za-z0-9_]*)=(\S+)/gm)) args[m[1]] ??= m[2].replace(/^"(.*)"$/, '$1');
+  return df.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (x, k) => args[k] ?? x);
+}
+
+/** A canonical image ref without the implied docker.io/library prefix. */
+const shortImage = (ref) => ref.replace(/^docker\.io\/library\//, '').replace(/^docker\.io\//, '');
+
 export function requirements(repo, cfg) {
-  const df = readFileSync(join(repo, 'Dockerfile'), 'utf8');
+  const df = expandDockerfileArgs(readFileSync(join(repo, 'Dockerfile'), 'utf8'));
   const stages = new Set([...df.matchAll(/^FROM\s+\S+\s+AS\s+(\S+)/gim)].map((m) => m[1].toLowerCase()));
   const images = new Set();
-  for (const m of df.matchAll(/^FROM\s+(?:--platform=\S+\s+)?(\S+)/gim)) if (!stages.has(m[1].toLowerCase()) && !m[1].includes('$')) images.add(m[1]);
-  for (const m of df.matchAll(/--from=(\S+)/g)) if (!stages.has(m[1].toLowerCase()) && /[:/]/.test(m[1])) images.add(m[1]);
-  const urls = new Set([...df.matchAll(/https?:\/\/[^\s"'`)\\]+/g)].map((m) => m[0].replace(/[.,;]+$/, '')));
+  for (const m of df.matchAll(/^FROM\s+(?:--platform=\S+\s+)?(\S+)/gim)) if (!stages.has(m[1].toLowerCase()) && m[1] !== 'scratch' && !m[1].includes('$')) images.add(shortImage(m[1]));
+  for (const m of df.matchAll(/--from=(\S+)/g)) if (!stages.has(m[1].toLowerCase()) && /[:/]/.test(m[1])) images.add(shortImage(m[1]));
+  const clones = new Set([...df.matchAll(/git clone[^\n]*?(https?:\/\/[^\s"'`)\\]+)/g)].map((m) => m[1]));
+  const urls = new Set([...df.matchAll(/https?:\/\/[^\s"'`)\\]+/g)].map((m) => m[0].replace(/[.,;]+$/, '')).filter((u) => !clones.has(u)));
   const pnpm = /pnpm@([0-9][^\s"']*)/.exec(df)?.[1] ?? 'latest (not pinned)';
   let packages = 0;
   const lock = join(repo, 'pnpm-lock.yaml');
@@ -270,6 +268,7 @@ export function requirements(repo, cfg) {
   return {
     images: [...images].sort().map((i) => ({ image: i, via: rewriteImage(i, mirrors) })),
     downloads: [...urls].sort().map((u) => ({ url: u, via: rewriteUrl(u, cfg?.registries?.artifacts?.rewrites ?? {}) })),
+    clones: [...clones].sort().map((u) => ({ url: u, via: rewriteUrl(u, cfg?.registries?.git?.rewrites ?? {}) })),
     npm: { packages, pnpm, registry: cfg?.registries?.npm?.url ?? 'https://registry.npmjs.org/' },
     apt: { mirrors: cfg?.registries?.apt?.mirrors ?? { 'deb.debian.org': 'https://deb.debian.org', 'security.debian.org': 'https://security.debian.org' } },
     git: rewriteUrl('https://github.com/lacky95/auraos.git', cfg?.registries?.git?.rewrites ?? {}),
@@ -283,6 +282,8 @@ function cmdRequirements(a) {
   for (const i of r.images) say(`  ${i.image}${i.via !== i.image ? `  → ${i.via}` : ''}`);
   say('Downloads in the image build (artifacts.rewrites):');
   for (const d of r.downloads) say(`  ${d.url}${d.via !== d.url ? `  → ${d.via}` : ''}`);
+  say('Git clones in the image build (registries.git.rewrites):');
+  for (const d of r.clones) say(`  ${d.url}${d.via !== d.url ? `  → ${d.via}` : ''}`);
   say(`npm: ${r.npm.packages} packages from the lockfile + pnpm ${r.npm.pnpm}, registry ${r.npm.registry}`);
   say(`apt (Debian bookworm): ${Object.entries(r.apt.mirrors).map(([k, v]) => `${k} → ${v}`).join(', ')}`);
   say(`git source: ${r.git}`);
@@ -296,6 +297,7 @@ export function auditPublic(repo, cfg) {
   const out = [];
   for (const i of r.images) if (i.via === i.image) out.push(`image ${i.image}: no registries.oci.mirrors entry for its registry`);
   for (const d of r.downloads) if (d.via === d.url) out.push(`download ${d.url}: no registries.artifacts.rewrites prefix`);
+  for (const d of r.clones) if (d.via === d.url) out.push(`git clone ${d.url}: no registries.git.rewrites prefix`);
   if (!cfg.registries?.npm) out.push('npm: no registries.npm (the lockfile would come from registry.npmjs.org)');
   if (!cfg.registries?.apt) out.push('apt: no registries.apt mirrors (deb.debian.org)');
   return out;

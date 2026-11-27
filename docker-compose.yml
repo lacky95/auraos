@@ -107,9 +107,11 @@ services:
       - SYS_PTRACE
     security_opt:
       - seccomp:unconfined
-    dns:
-      - 8.8.8.8
-      - 1.1.1.1
+    # No dns: here (D94 O11): the shell uses Docker's resolver, which follows
+    # the host's (corporate DNS, VPN, split DNS keep working). Servers and
+    # search domains are set through the infrastructure config (network.dns),
+    # which install.sh renders into its compose override; public DNS only
+    # when it is configured explicitly.
     stdin_open: true
     tty: true
     networks:
