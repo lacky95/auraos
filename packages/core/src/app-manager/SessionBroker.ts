@@ -246,7 +246,9 @@ export class SessionBroker {
     const id = await engine.execCreate(SESSION_BROKER_NAME, {
       Cmd: [helper, 'enter', JSON.stringify(input)], Tty: spec.tty, AttachStdin: true, User: '0',
     });
+    const T0 = Date.now(); console.warn(`[xh-debug] created ${id.slice(0, 12)} tty=${spec.tty}`);
     const sock: Duplex = await engine.execStart(id, spec.tty, { cols: spec.cols, rows: spec.rows });
+    console.warn(`[xh-debug] started ${id.slice(0, 12)} +${Date.now() - T0}ms`);
     let launcherPid = 0;
     for (let i = 0; i < 20 && !launcherPid; i++) {
       const r = await engine.execInspect(id).catch(() => null);
@@ -254,6 +256,7 @@ export class SessionBroker {
       if (!launcherPid && r && !r.Running) break;
       if (!launcherPid) await new Promise((res) => setTimeout(res, 50));
     }
+    console.warn(`[xh-debug] launcherPid ${launcherPid} +${Date.now() - T0}ms`);
     const record: SessionRecord = {
       sessionId: spec.sessionId, instanceId: spec.instanceId, ...(spec.userId ? { userId: spec.userId } : {}),
       kind: spec.kind, home: spec.home.mode, uid: spec.uid, launcherPid, startedAt: new Date().toISOString(),

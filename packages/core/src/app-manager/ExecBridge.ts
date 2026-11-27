@@ -337,15 +337,16 @@ export function engineSession(
       settled = true;
       void (opts.exitCode ?? (() => engineExitCode(engine, id)))().then(resolve, () => resolve(null));
     };
-    sock.once('end', finish);
-    sock.once('close', finish);
+    sock.once('end', () => { console.warn(`[xh-debug] end ${id.slice(0, 12)}`); finish(); });
+    sock.once('close', () => { console.warn(`[xh-debug] close ${id.slice(0, 12)}`); finish(); });
     sock.once('error', finish);
   });
   void (async () => {
     for (let wait: number = EXEC_WATCH_MS.first; streamOpen; wait = Math.min(wait * 2, EXEC_WATCH_MS.max)) {
       await sleep(wait);
       if (!streamOpen) return;
-      const r = await engine.execInspect(id).catch(() => null);
+      const r = await engine.execInspect(id).catch((e) => { console.warn(`[xh-debug] inspect error ${String(e)}`); return null; });
+      console.warn(`[xh-debug] watch ${id.slice(0, 12)} ${JSON.stringify(r)}`);
       // Not started yet (no exit code) or still running: keep watching.
       if (!r || r.Running || r.ExitCode === null) continue;
       await sleep(EXEC_WATCH_MS.grace);

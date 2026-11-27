@@ -121,10 +121,12 @@ export class DockerApi implements EngineClient {
         },
       });
       req.on('upgrade', (_res, socket, head) => {
+        console.warn(`[xh-debug] upgrade ${id.slice(0, 12)} head=${head.length}`);
         if (head.length) socket.unshift(head);
         resolve(socket);
       });
       req.on('response', (res) => {
+        console.warn(`[xh-debug] response ${id.slice(0, 12)} ${res.statusCode}`);
         void readCapped(res, MAX_JSON).then((text) => reject(new DockerApiError(res.statusCode ?? 500, engineMessage(text, res.statusCode))));
       });
       req.on('error', (err) => reject(new DockerApiError(502, `docker engine unreachable: ${err.message}`)));
