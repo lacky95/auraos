@@ -53,7 +53,7 @@ before(async () => {
   const uri = await server.start({ dataDir: DATA_DIR });
   redis = createRedis(uri);
   grants = new GrantStore(() => redis, now);
-  authz = new Authorizer({ grants, declared: (id) => apps.get(id)?.permissions, appScope: (id) => apps.get(id)?.scope });
+  authz = new Authorizer({ grants, declared: (id) => apps.get(id)?.permissions, appBinding: async (id) => ({ scope: apps.get(id)?.scope, installationId: apps.has(id) ? 'inst-1' : null }) });
   svc = new NotificationService({ redis, now, authorizer: authz, settings: () => settings });
 });
 
@@ -244,7 +244,7 @@ test('read access: own items always; others only with a scoped notifications.rea
   assert.ok((await listIds(A)).every((id) => id !== b.id && id !== c.id));
 
   await assert.rejects(grants.grant({ kind: 'app', id: 'com.example.a' }, 'notifications.read', { by: BY }), GrantError, 'a read grant needs a scope');
-  await grants.grant({ kind: 'app', id: 'com.example.a' }, 'notifications.read', { by: BY, appScope: 'user', read: { scope: 'app:com.example.b' } });
+  await grants.grant({ kind: 'app', id: 'com.example.a' }, 'notifications.read', { by: BY, appScope: 'user', installationId: 'inst-1', read: { scope: 'app:com.example.b' } });
   assert.equal((await svc.get(b.id, A)).title, 'B pub');
   assert.equal(await svc.get(bSecret.id, A), null, 'secret needs includeSecret');
   assert.equal(await svc.get(c.id, A), null, 'outside the scope');
@@ -252,9 +252,9 @@ test('read access: own items always; others only with a scoped notifications.rea
   assert.ok(ids.includes(own.id) && ids.includes(b.id) && !ids.includes(bSecret.id) && !ids.includes(c.id));
   assert.equal((await svc.list({ sender: 'app:com.example.b', state: 'active', limit: 200 }, A)).items.some((n) => n.id === b.id), true);
 
-  await grants.grant({ kind: 'app', id: 'com.example.a' }, 'notifications.read', { by: BY, appScope: 'user', read: { scope: { senders: ['app:com.example.b'] }, includeSecret: true } });
+  await grants.grant({ kind: 'app', id: 'com.example.a' }, 'notifications.read', { by: BY, appScope: 'user', installationId: 'inst-1', read: { scope: { senders: ['app:com.example.b'] }, includeSecret: true } });
   assert.equal((await svc.get(bSecret.id, A)).title, 'B secret');
-  await grants.grant({ kind: 'app', id: 'com.example.a' }, 'notifications.read', { by: BY, appScope: 'user', read: { scope: 'all' } });
+  await grants.grant({ kind: 'app', id: 'com.example.a' }, 'notifications.read', { by: BY, appScope: 'user', installationId: 'inst-1', read: { scope: 'all' } });
   assert.equal((await svc.get(c.id, A)).title, 'C priv');
   assert.equal(await svc.get(bSecret.id, A), null);
 
@@ -263,7 +263,7 @@ test('read access: own items always; others only with a scoped notifications.rea
   await rejectsStatus(svc.markSeen(bSecret.id, undefined, A), 404);
 
   // The manifest must REQUEST it: C has a grant but no request → nothing.
-  await grants.grant({ kind: 'app', id: 'com.example.c' }, 'notifications.read', { by: BY, appScope: 'user', read: { scope: '*' } });
+  await grants.grant({ kind: 'app', id: 'com.example.c' }, 'notifications.read', { by: BY, appScope: 'user', installationId: 'inst-1', read: { scope: '*' } });
   assert.equal(await svc.get(b.id, C), null);
   await grants.revoke({ kind: 'app', id: 'com.example.c' }, 'notifications.read');
 

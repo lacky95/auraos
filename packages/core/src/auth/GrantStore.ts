@@ -14,7 +14,13 @@
  *
  * App grants are pinned to the app's install scope (`appScope`): a clone,
  * scaffold or store install that SHADOWS the app from another scope under the
- * same id does not inherit the grant (it has to be granted again).
+ * same id does not inherit the grant (it has to be granted again). And they
+ * are pinned to the app's installation (`installationId`, S1, 5-main, like
+ * `app.use:<installationId>`): a grant counts only while that installation is
+ * the app's current one (`appGrantCounts`), so a new app under the same id
+ * and scope (`rm app` then `dev new`, a different-origin reinstall after a
+ * keep-data uninstall, a reassigned origin) inherits nothing. Grants from
+ * before 5-main are pinned once at boot (`attachInstallations`).
  *
  * A `user` subject (I.2, D82) holds only the app permissions
  * `app.use:<installationId>` (open and start the user's own instance) and
@@ -31,7 +37,9 @@
 import type { Redis } from '@aura/kv-store';
 import { OsEventBus } from '../ipc/OsEventBus.js';
 import { describeReadScope, normalizeReadScope, type ReadGrant } from '../notifications/access.js';
-import { OS_SCOPE, type ChangeAttribution, type GrantScope, type LegacyAdminAttribution, type GrantSubject, type GrantSubjectKind } from './types.js';
+import {
+  OS_SCOPE, type AppGrantBinding, type ChangeAttribution, type GrantScope, type LegacyAdminAttribution, type GrantSubject, type GrantSubjectKind,
+} from './types.js';
 
 export const GRANT_PREFIX = 'grant:';
 export const GRANT_INDEX_KEY = 'grant:idx';
@@ -130,6 +138,14 @@ export interface GrantRecord {
   scope: GrantScope;
   /** App subjects: the install scope the grant was given for (system|global|user). */
   appScope?: string;
+  /**
+   * App subjects (S1): the installation the grant was given to; it counts only
+   * while that installation is the app's current one. `null`: pinned to none
+   * (the 5-main migration found no installation for it): it never counts and
+   * is never attached later. Absent: a record from before 5-main, not
+   * migrated yet: it does not count either.
+   */
+  installationId?: string | null;
   grantedAt: number;
   /** A record from before D50 may name the retired shared admin credential. */
   grantedBy: GrantedBy | LegacyAdminAttribution;
@@ -155,6 +171,19 @@ export class GrantError extends Error {
     super(message);
     this.name = 'GrantError';
   }
+}
+
+/**
+ * Whether an app grant counts (S1): it exists, was given for the install scope
+ * the app resolves to now (a shadowing copy from another scope has to be
+ * granted again), and to the installation the app is now. The one rule for
+ * every app grant: the Authorizer's privileged permissions, Context keys and
+ * vault reads.
+ */
+export function appGrantCounts(record: Pick<GrantRecord, 'appScope' | 'installationId'> | null, current: AppGrantBinding): boolean {
+  if (!record) return false;
+  if (record.appScope && current.scope && record.appScope !== current.scope) return false;
+  return typeof record.installationId === 'string' && record.installationId === current.installationId;
 }
 
 function scopeKey(scope: GrantScope): string {
@@ -204,17 +233,25 @@ export class GrantStore {
   }
 
   /**
-   * Grant (idempotent; re-granting refreshes appScope + attribution, and for
-   * `notifications.read` replaces the read scope). `notifications.read`
-   * needs `opts.read` with an explicit scope.
+   * Grant (idempotent; re-granting refreshes appScope, the installation and
+   * the attribution, and for `notifications.read` replaces the read scope).
+   * An app grant needs `opts.installationId`: the installation it is given to
+   * (S1). `notifications.read` needs `opts.read` with an explicit scope.
    */
   async grant(
     subject: GrantSubject, permission: string,
-    opts: { by: GrantedBy; appScope?: string; scope?: GrantScope; read?: { scope: unknown; includeSecret?: boolean }; binding?: string },
+    opts: {
+      by: GrantedBy; appScope?: string; installationId?: string; scope?: GrantScope;
+      read?: { scope: unknown; includeSecret?: boolean }; binding?: string;
+    },
   ): Promise<{ record: GrantRecord; changed: boolean }> {
     permission = canonicalPermission(permission);
     const scope = opts.scope ?? OS_SCOPE;
     this.validate(subject, permission, scope);
+    if (subject.kind !== 'app' && opts.installationId !== undefined) throw new GrantError(400, 'only an app grant is pinned to an installation');
+    if (subject.kind === 'app' && (typeof opts.installationId !== 'string' || !SUBJECT_ID.test(opts.installationId))) {
+      throw new GrantError(409, `an app grant is given to one installation of the app, and ${subject.id} has none`);
+    }
     if (opts.binding !== undefined
       && (scope.kind !== 'terminal-session' || typeof opts.binding !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(opts.binding))) {
       throw new GrantError(400, 'only a Terminal session grant can be bound to an instance life');
@@ -230,6 +267,7 @@ export class GrantStore {
       permission,
       scope: { ...scope },
       ...(opts.appScope ? { appScope: opts.appScope } : {}),
+      ...(subject.kind === 'app' ? { installationId: opts.installationId! } : {}),
       grantedAt: this.now(),
       grantedBy: opts.by,
       ...(read ? { read } : {}),
@@ -240,7 +278,7 @@ export class GrantStore {
     const prev = await r.hget(key, field(permission, scope));
     await r.multi().hset(key, field(permission, scope), JSON.stringify(record)).sadd(GRANT_INDEX_KEY, key).exec();
     const prevRec = prev ? (JSON.parse(prev) as GrantRecord) : null;
-    const changed = !prevRec || prevRec.appScope !== record.appScope || prevRec.binding !== record.binding
+    const changed = !prevRec || prevRec.appScope !== record.appScope || prevRec.installationId !== record.installationId || prevRec.binding !== record.binding
       || JSON.stringify(prevRec.read ?? null) !== JSON.stringify(record.read ?? null);
     if (changed) this.emit({ subjectKind: subject.kind, subjectId: subject.id, permission, change: 'granted' });
     return { record, changed };
@@ -351,6 +389,40 @@ export class GrantStore {
         m.hdel(key, f);
         await m.exec();
         out.push({ subject: rec.subject, from: rec.permission, to });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * S1 one-time migration (idempotent): every app grant from before 5-main
+   * (no `installationId`) is pinned to the installation it was given to,
+   * `installationOf(appId, appScope)`, or to none (`null`: it never counts and
+   * is never attached later, so no future installation under that id
+   * inherits it). `installationOf` throws on a read error: nothing is pinned
+   * to none by a Valkey hiccup, the next boot retries. Returns what was
+   * pinned (for the audit). No `permissions:changed` event: an unpinned
+   * grant already does not count.
+   */
+  async attachInstallations(
+    installationOf: (appId: string, appScope: string | undefined) => Promise<string | null>,
+  ): Promise<Array<{ subject: GrantSubject; permission: string; scope: GrantScope; appScope?: string; installationId: string | null }>> {
+    const r = this.redis();
+    const out: Array<{ subject: GrantSubject; permission: string; scope: GrantScope; appScope?: string; installationId: string | null }> = [];
+    for (const key of await r.smembers(GRANT_INDEX_KEY)) {
+      if (!key.startsWith('grant:app:')) continue;
+      for (const [f, raw] of Object.entries(await r.hgetall(key))) {
+        let rec: GrantRecord;
+        try { rec = JSON.parse(raw) as GrantRecord; } catch { continue; }
+        if (rec.subject?.kind !== 'app' || rec.installationId !== undefined) continue;
+        const installationId = await installationOf(rec.subject.id, rec.appScope);
+        // A grant changed meanwhile (re-granted with its installation) keeps the newer record.
+        if ((await r.hget(key, f)) !== raw) continue;
+        await r.hset(key, f, JSON.stringify({ ...rec, installationId } satisfies GrantRecord));
+        out.push({
+          subject: rec.subject, permission: rec.permission, scope: rec.scope ?? OS_SCOPE,
+          ...(rec.appScope ? { appScope: rec.appScope } : {}), installationId,
+        });
       }
     }
     return out;

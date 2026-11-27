@@ -71,9 +71,9 @@ const mgr = {
 } as unknown as ObserverManager;
 
 const authorizer = new Authorizer({
-  grants: { get: async (s: { id: string }, p: string) => (s.id === TERMINALX && p === 'terminal.sessions.list' ? { appScope: 'user' } : null) } as never,
+  grants: { get: async (s: { id: string }, p: string) => (s.id === TERMINALX && p === 'terminal.sessions.list' ? { appScope: 'user', installationId: 'inst-1' } : null) } as never,
   declared: (id: string) => declared[id],
-  appScope: (id: string) => scopes[id],
+  appBinding: async (id: string) => ({ scope: scopes[id], installationId: scopes[id] ? 'inst-1' : null }),
 });
 
 // The owner's login: cookie `sess=ok` names live session s-live.

@@ -18,9 +18,9 @@
  * clone or scaffold that shadows the app under the same id does not inherit
  * them. Values never appear in a log, an error or the audit trail.
  */
-import type { GrantRecord, GrantStore } from '../auth/GrantStore.js';
-import { contextReadPermission, credentialReadPermission, userScope } from '../auth/GrantStore.js';
-import { OS_SCOPE, type GrantScope } from '../auth/types.js';
+import type { GrantStore } from '../auth/GrantStore.js';
+import { appGrantCounts, contextReadPermission, credentialReadPermission, userScope } from '../auth/GrantStore.js';
+import { OS_SCOPE, type AppGrantBinding, type GrantScope } from '../auth/types.js';
 import type { AuditInput } from '../auth/AdminAudit.js';
 import type { ContextStore } from './ContextStore.js';
 import type { CredentialVault } from './CredentialVault.js';
@@ -102,20 +102,10 @@ export async function grantedContextValue(
   return value === null ? { refused: 'not-set' } : { value, source: 'system' };
 }
 
-/**
- * Whether an app grant counts: it exists and was given for the app's
- * current install scope (a shadowing copy from another scope has to be
- * granted again).
- */
-export function appGrantCounts(record: Pick<GrantRecord, 'appScope'> | null, currentScope: string | undefined): boolean {
-  if (!record) return false;
-  return !(record.appScope && currentScope && record.appScope !== currentScope);
-}
-
 export interface LiveGrantedContextOptions {
   grants: Pick<GrantStore, 'get'>;
-  /** The install scope an app id resolves to now. */
-  appScope(appId: string): string | undefined;
+  /** The install scope an app id resolves to now and its installation there (S1). */
+  appBinding(appId: string): Promise<AppGrantBinding>;
   store: Pick<ContextStore, 'resolveEnv' | 'get'>;
   vault: Pick<CredentialVault, 'reveal'>;
   audit(entry: AuditInput): Promise<unknown>;
@@ -124,7 +114,7 @@ export interface LiveGrantedContextOptions {
 /** The live deps: GrantStore, the system Context, the vault, the admin audit. */
 export function liveGrantedContextDeps(o: LiveGrantedContextOptions): GrantedContextDeps {
   const held = async (appId: string, permission: string, scope: GrantScope) =>
-    appGrantCounts(await o.grants.get({ kind: 'app', id: appId }, permission, scope), o.appScope(appId));
+    appGrantCounts(await o.grants.get({ kind: 'app', id: appId }, permission, scope), await o.appBinding(appId));
   return {
     systemGranted: (appId, key) => held(appId, contextReadPermission(key), OS_SCOPE),
     vaultGranted: (appId, userId, key) => held(appId, credentialReadPermission(key), userScope(userId)),

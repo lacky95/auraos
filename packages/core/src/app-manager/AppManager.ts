@@ -59,13 +59,14 @@ import { grantedContextEnv, liveGrantedContextDeps, type GrantedContextDeps } fr
 import { ContextStore } from '../context/ContextStore.js';
 import { CredentialVault } from '../context/CredentialVault.js';
 import { migratePhase5Context } from '../context/migratePhase5.js';
-import type { ContextMigrationDeps } from '../context/migratePhase5.js';
+import type { ContextMigrationApp, ContextMigrationDeps } from '../context/migratePhase5.js';
 import { defaultKv } from '@aura/kv-store';
 import { appOwnershipSpecs, applyAppOwnership } from '../identity/appOwnership.js';
 import { ownershipJournalPath } from '../identity/ownershipApply.js';
 import { runAsMigrationBlock, type RunAsOwnershipInput } from '../identity/runAsOwnership.js';
 import { installationAppHomes } from '../homes/appHomeAdmin.js';
 import type { AppInstallation, AppRunAsMigration } from '../app-hosts/contracts.js';
+import type { AppGrantBinding } from '../auth/types.js';
 import { RuntimeCapabilityError } from '../runtimes/types.js';
 import { BASE_GROUP, BASE_PASSWD, identityAccountName, isNonRootIdentity, isSessionIdentity } from './spawn/identityArgs.js';
 import { renderGroup, renderPasswd, type PasswdEntry } from '../identity/passwd.js';
@@ -349,7 +350,7 @@ export class AppManager {
       const auth = async () => (await import('../auth/services.js')).getAuthServices();
       return liveGrantedContextDeps({
         grants: { get: async (...a) => (await auth()).grants.get(...a) },
-        appScope: (appId) => this.registry.getScopeId(appId) ?? undefined,
+        appBinding: (appId) => this.appGrantBinding(appId),
         store: new ContextStore(opts.dataDir),
         vault: new CredentialVault({ dataDir: opts.dataDir }),
         audit: (entry) => new AdminAudit(() => defaultRedis()).record(entry),
@@ -616,11 +617,22 @@ export class AppManager {
   }
 
   /** The app's current installation (App Host registry), or null when it cannot be read. */
-  async installationIdOf(appId: string): Promise<string | null> {
-    const scope = this.registry.getScopeId(appId);
+  async installationIdOf(appId: string, scope: string | undefined = this.registry.getScopeId(appId)): Promise<string | null> {
     if (!scope) return null;
     try { return (await getAppHostServices().registry.findInstallation(appId, scope))?.installationId ?? null; }
     catch { return null; }
+  }
+
+  /**
+   * What an app grant of `appId` counts for now (S1, auth/GrantStore.ts
+   * `appGrantCounts`): the install scope it resolves to (or `scope`, for a
+   * grant given to a copy in that scope) and that scope's installation.
+   * Read-only; an unreadable record is no installation, so the grant does
+   * not count (fail closed).
+   */
+  async appGrantBinding(appId: string, scope?: string): Promise<AppGrantBinding> {
+    const s = scope ?? this.registry.getScopeId(appId);
+    return { scope: s, installationId: await this.installationIdOf(appId, s) };
   }
 
   /**
@@ -678,6 +690,47 @@ export class AppManager {
   }
 
   /**
+   * S1 (5-main), in kernel init after the App Host migration: every app
+   * grant from before 5-main is pinned to the installation it was given to
+   * (the app id's installation in the grant's `appScope`; GrantStore
+   * `attachInstallations`), audited `grant.migrated`. A grant whose app has
+   * no installation is pinned to none: it never counts and no future
+   * installation under that id inherits it (grant it again). Idempotent;
+   * never fatal: until it ran, those grants do not count (fail closed), and
+   * the next boot retries. Waits for the App Host migration.
+   */
+  private async migrateGrantInstallations(): Promise<void> {
+    if (!this.appHostsReady) {
+      console.warn('[AppManager] grant installation migration waits for the App Host migration: app grants from before 5-main do not count until it ran');
+      return;
+    }
+    try {
+      const auth = (await import('../auth/services.js')).getAuthServices();
+      const hosts = getAppHostServices().registry;
+      const pinned = await auth.grants.attachInstallations(async (appId, appScope) => {
+        const scope = appScope ?? this.registry.getScopeId(appId);
+        // Throws on a read error: nothing is pinned to none by a Valkey hiccup.
+        return scope ? (await hosts.findInstallation(appId, scope))?.installationId ?? null : null;
+      });
+      for (const p of pinned) {
+        const message = p.installationId
+          ? `pinned grant ${p.permission} of app ${p.subject.id} to installation ${p.installationId}`
+          : `grant ${p.permission} of app ${p.subject.id} has no installation${p.appScope ? ` in scope ${p.appScope}` : ''}: it no longer counts; grant it again`;
+        console.log(`[AppManager] ${message}`);
+        await auth.audit.record({
+          by: { kind: 'system' }, action: 'grant.migrated', target: `app:${p.subject.id}`, ...(p.installationId ? {} : { outcome: 'failed' }),
+          detail: {
+            subject: `app:${p.subject.id}`, permission: p.permission, scope: p.scope.kind === 'os' ? 'os' : `${p.scope.kind}:${p.scope.id}`,
+            appScope: p.appScope ?? null, installationId: p.installationId, message,
+          },
+        }).catch(() => undefined);
+      }
+    } catch (err) {
+      console.warn(`[AppManager] grant installation migration failed: ${(err as Error).message}`);
+    }
+  }
+
+  /**
    * Stream C (Q7), in kernel init after the runtime migration (D78): the
    * Context migration (context/migratePhase5.ts: continuity grants, owner
    * keys to the owner's vault, a report). Idempotent; never fatal: on an
@@ -693,15 +746,20 @@ export class AppManager {
     }
     try {
       const auth = (await import('../auth/services.js')).getAuthServices();
+      const apps: ContextMigrationApp[] = [];
+      for (const m of this.registry.getAll()) {
+        apps.push({
+          appId: m.id, scope: String(this.registry.getScopeId(m.id) ?? m.scopeId), dir: m.appDir, context: m.context ?? [],
+          installationId: await this.installationIdOf(m.id),
+        });
+      }
       const r = await migratePhase5Context({
         dataDir: this.dataDir,
         kv: () => defaultKv() as never,
         store: new ContextStore(this.dataDir),
         vault: new CredentialVault({ dataDir: this.dataDir }),
         grants: auth.grants,
-        apps: () => this.registry.getAll().map((m) => ({
-          appId: m.id, scope: String(this.registry.getScopeId(m.id) ?? m.scopeId), dir: m.appDir, context: m.context ?? [],
-        })),
+        apps: () => apps,
         scan: (app, keys) => {
           const m = this.registry.getById(app.appId);
           return m ? contractScan(app.dir, m, keys) : [];
@@ -1362,6 +1420,8 @@ export class AppManager {
       console.warn(`[AppManager] sidecar reconcile failed: ${(err as Error).message}`);
     });
     await this.migrateAppHosts();
+    // S1: app grants pinned to their installation, before the Context migration grants more.
+    await this.migrateGrantInstallations();
     // D75: before any pool fill or service start, so every start resolves on the recorded runtimes.
     await this.migrateRuntimes();
     // Stream C (Q7): before any start, so the first spawn already gets only granted keys.

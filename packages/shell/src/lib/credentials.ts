@@ -36,11 +36,11 @@ export interface CredentialDeps extends ApprovalServiceDeps {
   vault: Pick<CredentialVault, 'store' | 'list' | 'resolve' | 'reveal' | 'handleOf' | 'removeConsumer' | 'remove' | 'describe'>;
   grants: {
     get(subject: GrantSubject, permission: string, scope: GrantScope): Promise<unknown>;
-    grant(subject: GrantSubject, permission: string, opts: { by: core.GrantedBy; appScope?: string; scope: GrantScope }): Promise<unknown>;
+    grant(subject: GrantSubject, permission: string, opts: { by: core.GrantedBy; appScope?: string; installationId?: string; scope: GrantScope }): Promise<unknown>;
     revoke(subject: GrantSubject, permission: string, scope: GrantScope): Promise<unknown>;
   };
-  /** The install scope an app id resolves to, for pinning a grant. */
-  appScope(appId: string): string | undefined;
+  /** The install scope an app id resolves to and its installation, for pinning a grant (S1). */
+  appBinding(appId: string): Promise<core.AppGrantBinding>;
 }
 
 export function liveCredentialDeps(): CredentialDeps {
@@ -50,8 +50,8 @@ export function liveCredentialDeps(): CredentialDeps {
     resolve: async (request) => (await import('./auth.ts')).resolveCaller(request),
     vault: new core.CredentialVault(),
     grants: svc.grants,
-    appScope: (appId) => {
-      try { return core.getAppManager().registry.getScopeId(appId) ?? undefined; } catch { return undefined; }
+    appBinding: async (appId) => {
+      try { return await core.getAppManager().appGrantBinding(appId); } catch { return { scope: undefined, installationId: null }; }
     },
   };
 }
@@ -163,10 +163,10 @@ function serverInstance(r: ResolvedPrincipal): core.InstancePrincipal | Response
   return p as core.InstancePrincipal;
 }
 
-/** Whether `appId` holds the read grant of `name` in `userId`'s vault, pinned to its install scope. */
+/** Whether `appId` holds the read grant of `name` in `userId`'s vault, pinned to its install scope and installation. */
 async function holdsRead(deps: CredentialDeps, appId: string, userId: string, name: string): Promise<boolean> {
-  const g = await deps.grants.get({ kind: 'app', id: appId }, readPermission(name), core.userScope(userId)) as { appScope?: string } | null;
-  return core.appGrantCounts(g, deps.appScope(appId));
+  const g = await deps.grants.get({ kind: 'app', id: appId }, readPermission(name), core.userScope(userId)) as core.GrantRecord | null;
+  return core.appGrantCounts(g, await deps.appBinding(appId));
 }
 
 async function reveal(deps: CredentialDeps, p: core.InstancePrincipal, userId: string, name: string, via: string): Promise<string | null> {
@@ -190,6 +190,10 @@ export async function readCredential(request: Request, handle: string | undefine
   if (!held || held.consumer !== p.appId) return json({ error: 'not-found' }, 404);
 
   if (!(await holdsRead(deps, p.appId, userId, held.name))) {
+    const binding = await deps.appBinding(p.appId);
+    if (!binding.installationId) {
+      return json({ error: 'no-installation', message: `${p.appId} has no installation record: a read grant is given to one installation of it.` }, 409);
+    }
     const read: CredentialRead = { name: held.name, app: p.appId };
     const gate = actionGate(deps, p, { approvalId: presentedApproval(request) });
     if (!(await gate.allows('credential.read', read))) {
@@ -201,9 +205,8 @@ export async function readCredential(request: Request, handle: string | undefine
     }
     const decided = gate.consumed()?.decidedBy;
     const by = decided?.kind === 'user' ? core.userAttribution({ userId: decided.userId, sessionId: decided.sessionId }) : core.operatorAttribution();
-    const appScope = deps.appScope(p.appId);
     await deps.grants.grant({ kind: 'app', id: p.appId }, readPermission(held.name), {
-      by, scope: core.userScope(userId), ...(appScope ? { appScope } : {}),
+      by, scope: core.userScope(userId), ...(binding.scope ? { appScope: binding.scope } : {}), installationId: binding.installationId,
     });
     await audit(deps, {
       by, action: 'vault.read-granted', target: `vault:${held.name}`, outcome: 'ok',

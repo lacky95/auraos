@@ -20,6 +20,9 @@ import { NexusManager } from '../dist/nexus/NexusManager.js';
 import { AppManager } from '../dist/app-manager/AppManager.js';
 import { AppRegistry } from '../dist/app-manager/AppRegistry.js';
 import { OsEventBus } from '../dist/ipc/OsEventBus.js';
+import { GrantStore, appGrantCounts, contextReadPermission } from '../dist/auth/GrantStore.js';
+import { Authorizer } from '../dist/auth/Authorizer.js';
+import { grantedContextValue, liveGrantedContextDeps } from '../dist/context/grantedContext.js';
 
 const ROOT = mkdtempSync(join(tmpdir(), 'aura-apphost-'));
 const server = new KvServer();
@@ -798,4 +801,142 @@ test('built-in: a same-id user copy never counts as the trusted system app (AppM
   assert.equal(trusted('user'), false, 'a same-id user copy that shadows it');
   assert.equal(trusted('global'), false, 'a same-id global copy');
   assert.equal(trusted(null), false, 'no copy');
+});
+
+// ── S1 (5-main): app grants are pinned to the installation they were given to ──
+// GrantStore + Authorizer + the Context lookup over the same Valkey as the
+// real installation lifecycle: what the owner granted reaches that
+// installation only, never a new app under the same id and scope.
+
+const S1_PERM = 'notifications.popup';
+function grantWorld() {
+  const grants = new GrantStore(() => redis);
+  const bindingOf = async (appId, scope = 'user') => ({ scope, installationId: (await registry.findInstallation(appId, scope))?.installationId ?? null });
+  const authz = new Authorizer({ grants, declared: () => [S1_PERM], appBinding: (appId) => bindingOf(appId) });
+  const decide = (appId) => authz.authorize({ kind: 'instance', appId, instanceId: `${appId}-1`, verification: 'verified' }, S1_PERM);
+  const context = liveGrantedContextDeps({
+    grants, appBinding: (appId) => bindingOf(appId),
+    store: { resolveEnv: async () => ({}), get: async () => 'secret-v' }, vault: { reveal: async () => null }, audit: async () => undefined,
+  });
+  const readsKey = async (appId) => 'value' in await grantedContextValue({ appId, declared: ['S1_KEY'], key: 'S1_KEY' }, context);
+  const grant = async (appId) => {
+    const { installationId } = await bindingOf(appId);
+    for (const p of [S1_PERM, contextReadPermission('S1_KEY')]) await grants.grant({ kind: 'app', id: appId }, p, { by: { kind: 'system' }, appScope: 'user', installationId });
+  };
+  return { grants, decide, readsKey, grant, bindingOf };
+}
+
+test('S1: the granted installation keeps its grants across a restart (a new Authorizer, a re-sync) and an update of that installation', async () => {
+  const w = grantWorld();
+  const id = 'com.example.granted';
+  const originId = randomUUID();
+  const first = await lifecycle.sync({ appId: id, originId, scope: 'user', source: SRC });
+  await w.grant(id);
+  assert.equal((await w.decide(id)).allow, true);
+  assert.equal(await w.readsKey(id), true);
+  // A shell restart: the boot migration syncs the same facts; a fresh Authorizer over the same store.
+  await lifecycle.sync({ appId: id, originId, scope: 'user', source: SRC });
+  const restarted = grantWorld();
+  assert.equal((await restarted.decide(id)).allow, true);
+  // A store update: same origin, a new source: the same installation, updated.
+  const upd = await lifecycle.sync({ appId: id, originId, scope: 'user', source: { kind: 'oci', ref: 'reg.example/apps/notes:2.0.0' } });
+  assert.equal(upd.installation.installationId, first.installation.installationId);
+  assert.equal((await restarted.decide(id)).allow, true);
+  assert.equal(await restarted.readsKey(id), true);
+});
+
+test('S1: rm app then dev new under the same id: the new installation inherits no grant, its Context keys included', async () => {
+  const w = grantWorld();
+  const id = 'com.example.recreated';
+  const old = await lifecycle.sync({ appId: id, originId: randomUUID(), scope: 'user', source: SRC });
+  await w.grant(id);
+  assert.equal((await w.decide(id)).allow, true);
+  // `aura rm app` (Delete app data) retires the installation; `aura dev new` brings a new origin.
+  await lifecycle.retireApp(id, 'user');
+  assert.equal((await w.decide(id)).allow, false, 'no installation: nothing counts');
+  const fresh = await lifecycle.sync({ appId: id, originId: randomUUID(), scope: 'user', source: { kind: 'local', ref: '/scaffold' } });
+  assert.notEqual(fresh.installation.installationId, old.installation.installationId);
+  const d = await w.decide(id);
+  assert.equal(d.allow, false);
+  assert.match(d.reason, /another installation of com\.example\.recreated/);
+  assert.equal(await w.readsKey(id), false, 'context.read:<KEY> is not inherited either');
+  assert.equal((await w.grants.get({ kind: 'app', id }, S1_PERM)).installationId, old.installation.installationId, 'the record still names the old one');
+  // The owner grants the new app: from then on it counts, for it.
+  await w.grant(id);
+  assert.equal((await w.decide(id)).allow, true);
+});
+
+test('S1: keep-data uninstall, then a different-origin reinstall (deny) inherits nothing; the same origin restored keeps its grant', async () => {
+  const w = grantWorld();
+  const id = 'com.example.kept';
+  const origin = randomUUID();
+  await lifecycle.sync({ appId: id, originId: origin, scope: 'user', source: SRC });
+  await w.grant(id);
+  await lifecycle.reserveApp(id, 'user');
+  const other = { appId: id, originId: randomUUID(), scope: 'user', source: SRC };
+  const deny = await lifecycle.checkRestore(other, true);
+  assert.equal(deny.kind, 'deny');
+  await lifecycle.completeInstall(other, deny, []);
+  assert.equal((await w.decide(id)).allow, false, 'a different app under the same id');
+  assert.equal(await w.readsKey(id), false);
+
+  const id2 = 'com.example.restored';
+  const origin2 = randomUUID();
+  const before = await lifecycle.sync({ appId: id2, originId: origin2, scope: 'user', source: SRC });
+  await w.grant(id2);
+  await lifecycle.reserveApp(id2, 'user');
+  const same = { appId: id2, originId: origin2, scope: 'user', source: SRC };
+  const restore = await lifecycle.checkRestore(same, true);
+  assert.equal(restore.kind, 'restore');
+  await lifecycle.completeInstall(same, restore, []);
+  assert.equal((await registry.findInstallation(id2, 'user')).installationId, before.installation.installationId);
+  assert.equal((await w.decide(id2)).allow, true, 'the restored installation is the one that was granted');
+});
+
+test('S1: a replaced origin (dev origin --reassign, scaffold --force) is a new installation: the grant does not follow', async () => {
+  const w = grantWorld();
+  const id = 'com.example.reassigned';
+  await lifecycle.sync({ appId: id, originId: randomUUID(), scope: 'user', source: SRC });
+  await w.grant(id);
+  await lifecycle.sync({ appId: id, originId: randomUUID(), scope: 'user', source: SRC });
+  assert.equal((await w.decide(id)).allow, false);
+});
+
+test('S1 migration: grants from before 5-main are pinned once to their installation; one without is pinned to none and never inherited', async () => {
+  const w = grantWorld();
+  const legacy = (appId, permission, appScope) => redis.multi()
+    .hset(`grant:app:${appId}`, `os|${permission}`, JSON.stringify({ subject: { kind: 'app', id: appId }, permission, scope: { kind: 'os' }, appScope, grantedAt: 1, grantedBy: { kind: 'system' } }))
+    .sadd('grant:idx', `grant:app:${appId}`).exec();
+  const live = 'com.example.live';
+  const gone = 'com.example.gone';
+  const inst = await lifecycle.sync({ appId: live, originId: randomUUID(), scope: 'user', source: SRC });
+  await legacy(live, S1_PERM, 'user');
+  await legacy(gone, S1_PERM, 'user');
+  await w.grants.grant({ kind: 'apiKey', id: 'k1' }, S1_PERM, { by: { kind: 'system' } });
+  assert.equal((await w.decide(live)).allow, false, 'not pinned yet: does not count (fail closed)');
+  // The AppManager's lookup: the installation of the app id in the grant's scope; throws on a read error.
+  const installationOf = async (appId, appScope) => (await registry.findInstallation(appId, appScope ?? 'user'))?.installationId ?? null;
+  await assert.rejects(w.grants.attachInstallations(async () => { throw new Error('ECONNREFUSED'); }), /ECONNREFUSED/);
+  assert.equal((await w.grants.get({ kind: 'app', id: live }, S1_PERM)).installationId, undefined, 'a read error pins nothing to none');
+  const pinned = await w.grants.attachInstallations(installationOf);
+  assert.deepEqual(pinned.map((p) => [p.subject.id, p.installationId]).sort(), [[gone, null], [live, inst.installation.installationId]].sort());
+  assert.deepEqual(await w.grants.attachInstallations(installationOf), [], 'idempotent');
+  assert.equal((await w.decide(live)).allow, true, 'the installation that was granted keeps it');
+  assert.equal((await w.grants.get({ kind: 'apiKey', id: 'k1' }, S1_PERM)).installationId, undefined, 'API key grants are not app grants');
+  // A future app under the deleted id: a new installation, and the pinned-to-none grant stays unattached.
+  await lifecycle.sync({ appId: gone, originId: randomUUID(), scope: 'user', source: SRC });
+  assert.deepEqual(await w.grants.attachInstallations(installationOf), []);
+  assert.equal((await w.grants.get({ kind: 'app', id: gone }, S1_PERM)).installationId, null);
+  assert.equal((await w.decide(gone)).allow, false);
+});
+
+test('S1: an app grant needs the installation it is given to; only app grants have one', async () => {
+  const grants = new GrantStore(() => redis);
+  await assert.rejects(grants.grant({ kind: 'app', id: 'com.example.none' }, S1_PERM, { by: { kind: 'system' }, appScope: 'user' }), (e) => e.status === 409 && /has none/.test(e.message));
+  await assert.rejects(grants.grant({ kind: 'apiKey', id: 'k1' }, S1_PERM, { by: { kind: 'system' }, installationId: 'i-1' }), (e) => e.status === 400);
+  assert.equal(appGrantCounts({ appScope: 'user', installationId: 'i-1' }, { scope: 'user', installationId: 'i-1' }), true);
+  assert.equal(appGrantCounts({ appScope: 'user', installationId: 'i-1' }, { scope: 'user', installationId: 'i-2' }), false);
+  assert.equal(appGrantCounts({ appScope: 'user', installationId: null }, { scope: 'user', installationId: null }), false, 'pinned to none never counts');
+  assert.equal(appGrantCounts({ appScope: 'user' }, { scope: 'user', installationId: 'i-1' }), false, 'unpinned never counts');
+  assert.equal(appGrantCounts({ appScope: 'global', installationId: 'i-1' }, { scope: 'user', installationId: 'i-1' }), false, 'another scope');
 });

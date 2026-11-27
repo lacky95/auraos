@@ -67,7 +67,7 @@ function deps({ system = {}, vault = vaultFake(), scopes = { [APP]: 'global', [O
   const store = systemStore(system);
   return {
     audits, store, vault,
-    d: liveGrantedContextDeps({ grants, appScope: (a) => scopes[a], store, vault, audit: async (e) => { audits.push(e); } }),
+    d: liveGrantedContextDeps({ grants, appBinding: async (a) => ({ scope: scopes[a], installationId: scopes[a] ? 'inst-1' : null }), store, vault, audit: async (e) => { audits.push(e); } }),
   };
 }
 
@@ -75,7 +75,7 @@ test('context.read:<KEY> is a privileged, app-only, OS-wide permission', async (
   assert.ok(CONTEXT_READ_PERMISSION_RE.test('context.read:GEMINI_API_KEY'));
   assert.ok(!CONTEXT_READ_PERMISSION_RE.test('context.read:lower'));
   assert.ok(isPrivilegedPermission(contextReadPermission('X')));
-  await grants.grant({ kind: 'app', id: APP }, contextReadPermission('X'), { by, appScope: 'global' });
+  await grants.grant({ kind: 'app', id: APP }, contextReadPermission('X'), { by, appScope: 'global', installationId: 'inst-1' });
   await assert.rejects(grants.grant({ kind: 'apiKey', id: 'k1' }, contextReadPermission('X'), { by }), GrantError);
   await assert.rejects(grants.grant({ kind: 'app', id: APP }, contextReadPermission('X'), { by, scope: userScope('default') }), GrantError);
 });
@@ -83,12 +83,12 @@ test('context.read:<KEY> is a privileged, app-only, OS-wide permission', async (
 test('an app without a grant sees no key; undeclared keys never reach it', async () => {
   const { d } = deps({ system: { A_KEY: { value: 'a', inject: ['env'] }, B_KEY: { value: 'b', inject: ['env', 'file'] } } });
   // Nothing declared (Counter): nothing, whatever is granted.
-  await grants.grant({ kind: 'app', id: OTHER }, contextReadPermission('A_KEY'), { by, appScope: 'system' });
+  await grants.grant({ kind: 'app', id: OTHER }, contextReadPermission('A_KEY'), { by, appScope: 'system', installationId: 'inst-1' });
   assert.deepEqual((await grantedContextEnv({ appId: OTHER, declared: [] }, d)).env, {});
   // Declared, not granted: nothing.
   assert.deepEqual((await grantedContextEnv({ appId: APP, declared: ['A_KEY', 'B_KEY'] }, d)).env, {});
   // Declared and granted: exactly that key.
-  await grants.grant({ kind: 'app', id: APP }, contextReadPermission('A_KEY'), { by, appScope: 'global' });
+  await grants.grant({ kind: 'app', id: APP }, contextReadPermission('A_KEY'), { by, appScope: 'global', installationId: 'inst-1' });
   const r = await grantedContextEnv({ appId: APP, declared: ['A_KEY', 'B_KEY'] }, d);
   assert.deepEqual(r.env, { A_KEY: 'a' });
   assert.deepEqual(r.sources, { A_KEY: 'system' });
@@ -96,7 +96,7 @@ test('an app without a grant sees no key; undeclared keys never reach it', async
 
 test('a granted key not injected as env stays out of the env; context.get still answers', async () => {
   const { d } = deps({ system: { OS_ONLY: { value: 'o', inject: [] }, FILE_ONLY: { value: 'f', inject: ['file'] } } });
-  for (const k of ['OS_ONLY', 'FILE_ONLY']) await grants.grant({ kind: 'app', id: APP }, contextReadPermission(k), { by, appScope: 'global' });
+  for (const k of ['OS_ONLY', 'FILE_ONLY']) await grants.grant({ kind: 'app', id: APP }, contextReadPermission(k), { by, appScope: 'global', installationId: 'inst-1' });
   assert.deepEqual((await grantedContextEnv({ appId: APP, declared: ['OS_ONLY', 'FILE_ONLY'] }, d)).env, {});
   assert.deepEqual(await grantedContextValue({ appId: APP, declared: ['OS_ONLY'], key: 'OS_ONLY' }, d), { value: 'o', source: 'system' });
 });
@@ -105,22 +105,22 @@ test('context.get refusals: undeclared, not granted, not set', async () => {
   const { d } = deps({ system: { A_KEY: { value: 'a', inject: ['env'] } } });
   assert.deepEqual(await grantedContextValue({ appId: APP, declared: [], key: 'A_KEY' }, d), { refused: 'undeclared' });
   assert.deepEqual(await grantedContextValue({ appId: APP, declared: ['A_KEY'], key: 'A_KEY' }, d), { refused: 'not-granted' });
-  await grants.grant({ kind: 'app', id: APP }, contextReadPermission('MISSING'), { by, appScope: 'global' });
+  await grants.grant({ kind: 'app', id: APP }, contextReadPermission('MISSING'), { by, appScope: 'global', installationId: 'inst-1' });
   assert.deepEqual(await grantedContextValue({ appId: APP, declared: ['MISSING'], key: 'MISSING' }, d), { refused: 'not-set' });
 });
 
 test('a grant counts only for the install scope it was given for', async () => {
   const { d } = deps({ system: { A_KEY: { value: 'a', inject: ['env'] } }, scopes: { [APP]: 'user' } });
-  await grants.grant({ kind: 'app', id: APP }, contextReadPermission('A_KEY'), { by, appScope: 'global' });
+  await grants.grant({ kind: 'app', id: APP }, contextReadPermission('A_KEY'), { by, appScope: 'global', installationId: 'inst-1' });
   assert.deepEqual((await grantedContextEnv({ appId: APP, declared: ['A_KEY'] }, d)).env, {}, 'a user-scope copy shadowing the global app');
-  assert.equal(appGrantCounts({ appScope: 'global' }, 'global'), true);
-  assert.equal(appGrantCounts(null, 'global'), false);
+  assert.equal(appGrantCounts({ appScope: 'global', installationId: 'inst-1' }, { scope: 'global', installationId: 'inst-1' }), true);
+  assert.equal(appGrantCounts(null, { scope: 'global', installationId: 'inst-1' }), false);
 });
 
 test('personal keys: the user\'s vault first (audited), then the system Context; per user', async () => {
   const vault = vaultFake({ default: { REG_PASS: 'owner-v' }, bob: {} });
   const { d, audits } = deps({ system: { REG_PASS: { value: 'sys-v', inject: ['env'] } }, vault });
-  await grants.grant({ kind: 'app', id: 'com.aura.terminal' }, credentialReadPermission('REG_PASS'), { by, scope: userScope('default'), appScope: 'system' });
+  await grants.grant({ kind: 'app', id: 'com.aura.terminal' }, credentialReadPermission('REG_PASS'), { by, scope: userScope('default'), appScope: 'system', installationId: 'inst-1' });
   const owner = await grantedContextEnv({ appId: 'com.aura.terminal', declared: ['REG_PASS'], userId: 'default', instanceId: 'com.aura.terminal-1' }, d);
   assert.deepEqual(owner.env, { REG_PASS: 'owner-v' });
   assert.deepEqual(owner.sources, { REG_PASS: 'vault' });
@@ -165,11 +165,11 @@ function migrationFixture(over = {}) {
     async set() {}, async del() { return false; },
   };
   const apps = [
-    { appId: 'io.lakner.callgemini', scope: 'global', dir: '/x', context: ['GEMINI_API_KEY'] },
-    { appId: 'io.lakner.callgemini.copy', scope: 'global', dir: '/y', context: ['GEMINI_API_KEY'] },
-    { appId: 'com.aura.terminal', scope: 'system', dir: '/t', context: ['LAKNERIO_REGISTRY_USER', 'LAKNERIO_REGISTRY_PASSWORD'] },
-    { appId: 'com.aura.counter', scope: 'system', dir: '/c', context: [] },
-    { appId: 'io.lakner.gh', scope: 'global', dir: '/g', context: [] },
+    { appId: 'io.lakner.callgemini', scope: 'global', dir: '/x', installationId: 'inst-1', context: ['GEMINI_API_KEY'] },
+    { appId: 'io.lakner.callgemini.copy', scope: 'global', dir: '/y', installationId: 'inst-1', context: ['GEMINI_API_KEY'] },
+    { appId: 'com.aura.terminal', scope: 'system', dir: '/t', installationId: 'inst-1', context: ['LAKNERIO_REGISTRY_USER', 'LAKNERIO_REGISTRY_PASSWORD'] },
+    { appId: 'com.aura.counter', scope: 'system', dir: '/c', installationId: 'inst-1', context: [] },
+    { appId: 'io.lakner.gh', scope: 'global', dir: '/g', installationId: 'inst-1', context: [] },
   ];
   const d = {
     dataDir, kv: () => rawKv, store, vault, grants, apps: () => apps,
@@ -233,7 +233,7 @@ test('migration: continuity grants, owner keys to the vault, test keys injected 
 test('migration: an owner vault entry that exists is kept; missing apps and keys are skipped', async () => {
   const { d, vault } = migrationFixture();
   vault.data.default = { LAKNERIO_REGISTRY_USER: 'already' };
-  const r = await migratePhase5Context({ ...d, apps: () => [{ appId: 'com.aura.terminal', scope: 'system', dir: '/t', context: ['LAKNERIO_REGISTRY_USER'] }] });
+  const r = await migratePhase5Context({ ...d, apps: () => [{ appId: 'com.aura.terminal', scope: 'system', dir: '/t', installationId: 'inst-1', context: ['LAKNERIO_REGISTRY_USER'] }] });
   assert.equal(vault.data.default.LAKNERIO_REGISTRY_USER, 'already');
   assert.match(r.rows.find((x) => x.key === 'LAKNERIO_REGISTRY_USER').detail, /already holds it/);
   assert.equal(await grants.get({ kind: 'app', id: 'io.lakner.callgemini' }, contextReadPermission('GEMINI_API_KEY')), null);

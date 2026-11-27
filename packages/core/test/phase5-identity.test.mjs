@@ -489,7 +489,7 @@ test('GrantStore: a user holds app.use/app.jump only; nobody else holds them; id
 
 test('Authorizer: a user or an instance acting for it holds its app grants; absent grants deny; foreign principals are refused first (A1)', async () => {
   const grants = new GrantStore(r, now);
-  const authz = new Authorizer({ grants, declared: () => [], appScope: () => 'system', localSystemId: () => 'sys-local' });
+  const authz = new Authorizer({ grants, declared: () => [], appBinding: async () => ({ scope: 'system', installationId: 'inst-1' }), localSystemId: () => 'sys-local' });
   const perm = 'app.use:i1';
   await grants.grant({ kind: 'user', id: 'uaaaaaaaaaaaaaaa' }, perm, { by: operatorAttribution() });
   const member = { kind: 'user', userId: 'uaaaaaaaaaaaaaaa', role: 'member', sessionId: 's', verification: 'verified', systemId: 'sys-local' };

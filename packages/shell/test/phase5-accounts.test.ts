@@ -48,7 +48,7 @@ const input = (principal: AccessPrincipal, rule: AccessRule, via: DecideInput['a
 });
 
 test('C2: a member satisfies no owner level; the owner does', async () => {
-  const d = createDecide({ authorizer: new Authorizer({ grants: memoryGrants(), declared: () => [], appScope: () => 'user' }) });
+  const d = createDecide({ authorizer: new Authorizer({ grants: memoryGrants(), declared: () => [], appBinding: async () => ({ scope: 'user', installationId: 'inst-1' }) }) });
   assert.equal((await d(input(owner, OWNER_RULE))).outcome, 'allow');
   assert.deepEqual(await d(input(member, OWNER_RULE)), { outcome: 'deny', reason: 'wrong-principal' });
   assert.equal((await d(input(member, INSTANCE_RULE))).outcome, 'deny');
@@ -56,7 +56,7 @@ test('C2: a member satisfies no owner level; the owner does', async () => {
 
 test('C7: a member holds an app-permission rule only with its own user grant', async () => {
   const grants = memoryGrants();
-  const d = createDecide({ authorizer: new Authorizer({ grants, declared: () => [], appScope: () => 'user' }) });
+  const d = createDecide({ authorizer: new Authorizer({ grants, declared: () => [], appBinding: async () => ({ scope: 'user', installationId: 'inst-1' }) }) });
   assert.deepEqual(await d(input(member, USE_RULE)), { outcome: 'deny', reason: 'missing-permission' });
   (grants as unknown as { add(k: string, i: string, p: string): void }).add('user', MEMBER_ID, 'app.use:inst-1');
   assert.deepEqual(await d(input(member, USE_RULE)), { outcome: 'allow', reason: 'app-permission' });
@@ -70,7 +70,7 @@ test('D85 A1: a foreign-system principal is refused before any role or grant rul
   const grants = memoryGrants();
   (grants as unknown as { add(k: string, i: string, p: string): void }).add('user', MEMBER_ID, 'app.use:inst-1');
   const d = createDecide({
-    authorizer: new Authorizer({ grants, declared: () => [], appScope: () => 'user' }),
+    authorizer: new Authorizer({ grants, declared: () => [], appBinding: async () => ({ scope: 'user', installationId: 'inst-1' }) }),
     ownerAgent: () => true,
   });
   const remoteOwner = { ...owner, systemId: 'another-aura' };

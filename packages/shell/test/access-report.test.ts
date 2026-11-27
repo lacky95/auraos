@@ -48,7 +48,7 @@ const operator: AccessPrincipal = { kind: 'operator', verification: 'verified' }
 const authorizer = (declared: Record<string, string[]> = {}) => new Authorizer({
   grants: { get: async () => null } as never,
   declared: (id: string) => declared[id],
-  appScope: () => 'user',
+  appBinding: async () => ({ scope: 'user', installationId: 'inst-1' }),
 });
 
 const input = (principal: AccessPrincipal, rule: AccessRule | null, resource: Partial<DecideInput['resource']> = {}): DecideInput => ({

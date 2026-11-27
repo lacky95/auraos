@@ -183,6 +183,18 @@ export type GrantScope =
   /** One user (D56): a `credential.read:<NAME>` grant reads that user's vault entry only. */
   | { kind: 'user'; id: string };
 
+/**
+ * What an app grant counts for now (S1, 5-main): the install scope the app id
+ * resolves to and that scope's installation (null: none). A grant counts only
+ * for the installation it was given to (`GrantStore.appGrantCounts`), so a
+ * new app under the same id (delete and recreate, a different-origin
+ * reinstall, a replaced origin) inherits nothing.
+ */
+export interface AppGrantBinding {
+  scope: string | undefined;
+  installationId: string | null;
+}
+
 /** Reserved scopes for federation (D47), types only, like `ReservedGrantSubject`. */
 export type ReservedGrantScope = { kind: 'system'; systemId: string };
 export const OS_SCOPE: GrantScope = Object.freeze({ kind: 'os' as const });

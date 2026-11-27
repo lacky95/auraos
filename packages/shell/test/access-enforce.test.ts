@@ -71,7 +71,7 @@ const declared: Record<string, string[]> = {
 const authorizer = new Authorizer({
   grants: { get: async () => null } as never,
   declared: (id: string) => declared[id],
-  appScope: (id: string) => scopes[id],
+  appBinding: async (id: string) => ({ scope: scopes[id], installationId: scopes[id] ? 'inst-1' : null }),
 });
 
 /** What a route's own hasPermission check answered (core's MVP auto-grant counts), and what `enforce` answers. */
@@ -238,9 +238,9 @@ test('D29: TerminalX lists the Terminal\'s instances with its terminal.sessions.
   const of = (id: string) => ({ path: `/api/apps/${id}/instances`, route, params: { id } });
   const granted: Record<string, string[]> = { ...declared, 'com.acme.notes': [...declared['com.acme.notes']!, 'terminal.sessions.list'] };
   const tx = new Authorizer({
-    grants: { get: async (s: { id: string }, p: string) => (s.id === 'com.acme.notes' && p === 'terminal.sessions.list' ? { appScope: 'user' } : null) } as never,
+    grants: { get: async (s: { id: string }, p: string) => (s.id === 'com.acme.notes' && p === 'terminal.sessions.list' ? { appScope: 'user', installationId: 'inst-1' } : null) } as never,
     declared: (id: string) => granted[id],
-    appScope: (id: string) => scopes[id],
+    appBinding: async (id: string) => ({ scope: scopes[id], installationId: scopes[id] ? 'inst-1' : null }),
   });
   const asTx = async (call: ReturnType<typeof of>) => {
     const r = await accessGate(ctx(call), { ...deps('enforce', { principal: inst('com.acme.notes'), via: 'instance-token' }), authorizer: tx });

@@ -132,7 +132,7 @@ test('B7: the observer counts it per app, and the decision is unchanged', async 
     registry: { getById: (id: string) => (id === 'com.a.app' ? {} : undefined) },
   };
   const deps: ObserverDeps = {
-    authorizer: new Authorizer({ grants: { get: async () => null } as never, declared: () => [], appScope: () => 'user' }),
+    authorizer: new Authorizer({ grants: { get: async () => null } as never, declared: () => [], appBinding: async () => ({ scope: 'user', installationId: 'inst-1' }) }),
     mgr: () => mgr as never,
     services: () => null,
     redisReady: () => true,

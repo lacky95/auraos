@@ -8,7 +8,7 @@ export {
   credentialNamespace, isCredentialHandle, isCredentialName,
 } from './CredentialVault.js';
 export type { CredentialSummary, CredentialVaultOptions, VaultKv } from './CredentialVault.js';
-export { appGrantCounts, grantedContextEnv, grantedContextValue, liveGrantedContextDeps } from './grantedContext.js';
+export { grantedContextEnv, grantedContextValue, liveGrantedContextDeps } from './grantedContext.js';
 export type {
   ContextRefusal, ContextSource, GrantedContextDeps, GrantedContextRequest, LiveGrantedContextOptions,
 } from './grantedContext.js';

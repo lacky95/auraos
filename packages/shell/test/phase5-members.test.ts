@@ -36,7 +36,7 @@ function setup() {
     get: async (s: { kind: string; id: string }, p: string) => (held.has(`${s.kind}:${s.id}|${p}`) ? { permission: p } : null),
   } as unknown as GrantStore;
   const deps: DecideDeps = {
-    authorizer: new Authorizer({ grants, declared: () => [], appScope: () => 'system' }),
+    authorizer: new Authorizer({ grants, declared: () => [], appBinding: async () => ({ scope: 'system', installationId: 'inst-1' }) }),
     instanceOwner: (id) => INSTANCES[id] ?? null,
     installationOf: async (appId) => (appId === 'com.aura.terminal' ? 'inst-term' : null),
   };
@@ -114,7 +114,7 @@ test('D82: a member signs itself out and reads its own session; it reaches no ow
 
 test('D82: accounts are the host operator\'s alone, in every mode; not the owner\'s login, not an owner agent', async () => {
   const deps: DecideDeps = {
-    authorizer: new Authorizer({ grants: { get: async () => null } as unknown as GrantStore, declared: () => [], appScope: () => 'system' }),
+    authorizer: new Authorizer({ grants: { get: async () => null } as unknown as GrantStore, declared: () => [], appBinding: async () => ({ scope: 'system', installationId: 'inst-1' }) }),
     ownerAgent: () => true,
   };
   const d = createDecide(deps);
@@ -191,7 +191,7 @@ test('owner decision (5-main): a member\'s Terminal acts with the member\'s own 
   const instances: Record<string, string | null> = { ...INSTANCES, 'io.ex.notes-1': 'default', 'io.ex.notes-2': MEMBER };
   const d = createDecide({
     // The Terminal app holds its declared app grants (the owner's); a member's Terminal must not inherit them.
-    authorizer: new Authorizer({ grants, declared: (id: string) => (id === 'com.aura.terminal' ? ['apps.mount'] : []), appScope: () => 'system' }),
+    authorizer: new Authorizer({ grants, declared: (id: string) => (id === 'com.aura.terminal' ? ['apps.mount'] : []), appBinding: async () => ({ scope: 'system', installationId: 'inst-1' }) }),
     instanceOwner: (id) => instances[id] ?? null,
     installationOf: async (appId) => ({ 'com.aura.terminal': 'inst-term', 'io.ex.notes': 'inst-notes' } as Record<string, string>)[appId] ?? null,
     ownerAgent: (p) => p.appId === 'com.aura.terminal' && INSTANCES[p.instanceId] === 'default',
@@ -230,7 +230,7 @@ test('5-main integration (I.2 + D69): a member\'s app.use reaches its own Termin
   const held = new Set<string>(['user:' + MEMBER + '|app.use:inst-term', 'user:' + MEMBER + '|app.use:inst-shelld']);
   const grants = { get: async (s: { kind: string; id: string }, p: string) => (held.has(`${s.kind}:${s.id}|${p}`) ? { permission: p } : null) } as unknown as GrantStore;
   const d = createDecide({
-    authorizer: new Authorizer({ grants, declared: () => [], appScope: () => 'system' }),
+    authorizer: new Authorizer({ grants, declared: () => [], appBinding: async () => ({ scope: 'system', installationId: 'inst-1' }) }),
     instanceOwner: (id) => INSTANCES[id] ?? null,
     installationOf: async (appId) => ({ 'com.aura.terminal': 'inst-term', 'com.aura.aurashelld': 'inst-shelld' } as Record<string, string>)[appId] ?? null,
   });

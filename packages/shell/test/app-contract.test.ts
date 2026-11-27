@@ -95,7 +95,7 @@ test('permissions.check: the app behind the call, as a rule decides; the owner h
   const authorizer = new core.Authorizer({
     grants: { get: async () => null } as never,
     declared: (id: string) => (id === 'com.ex.notes' ? ['sidecars.spawn', 'notifications.popup'] : undefined),
-    appScope: () => 'user',
+    appBinding: async () => ({ scope: 'user', installationId: 'inst-1' }),
   });
   const held = (p: core.Principal, n: string) => permissionHeld({ authorizer }, p, n, true);
   const call = (resolved: ResolvedPrincipal, q: string) => checkPermissions(req(`/api/user/me/permissions?${q}`), { resolve: async () => resolved, held });

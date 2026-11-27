@@ -71,11 +71,12 @@ class MemoryGrants {
   m = new Map<string, Record<string, unknown>>();
   key = (s: GrantSubject, p: string, sc: GrantScope) => `${s.kind}:${s.id}|${scopeKey(sc)}|${p}`;
   async get(s: GrantSubject, p: string, sc: GrantScope) { return this.m.get(this.key(s, p, sc)) ?? null; }
-  async grant(s: GrantSubject, p: string, o: { by: unknown; appScope?: string; scope: GrantScope }) {
+  async grant(s: GrantSubject, p: string, o: { by: unknown; appScope?: string; installationId?: string; scope: GrantScope }) {
     // The real GrantStore's own validation: an app's credential.read for one user only.
     assert.ok(core.CREDENTIAL_READ_PERMISSION_RE.test(p));
     assert.equal(o.scope.kind, 'user');
-    const record = { subject: s, permission: p, scope: o.scope, appScope: o.appScope, grantedBy: o.by };
+    assert.ok(o.installationId, 'an app grant is given to one installation (S1)');
+    const record = { subject: s, permission: p, scope: o.scope, appScope: o.appScope, installationId: o.installationId, grantedBy: o.by };
     this.m.set(this.key(s, p, o.scope), record);
     return { record, changed: true };
   }
@@ -100,6 +101,8 @@ let via: string;
 let responses: string[];
 /** The desktop's scheme as the shell sees it (D56: HTTP stays allowed, with a notice). */
 let scheme: 'http' | 'https';
+/** What an app grant counts for now (S1): the app's scope and installation. */
+let binding: core.AppGrantBinding;
 
 function deps(): CredentialDeps & ApprovalRouteDeps {
   const d: CredentialDeps & ApprovalRouteDeps = {
@@ -121,7 +124,7 @@ function deps(): CredentialDeps & ApprovalRouteDeps {
     rateKey: () => 'ip:10.0.0.1',
     vault,
     grants,
-    appScope: () => 'user',
+    appBinding: async () => binding,
     storeCredential: (userId, ask, value, record) => storeApprovedCredential(d, userId, ask, value, record),
   };
   return d;
@@ -137,6 +140,7 @@ beforeEach(() => {
   via = 'instance-token';
   responses = [];
   scheme = 'https';
+  binding = { scope: 'user', installationId: 'inst-1' };
 });
 
 const req = (method: string, path: string, body?: unknown, headers: Record<string, string> = {}) => new Request(`http://shell.test${path}`, {
@@ -326,7 +330,7 @@ test('a raw read is refused without the grant, allowed with it, and audited; ano
     resolve: async () => ({ principal: NOTES, via: 'instance-token' } as unknown as ResolvedPrincipal),
     declared: () => declared, signal: () => undefined,
     context: core.liveGrantedContextDeps({
-      grants: grants as never, appScope: () => 'user', store: { get: async () => null, resolveEnv: async () => ({}) },
+      grants: grants as never, appBinding: async () => binding, store: { get: async () => null, resolveEnv: async () => ({}) },
       vault, audit: async (e) => { audits.push(e as never); },
     }),
   });
@@ -347,6 +351,13 @@ test('a raw read is refused without the grant, allowed with it, and audited; ano
     resolve: async () => ({ principal: SPY, via: 'instance-token' } as unknown as ResolvedPrincipal),
   });
   assert.equal(spyCtx.status, 403);
+
+  // S1: a new app under the same id (deleted and recreated: another installation) reads nothing.
+  binding = { scope: 'user', installationId: 'inst-2' };
+  assert.equal((await readValue(handle)).status, 202, 'the read grant was given to the earlier installation');
+  assert.equal((await readContext(req('GET', '/api/os/context/GITHUB_TOKEN'), 'GITHUB_TOKEN', ctxDeps(['GITHUB_TOKEN']))).status, 403);
+  binding = { scope: 'user', installationId: null };
+  assert.equal((await readValue(handle)).body.error, 'no-installation', 'no installation: nothing to grant to');
 });
 
 test('revoke: one app\'s access, then the whole secret; handles and grants stop working', async () => {

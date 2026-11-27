@@ -9,7 +9,8 @@
  *
  * Stream C (Q7): the approved binding names the app's Context keys
  * (`context[]`); once the install lands, the same decision grants each as
- * `context.read:<KEY>`, attributed to whoever approved it (`grantContext`).
+ * `context.read:<KEY>` to the installation it landed as (S1), attributed to
+ * whoever approved it (`grantContext`).
  * A key the update no longer declares keeps its grant, which counts only
  * while declared.
  *
@@ -33,8 +34,11 @@ type InstallGenerator = AsyncGenerator<NexusProgressEvent, InstallRecord | null,
 export function installGate(
   deps: ApprovalServiceDeps, principal: AccessPrincipal, request: Request, operatorCode: unknown,
   override?: { level: (binding: InstallBinding) => ApprovalLevel; diff: PermissionDiff },
-  /** Where the approved Context keys are granted; default GrantStore and the admin audit. */
-  contextGrants: () => Pick<core.AuthServices, 'grants' | 'audit'> = () => core.getAuthServices(),
+  /** Where the approved Context keys are granted: GrantStore, the admin audit, the installation the app landed as. */
+  contextGrants: () => Pick<core.AuthServices, 'grants' | 'audit'> & { installationOf(appId: string, scope: string): Promise<string | null> } = () => {
+    const svc = core.getAuthServices();
+    return { grants: svc.grants, audit: svc.audit, installationOf: (appId, scope) => core.getAppManager().installationIdOf(appId, scope) };
+  },
 ) {
   const gate = actionGate(deps, principal, {
     approvalId: presentedApproval(request),
@@ -54,12 +58,17 @@ export function installGate(
     grantContext: async (): Promise<void> => {
       if (!approved || !(approved.binding.context ?? []).length) return;
       const { binding, by } = approved;
-      const { grants, audit } = contextGrants();
+      const { grants, audit, installationOf } = contextGrants();
+      const installationId = await installationOf(binding.appId, binding.scope);
+      if (!installationId) {
+        console.warn(`[nexus] ${binding.appId} has no installation in scope ${binding.scope}: its approved Context keys are not granted (aura grant them after it has one)`);
+        return;
+      }
       for (const key of binding.context) {
         try {
-          const r = await grants.grant({ kind: 'app', id: binding.appId }, core.contextReadPermission(key), { by, appScope: binding.scope });
+          const r = await grants.grant({ kind: 'app', id: binding.appId }, core.contextReadPermission(key), { by, appScope: binding.scope, installationId });
           if (r.changed) {
-            await audit.record({ by, action: 'grant', target: `app:${binding.appId}`, outcome: 'ok', detail: { permission: core.contextReadPermission(key), appScope: binding.scope, via: binding.action } })
+            await audit.record({ by, action: 'grant', target: `app:${binding.appId}`, outcome: 'ok', detail: { permission: core.contextReadPermission(key), appScope: binding.scope, installationId, via: binding.action } })
               .catch(() => undefined);
           }
         } catch (err) {

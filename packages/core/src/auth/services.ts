@@ -70,7 +70,9 @@ export function getAuthServices(): AuthServices {
   const authorizer = new Authorizer({
     grants,
     declared: (appId) => registry()?.getById(appId)?.permissions,
-    appScope: (appId) => registry()?.getScopeId(appId),
+    appBinding: async (appId) => {
+      try { return await getAppManager().appGrantBinding(appId); } catch { return { scope: undefined, installationId: null }; }
+    },
   });
   const identity = new LinuxIdentityStore({ redis, hwmFile: defaultHighWaterMarkFile() });
   const clientSessions = new ClientSessionStore({ redis });

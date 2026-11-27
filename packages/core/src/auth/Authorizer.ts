@@ -9,7 +9,8 @@
  *              ENFORCED ones, MVP auto-grant for the rest, as PermissionManager),
  *              PLUS the owner's grant (GrantStore) for privileged ones
  *              (notifications.locked / .popup / .read / .systemModal). A grant only counts
- *              while the app still resolves to the install scope it was given for.
+ *              while the app still resolves to the install scope it was given for,
+ *              and to the installation it was given to (S1, `appGrantCounts`).
  *              `readGrant()` returns the SCOPE of a `notifications.read` grant.
  *   apiKey     its scopes (fixed by the owner at creation) or a GrantStore
  *              grant to the key; nothing else
@@ -41,11 +42,13 @@ function warnLegacy(appId: string, legacy: string, current: string): void {
   warnedLegacy.add(k);
   console.warn(`[auth] ${appId} requests the deprecated permission '${legacy}' — treated as '${current}'; rename it in app.manifest.json`);
 }
-import { GrantStore, NOTIFICATIONS_READ_PERMISSION, USER_APP_PERMISSION_RE, isPrivilegedPermission, canonicalPermission } from './GrantStore.js';
+import {
+  GrantStore, NOTIFICATIONS_READ_PERMISSION, USER_APP_PERMISSION_RE, appGrantCounts, isPrivilegedPermission, canonicalPermission,
+} from './GrantStore.js';
 import { localSystemId } from '../system/systemIdentity.js';
 import type { ReadGrant } from '../notifications/access.js';
 import {
-  isSystemPrincipal, type DeclaredActor, type GrantSubject, type Principal,
+  isSystemPrincipal, type AppGrantBinding, type DeclaredActor, type GrantSubject, type Principal,
 } from './types.js';
 
 export const BASIC_NOTIFICATION_PERMISSION = 'system.notifications';
@@ -60,8 +63,8 @@ export interface AuthorizerDeps {
   grants: GrantStore;
   /** The app's manifest permissions[] (undefined: unknown app). */
   declared(appId: string): string[] | undefined;
-  /** The install scope the app id currently resolves to (system|global|user). */
-  appScope(appId: string): string | undefined;
+  /** The install scope the app id resolves to now (system|global|user) and its installation there (S1). */
+  appBinding(appId: string): Promise<AppGrantBinding>;
   /** This system's id (D47); default `localSystemId()`. Unreadable: every principal naming a system is refused. */
   localSystemId?: () => string;
 }
@@ -168,9 +171,12 @@ export class Authorizer {
           const g = await this.deps.grants.get(subject, action);
           const short = action.startsWith('notifications.') ? action.split('.')[1] : action;
           if (!g) return deny(`'${action}' is requested by ${appId} but not granted — the owner must grant it (aura grant notif-perms ${appId} ${short})`);
-          const scope = this.deps.appScope(appId);
-          if (g.appScope && scope && g.appScope !== scope) {
-            return deny(`'${action}' was granted to ${appId} in scope '${g.appScope}', but the app now resolves to scope '${scope}' — grant it again`);
+          const current = await this.deps.appBinding(appId);
+          if (g.appScope && current.scope && g.appScope !== current.scope) {
+            return deny(`'${action}' was granted to ${appId} in scope '${g.appScope}', but the app now resolves to scope '${current.scope}' — grant it again`);
+          }
+          if (!appGrantCounts(g, current)) {
+            return deny(`'${action}' was granted to another installation of ${appId}, not to this one — the owner must grant it again`);
           }
           return allow(`requested by ${appId} and granted by the owner`);
         }

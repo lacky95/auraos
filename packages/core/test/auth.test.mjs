@@ -58,7 +58,7 @@ before(async () => {
   authz = new Authorizer({
     grants,
     declared: (id) => apps.get(id)?.permissions,
-    appScope: (id) => apps.get(id)?.scope,
+    appBinding: async (id) => ({ scope: apps.get(id)?.scope, installationId: apps.has(id) ? 'inst-1' : null }),
   });
   svc = new NotificationService({ redis, now, authorizer: authz });
 });
@@ -101,7 +101,7 @@ test('Authorizer matrix: system / owner / instance / apiKey / anonymous', async 
   assert.equal(await a(inst('com.example.unknown'), 'system.notifications'), false);
   // privileged: declared but not granted → deny; not declared → deny even if granted
   assert.equal(await a(inst('com.example.priv'), 'notifications.locked'), false);
-  await grants.grant({ kind: 'app', id: 'com.example.basic' }, 'notifications.locked', { by, appScope: 'user' });
+  await grants.grant({ kind: 'app', id: 'com.example.basic' }, 'notifications.locked', { by, appScope: 'user', installationId: 'inst-1' });
   assert.equal(await a(inst('com.example.basic'), 'notifications.locked'), false, 'granted but not requested');
   await grants.revoke({ kind: 'app', id: 'com.example.basic' }, 'notifications.locked');
   // anonymous: basic only
@@ -136,11 +136,11 @@ test('GrantStore: validation, idempotence, listing, permissions:changed events',
     await assert.rejects(grants.grant(s, 'apps.mount', { by }), (e) => e instanceof GrantError && e.status === 400);
     await assert.rejects(grants.grant({ kind: 'user', id: 'x' }, 'notifications.locked', { by }), GrantError);
     await assert.rejects(grants.grant({ kind: 'app', id: '../evil' }, 'notifications.locked', { by }), GrantError);
-    const g1 = await grants.grant(s, 'notifications.popup', { by, appScope: 'user' });
+    const g1 = await grants.grant(s, 'notifications.popup', { by, appScope: 'user', installationId: 'inst-1' });
     assert.equal(g1.changed, true);
     assert.deepEqual(g1.record.scope, { kind: 'os' });
     assert.deepEqual(g1.record.grantedBy, by);
-    const g2 = await grants.grant(s, 'notifications.popup', { by, appScope: 'user' });
+    const g2 = await grants.grant(s, 'notifications.popup', { by, appScope: 'user', installationId: 'inst-1' });
     assert.equal(g2.changed, false);
     assert.equal((await grants.listFor(s)).length, 1);
     assert.ok((await grants.listAll()).some((g) => g.subject.id === 'com.example.priv'));
@@ -186,8 +186,8 @@ test('privileged features: downgraded until granted, accepted at once, downgrade
   r = await svc.create(popReq, P);
   assert.equal(r.notification.popup, false);
 
-  await grants.grant(s, 'notifications.locked', { by, appScope: 'user' });
-  await grants.grant(s, 'notifications.popup', { by, appScope: 'user' });
+  await grants.grant(s, 'notifications.locked', { by, appScope: 'user', installationId: 'inst-1' });
+  await grants.grant(s, 'notifications.popup', { by, appScope: 'user', installationId: 'inst-1' });
   r = await svc.create(lockedReq, P);
   assert.equal(r.notification.type, 'locked');
   assert.deepEqual(r.warnings, []);
@@ -396,12 +396,14 @@ test('rename: stored desktopModal grants migrate to systemModal (subject, scope,
   assert.equal(rec.grantedAt, 1234);
   assert.equal(await redis.hget('grant:app:com.example.legacy', 'os|notifications.desktopModal'), null, 'old field gone');
   assert.equal((await grants.get(subject, 'notifications.desktopModal')).permission, 'notifications.systemModal', 'get() takes the old name too');
-  // The manifest still says desktopModal: it counts as systemModal.
+  // The manifest still says desktopModal: it counts as systemModal (once pinned to its installation, S1).
+  assert.equal((await authz.authorize(inst('com.example.legacy'), 'notifications.systemModal')).allow, false, 'a record from before 5-main is not pinned yet');
+  assert.deepEqual((await grants.attachInstallations(async () => 'inst-1')).map((p) => [p.permission, p.installationId]), [['notifications.systemModal', 'inst-1']]);
   assert.equal((await authz.authorize(inst('com.example.legacy'), 'notifications.systemModal')).allow, true);
   // grant / revoke with the old name act on the new one.
   await grants.revoke(subject, 'notifications.desktopModal');
   assert.equal(await grants.get(subject, 'notifications.systemModal'), null);
-  const g = await grants.grant(subject, 'notifications.desktopModal', { by, appScope: 'user' });
+  const g = await grants.grant(subject, 'notifications.desktopModal', { by, appScope: 'user', installationId: 'inst-1' });
   assert.equal(g.record.permission, 'notifications.systemModal');
   assert.ok(PRIVILEGED_PERMISSIONS.includes('notifications.systemModal') && !PRIVILEGED_PERMISSIONS.includes('notifications.desktopModal'));
   assert.ok(ENFORCED_PERMISSIONS.includes('notifications.systemModal') && ENFORCED_PERMISSIONS.includes('notifications.desktopModal'));
@@ -416,16 +418,16 @@ test('terminal.embed, terminal.sessions.list and terminal.screen.read: requested
     assert.equal((await authz.authorize(inst('com.example.embedder'), perm)).allow, false, `${perm} before the grant`);
     assert.equal((await authz.authorize(inst('com.example.basic'), perm)).allow, false, `${perm} not requested`);
   }
-  await grants.grant(app, 'terminal.embed', { by: BY, appScope: 'user' });
+  await grants.grant(app, 'terminal.embed', { by: BY, appScope: 'user', installationId: 'inst-1' });
   assert.equal((await authz.authorize(inst('com.example.embedder'), 'terminal.embed')).allow, true);
   assert.equal((await authz.authorize(inst('com.example.embedder'), 'terminal.sessions.list')).allow, false, 'listing is separate');
   assert.equal((await authz.authorize(inst('com.example.embedder'), 'terminal.screen.read')).allow, false, 'screen reads are separate');
-  await grants.grant(app, 'terminal.screen.read', { by: BY, appScope: 'user' });
+  await grants.grant(app, 'terminal.screen.read', { by: BY, appScope: 'user', installationId: 'inst-1' });
   assert.equal((await authz.authorize(inst('com.example.embedder'), 'terminal.screen.read')).allow, true);
   await grants.revoke(app, 'terminal.screen.read');
   assert.equal((await authz.authorize(inst('com.example.embedder'), 'terminal.screen.read')).allow, false);
   // A grant to an app that does not request it does nothing.
-  await grants.grant({ kind: 'app', id: 'com.example.basic' }, 'terminal.embed', { by: BY, appScope: 'user' });
+  await grants.grant({ kind: 'app', id: 'com.example.basic' }, 'terminal.embed', { by: BY, appScope: 'user', installationId: 'inst-1' });
   assert.equal((await authz.authorize(inst('com.example.basic'), 'terminal.embed')).allow, false);
   await grants.revoke({ kind: 'app', id: 'com.example.basic' }, 'terminal.embed');
   await grants.revoke(app, 'terminal.embed');
@@ -437,8 +439,8 @@ test('a Terminal session grant is its own record, and revoking the app grant dro
   const app = { kind: 'app', id: 'com.example.embedder' };
   const s1 = terminalSessionScope('com.aura.terminal-2#a3');
   const s2 = terminalSessionScope('com.aura.terminal-2#a4');
-  await grants.grant(app, 'terminal.embed', { by: BY, appScope: 'user' });
-  await grants.grant(app, 'terminal.embed', { by: { kind: 'system' }, appScope: 'user', scope: s1 });
+  await grants.grant(app, 'terminal.embed', { by: BY, appScope: 'user', installationId: 'inst-1' });
+  await grants.grant(app, 'terminal.embed', { by: { kind: 'system' }, appScope: 'user', installationId: 'inst-1', scope: s1 });
   assert.ok(await grants.get(app, 'terminal.embed', s1));
   assert.equal(await grants.get(app, 'terminal.embed', s2), null, 'another session');
   // The OS-wide grant and a session grant are separate fields.
@@ -450,7 +452,7 @@ test('a Terminal session grant is its own record, and revoking the app grant dro
   await refused400(grants.grant(app, 'terminal.embed', { by: BY, scope: terminalSessionScope('no-session') }));
   await refused400(grants.grant(app, 'terminal.embed', { by: BY, scope: { kind: 'user', id: 'x' } }));
   // Revoking one session leaves the app grant; revoking the app grant leaves nothing.
-  await grants.grant(app, 'terminal.embed', { by: { kind: 'system' }, appScope: 'user', scope: s2 });
+  await grants.grant(app, 'terminal.embed', { by: { kind: 'system' }, appScope: 'user', installationId: 'inst-1', scope: s2 });
   await grants.revoke(app, 'terminal.embed', s2);
   assert.equal(await grants.get(app, 'terminal.embed', s2), null);
   assert.ok(await grants.get(app, 'terminal.embed'));
@@ -462,11 +464,11 @@ test('a Terminal session grant is its own record, and revoking the app grant dro
 test('a Terminal session grant records the instance life it was made in, and nothing else may carry one', async () => {
   const app = { kind: 'app', id: 'com.example.embedder' };
   const s1 = terminalSessionScope('com.aura.terminal-2#a3');
-  await grants.grant(app, 'terminal.embed', { by: { kind: 'system' }, appScope: 'user', scope: s1, binding: 'life-1' });
+  await grants.grant(app, 'terminal.embed', { by: { kind: 'system' }, appScope: 'user', installationId: 'inst-1', scope: s1, binding: 'life-1' });
   assert.equal((await grants.get(app, 'terminal.embed', s1)).binding, 'life-1');
   const refused400 = (p) => assert.rejects(p, (err) => err instanceof GrantError && err.status === 400);
-  await refused400(grants.grant(app, 'terminal.embed', { by: { kind: 'system' }, binding: 'life-1' }));
-  await refused400(grants.grant(app, 'terminal.embed', { by: { kind: 'system' }, scope: s1, binding: 'bad life' }));
+  await refused400(grants.grant(app, 'terminal.embed', { by: { kind: 'system' }, installationId: 'inst-1', binding: 'life-1' }));
+  await refused400(grants.grant(app, 'terminal.embed', { by: { kind: 'system' }, installationId: 'inst-1', scope: s1, binding: 'bad life' }));
   await grants.revokeAll(app);
 });
 
@@ -476,10 +478,10 @@ test('an ended Terminal session takes every grant of it along, and nothing else'
   const b = { kind: 'app', id: 'com.example.basic' };
   const s1 = terminalSessionScope('com.aura.terminal-2#a3');
   const s2 = terminalSessionScope('com.aura.terminal-3#a1');
-  await grants.grant(a, 'terminal.embed', { by: BY, appScope: 'user' });
-  await grants.grant(a, 'terminal.embed', { by: { kind: 'system' }, appScope: 'user', scope: s1 });
-  await grants.grant(b, 'terminal.embed', { by: { kind: 'system' }, appScope: 'user', scope: s1 });
-  await grants.grant(a, 'terminal.embed', { by: { kind: 'system' }, appScope: 'user', scope: s2 });
+  await grants.grant(a, 'terminal.embed', { by: BY, appScope: 'user', installationId: 'inst-1' });
+  await grants.grant(a, 'terminal.embed', { by: { kind: 'system' }, appScope: 'user', installationId: 'inst-1', scope: s1 });
+  await grants.grant(b, 'terminal.embed', { by: { kind: 'system' }, appScope: 'user', installationId: 'inst-1', scope: s1 });
+  await grants.grant(a, 'terminal.embed', { by: { kind: 'system' }, appScope: 'user', installationId: 'inst-1', scope: s2 });
   const sameId = (id) => (sc) => sc.kind === 'terminal-session' && sc.id === id;
   assert.equal(await grants.revokeScopes('terminal.embed', sameId('com.aura.terminal-2#a3')), 2);
   assert.equal(await grants.get(a, 'terminal.embed', s1), null);
@@ -504,9 +506,9 @@ test('declaring system.kv.os.<topic>.write grants nothing; the owner\'s grant do
   assert.match(before.reason, /not granted/);
   // Not requested: a grant alone is nothing.
   assert.equal((await authz.authorize(themer, 'system.kv.os.keymap.write')).allow, false);
-  await grants.grant(subject, 'system.kv.os.theme.write', { by, appScope: 'user' });
+  await grants.grant(subject, 'system.kv.os.theme.write', { by, appScope: 'user', installationId: 'inst-1' });
   assert.equal((await authz.authorize(themer, 'system.kv.os.theme.write')).allow, true);
-  await grants.grant(subject, 'system.kv.os.keymap.write', { by, appScope: 'user' });
+  await grants.grant(subject, 'system.kv.os.keymap.write', { by, appScope: 'user', installationId: 'inst-1' });
   assert.equal((await authz.authorize(themer, 'system.kv.os.keymap.write')).allow, false, 'still not requested');
   await grants.revoke(subject, 'system.kv.os.theme.write');
   await grants.revoke(subject, 'system.kv.os.keymap.write');

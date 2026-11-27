@@ -421,10 +421,16 @@ test('install without an approval answers needs-approval with the exact diff; wi
 });
 
 test('stream C: an approved install grants the Context keys it names, attributed to the approver', async () => {
-  const granted: Array<{ id: string; permission: string; appScope?: string; by: unknown }> = [];
+  const granted: Array<{ id: string; permission: string; appScope?: string; installationId?: string; by: unknown }> = [];
   const fakeGrants = () => ({
-    grants: { grant: async (s: { id: string }, permission: string, o: { by: unknown; appScope?: string }) => { granted.push({ id: s.id, permission, appScope: o.appScope, by: o.by }); return { record: {}, changed: true }; } },
+    grants: {
+      grant: async (s: { id: string }, permission: string, o: { by: unknown; appScope?: string; installationId?: string }) => {
+        granted.push({ id: s.id, permission, appScope: o.appScope, installationId: o.installationId, by: o.by });
+        return { record: {}, changed: true };
+      },
+    },
     audit: { record: async () => '' },
+    installationOf: async (appId: string, scope: string) => `inst-${scope}-${appId}`,
   }) as never;
   const binding = { ...BINDING, context: ['OPENAI_API_KEY'] };
   const run = async (headers: Record<string, string> = {}) => {
@@ -438,7 +444,8 @@ test('stream C: an approved install grants the Context keys it names, attributed
   await decide(first.body.approvalId, 'approve', { password: PASSWORD });
   const done = await run({ 'x-aura-approval': first.body.approvalId });
   assert.equal(done.body.ok, true);
-  assert.deepEqual(granted.map((g) => [g.id, g.permission, g.appScope]), [['com.example.notes', 'context.read:OPENAI_API_KEY', 'user']]);
+  assert.deepEqual(granted.map((g) => [g.id, g.permission, g.appScope, g.installationId]),
+    [['com.example.notes', 'context.read:OPENAI_API_KEY', 'user', 'inst-user-com.example.notes']], 'to the installation it landed as (S1)');
   assert.equal((granted[0]!.by as { kind: string }).kind, 'user');
 });
 

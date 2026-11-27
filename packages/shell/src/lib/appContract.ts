@@ -87,7 +87,7 @@ export function liveContextReadDeps(store: Pick<ContextStore, 'get' | 'resolveEn
     },
     context: core.liveGrantedContextDeps({
       grants: svc.grants,
-      appScope: (appId) => { try { return core.getAppManager().registry.getScopeId(appId) ?? undefined; } catch { return undefined; } },
+      appBinding: async (appId) => { try { return await core.getAppManager().appGrantBinding(appId); } catch { return { scope: undefined, installationId: null }; } },
       store,
       vault: new core.CredentialVault(),
       audit: (entry) => svc.audit.record(entry),
