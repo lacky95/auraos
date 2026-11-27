@@ -1,0 +1,37 @@
+---
+/**
+ * Styles of the setup wizard in an app's Activity window (D108 W1,
+ * Wizard.ts, lib/setupWindow.ts). `is:global` because the wizard is built at
+ * runtime inside a window's `.slot-body` and carries no Astro scope
+ * attribute. The components' own rows (`su-*`, `sf-*`) come from
+ * `@aura/ui/styles/setup.css` (W2). Theme tokens only.
+ */
+import '@aura/ui/styles/setup.css';
+---
+<style is:global>
+  .wz-root {
+    position: absolute; inset: 0; z-index: 6; overflow: auto;
+    display: flex; flex-direction: column; gap: 12px; padding: 16px 20px;
+    background: var(--aura-color-bg); color: var(--aura-color-text);
+    font-family: var(--aura-font-mono); font-size: 0.7rem;
+  }
+  .wz-head { display: flex; flex-direction: column; gap: 4px; }
+  .wz-title { margin: 0; font-size: 0.8rem; font-weight: 400; letter-spacing: 0.1em; text-transform: uppercase; color: var(--aura-color-primary); }
+  .wz-sub, .wz-note { margin: 0; font-size: 0.65rem; line-height: 1.5; color: var(--aura-color-text-dim); }
+  .wz-steps { flex-shrink: 0; }
+  .wz-body { display: flex; flex-direction: column; gap: 10px; flex: 1; min-height: 0; }
+  .wz-step-title, .wz-notice-title { margin: 0; font-size: 0.65rem; font-weight: 400; letter-spacing: 0.1em; text-transform: uppercase; color: var(--aura-color-primary); }
+  .wz-notice, .wz-pending, .wz-progress, .wz-blocked { display: flex; flex-direction: column; gap: 8px; }
+  .wz-problem { padding: 6px 8px; border: 1px solid var(--aura-color-danger); }
+  .wz-problem-text { margin: 0; color: var(--aura-color-text); }
+  .wz-problem-hint { margin: 2px 0 0; font-size: 0.62rem; color: var(--aura-color-text-dim); }
+  .wz-actions { display: flex; justify-content: flex-end; gap: 8px; flex-shrink: 0; }
+  .wz-btn {
+    font: inherit; font-size: 0.65rem; letter-spacing: 0.08em; padding: 4px 12px; cursor: pointer;
+    background: var(--aura-color-surface); color: var(--aura-color-text); border: 1px solid var(--aura-color-border);
+  }
+  .wz-btn:hover:not(:disabled) { color: var(--aura-color-primary); border-color: var(--aura-color-primary); }
+  .wz-btn.wz-btn-primary { background: var(--aura-color-primary); color: var(--aura-color-bg); border-color: var(--aura-color-primary); }
+  .wz-btn.wz-btn-primary:hover:not(:disabled) { color: var(--aura-color-bg); }
+  .wz-btn:disabled { opacity: 0.4; cursor: default; }
+</style>

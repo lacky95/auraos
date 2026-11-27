@@ -2,6 +2,7 @@
 import OSLayout from '../layouts/OSLayout.astro';
 import Icon from '../components/ui/Icon.astro';
 import LayoutManager from '../components/layout/LayoutManager.astro';
+import WizardStyles from '../components/setup/WizardStyles.astro';
 import { getAppManager, DEFAULT_WORKSPACE_STATE, readUserPref, readUserPrefValue, type WorkspaceState } from '@aura/core';
 import { sharedKv } from '../lib/sharedKv';
 import { sessionBootInfo, waitForRestore } from '../lib/desktopSession';
@@ -274,6 +275,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
       </div>
     </div>
   </div>
+  <WizardStyles />
 </OSLayout>
 
 <script>
@@ -314,6 +316,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
   import { isHostNestedSender, onAuraChannel, replyTo, senderAppId, setNativeRuntimeCheck } from '../lib/auraChannelShell.ts';
   import { openExternalTab } from '../lib/externalTab.ts';
   import { afterUserClose } from '../lib/lastWindowDialog.ts';
+  import { mountSetupWindow, startWithSetup, type SetupLaunch } from '../lib/setupWindow.ts';
 
   const layoutLog = createLogger('shell:layout');
   const iframeLog = createLogger('shell:iframe');
@@ -1105,6 +1108,11 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
      */
     minimizable?: boolean;
     /**
+     * D108 W1: the launch window shows the app's setup (lib/setupWindow.ts)
+     * instead of its frame, until the setup reports ready.
+     */
+    setup?: SetupLaunch;
+    /**
      * What the app wants shown as this window's id, when that differs from its
      * OS handle. The Terminal reports which SESSION it is showing: a window can
      * change session without the shell being involved at all (same instance,
@@ -1653,7 +1661,36 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     };
   }
 
+  // D108 W1: a launch whose app needs setup keeps its window (the launch
+  // placeholder) in setup state; the app's frame loads only after `ready`,
+  // then the launch goes on in the same window.
+  const setupWaiters = new Map<string, (ready: boolean) => void>();
+  function showSetup(viewId: string, launch: SetupLaunch): Promise<boolean> {
+    if (!views.some((v) => v.viewId === viewId)) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      setupWaiters.set(viewId, resolve);
+      views = views.map((v) => v.viewId === viewId ? { ...v, setup: launch, isLoading: true, lifecycleState: 'setup' } : v);
+      renderLayout();
+    });
+  }
+  function settleSetup(viewId: string, ready: boolean): void {
+    const done = setupWaiters.get(viewId);
+    if (!done) return;
+    setupWaiters.delete(viewId);
+    if (ready) views = views.map((v) => v.viewId === viewId ? { ...v, setup: undefined, lifecycleState: 'starting' } : v);
+    done(ready);
+  }
+  function mountSetupSlot(body: HTMLElement, v: AppView): void {
+    if (!v.setup || body.querySelector('[data-aura-setup-window]')) return;
+    mountSetupWindow(body, { appId: v.appId, appName: v.title, launch: v.setup, onReady: () => settleSetup(v.viewId, true) }, {
+      openApproval: (id) => { void (window as unknown as { auraOpenApproval?: (id: string) => Promise<string> }).auraOpenApproval?.(id); },
+    });
+  }
+
   window.auraLaunchApp = async (appId: string, opts?: { workspaceId?: string }) => {
+    // A window already setting this app up: show it, don't open a second.
+    const inSetup = views.find((v) => v.appId === appId && v.setup);
+    if (inSetup) { focusView_(inSetup.viewId); return; }
     // Optional target workspace: switch to it FIRST so `pushPendingView` and
     // the eventual `addMemberToActive` from `pending.replaceWith` claim the
     // app for that workspace (the context-menu "Open in workspace ▸ X" path).
@@ -1673,7 +1710,8 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
 
       // Activities not supported → original 1:1 instance/view behavior
       if (manifest.activityMode === 'none') {
-        const res = await fetch(`/api/apps/${appId}/start`, { method: 'POST' });
+        const res = await startWithSetup(appId, { showSetup: (launch) => showSetup(pending.pendingId, launch) });
+        if (!res) return; // closed during its setup
         if (!res.ok) { console.error(`Failed to start ${appId}`); pending.drop(); return; }
         const { instanceId, instance } = await res.json();
 
@@ -1722,7 +1760,8 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
       }
 
       if (!targetInstanceId) {
-        const res = await fetch(`/api/apps/${appId}/start`, { method: 'POST' });
+        const res = await startWithSetup(appId, { showSetup: (launch) => showSetup(pending.pendingId, launch) });
+        if (!res) return; // closed during its setup
         if (!res.ok) { console.error(`Failed to start ${appId}`); pending.drop(); return; }
         const { instanceId, instance } = await res.json();
         targetInstanceId = instanceId;
@@ -2173,6 +2212,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     // A maximized window that's being closed must release the maximize state,
     // or the desktop would stay "stuck" promoting a dead viewId.
     if (maximizedViewId === viewId) maximizedViewId = null;
+    settleSetup(viewId, false);
     const v = views.find((x) => x.viewId === viewId);
     if (v && v.instanceId) {
       // Skip backend call for placeholder views (no instance yet).
@@ -2861,6 +2901,7 @@ const dynamicLayoutStyle = ssrPlaced.length > 0 ? ssrGrid.container : 'display:n
     // If the view is still mid-spawn (isLoading=true) we don't have an
     // iframeUrl yet (placeholder views set iframeUrl=''). Don't create the
     // iframe element until we have a real URL.
+    if (v.setup) { mountSetupSlot(body, v); return; }
     if (v.isLoading) return;
 
     const existing = body.querySelector('iframe') as HTMLIFrameElement | null;

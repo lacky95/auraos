@@ -6,7 +6,7 @@
  */
 import type { NexusSource } from '../nexus/types.js';
 import type { ExecutionApproval } from '../identity/execution.js';
-import type { InstallationSetupSummary } from '../setup/contracts.js';
+import type { InstallationSetupSummary, SetupStateView } from '../setup/contracts.js';
 
 export type AppInstallationState = 'active' | 'reserved' | 'retired';
 
@@ -148,8 +148,16 @@ export interface AppHostRegistry {
   listForApp(appId: string): Promise<AppHostRecord[]>;
 }
 
-/** The one answer to "what does this window load?" (`resolveAppFrame()`). */
-export interface ResolvedAppFrame {
+/**
+ * The one answer to "what does this window load?" (`resolveAppFrame()`):
+ * the app's own App Host, or (D108 W1) the shell's setup view for an app
+ * that is not ready yet. No `kind` means the app: existing callers unchanged.
+ */
+export type ResolvedAppFrame = ResolvedAppHostFrame | ResolvedSetupFrame;
+
+/** A window that shows its app: an App Host frame entered through a one-time handoff. */
+export interface ResolvedAppHostFrame {
+  kind?: 'app';
   origin: string;
   url: string;
   label: string;
@@ -163,6 +171,20 @@ export interface ResolvedAppFrame {
    * registry. A same-id copy in another scope is false. Absent on the proxy route.
    */
   system?: boolean;
+}
+
+/**
+ * A window in setup state (D108 W1): the shell's own view inside the
+ * Activity window, in the owner's session. No instance, no handoff: the
+ * app's frame is never loaded before the setup reports `ready`.
+ */
+export interface ResolvedSetupFrame {
+  kind: 'setup';
+  appId: string;
+  /** The setup API's answer; null when it refused (`refusal`). */
+  state: SetupStateView | null;
+  /** The setup API's D105-shaped refusal (503 `unavailable` while this AuraOS has no setup engine). */
+  refusal?: { status: number; error: string; message: string; hint?: string };
 }
 
 /** The one-time code redeemed at `/_aura/handoff`. */
