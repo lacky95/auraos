@@ -15,15 +15,26 @@
  */
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { dirname, extname, join, relative, resolve, sep } from 'node:path';
-import { contractFindings, prodCapability, scanContractSources, type AppManifest } from '@aura/core';
+import { contractFindings, prodCapability, scanContractSources, type AppManifest, type SetupRequirement } from '@aura/core';
 
 export type Severity = 'error' | 'warn' | 'info';
+
+/**
+ * One schema issue as `aura dev validate` prints it. A key the schema does
+ * not allow names the key even when the schema gave its own message (a D108
+ * profile overlay: "a profile overlay may only set …").
+ */
+export function issueText(i: { path: ReadonlyArray<string | number>; message: string; code?: string; keys?: readonly string[] }): string {
+  const keys = i.code === 'unrecognized_keys' && i.keys?.length && !i.keys.every((k) => i.message.includes(`'${k}'`))
+    ? ` (not allowed: ${i.keys.join(', ')})` : '';
+  return `${i.path.join('.')}: ${i.message}${keys}`;
+}
 
 export interface Finding {
   file: string;
   line: number;
   severity: Severity;
-  rule: 'manifest-key' | 'sdk-import' | 'removed-global' | 'proxy-path' | 'upgrade-catch-all' | 'hmr-off' | 'contract' | 'release-build';
+  rule: 'manifest-key' | 'sdk-import' | 'removed-global' | 'proxy-path' | 'upgrade-catch-all' | 'hmr-off' | 'contract' | 'release-build' | 'setup';
   message: string;
 }
 
@@ -492,5 +503,34 @@ export function lintAppSources(appDir: string, opts: LintOptions = {}): Finding[
     out.push(...lintProxyPaths(file, rel, text));
     out.push(...lintUpgradeAndHmr(file, text));
   }
+  return out;
+}
+
+// ─── app setup and operating profiles (D108) ────────────────────────────────
+
+/**
+ * Static warnings over `setup` and `profiles` (the schema already refuses
+ * what is invalid, unknown overlay keys included). §5.11: a `required`
+ * feature or grant under a field `when` holds only while the app's own field
+ * says so: a wrong condition hides a security requirement, so it is a warning.
+ * Whether a profile is feasible needs the live system: not checked here.
+ */
+export function lintSetup(manifestFile: string, text: string, parsed: AppManifest): Finding[] {
+  const lines = text.split('\n');
+  const out: Finding[] = [];
+  const check = (reqs: readonly SetupRequirement[] | undefined, at: string[]) => {
+    (reqs ?? []).forEach((r, i) => {
+      if (r.level !== 'required' || !r.when || !('field' in r.when)) return;
+      const subject = 'feature' in r ? `feature ${r.feature}` : 'grant' in r ? `grant ${r.grant}` : null;
+      if (!subject) return;
+      out.push({
+        file: manifestFile, line: jsonKeyLine(lines, [...at, 'requirements']), severity: 'warn', rule: 'setup',
+        message: `${at.join('.')}.requirements[${i}]: the required ${subject} holds only while field ${r.when.field} is ${'in' in r.when ? r.when.in.join('/') : String(r.when.equals)}; `
+          + 'a wrong condition hides a security requirement (D108 §5.11). Prefer a profile condition, or no condition',
+      });
+    });
+  };
+  check(parsed.setup?.requirements, ['setup']);
+  (parsed.profiles ?? []).forEach((p) => check(p.setup?.requirements, ['profiles', p.id, 'setup']));
   return out;
 }

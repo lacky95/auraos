@@ -4,7 +4,7 @@ import { join, resolve, dirname } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { AppManifestSchema, AURA_CONTRACT, AURA_NPMRC, initRepo, needsNpmrc, newOriginId, portPackageJsonForScope, portToolsForScope, requirementsOf, type AppManifest, type RuntimeRequirements } from '@aura/core';
 import { color, error, fail, info, ok, warn } from '../lib/format.js';
-import { CONTRACT_DOCS_HINT, DOCS_HINT, lintAppSources, lintContract, lintManifestKeys, lintReleaseBuild, type Finding } from '../lib/apphost-lint.js';
+import { CONTRACT_DOCS_HINT, DOCS_HINT, lintAppSources, lintContract, issueText, lintManifestKeys, lintReleaseBuild, lintSetup, type Finding } from '../lib/apphost-lint.js';
 import { promptText, promptChoice, promptConfirm, promptMultiSelect, PromptCancelled, BACK, type MultiSelectMode } from '../lib/prompts.js';
 import { fetchCapabilities, loadState } from '../lib/registry.js';
 import { api } from '../lib/client.js';
@@ -866,6 +866,8 @@ The app contract checks (D48, warnings: report only, except the first error):
   - SDK calls whose permission is missing (user.confirm, storage, osSidecars, notifications)
   - services[] without sidecars.spawn or docker; privileged sidecars without sidecars.privileged
   - the docker CLI or socket without "docker" in tools[]; interfaces.resolve() of a name not in consumes[]
+App setup and operating profiles (D108): the schema checks setup and profiles (an overlay key outside the
+  allowlist is an error); a required feature or grant under a field condition is a warning.
 Runtime requirements (D85 A5, warnings: report only): the capabilities the app needs from its
 runtime, why it needs this host's filesystem (A4), checked against each enabled runtime of the
 AuraOS this runs on (not checked when none is reachable), plus portability notes for fields that
@@ -904,7 +906,7 @@ Skips node_modules, dist, .astro and .next. ${DOCS_HINT}; ${CONTRACT_DOCS_HINT}.
           const text = readFileSync(m, 'utf-8');
           const data = JSON.parse(text) as unknown;
           const result = AppManifestSchema.safeParse(data);
-          if (!result.success) { warn(`${m}: ${result.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`); failed++; }
+          if (!result.success) { warn(`${m}: ${result.error.issues.map(issueText).join('; ')}`); failed++; }
           else {
             schemaOk = true;
             ok(`${m}`);
@@ -917,6 +919,7 @@ Skips node_modules, dist, .astro and .next. ${DOCS_HINT}; ${CONTRACT_DOCS_HINT}.
             findings.push(...lintManifestKeys(m, text, data, result.data, REMOVED_MANIFEST_KEYS));
             findings.push(...lintContract(m, text, result.data, { source: opts.source !== false }));
             findings.push(...lintReleaseBuild(m, text, result.data));
+            findings.push(...lintSetup(m, text, result.data));
             requirements.push({ manifest: result.data, req: requirementsOf(result.data) });
           }
         } catch (err) { warn(`${m}: ${String(err)}`); failed++; }
