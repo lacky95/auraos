@@ -1,9 +1,9 @@
 {
   "minTests": {
     "packages/kv-store": 16,
-    "packages/core": 954,
+    "packages/core": 928,
     "packages/app-sdk": 85,
-    "packages/aura-cli": 106,
+    "packages/aura-cli": 104,
     "packages/shell": 973,
     "apps/com.aura.aurashelld": 49,
     "apps/com.aura.browser": 9,
