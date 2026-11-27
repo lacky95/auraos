@@ -30,7 +30,7 @@ import type { ResolvedSidecarSpec } from '../../app-manager/sidecar-spec.js';
 import type { SidecarRuntimeFacts } from './backends.js';
 import { containerName, sidecarContainerName } from './names.js';
 import { rawSocketArgs } from '../spawn/networkArgs.js';
-import { sidecarIdentityArgs } from '../spawn/identityArgs.js';
+import { SidecarHomeError, isRootInstallation, sidecarIdentityArgs, verifiedNonRootUser } from '../spawn/identityArgs.js';
 import { containerHomeMount } from '../spawn/homeArgs.js';
 import { LOGICAL_HOME_PATH as SHARED_HOME_PATH } from '../../homes/types.js';
 import { MOUNT_ROOT_PATH, MY_TOOLS_PATH } from '../spawn/paths.js';
@@ -135,11 +135,48 @@ async function toolArgs(rt: SidecarRuntimeFacts, dirKey: string, image: string):
   ];
 }
 
+/**
+ * B12b (owner decision 7): the user a root installation's inheritHome sidecar
+ * runs as, verified here before anything is created: the template's `user`,
+ * else the image's own Config.User (`docker image inspect`), only as a
+ * numeric non-root `uid[:gid]` (identityArgs `verifiedNonRootUser`; a name or
+ * an empty user is never assumed to be non-root). A runtime that goes on
+ * pins it with `--user` (identityArgs `sidecarIdentityArgs`, `rootHomeUser`).
+ *
+ * Then (c), cannot escalate: no capabilities and no-new-privileges are set,
+ * but this runtime can't mount the home nosuid. Docker's `--mount` has no
+ * nosuid for a writable volume or bind, and a nosuid bind made on the host
+ * (the mounts helper) doesn't survive a daemon restart, after which the
+ * restart policy starts the sidecar again without it. So it is refused, fail
+ * closed, until the runtime can give the guarantee itself.
+ */
+const HOME_NOSUID_UNAVAILABLE = 'the container runtime cannot mount the home nosuid (docker\'s --mount has no nosuid for a writable volume, and a host-side nosuid bind would not survive a daemon restart)';
+
+/** (a): the verified non-root user, or a `sidecar-home-root-user` refusal. */
+async function rootHomeUser(req: RuntimeWorkloadCreate): Promise<string> {
+  const { spec, appId } = req;
+  let user = spec.user;
+  if (user === undefined) {
+    const r = await docker(['image', 'inspect', spec.image, '--format', '{{.Config.User}}']);
+    if (r.code !== 0) throw new Error(`docker image inspect ${spec.image}: ${r.stderr.trim()}`);
+    user = r.stdout.trim();
+  }
+  const verified = verifiedNonRootUser(user);
+  if (!verified) throw SidecarHomeError.rootUser(appId, spec.template, spec.image, user);
+  return verified;
+}
+
 /** The `docker create` argv of one OS sidecar (golden: test/golden-workload-args.test.mjs). */
 export async function sidecarCreateArgs(
   req: RuntimeWorkloadCreate, rt: SidecarRuntimeFacts, facts: { mountRootSubpath(consumer: string): string; baseImage: string; network?: string },
 ): Promise<string[]> {
   const { instanceId, appId, spec } = req;
+  // B12b: a root installation's home sidecar: verified non-root and unable to escalate, else refused here.
+  // (a) first, then (c): no nosuid home here, so a verified user is refused too (sidecarIdentityArgs has its flags).
+  if (spec.inheritHome && isRootInstallation(req.parentIdentity)) {
+    await rootHomeUser(req);
+    throw SidecarHomeError.escalation(appId, spec.template, 'container', HOME_NOSUID_UNAVAILABLE);
+  }
   const container = sidecarContainerName(instanceId, spec.name);
   const consumer = `${instanceId}--${spec.name}`;
   const identity: Record<string, string> = spec.inheritIdentity ? {
@@ -181,7 +218,7 @@ export async function sidecarCreateArgs(
     ...(spec.limits?.memory ? ['--memory', spec.limits.memory] : []),
     ...(spec.limits?.cpus ? ['--cpus', String(spec.limits.cpus)] : []),
     ...(spec.user ? ['--user', spec.user] : []),
-    // P5-3: an aura-base sidecar that inherits the app's home is the app's own code: the app's identity.
+    // P5-3, B12: a sidecar that inherits the app's home never runs as more than the app.
     ...sidecarIdentityArgs(spec, req.parentIdentity, { appDataVolume: rt.appDataVolume, instanceId, baseImage: facts.baseImage }),
     ...(spec.workdir ? ['--workdir', spec.workdir] : []),
     ...(spec.inheritPermissions && req.permissions?.length ? ['-e', `AURA_PERMISSIONS=${req.permissions.join(',')}`] : []),

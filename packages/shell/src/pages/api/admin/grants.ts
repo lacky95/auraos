@@ -34,10 +34,18 @@ import { ownerUiApp } from '../../../../server/gateway-identity.mjs';
  * operator) who decided, and the requester of an approved request.
  * Grantable: notifications.locked, notifications.popup, notifications.read,
  * notifications.systemModal (phase 6; revoking it releases that sender's modals),
- * context.read:<KEY> (Phase 5 stream C: a system Context key reaches the app).
+ * context.read:<KEY> (Phase 5 stream C: a system Context key reaches the app),
+ * home.inherit.sidecar:<template> (B12b: a root installation's inheritHome
+ * sidecar gets the app's home; still verified non-root and unable to escalate).
  * An app must also REQUEST the permission in its manifest for the grant to count
- * (a Context key: declare it in `context[]`).
+ * (a Context key: declare it in `context[]`; a home sidecar: an `inheritHome`
+ * template of that name in `services[]`).
  */
+/** B12b: the app's `services[]` templates that inherit its home. */
+function homeSidecarTemplates(m: { services?: Array<{ name: string; inheritHome?: boolean }> }): string[] {
+  return (m.services ?? []).filter((x) => x.inheritHome === true).map((x) => x.name);
+}
+
 function fail(err: unknown): Response {
   const status = (err as { status?: unknown }).status;
   const message = err instanceof Error ? err.message : String(err);
@@ -82,6 +90,8 @@ export const GET: APIRoute = async (ctx) => {
       ...(m.permissions ?? []).map((x: string) => core.canonicalPermission(x)).filter((x: string) => core.isPrivilegedPermission(x)),
       // Stream C: each declared Context key is requested as context.read:<KEY>.
       ...(m.context ?? []).map((k: string) => core.contextReadPermission(k)),
+      // B12b: each inheritHome template as home.inherit.sidecar:<name> (it counts for a root installation only).
+      ...homeSidecarTemplates(m).map((n) => core.homeInheritSidecarPermission(n)),
     ])];
     const scope = mgr.registry.getScopeId(m.id) ?? null;
     const asOwner = asOwnerPermissions(m.id, scope, declared);
@@ -133,6 +143,10 @@ export const POST: APIRoute = async (ctx) => {
       // Stream C: a Context key counts only while the app declares it in context[].
       const key = a.permission.slice('context.read:'.length);
       if (!(m.context ?? []).includes(key)) warnings.push(`${a.id} does not declare '${key}' in its manifest context[] — the grant has no effect until it does`);
+    } else if (core.HOME_INHERIT_SIDECAR_PERMISSION_RE.test(a.permission)) {
+      // B12b: a home sidecar grant counts only for an inheritHome template of that name.
+      const name = a.permission.slice('home.inherit.sidecar:'.length);
+      if (!homeSidecarTemplates(m).includes(name)) warnings.push(`${a.id} has no inheritHome template '${name}' in its manifest services[] — the grant has no effect until it does`);
     } else if (!(m.permissions ?? []).some((x: string) => core.canonicalPermission(x) === a.permission)) {
       warnings.push(`${a.id} does not request '${a.permission}' in its manifest — the grant has no effect until it does`);
     }

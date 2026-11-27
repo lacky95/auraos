@@ -27,13 +27,14 @@
  * service account (`/nonexistent`, nologin); `AURA_RUN_AS=user`.
  *
  * There is no fallback: the runner never retries a failed non-root start as
- * root (P5-3). Sidecars keep their image user, except an `aura-base` sidecar
- * that inherits the app's home: it is the app's own code and runs as the app
- * (`sidecarIdentityArgs`).
+ * root (P5-3). Sidecars keep their image user, except one that inherits the
+ * app's home: it never runs as more than the app (`sidecarIdentityArgs`; B12,
+ * B12b).
  */
 import { chmodSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { SpawnIdentity } from '../../identity/types.js';
+import type { AuraErrorBody } from '../../errors/contracts.js';
 import { appAccountName, renderGroup, renderPasswd } from '../../identity/passwd.js';
 import { TERMINAL_SERVICE_ACCOUNT, TERMINAL_SERVICE_GID, TERMINAL_SERVICE_UID } from '../../identity/types.js';
 
@@ -181,13 +182,88 @@ export function containerIdentityArgs(identity: SpawnIdentity | undefined, opts?
 }
 
 /**
- * B12: the user an `inheritHome` sidecar runs as (`uid:gid`), or null when it
- * keeps its image user (a root installation). A template `user` other than
- * this conflicts and is refused.
+ * B12: the user an `inheritHome` sidecar runs as (`uid:gid`), or null for a
+ * root installation, whose sidecar runs as a verified non-root user of its
+ * own (B12b, `verifiedNonRootUser`). A template `user` other than a non-null
+ * value here conflicts and is refused.
  */
 export function inheritHomeUser(parent: SpawnIdentity | null | undefined): string | null {
   if (isApprovedRootIdentity(parent) || isNonRootIdentity(parent)) return `${parent!.uid}:${parent!.gid}`;
   return null;
+}
+
+/**
+ * B12b (owner decision 7): a root installation, the legacy state with no app
+ * identity and no approved root request. Its inheritHome sidecar is the only
+ * one that does not run as its app's identity.
+ */
+export function isRootInstallation(parent: SpawnIdentity | null | undefined): boolean {
+  return !isApprovedRootIdentity(parent) && !isNonRootIdentity(parent);
+}
+
+const NUMERIC_USER_RE = /^(\d{1,10})(?::(\d{1,10}))?$/;
+
+/**
+ * B12b (a): `user` (a template's `user`, else the image's Config.User) as a
+ * verifiably non-root `uid[:gid]`: numeric, uid not 0 and a given gid not 0.
+ * Null for root, an empty user (the image's root) and a name: a name is only
+ * resolved inside the container, so it can't be verified here and is never
+ * assumed to be non-root.
+ */
+export function verifiedNonRootUser(user: string | null | undefined): string | null {
+  const m = NUMERIC_USER_RE.exec((user ?? '').trim());
+  if (!m) return null;
+  const uid = Number(m[1]);
+  const gid = m[2] === undefined ? null : Number(m[2]);
+  if (uid === 0 || uid > 4294967294 || gid === 0 || (gid !== null && gid > 4294967294)) return null;
+  return gid === null ? String(uid) : `${uid}:${gid}`;
+}
+
+export type SidecarHomeRefusal = 'sidecar-home-not-authorized' | 'sidecar-home-root-user' | 'sidecar-home-escalation';
+
+/**
+ * B12b (owner decision 7): a root installation's inheritHome sidecar is
+ * refused unless it is (a) verifiably non-root, (b) explicitly authorized for
+ * the home (`home.inherit.sidecar:<template>`, pinned to the installation)
+ * and (c) unable to escalate (no capabilities, no-new-privileges, the home
+ * mounted nosuid). Nothing is created. The D105 body travels with it.
+ */
+export class SidecarHomeError extends Error {
+  override readonly name = 'SidecarHomeError';
+  readonly body: AuraErrorBody;
+  constructor(readonly code: SidecarHomeRefusal, readonly status: number, body: Omit<AuraErrorBody, 'error'>) {
+    super(body.message);
+    this.body = { error: code, ...body };
+  }
+
+  static notAuthorized(appId: string, template: string): SidecarHomeError {
+    // auth/GrantStore.ts homeInheritSidecarPermission (not imported: a runtime never loads the bus GrantStore uses).
+    const permission = `home.inherit.sidecar:${template}`;
+    return new SidecarHomeError('sidecar-home-not-authorized', 403, {
+      message: `${appId} runs as root (no app identity), so its sidecar '${template}' gets the app's home only with an explicit grant of ${permission} to this installation: not created`,
+      category: 'missing-permission', permission, target: appId,
+      hint: `run the app as its own identity (aura admin apps run-as ${appId} app), or grant it: aura admin grant ${appId} ${permission}`,
+      suggest: [`aura admin apps run-as ${appId} app`, `aura admin grant ${appId} ${permission}`],
+    });
+  }
+
+  static rootUser(appId: string, template: string, image: string, user: string): SidecarHomeError {
+    const what = user ? `'${user}'` : 'empty (root)';
+    return new SidecarHomeError('sidecar-home-root-user', 409, {
+      message: `${appId} runs as root, so its sidecar '${template}' with the app's home must run as a verifiably non-root user, `
+        + `and its user (services[${template}].user, else ${image}'s image user) is ${what}: not created`,
+      category: 'invalid-request', manifestField: `services[${template}].user`, target: appId,
+      hint: `set services[${template}].user to a numeric non-root "uid:gid" the image runs as, or run the app as its own identity (aura admin apps run-as ${appId} app)`,
+    });
+  }
+
+  static escalation(appId: string, template: string, runtime: string, why: string): SidecarHomeError {
+    return new SidecarHomeError('sidecar-home-escalation', 409, {
+      message: `${appId} runs as root, so its sidecar '${template}' gets the app's home only where it can't escalate, and ${why}: not created`,
+      category: 'unsupported-feature', missing: ['nosuidHomeMount'], target: appId, details: { runtime },
+      hint: `run the app as its own identity (aura admin apps run-as ${appId} app): its sidecar then runs as the app's uid`,
+    });
+  }
 }
 
 /** What the sidecar policy needs to know about a sidecar spec. */
@@ -198,28 +274,35 @@ export interface SidecarIdentitySpec {
 }
 
 /**
- * A sidecar's identity (P5-3; B12, D107). A sidecar without the app's home
- * keeps its image user, or the manifest's `services[].user`. A sidecar that
- * inherits the app's home (`inheritHome`) works on the app's files, whatever
- * its image, so it runs as the app's own identity, never more:
+ * A sidecar's identity (P5-3; B12, B12b, D107). A sidecar without the app's
+ * home keeps its image user, or the manifest's `services[].user`. A sidecar
+ * that inherits the app's home (`inheritHome`) works on the app's files,
+ * whatever its image, so it never runs as more than its app:
  *   - an app identity (non-root): that uid:gid, no capabilities,
  *     no-new-privileges; an `aura-base` image also gets the identity files
  *     (a foreign image keeps its own /etc/passwd);
  *   - an approved root request: uid 0 without capabilities, like the app;
- *   - a root installation (legacy, no app identity yet): the image's own user,
- *     without capabilities and with no-new-privileges.
+ *   - a root installation (legacy, no app identity yet; B12b): only the
+ *     verified non-root `rootHomeUser` the runtime resolved, pinned with
+ *     `--user`, without capabilities and with no-new-privileges; without
+ *     one it is refused (never its image's root).
  * A template `user` that conflicts with it is refused by the kernel before
  * this runs (SidecarManager, D105). An image that can't run under the
  * identity fails its start with its own words: never retried as root.
  */
 export function sidecarIdentityArgs(
-  spec: SidecarIdentitySpec, parent: SpawnIdentity | null | undefined, opts: ContainerIdentityOpts & { baseImage: string },
+  spec: SidecarIdentitySpec, parent: SpawnIdentity | null | undefined,
+  opts: ContainerIdentityOpts & { baseImage: string; rootHomeUser?: string },
 ): string[] {
   if (!spec.inheritHome) return [];
   // Under an approved root request: uid 0 without capabilities, like the app.
   if (isApprovedRootIdentity(parent)) return processIdentityFlags(parent!);
-  // A root installation: never more than root without capabilities (its image user, nothing granted).
-  if (!isNonRootIdentity(parent)) return ['--cap-drop', 'ALL', '--security-opt', 'no-new-privileges'];
+  if (!isNonRootIdentity(parent)) {
+    // B12b: a root installation: a verified non-root user, no capabilities, no privilege gain.
+    const user = verifiedNonRootUser(opts.rootHomeUser);
+    if (!user) throw new Error('a root installation\'s inheritHome sidecar needs a verified non-root user: not created');
+    return ['--user', user, '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges'];
+  }
   return [...processIdentityFlags(parent), ...(spec.image === opts.baseImage ? identityFileMounts(opts.appDataVolume, opts.instanceId) : [])];
 }
 

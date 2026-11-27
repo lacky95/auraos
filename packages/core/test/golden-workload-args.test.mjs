@@ -45,7 +45,7 @@ function normalise(v, dataDir) {
 // ─── Sidecars ───────────────────────────────────────────────────────────────
 
 /** In-memory docker CLI (execFile), recording every argv. */
-function fakeDocker(t, { failStart = false, dieOnBoot = false, missingImages = [] } = {}) {
+function fakeDocker(t, { failStart = false, dieOnBoot = false, missingImages = [], imageUsers = {} } = {}) {
   const containers = new Map();
   const calls = [];
   let nextId = 1;
@@ -62,6 +62,8 @@ function fakeDocker(t, { failStart = false, dieOnBoot = false, missingImages = [
     if (verb === 'volume') reply(cb, args.at(-1) === `aura-${APP}-legacy` ? 0 : 1, '', 'no such volume');
     else if (verb === 'image') {
       if (args.includes('{{.Id}}') && missingImages.includes(args.at(-1))) reply(cb, 1, '', 'No such image');
+      // B12b: the image's own Config.User (empty: root).
+      else if (args.includes('{{.Config.User}}')) reply(cb, 0, `${imageUsers[args[2]] ?? ''}\n`);
       else reply(cb, 0, args.includes('{{.Id}}') ? 'sha256:x' : 'PATH=/usr/local/bin:/usr/bin:/bin\n');
     } else if (verb === 'pull') {
       const image = args.at(-1);
@@ -134,7 +136,7 @@ const CRED = {
   redact: (text) => text,
 };
 
-function sidecars(t, { toolsMode = 'hardlink', pullCredential, identity = { uid: 200001, gid: 200001, range: 'app' } } = {}) {
+function sidecars(t, { toolsMode = 'hardlink', pullCredential, identity = { uid: 200001, gid: 200001, range: 'app' }, homeGrants } = {}) {
   const dataDir = fs.mkdtempSync(join(tmpdir(), 'aura-gw-'));
   fs.mkdirSync(join(dataDir, 'aura', 'toolchain', 'bin'), { recursive: true });
   for (const b of ['jq', 'rg']) fs.writeFileSync(join(dataDir, 'aura', 'toolchain', 'bin', b), `#!/bin/sh\necho ${b}\n`);
@@ -158,6 +160,8 @@ function sidecars(t, { toolsMode = 'hardlink', pullCredential, identity = { uid:
     mounts: { reapplyConsumer: async () => ({ restored: 0, inherited: 0, failed: 0 }), removeAll: () => {}, forgetConsumer: () => {} },
     context: async () => ({ env: { CTX_KEY: 'ctx-value' }, known: new Set(['CTX_KEY']) }),
     ...(pullCredential ? { pullCredential } : {}),
+    // B12b: the templates granted home.inherit.sidecar:<template> (absent: none).
+    ...(homeGrants ? { homeInheritGranted: async (appId, template) => appId === APP && homeGrants.includes(template) } : {}),
     instance: (id) => (id === INST ? { appId: APP, instanceDataDir: join(dataDir, 'scopes/users/default/apps', APP, INST), ...(identity ? { identity } : {}) } : null),
     appHome: async () => ({ kind: 'app-global', hostPath: join(dataDir, 'aura/apphomes/i/global'), volumeSubpath: 'aura/apphomes/i/global',
       logicalPath: '/home/aura', uid: 200001, gid: 200001, mode: 0o700 }),
@@ -219,16 +223,27 @@ test('golden sidecar argv: prepull-credential and image-auth refusal', async (t)
   recorded['sidecar:prepull-credential'] = normalise({ calls: d.calls, err: err && { name: err.name, code: err.code, status: err.status, message: err.message } }, dataDir);
 });
 
-// B12: the identity of a foreign-image home sidecar, under an app identity and under a root installation,
-// and the refusal of a conflicting template user (nothing is created).
+// B12: the identity of a foreign-image home sidecar under an app identity, and the refusal of a
+// conflicting template user (nothing is created). B12b (owner decision 7): under a root installation,
+// refused without the grant; with it, refused for a root image user, and for a verified non-root user
+// too on this runtime (no nosuid home); nothing is created in any case.
 test('golden sidecar argv: B12 home sidecar identity (foreign image, app and root parent; conflicting user refused)', async (t) => {
-  const d = fakeDocker(t);
+  const d = fakeDocker(t, { imageUsers: { 'ghcr.io/example/nonroot:1': '1001:1001' } });
   const app1 = sidecars(t);
   await app1.mgr.spawn(INST, { template: 'homeforeign' }, app);
   const err = await app1.mgr.spawn(INST, { template: 'homeuser' }, app).then(() => null, (e) => e);
-  const root = sidecars(t, { identity: null });
-  await root.mgr.spawn(INST, { template: 'homeforeign', name: 'homeforeign-root' }, app);
-  recorded['sidecar:b12-home-identity'] = normalise({ calls: d.calls, refusal: err && { status: err.status, body: err.body } }, app1.dataDir);
+  const refusal = (e) => e && { status: e.status, body: e.body };
+  const ungranted = sidecars(t, { identity: null });
+  const noGrant = await ungranted.mgr.spawn(INST, { template: 'homeforeign', name: 'homeforeign-root' }, app).then(() => null, (e) => e);
+  const granted = sidecars(t, { identity: null, homeGrants: ['homeforeign', 'homeuser', 'homenonroot'] });
+  const rootImage = await granted.mgr.spawn(INST, { template: 'homeforeign', name: 'homeforeign-root' }, app).then(() => null, (e) => e);
+  const nonRootUser = await granted.mgr.spawn(INST, { template: 'homeuser', name: 'homeuser-root' }, app).then(() => null, (e) => e);
+  const nonRootImage = await granted.mgr.spawn(INST, { template: 'homenonroot' }, app).then(() => null, (e) => e);
+  recorded['sidecar:b12-home-identity'] = normalise({
+    calls: d.calls, refusal: refusal(err),
+    root: { noGrant: refusal(noGrant), rootImage: refusal(rootImage), nonRootUser: refusal(nonRootUser), nonRootImage: refusal(nonRootImage) },
+  }, app1.dataDir);
+  assert.ok(!d.calls.some((c) => c[0] === 'create' && c.some((a) => /-root$|homenonroot$/.test(a))), 'nothing is created for a root installation');
 });
 
 for (const [name, opt] of Object.entries({ 'fail-start': { failStart: true }, 'die-on-boot': { dieOnBoot: true } })) {

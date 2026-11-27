@@ -21,7 +21,7 @@ const APP = 'io.test.app';
 const INST = 'io.test.app-2';
 
 /** In-memory docker: just enough of the CLI for SidecarManager. */
-function fakeDocker(t, { failStart = false, dieOnBoot = false, missingImages = [], onCreate, onPull } = {}) {
+function fakeDocker(t, { failStart = false, dieOnBoot = false, missingImages = [], onCreate, onPull, imageUsers = {} } = {}) {
   const containers = new Map();   // name → { id, state, labels, args }
   const calls = [];
   let nextId = 1;
@@ -37,6 +37,7 @@ function fakeDocker(t, { failStart = false, dieOnBoot = false, missingImages = [
     if (verb === 'volume') reply(cb, 1, '', 'no such volume');
     else if (verb === 'image') {
       if (args.includes('{{.Id}}') && missingImages.includes(args.at(-1))) reply(cb, 1, '', 'No such image');
+      else if (args.includes('{{.Config.User}}')) reply(cb, 0, `${imageUsers[args[2]] ?? ''}\n`);
       else reply(cb, 0, args.includes('{{.Id}}') ? 'sha256:x' : 'PATH=/usr/bin:/bin\n');
     }
     else if (verb === 'pull' || verb === '--config') {
@@ -88,6 +89,9 @@ function fakeDocker(t, { failStart = false, dieOnBoot = false, missingImages = [
   return { containers, calls };
 }
 
+/** P5-3: an installation's own app identity (B12: its home sidecars run as it). */
+const APP_IDENTITY = { uid: 200001, gid: 200001, range: 'app' };
+
 function fixture(t, opts = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), 'aura-sc-'));
   const tokens = new InstanceTokens(join(dataDir, 'aura', 'secrets', 'k'));
@@ -127,7 +131,9 @@ function fixture(t, opts = {}) {
     },
     // Stream C: the parent's granted Context keys, and every Context key name.
     context: async () => ({ env: { CTX_KEY: 'ctx-value' }, known: new Set(['CTX_KEY', 'UNGRANTED_KEY']) }),
-    instance: (id) => (id === INST ? { appId: APP, instanceDataDir: join(dataDir, 'scopes/users/default/apps', APP, INST) } : null),
+    instance: (id) => (id === INST ? { appId: APP, instanceDataDir: join(dataDir, 'scopes/users/default/apps', APP, INST), ...(opts.identity ? { identity: opts.identity } : {}) } : null),
+    // B12b: the templates granted home.inherit.sidecar:<template>.
+    ...(opts.homeGrants ? { homeInheritGranted: async (appId, template) => appId === APP && opts.homeGrants.includes(template) } : {}),
     // D65: the parent's App Home (AppManager.appHomeOf).
     appHome: async (id) => (opts.appHome !== undefined ? opts.appHome : id === INST ? {
       kind: 'app-global', hostPath: join(dataDir, 'aura/apphomes/inst-1/global'), volumeSubpath: 'aura/apphomes/inst-1/global',
@@ -381,7 +387,7 @@ test('spawn and remove notify `changed` (AppManager refreshes its sidecar cache 
 test('inheritHome mounts the parent\'s App Home (D65) and sets HOME after the template env', async (t) => {
   const d = fakeDocker(t);
   const svc = [{ name: 'home', image: 'alpine:3', command: ['sleep', 'infinity'], env: { HOME: '/elsewhere' }, volumes: [], inheritHome: true }];
-  await fixture(t, { services: svc }).mgr.spawn(INST, { template: 'home' }, { instanceId: INST });
+  await fixture(t, { services: svc, identity: APP_IDENTITY }).mgr.spawn(INST, { template: 'home' }, { instanceId: INST });
   const c = d.containers.get(`aura-${INST}--home`);
   const mounts = flag(c.args, '--mount');
   assert.ok(mounts.some((m) => m === 'type=volume,source=appvol,target=/home/aura,volume-subpath=aura/apphomes/inst-1/global'), mounts.join(' | '));
@@ -397,10 +403,61 @@ test('inheritHome mounts the parent\'s App Home (D65) and sets HOME after the te
 test('inheritHome fails closed: no resolvable App Home, or a Private Home, creates no sidecar', async (t) => {
   const d = fakeDocker(t);
   const svc = [{ name: 'home', image: 'alpine:3', command: ['sleep', 'infinity'], volumes: [], inheritHome: true }];
-  await assert.rejects(fixture(t, { services: svc, appHome: null }).mgr.spawn(INST, { template: 'home' }, { instanceId: INST }), /inheritHome has nothing to mount/);
+  await assert.rejects(fixture(t, { services: svc, appHome: null, identity: APP_IDENTITY }).mgr.spawn(INST, { template: 'home' }, { instanceId: INST }), /inheritHome has nothing to mount/);
   const priv = { kind: 'private', hostPath: '/data/aura/home/default', volumeSubpath: 'aura/home/default', logicalPath: '/home/aura', uid: 1000, gid: 1000, mode: 0o700 };
-  await assert.rejects(fixture(t, { services: svc, appHome: priv }).mgr.spawn(INST, { template: 'home' }, { instanceId: INST }), /inheritHome has nothing to mount/);
+  await assert.rejects(fixture(t, { services: svc, appHome: priv, identity: APP_IDENTITY }).mgr.spawn(INST, { template: 'home' }, { instanceId: INST }), /inheritHome has nothing to mount/);
   assert.equal(d.containers.get(`aura-${INST}--home`), undefined);
+});
+
+// B12b (owner decision 7): a root installation's home sidecar only if granted for its template and
+// installation, verifiably non-root and unable to escalate; otherwise refused with its D105 body.
+test('B12b: a root installation\'s home sidecar fails closed (no grant; root user; no nosuid home here)', async (t) => {
+  const d = fakeDocker(t, { imageUsers: { 'ghcr.io/x/nonroot:1': '1001:1001', 'ghcr.io/x/named:1': 'node' } });
+  const svc = [
+    { name: 'home', image: 'alpine:3', command: ['sleep', 'infinity'], volumes: [], inheritHome: true, inheritIdentity: true },
+    { name: 'homeuser', image: 'alpine:3', command: [], volumes: [], inheritHome: true, user: '1000:1000' },
+    { name: 'homeroot', image: 'alpine:3', command: [], volumes: [], inheritHome: true, user: '0:0' },
+    { name: 'homenonroot', image: 'ghcr.io/x/nonroot:1', command: [], volumes: [], inheritHome: true },
+    { name: 'homenamed', image: 'ghcr.io/x/named:1', command: [], volumes: [], inheritHome: true },
+    { name: 'plain', image: 'alpine:3', command: ['sleep', 'infinity'], volumes: [] },
+  ];
+  const code = (p) => p.then(() => null, (e) => [e.status, e.body?.error]);
+  // (b) no grant: refused before anything is pulled or made, whatever the user.
+  const none = fixture(t, { services: svc });
+  assert.deepEqual(await code(none.mgr.spawn(INST, { template: 'home' }, { instanceId: INST })), [403, 'sidecar-home-not-authorized']);
+  assert.deepEqual(await code(none.mgr.spawn(INST, { template: 'homenonroot' }, { instanceId: INST })), [403, 'sidecar-home-not-authorized']);
+  // A grant for another template does not count.
+  const other = fixture(t, { services: svc, homeGrants: ['homeuser'] });
+  assert.deepEqual(await code(other.mgr.spawn(INST, { template: 'home' }, { instanceId: INST })), [403, 'sidecar-home-not-authorized']);
+  // (a) granted, but root: the image's empty user, an explicit 0:0, or a name that can't be verified.
+  const f = fixture(t, { services: svc, homeGrants: ['home', 'homeuser', 'homeroot', 'homenonroot', 'homenamed'] });
+  const forgot = [];
+  const forget = f.tokens.forget.bind(f.tokens);
+  f.tokens.forget = (i, sc) => { forgot.push(sc); return forget(i, sc); };
+  for (const template of ['home', 'homeroot', 'homenamed']) {
+    assert.deepEqual(await code(f.mgr.spawn(INST, { template }, { instanceId: INST })), [409, 'sidecar-home-root-user'], template);
+  }
+  // (c) granted and verifiably non-root (template user or image user), but no nosuid home on this runtime.
+  for (const template of ['homeuser', 'homenonroot']) {
+    assert.deepEqual(await code(f.mgr.spawn(INST, { template }, { instanceId: INST })), [409, 'sidecar-home-escalation'], template);
+  }
+  assert.ok(!d.calls.some((c) => c[0] === 'create'), 'nothing is created');
+  assert.ok(forgot.includes('home'), 'its token is forgotten again');
+  // A home sidecar made before B12b (same spec, running) is not adopted: it is removed and refused.
+  const made = fixture(t, { services: svc, identity: APP_IDENTITY });
+  await made.mgr.spawn(INST, { template: 'homenonroot' }, { instanceId: INST });
+  assert.ok(d.containers.get(`aura-${INST}--homenonroot`), 'made under an app identity');
+  const label = d.containers.get(`aura-${INST}--homenonroot`).labels['aura.sidecar.spec'];
+  const rec = JSON.parse(label);
+  const asRoot = fixture(t, { services: svc, homeGrants: ['homenonroot'] });
+  // The same spec hash as a root installation computes it (the record does not carry the identity).
+  assert.deepEqual(await code(asRoot.mgr.spawn(INST, { template: 'homenonroot' }, { instanceId: INST })), [409, 'sidecar-home-escalation']);
+  assert.equal(d.containers.get(`aura-${INST}--homenonroot`), undefined, `the old one (${rec.specHash}) is gone, not adopted`);
+  // A sidecar without the home is not affected.
+  await f.mgr.spawn(INST, { template: 'plain' }, { instanceId: INST });
+  // Under an app identity the grant is not needed: the sidecar runs as the app.
+  await fixture(t, { services: svc, identity: APP_IDENTITY }).mgr.spawn(INST, { template: 'home' }, { instanceId: INST });
+  assert.ok(d.containers.get(`aura-${INST}--home`));
 });
 
 // ─── Tools of a sidecar ──────────────────────────────────────────────────
