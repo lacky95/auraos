@@ -220,9 +220,15 @@ test('D108 A1: setup and profiles are reserved in the schema (kept, never droppe
   assert.deepEqual(m.profiles.map((p) => p.id), ['personal']);
   assert.deepEqual(declaredSetupKeys(m), ['setup', 'profiles']);
   const b = operationalBlock(m);
+  // The D105 error body (errors/contracts.ts AuraErrorBody): only its fields, the state under details.
   assert.deepEqual({ ...b, message: undefined, hint: undefined }, {
-    error: 'setup-unsupported', category: 'unsupported-feature', state: 'blocked', manifestField: 'setup', target: 'com.example.notes', message: undefined, hint: undefined,
+    error: 'setup-unsupported', category: 'unsupported-feature', manifestField: 'setup', target: 'com.example.notes', docs: 'app-contract',
+    details: { state: 'blocked' }, message: undefined, hint: undefined,
   });
+  const D105_FIELDS = ['error', 'message', 'reason', 'category', 'hint', 'docs', 'permission', 'holder', 'capability', 'missing', 'suggest', 'manifestField', 'policy', 'target', 'approvalId', 'details'];
+  for (const body of [b, operationalBlock(parse({ auraContract: 2 }))]) {
+    assert.deepEqual(Object.keys(body).filter((k) => !D105_FIELDS.includes(k)), [], 'no field outside the D105 body');
+  }
   assert.match(b.message, /declares setup and profiles .*D108.*does not start the app unconfigured/);
   assert.match(b.hint, /without setup\/profiles, or update AuraOS/);
   assert.equal(operationalBlock({ id: 'com.example.notes', profiles: [] })?.manifestField, 'profiles', 'an empty list is still a declaration');

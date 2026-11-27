@@ -50,14 +50,16 @@ const input = (principal: AccessPrincipal, rule: AccessRule, via: DecideInput['a
 test('C2: a member satisfies no owner level; the owner does', async () => {
   const d = createDecide({ authorizer: new Authorizer({ grants: memoryGrants(), declared: () => [], appBinding: async () => ({ scope: 'user', installationId: 'inst-1' }) }) });
   assert.equal((await d(input(owner, OWNER_RULE))).outcome, 'allow');
-  assert.deepEqual(await d(input(member, OWNER_RULE)), { outcome: 'deny', reason: 'wrong-principal' });
+  assert.deepEqual(await d(input(member, OWNER_RULE)), { outcome: 'deny', reason: 'wrong-principal', facts: { ownerOnly: true } });
   assert.equal((await d(input(member, INSTANCE_RULE))).outcome, 'deny');
 });
 
 test('C7: a member holds an app-permission rule only with its own user grant', async () => {
   const grants = memoryGrants();
   const d = createDecide({ authorizer: new Authorizer({ grants, declared: () => [], appBinding: async () => ({ scope: 'user', installationId: 'inst-1' }) }) });
-  assert.deepEqual(await d(input(member, USE_RULE)), { outcome: 'deny', reason: 'missing-permission' });
+  assert.deepEqual(await d(input(member, USE_RULE)), {
+    outcome: 'deny', reason: 'missing-permission', facts: { permission: 'app.use:inst-1', missing: 'grant', holder: 'owner-grant' },
+  });
   (grants as unknown as { add(k: string, i: string, p: string): void }).add('user', MEMBER_ID, 'app.use:inst-1');
   assert.deepEqual(await d(input(member, USE_RULE)), { outcome: 'allow', reason: 'app-permission' });
   // An instance acting for the member holds the member's grant (the member's own instance, C7).

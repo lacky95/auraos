@@ -98,6 +98,14 @@ export type ApprovalClass = (typeof APPROVAL_CLASSES)[number];
  *                      onboarding, reassign an app's origin, overwrite an app
  *                      (`clone-app` / `scaffold` with `force`)
  *
+ * Creating an app (D109 AF2), shell `lib/approvals/appCreate.ts`:
+ *   app.create         a new app from a sandbox or Settings: `aura dev new`
+ *                      (`/api/admin/scaffold`) and `aura dev clone`
+ *                      (`/api/admin/clone-app`). Bound to the digest of the
+ *                      files actually written, the requester's summary and
+ *                      plan digests and the target; the dialog shows the
+ *                      facts the server read from the manifest being written
+ *
  * App patches (Track P, D9):
  *   app.patch.activate install a prepared app tree from a patch workspace, or
  *                      its rollback tree (`/api/apps/<id>/activate`)
@@ -116,7 +124,7 @@ export const APPROVAL_ACTIONS = [
   'nexus.install', 'nexus.update', 'os.context.write', 'user.confirm', 'app.adapter-change',
   'credential.store', 'credential.read',
   'admin.grant', 'admin.revoke', 'admin.api-key', 'admin.manifest-edit', 'admin.read', 'admin.change',
-  'app.patch.activate', 'app.source.open', 'app.setup.apply',
+  'app.patch.activate', 'app.source.open', 'app.create', 'app.setup.apply',
 ] as const;
 export type ApprovalAction = (typeof APPROVAL_ACTIONS)[number];
 
@@ -131,6 +139,7 @@ export const APPROVAL_CLASS: Readonly<Record<ApprovalAction, ApprovalClass>> = {
   'nexus.install': 'forced',
   'nexus.update': 'forced',
   'app.patch.activate': 'forced',
+  'app.create': 'forced',
   'user.confirm': 'forced',
   'admin.change': 'forced',
   'os.context.write': 'deferrable',
@@ -212,6 +221,20 @@ export interface ApprovalDisplay {
    * shown first and prominently. Never the requester's wording.
    */
   highRisk?: ApprovalRisk[];
+  /**
+   * D109 AF2: the requester's own summary of what it asks for (an agent's
+   * architecture summary), Markdown, normalised and bounded by the server
+   * (shell `lib/approvals/display.ts` `requesterExplanation`). The dialog
+   * renders it as safe Markdown (no HTML, no script, no link it follows, no
+   * resource it loads) below the facts, under a label saying AuraOS did not
+   * check it; it never replaces `title`, `details` or `highRisk`.
+   */
+  explanation?: ApprovalExplanation;
+}
+
+export interface ApprovalExplanation {
+  format: 'markdown';
+  text: string;
 }
 
 /** One high-risk item of an approval: what, and why it is dangerous, in one line. */

@@ -35,6 +35,8 @@ export interface ApprovalView {
     title: string; details: string[]; requestedBy: string; reason?: string;
     /** The server's high-risk review (shell lib/approvals/display.ts), printed first. */
     highRisk?: Array<{ item: string; why: string; added?: boolean }>;
+    /** D109 AF2: the requester's summary (Markdown), printed as text under its label. */
+    explanation?: { format: 'markdown'; text: string };
   };
   /** D102: `deferrable` requests may be put on hold by the owner. */
   class?: 'forced' | 'deferrable';
@@ -198,6 +200,26 @@ export async function operatorCode(subject: string): Promise<string> {
   return (await issueSetupCode({ purpose: 'operator', subject })).code;
 }
 
+/** At most this many summary lines in a terminal; the desktop dialog shows all of it. */
+const MAX_EXPLANATION_LINES = 40;
+
+/**
+ * D109 AF2: the requester's summary as plain terminal text, under its label.
+ * Every control character (escape sequences included) and bidi or zero-width
+ * character goes, so the text cannot move the cursor, recolour or hide lines.
+ */
+export function explanationLines(e: { text?: unknown } | undefined): string[] {
+  if (!e || typeof e.text !== 'string' || !e.text.trim()) return [];
+  // eslint-disable-next-line no-control-regex
+  const clean = e.text.replace(/\r\n?/g, '\n').replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u061c\u200b\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, '');
+  const lines = clean.split('\n');
+  return [
+    '  The requester\'s summary (not checked by AuraOS):',
+    ...lines.slice(0, MAX_EXPLANATION_LINES).map((l) => `  | ${l}`),
+    ...(lines.length > MAX_EXPLANATION_LINES ? [`  | … ${lines.length - MAX_EXPLANATION_LINES} more lines: open the AuraOS desktop to read all of it`] : []),
+  ];
+}
+
 /** The lines the CLI prints for an approval: what the server built, the requester's words labelled. */
 export function approvalLines(v: Pick<ApprovalView, 'display' | 'level'>): string[] {
   const risks = v.display.highRisk ?? [];
@@ -207,6 +229,7 @@ export function approvalLines(v: Pick<ApprovalView, 'display' | 'level'>): strin
     ...v.display.details.map((d) => `  ${d}`),
     `  Requested by: ${v.display.requestedBy}`,
     ...(v.display.reason ? [`  In the requester's own words (not verified): ${v.display.reason}`] : []),
+    ...explanationLines(v.display.explanation),
     ...(v.level === 'fresh' ? ['  Level: fresh (password or host operator)'] : []),
   ];
 }

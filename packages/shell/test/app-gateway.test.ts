@@ -413,7 +413,13 @@ test('CSRF: mutations need the exact Origin plus JSON or the token', async () =>
   const issued = JSON.parse((await call('/_aura/os/_csrf')).body) as { token: string; header: string };
   assert.equal(browserBoundaryError({ method: 'POST', headers: { origin: ORIGIN } }, { policy: 'gateway', origin: session.aud, csrf: true }), null);
   assert.equal((await call('/_aura/os/api/kv/app/x', 'POST', { origin: ORIGIN, 'content-type': 'multipart/form-data', [issued.header]: issued.token }, 'x')).status, 200);
-  assert.equal((await call('/_aura/os/api/kv/app/x', 'POST', { origin: ORIGIN, 'content-type': 'text/plain' }, 'x')).status, 403);
+  const csrf = await call('/_aura/os/api/kv/app/x', 'POST', { origin: ORIGIN, 'content-type': 'text/plain' }, 'x');
+  assert.equal(csrf.status, 403);
+  // The code stays; the body says what to do (error-messages Pass A).
+  const why = JSON.parse(csrf.body) as { error: string; message?: string; hint?: string };
+  assert.equal(why.error, 'csrf-required');
+  assert.match(why.message ?? '', /JSON body or the CSRF token/);
+  assert.match(why.hint ?? '', /osClient|Content-Type: application\/json/);
   assert.equal((await call('/_aura/os/api/kv/app/x', 'POST', json, '{}')).status, 200);
 });
 

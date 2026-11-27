@@ -96,31 +96,82 @@ test('a linked worktree needs its git common dir (mounted read-only); a plain cl
   assert.equal(CHK.gitCommonDir('/data/dev/clone', { read }), null);
 });
 
-test('the check container: --rm, the limits profile, no capabilities, --network none, only the worktree (rw) and its git dir (ro)', () => {
-  const o = { ...CHK.parseCheckArgs(['--only=kv-store', '--env', 'X=1']), worktree: '/data/dev/x', gitDir: '/workspace/.git' };
+test('the check container: --rm, the limits profile, no capabilities, --network none, only the worktree (rw) and its git dir (ro), labelled', () => {
+  const o = { ...CHK.parseCheckArgs(['--only=kv-store', '--env', 'X=1']), worktree: '/data/dev/x', gitDir: '/workspace/.git', branch: 'phase6/x' };
   const mounts = [{ Type: 'volume', Name: 'vol', Destination: '/data' }, { Type: 'bind', Source: '/srv/aura', Destination: '/workspace' }];
-  const a = CHK.checkRunArgs(o, { name: 'aura-check-1', mounts, owner: '0:0' }).join(' ');
-  assert.match(a, /^run --rm --name aura-check-1 --network none --cpus=4 --memory=6442450944 --memory-swap=6442450944 --pids-limit=2048 --cap-drop ALL --security-opt no-new-privileges --user 0:0 --workdir \/data\/dev\/x /);
+  const a = CHK.checkRunArgs(o, { name: 'aura-check-1', mounts, owner: '0:0', started: '2026-11-27T20:00:00.000Z' }).join(' ');
+  assert.match(a, /^create --rm --name aura-check-1 --network none --cpus=4 --memory=6442450944 --memory-swap=6442450944 --pids-limit=2048 --cap-drop ALL --security-opt no-new-privileges --user 0:0 --workdir \/data\/dev\/x /);
   assert.match(a, /--mount type=volume,source=vol,target=\/data\/dev\/x,volume-subpath=dev\/x --mount type=bind,source=\/srv\/aura\/\.git,target=\/workspace\/\.git,readonly /);
   assert.equal((a.match(/--mount/g) ?? []).length, 2);
   assert.doesNotMatch(a, /docker\.sock|\/home|aura-net|--privileged|-v \//);
+  assert.match(a, / --label aura\.role=check --label aura\.check\.worktree=\/data\/dev\/x --label aura\.check\.branch=phase6\/x --label aura\.check\.started=2026-11-27T20:00:00\.000Z --label aura\.check\.timeout=2400 /);
   assert.match(a, /-e HOME=\/tmp -e AURA_TESTS_LIVE_SHELL=1 -e X=1 --entrypoint timeout aura-base -k 30 2400 node tools\/run-tests\.mjs --only=kv-store$/);
+  // every limit of the profile is always on the argv, whatever is overridden
+  for (const over of [[], ['--cpus=1'], ['--memory', '1g'], ['--pids=64']]) {
+    const x = CHK.checkRunArgs({ ...CHK.parseCheckArgs(over), worktree: '/w', gitDir: null }, { name: 'n', mounts: null, owner: '1:1', started: 's' });
+    for (const f of ['--rm', /^--cpus=/, /^--memory=/, /^--memory-swap=/, /^--pids-limit=/]) assert.ok(x.some((y) => (typeof f === 'string' ? y === f : f.test(y))), `${f} in ${over}`);
+  }
   // the release build's containers come from the same function, with the release profile
   const r = B.buildContainerArgs({ name: 'n', image: 'i', dataVolume: 'v', stagingSub: 's', storeSub: 'p', network: 'none' }).join(' ');
-  assert.match(r, /--network none --cpus=2 --memory=6442450944 --memory-swap=6442450944 --pids-limit=2048 --cap-drop ALL --security-opt no-new-privileges --workdir \/workspace /);
+  assert.match(r, /^run --rm --name n --network none --cpus=2 --memory=6442450944 --memory-swap=6442450944 --pids-limit=2048 --cap-drop ALL --security-opt no-new-privileges --workdir \/workspace /);
 });
 
-const FAKE = `#!/bin/sh
-echo "docker $*" >> "$FAKE_STATE/calls.log"
-case "$1" in
-  inspect) echo '[{"Type":"bind","Source":"/host","Destination":"/"}]'; exit 0 ;;
-  run) if flock -n "$FAKE_LOCK" true 2>/dev/null; then echo free > "$FAKE_STATE/lock"; else echo held > "$FAKE_STATE/lock"; fi
-       echo "check output on stdout"; exit "\${FAKE_RC:-0}" ;;
-esac
-exit 0
+test('capProblems: a created container must carry every limit of its profile, --rm, its network and the role label', () => {
+  const o = { limits: { ...LIM.DEFAULT_CHECK_LIMITS }, network: 'none' };
+  const good = { hostConfig: { NanoCpus: 4e9, Memory: 6 * GiB, MemorySwap: 6 * GiB, PidsLimit: 2048, AutoRemove: true, Privileged: false, NetworkMode: 'none' }, labels: { 'aura.role': 'check' } };
+  assert.deepEqual(CHK.capProblems(good, o), []);
+  assert.deepEqual(CHK.capProblems({ ...good, hostConfig: { ...good.hostConfig, NanoCpus: 0, MemorySwap: -1 } }, o), ['NanoCpus is 0, expected 4000000000', `MemorySwap is -1, expected ${6 * GiB}`]);
+  const { Memory, PidsLimit, AutoRemove, ...rest } = good.hostConfig;
+  assert.equal(CHK.capProblems({ hostConfig: rest, labels: {} }, o).length, 4);
+  assert.match(CHK.capProblems({ ...good, hostConfig: { ...good.hostConfig, Privileged: true, NetworkMode: 'bridge' } }, o).join(), /Privileged.*NetworkMode/);
+});
+
+test('branchOf: a linked worktree\'s branch, a clone\'s, a detached HEAD', () => {
+  const files = {
+    '/data/dev/x/.git': 'gitdir: /workspace/.git/worktrees/x\n', '/workspace/.git/worktrees/x/HEAD': 'ref: refs/heads/phase6/B-check2\n',
+    '/c/.git/HEAD': 'ref: refs/heads/main\n', '/d/.git/HEAD': '0123456789abcdef0123456789abcdef01234567\n',
+  };
+  const read = (p) => { if (p in files) return files[p]; throw new Error('ENOENT'); };
+  assert.equal(CHK.branchOf('/data/dev/x', { read }), 'phase6/B-check2');
+  assert.equal(CHK.branchOf('/c', { read }), 'main');
+  assert.equal(CHK.branchOf('/d', { read }), 'detached@0123456789ab');
+  assert.equal(CHK.branchOf('/none', { read }), null);
+});
+
+test('check target: live by default (--target / AURA_CHECK_TARGET); an unregistered target is refused (3)', () => {
+  assert.deepEqual([...CHK.CHECK_TARGETS], ['live']);
+  assert.equal(CHK.parseCheckArgs([]).target, 'live');
+  assert.throws(() => CHK.parseCheckArgs(['--target', 'build-vm']), (e) => e.code === 'no-target' && e.exit === 3);
+});
+
+// A fake docker (node): records argv; `inspect` of the HostConfig answers from the last `create` (FAKE_DROP drops a field).
+const FAKE = `#!/usr/bin/env node
+const fs = require('node:fs');
+const a = process.argv.slice(2);
+const S = process.env.FAKE_STATE;
+const log = S + '/calls.log';
+fs.appendFileSync(log, 'docker ' + a.join(' ') + '\\n');
+if (a[0] === 'inspect' && a[2] === '{{json .Mounts}}') { console.log('[{"Type":"bind","Source":"/host","Destination":"/"}]'); process.exit(0); }
+if (a[0] === 'inspect') {
+  const c = fs.readFileSync(log, 'utf8').split('\\n').filter((l) => l.startsWith('docker create ')).pop().split(' ');
+  const v = (f) => c.find((x) => x.startsWith(f + '='))?.slice(f.length + 1);
+  const hc = { NanoCpus: Number(v('--cpus')) * 1e9, Memory: Number(v('--memory')), MemorySwap: Number(v('--memory-swap')), PidsLimit: Number(v('--pids-limit')),
+    AutoRemove: c.includes('--rm'), Privileged: false, NetworkMode: c[c.indexOf('--network') + 1] };
+  if (process.env.FAKE_DROP) delete hc[process.env.FAKE_DROP];
+  const labels = Object.fromEntries(c.map((x, i) => (c[i - 1] === '--label' ? x.split(/=(.*)/s).slice(0, 2) : null)).filter(Boolean));
+  console.log(JSON.stringify(hc) + '\\t' + JSON.stringify(labels));
+  process.exit(0);
+}
+if (a[0] === 'start') {
+  const held = require('node:child_process').spawnSync('flock', ['-n', process.env.FAKE_LOCK, 'true']).status !== 0;
+  fs.writeFileSync(S + '/lock', held ? 'held' : 'free');
+  console.log('check output on stdout');
+  process.exit(Number(process.env.FAKE_RC ?? 0));
+}
+process.exit(0);
 `;
 
-test('builder.mjs check: the command\'s output and exit code pass through, under the slot lock; a missing worktree is refused (3)', () => {
+test('builder.mjs check: create, inspect, start; output and exit code pass through under the slot lock; an uncapped container is removed unstarted (3)', () => {
   const bin = tmp('aura-check-bin-');
   const state = tmp('aura-check-state-');
   writeFileSync(join(bin, 'docker'), FAKE);
@@ -130,20 +181,36 @@ test('builder.mjs check: the command\'s output and exit code pass through, under
   mkdirSync(join(wt, 'packages'));
   const lock = join(state, 'slot.lock');
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, FAKE_STATE: state, FAKE_LOCK: lock, FAKE_RC: '7' };
-  const run = (...args) => spawnSync(process.execPath, [join(ROOT, 'os/release/builder.mjs'), 'check', ...args], { env, encoding: 'utf8' });
-  const r = run('--worktree', wt, '--lock', lock, '--only=core');
+  delete env.AURA_CHECK_TARGET;
+  const run = (args, extra = {}) => spawnSync(process.execPath, [join(ROOT, 'os/release/builder.mjs'), 'check', ...args], { env: { ...env, ...extra }, encoding: 'utf8' });
+  const calls = () => readFileSync(join(state, 'calls.log'), 'utf8').split('\n').filter(Boolean);
+  const r = run(['--worktree', wt, '--lock', lock, '--only=core']);
   assert.equal(r.status, 7, r.stderr);
   assert.match(r.stdout, /check output on stdout/);
-  assert.match(r.stderr, /cpus 4, memory 6442450944 bytes \(no swap\), pids 2048, network none/);
-  assert.equal(readFileSync(join(state, 'lock'), 'utf8').trim(), 'held', 'docker run ran while the slot lock was held');
-  const call = readFileSync(join(state, 'calls.log'), 'utf8').split('\n').find((l) => l.startsWith('docker run'));
-  assert.match(call, new RegExp(`type=bind,source=(/host)?${wt},target=${wt} `));
-  assert.match(call, /--entrypoint timeout aura-base -k 30 2400 node tools\/run-tests\.mjs --only=core$/);
-  const free = run('--worktree', wt, '--no-lock', '--', 'true');
+  assert.match(r.stderr, /\(target live\): cpus 4, memory 6442450944 bytes \(no swap\), pids 2048, network none/);
+  assert.equal(readFileSync(join(state, 'lock'), 'utf8').trim(), 'held', 'the container ran while the slot lock was held');
+  const create = calls().find((l) => l.startsWith('docker create'));
+  const name = /--name (aura-check-[0-9a-f]{8}) /.exec(create)[1];
+  assert.match(create, new RegExp(`type=bind,source=(/host)?${wt},target=${wt} `));
+  assert.match(create, / --label aura\.role=check .*--label aura\.check\.started=\d{4}-\d\d-\d\dT[^ ]+ --label aura\.check\.timeout=2400 /);
+  assert.match(create, /--entrypoint timeout aura-base -k 30 2400 node tools\/run-tests\.mjs --only=core$/);
+  const order = calls().filter((l) => !l.includes('{{json .Mounts}}')).map((l) => l.split(' ').slice(0, 2).join(' '));
+  assert.deepEqual(order, ['docker create', 'docker inspect', 'docker start'], 'inspected before it starts');
+  assert.match(calls().find((l) => l.startsWith('docker start')), new RegExp(`start -a ${name}$`));
+  const free = run(['--worktree', wt, '--no-lock', '--', 'true']);
   assert.equal(free.status, 7);
   assert.equal(readFileSync(join(state, 'lock'), 'utf8').trim(), 'free');
-  const missing = run('--worktree', join(wt, 'nope'), '--no-lock');
+  for (const field of ['Memory', 'MemorySwap', 'NanoCpus', 'PidsLimit', 'AutoRemove']) {
+    writeFileSync(join(state, 'calls.log'), '');
+    const u = run(['--worktree', wt, '--no-lock'], { FAKE_DROP: field });
+    assert.equal(u.status, 3, field);
+    assert.match(u.stderr, new RegExp(`uncapped: .*${field} is unset`));
+    assert.ok(calls().some((l) => /^docker rm -f aura-check-/.test(l)), 'removed');
+    assert.ok(!calls().some((l) => l.startsWith('docker start')), 'never started');
+  }
+  const missing = run(['--worktree', join(wt, 'nope'), '--no-lock']);
   assert.equal(missing.status, 3);
   assert.match(missing.stderr, /no-worktree/);
-  assert.equal(run('--network', 'host').status, 64);
+  assert.equal(run(['--network', 'host']).status, 64);
+  assert.equal(run(['--worktree', wt], { AURA_CHECK_TARGET: 'build-vm' }).status, 3);
 });

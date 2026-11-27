@@ -21,6 +21,7 @@
  * core module; type-only imports are free.
  */
 import type { ConfigField, ConfigValue, ConfigValues } from '../config/schema.js';
+import type { AuraErrorBody, ErrorCategory } from '../errors/contracts.js';
 import type {
   EnvValue, HomeEnvironment, HomeEnvironmentsDeclaration, InstanceScope, ProfileDeclaration, ServiceOverlay,
   SetupDeclaration, SetupRequirement, SidecarHome,
@@ -277,8 +278,8 @@ export const SETUP_ERROR_CODES = [
 ] as const;
 export type SetupErrorCode = (typeof SETUP_ERROR_CODES)[number];
 
-/** The D105 category a setup refusal carries; `needs-setup` joins the `ErrorCategory` union (errors/contracts.ts) at the R1 rebase. */
-export type SetupErrorCategory = 'needs-setup' | 'unsupported-feature' | 'needs-approval' | 'not-grantable' | 'invalid-request' | 'missing-permission';
+/** The D105 categories a setup refusal carries (a subset of `ErrorCategory`, errors/contracts.ts). */
+export type SetupErrorCategory = Extract<ErrorCategory, 'needs-setup' | 'unsupported-feature' | 'needs-approval' | 'not-grantable' | 'invalid-request' | 'missing-permission'>;
 
 export const CATEGORY_OF_SETUP_CODE: Readonly<Record<SetupErrorCode, SetupErrorCategory>> = Object.freeze({
   'setup-required': 'needs-setup',
@@ -297,8 +298,8 @@ export const CATEGORY_OF_SETUP_CODE: Readonly<Record<SetupErrorCode, SetupErrorC
 });
 
 /**
- * A setup refusal as a D105 body (the `AuraErrorBody` shape of
- * errors/contracts.ts, narrowed). Reader-aware like Pass A: never another
+ * A setup refusal as a D105 body (`AuraErrorBody` of errors/contracts.ts,
+ * narrowed; assignable to it). Reader-aware like Pass A: never another
  * user's values, never a secret, never the owner's grants to an app.
  */
 export interface SetupErrorBody {
@@ -554,3 +555,7 @@ export interface SetupServiceContract {
   /** The calling instance's own effective values (`/api/setup/self`). */
   selfConfig(instance: { appId: string; instanceId: string; userId?: string }): Promise<SetupConfigView>;
 }
+
+/** Compile-time proof that a setup refusal is a D105 body. */
+type _SetupBodyIsAuraBody = SetupErrorBody extends AuraErrorBody ? true : never;
+export const SETUP_BODY_IS_AURA_BODY: _SetupBodyIsAuraBody = true;

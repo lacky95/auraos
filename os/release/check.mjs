@@ -10,6 +10,7 @@
 //
 // Command: after `--`; default `node tools/run-tests.mjs [--only=<pkgs>]`. Exit
 // code and output are the command's (124 on --timeout; 3 refused, 64 usage).
+// The container is `docker create`d, inspected, then `docker start -a`ed.
 // Options:
 //   --worktree DIR    the checkout to check (default: the current directory); mounted rw at its own path
 //   --image IMG       default aura-base (node + toolchain; the tools come from the worktree's node_modules).
@@ -23,6 +24,14 @@
 //                     capped check at a time, since the sum of capped containers can still exceed the host
 //   --no-lock         run without the slot
 //   --no-git          do not mount the worktree's git directory (read-only; dep-check lists files through git)
+//   --target T        where the check runs (env AURA_CHECK_TARGET), default `live`: the Docker daemon this runs
+//                     against. The build/test VM (D106 §3 item 5) becomes the default once it is registered as a
+//                     build target in auraos-e2e config/targets.yaml; until then any other target is refused (3)
+//
+// Every check container is labelled (CHECK_LABELS: aura.role=check, the worktree, its branch, the start time
+// and the timeout), so diagnose/containers (auraos-e2e) tells a capped check from an orphan and flags one that
+// runs past its timeout. The container is created, inspected and only then started: a container whose
+// HostConfig lacks a limit of the profile, --rm or the role label is removed unstarted (refused, 3).
 //
 // The container: `--rm`, --network none, no capabilities, no-new-privileges,
 // the worktree owner's uid:gid, HOME=/tmp, no Docker socket, no home, no
@@ -34,7 +43,7 @@
 // cap refuses instead of running uncapped.
 import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { hostname } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { parseArgs } from '../release-verify.mjs';
@@ -45,6 +54,12 @@ export const CHECK_IMAGE = 'aura-base';
 export const CHECK_LOCK = '/data/dev/.cpu.lock';
 export const CHECK_TIMEOUT_S = 2400;
 export const CHECK_NETWORKS = Object.freeze(['none', 'bridge']);
+/** Registered check targets; the first is the default. The build/test VM goes first once it is registered. */
+export const CHECK_TARGETS = Object.freeze(['live']);
+/** The labels of every check container (diagnose/containers reads them). */
+export const CHECK_LABELS = Object.freeze({
+  role: 'aura.role', worktree: 'aura.check.worktree', branch: 'aura.check.branch', started: 'aura.check.started', timeout: 'aura.check.timeout',
+});
 
 export class CheckError extends Error {
   constructor(code, message, exit = 3) { super(message); this.code = code; this.exit = exit; }
@@ -76,7 +91,12 @@ export function parseCheckArgs(argv) {
     env[m[1]] = m[2];
   }
   const only = str('only');
+  const target = str('target') ?? process.env.AURA_CHECK_TARGET ?? CHECK_TARGETS[0];
+  if (!CHECK_TARGETS.includes(target)) {
+    throw new CheckError('no-target', `check target ${target} is not registered (known: ${CHECK_TARGETS.join(', ')}): the build/test VM becomes a target once it is in auraos-e2e config/targets.yaml (D106)`);
+  }
   return {
+    target,
     worktree: str('worktree') ?? process.cwd(),
     image: str('image') ?? CHECK_IMAGE,
     limits, network, timeoutS, env,
@@ -115,18 +135,73 @@ export function gitCommonDir(worktree, { read = (p) => readFileSync(p, 'utf8') }
   return isAbsolute(common) && relative(worktree, common).startsWith('..') ? common : null;
 }
 
-/** The `docker run` argv of one check (no I/O: mounts and owner are passed in). */
-export function checkRunArgs(o, { name, mounts, owner }) {
+/** The worktree's branch (`detached@<sha12>` on a detached HEAD), read from its git files; null when unknown. */
+export function branchOf(worktree, { read = (p) => readFileSync(p, 'utf8') } = {}) {
+  let head;
+  try {
+    const dotgit = read(join(worktree, '.git'));
+    const m = /^gitdir:\s*(.+)$/m.exec(dotgit);
+    head = read(join(m ? resolve(worktree, m[1].trim()) : join(worktree, '.git'), 'HEAD'));
+  } catch {
+    try { head = read(join(worktree, '.git', 'HEAD')); } catch { return null; }
+  }
+  const ref = /^ref:\s*refs\/heads\/(.+)$/m.exec(head);
+  if (ref) return ref[1].trim();
+  const sha = /^([0-9a-f]{12})/.exec(head.trim());
+  return sha ? `detached@${sha[1]}` : null;
+}
+
+/** The labels of one check container. */
+export function checkLabels(o, { started }) {
+  return {
+    [CHECK_LABELS.role]: 'check', [CHECK_LABELS.worktree]: o.worktree, [CHECK_LABELS.branch]: o.branch ?? 'unknown',
+    [CHECK_LABELS.started]: started, [CHECK_LABELS.timeout]: String(o.timeoutS),
+  };
+}
+
+/** The `docker create` argv of one check (no I/O: mounts, owner and start time are passed in). */
+export function checkRunArgs(o, { name, mounts, owner, started }) {
   const at = (path, readonly) => ({ ...daemonSourceOf(path, mounts), target: path, readonly });
   const m = [at(o.worktree, false)];
   if (o.gitDir) m.push(at(o.gitDir, true));
   return [
     ...throwawayArgs({
-      name, image: o.image, network: o.network, limits: o.limits, workdir: o.worktree, mounts: m, user: owner,
-      env: { HOME: '/tmp', AURA_TESTS_LIVE_SHELL: '1', ...o.env }, entrypoint: 'timeout',
+      verb: 'create', name, image: o.image, network: o.network, limits: o.limits, workdir: o.worktree, mounts: m, user: owner,
+      labels: checkLabels(o, { started }), env: { HOME: '/tmp', AURA_TESTS_LIVE_SHELL: '1', ...o.env }, entrypoint: 'timeout',
     }),
     '-k', '30', String(o.timeoutS), ...o.cmd,
   ];
+}
+
+/**
+ * What is wrong with a created check container against its profile (`docker inspect` HostConfig and
+ * Config.Labels): [] when it is capped as asked (cpus, memory, memory-swap = memory, pids), auto-removed,
+ * unprivileged, on the asked network and labelled aura.role=check.
+ */
+export function capProblems({ hostConfig: h, labels }, o) {
+  const p = [];
+  const want = (what, got, exp) => { if (got !== exp) p.push(`${what} is ${got ?? 'unset'}, expected ${exp}`); };
+  want('NanoCpus', h?.NanoCpus, Math.round(o.limits.cpus * 1e9));
+  want('Memory', h?.Memory, o.limits.memoryBytes);
+  want('MemorySwap', h?.MemorySwap, o.limits.memoryBytes);
+  want('PidsLimit', h?.PidsLimit, o.limits.pids);
+  want('AutoRemove', h?.AutoRemove, true);
+  want('Privileged', h?.Privileged ?? false, false);
+  want('NetworkMode', h?.NetworkMode, o.network);
+  want(`label ${CHECK_LABELS.role}`, labels?.[CHECK_LABELS.role], 'check');
+  return p;
+}
+
+/** Waits for the host-wide slot: `flock` on an fd this process keeps, so the lock lasts until `release` (or exit). */
+async function takeSlot(lock) {
+  const fd = openSync(lock, 'a');
+  const code = await new Promise((res) => {
+    const c = spawn('flock', ['-x', '3'], { stdio: ['ignore', 'ignore', 'inherit', fd] });
+    c.on('error', () => res(127));
+    c.on('close', (x) => res(x));
+  });
+  if (code !== 0) { closeSync(fd); throw new CheckError('slot', `cannot take the slot ${lock} (flock exit ${code})`); }
+  return { release: () => { try { closeSync(fd); } catch { /* closed */ } } };
 }
 
 /** This container's mounts as the daemon sees them, or null outside a container. */
@@ -143,30 +218,45 @@ export async function check(o, { docker = 'docker', log = (s) => process.stderr.
   try { worktree = realpathSync(o.worktree); } catch { throw new CheckError('no-worktree', `no such worktree: ${o.worktree}`); }
   if (!existsSync(join(worktree, 'package.json'))) throw new CheckError('no-worktree', `${worktree} is not a checkout (no package.json)`);
   const st = statSync(worktree);
-  const run = { ...o, worktree, gitDir: o.git ? gitCommonDir(worktree) : null };
+  const run = { ...o, worktree, gitDir: o.git ? gitCommonDir(worktree) : null, branch: branchOf(worktree) };
   const name = `aura-check-${randomBytes(4).toString('hex')}`;
-  const args = checkRunArgs(run, { name, mounts: ownMounts(docker), owner: `${st.uid}:${st.gid}` });
-  const argv = o.lock ? ['flock', o.lock, docker, ...args] : [docker, ...args];
+  const mounts = ownMounts(docker);
   const l = o.limits;
-  log(`${o.image} in ${name}: cpus ${l.cpus}, memory ${l.memoryBytes} bytes (no swap), pids ${l.pids}, network ${o.network}, timeout ${o.timeoutS} s; ${worktree}`);
+  log(`${o.image} in ${name} (target ${o.target}): cpus ${l.cpus}, memory ${l.memoryBytes} bytes (no swap), pids ${l.pids}, network ${o.network}, timeout ${o.timeoutS} s; ${worktree} (${run.branch ?? 'unknown branch'})`);
   log(o.lock ? `waiting for the slot ${o.lock} (one check at a time)` : 'no slot lock');
-  return new Promise((done) => {
-    const child = spawn(argv[0], argv.slice(1), { stdio: ['ignore', 'inherit', 'inherit'] });
-    const stop = (sig) => {
-      spawnSync(docker, ['rm', '-f', name], { stdio: 'ignore', timeout: 20_000 });
-      child.kill(sig);
-    };
-    process.once('SIGINT', stop);
-    process.once('SIGTERM', stop);
-    child.on('error', (e) => { log(e.message); done(127); });
-    child.on('close', (code, sig) => {
-      process.off('SIGINT', stop);
-      process.off('SIGTERM', stop);
-      if (code === 124) log(`timed out after ${o.timeoutS} s`);
-      if (code === 137) log('killed (exit 137): the memory limit, a timeout kill or a signal');
-      done(code ?? (sig ? 128 : 1));
+  const slot = o.lock ? await takeSlot(o.lock) : null;
+  const remove = () => spawnSync(docker, ['rm', '-f', name], { stdio: 'ignore', timeout: 20_000 });
+  try {
+    const args = checkRunArgs(run, { name, mounts, owner: `${st.uid}:${st.gid}`, started: new Date().toISOString() });
+    const c = spawnSync(docker, args, { encoding: 'utf8', timeout: 120_000 });
+    if (c.status !== 0) throw new CheckError('create', `docker create failed: ${(c.stderr ?? '').trim().split('\n').slice(-3).join(' / ')}`);
+    const i = spawnSync(docker, ['inspect', '-f', '{{json .HostConfig}}\t{{json .Config.Labels}}', name], { encoding: 'utf8', timeout: 20_000 });
+    let problems;
+    try {
+      const [hc, lb] = i.stdout.trim().split('\t');
+      problems = capProblems({ hostConfig: JSON.parse(hc), labels: JSON.parse(lb) }, run);
+    } catch { problems = [`cannot inspect ${name}: ${(i.stderr ?? '').trim()}`]; }
+    if (problems.length) {
+      remove();
+      throw new CheckError('uncapped', `${name} was not created as asked, removed unstarted: ${problems.join('; ')}`);
+    }
+    return await new Promise((done) => {
+      const child = spawn(docker, ['start', '-a', name], { stdio: ['ignore', 'inherit', 'inherit'] });
+      const stop = (sig) => { remove(); child.kill(sig); };
+      process.once('SIGINT', stop);
+      process.once('SIGTERM', stop);
+      child.on('error', (e) => { log(e.message); remove(); done(127); });
+      child.on('close', (code, sig) => {
+        process.off('SIGINT', stop);
+        process.off('SIGTERM', stop);
+        if (code === 124) log(`timed out after ${o.timeoutS} s`);
+        if (code === 137) log('killed (exit 137): the memory limit, a timeout kill or a signal');
+        done(code ?? (sig ? 128 : 1));
+      });
     });
-  });
+  } finally {
+    slot?.release();
+  }
 }
 
 /** CLI: `builder.mjs check …`. */

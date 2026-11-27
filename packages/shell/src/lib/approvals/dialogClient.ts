@@ -25,6 +25,8 @@ export interface ApprovalDialogView {
     title: string; details: string[]; requestedBy: string; reason?: string;
     /** The server's high-risk review, shown first (lib/approvals/display.ts `installRisks`). */
     highRisk?: Array<{ item: string; why: string; added: boolean }>;
+    /** D109 AF2: the requester's summary (Markdown), rendered apart from the facts. */
+    explanation?: { format: 'markdown'; text: string };
   };
   appId: string | null;
   /** The app "Deny and block" would block (L4), or null: no block offered. */
@@ -59,11 +61,18 @@ export function parseApprovalView(x: unknown, protocol = 'https:'): ApprovalDial
       details: (d['details'] as unknown[]).filter((l): l is string => typeof l === 'string'),
       ...(typeof d['reason'] === 'string' ? { reason: d['reason'] } : {}),
       ...(Array.isArray(d['highRisk']) ? { highRisk: parseRisks(d['highRisk']) } : {}),
+      ...(explanationOf(d['explanation']) ? { explanation: explanationOf(d['explanation'])! } : {}),
     },
     appId: typeof v['appId'] === 'string' ? v['appId'] : null,
     blockable: typeof v['blockable'] === 'string' ? v['blockable'] : null,
     freshVia: freshViaOf(v['freshVia'], protocol),
   };
+}
+
+/** D109 AF2: a well-formed requester summary (Markdown text), else none. */
+function explanationOf(x: unknown): { format: 'markdown'; text: string } | null {
+  const o = x as Record<string, unknown> | null;
+  return o && typeof o === 'object' && o['format'] === 'markdown' && typeof o['text'] === 'string' && o['text'] ? { format: 'markdown', text: o['text'] } : null;
 }
 
 /** The well-formed high-risk lines of a view; anything else is dropped. */

@@ -24,7 +24,7 @@
  * the view — the view mode and the scroll position stay.
  */
 import type { Notification } from '../../../lib/notifications/api.ts';
-import { markdownPreview, parseMarkdown, type Block, type Inline } from '../../../lib/notifications/markdown.ts';
+import { inlineText as inlineTextOf, markdownPreview, parseMarkdown, type Block, type Inline } from '../../../lib/notifications/markdown.ts';
 
 type MarkdownComp = Extract<NonNullable<Notification['components']>[number], { kind: 'markdown' }>;
 
@@ -40,7 +40,14 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: 
 
 // ── Rendering ──────────────────────────────────────────────────────────
 
-function renderInline(nodes: Inline[], parent: Node): void {
+/**
+ * `links: 'text'` (the owner's approval dialog, D109 AF2): a link is its text
+ * with the address visible after it, not an anchor; an image the same. Nothing
+ * can be clicked, followed or loaded.
+ */
+export interface RenderOptions { links?: 'open' | 'text' }
+
+function renderInline(nodes: Inline[], parent: Node, o: RenderOptions = {}): void {
   for (const n of nodes) {
     switch (n.t) {
       case 'text': parent.appendChild(document.createTextNode(n.v)); break;
@@ -48,16 +55,24 @@ function renderInline(nodes: Inline[], parent: Node): void {
       case 'code': parent.appendChild(el('code', 'aura-ntf-md-icode', n.v)); break;
       case 'strong': case 'em': case 'del': {
         const e = el(n.t === 'strong' ? 'strong' : n.t === 'em' ? 'em' : 'del');
-        renderInline(n.c, e);
+        renderInline(n.c, e, o);
         parent.appendChild(e);
         break;
       }
       case 'link': {
+        if (o.links === 'text') {
+          const s = el('span', 'aura-ntf-md-textlink');
+          renderInline(n.c, s, o);
+          const href = n.href ?? '';
+          if (href && href !== inlineTextOf(n.c)) s.appendChild(document.createTextNode(` <${href}>`));
+          parent.appendChild(s);
+          break;
+        }
         if (!n.href) {
           // Not http(s) / mailto: the text only, visibly not a link.
           const s = el('span', 'aura-ntf-md-badlink');
           s.title = 'Link removed (only http, https and mailto links open)';
-          renderInline(n.c, s);
+          renderInline(n.c, s, o);
           parent.appendChild(s);
           break;
         }
@@ -67,12 +82,16 @@ function renderInline(nodes: Inline[], parent: Node): void {
         a.rel = 'noopener noreferrer';
         a.referrerPolicy = 'no-referrer';
         if (n.title) a.title = n.title;
-        renderInline(n.c, a);
+        renderInline(n.c, a, o);
         parent.appendChild(a);
         break;
       }
       case 'image': {
         const label = `🖼 ${n.alt || 'image'}`;
+        if (o.links === 'text') {
+          parent.appendChild(el('span', 'aura-ntf-md-textlink', `[${label}, not loaded]${n.href ? ` <${n.href}>` : ''}`));
+          break;
+        }
         if (!n.href) { parent.appendChild(el('span', 'aura-ntf-md-badlink', `[${label}]`)); break; }
         const a = el('a', 'aura-ntf-md-link aura-ntf-md-img', label);
         a.href = n.href;
@@ -87,19 +106,19 @@ function renderInline(nodes: Inline[], parent: Node): void {
   }
 }
 
-function renderBlocks(blocks: Block[], parent: Node, tight = false): void {
+function renderBlocks(blocks: Block[], parent: Node, tight = false, o: RenderOptions = {}): void {
   for (const b of blocks) {
     switch (b.t) {
       case 'heading': {
         const h = el(`h${b.level}` as 'h1', `aura-ntf-md-h aura-ntf-md-h${b.level}`);
-        renderInline(b.c, h);
+        renderInline(b.c, h, o);
         parent.appendChild(h);
         break;
       }
       case 'paragraph': {
-        if (tight) { renderInline(b.c, parent); break; }
+        if (tight) { renderInline(b.c, parent, o); break; }
         const p = el('p');
-        renderInline(b.c, p);
+        renderInline(b.c, p, o);
         parent.appendChild(p);
         break;
       }
@@ -135,7 +154,7 @@ function renderBlocks(blocks: Block[], parent: Node, tight = false): void {
             box.setAttribute('aria-label', it.task ? 'Done' : 'Not done');
             li.appendChild(box);
           }
-          renderBlocks(it.c, li, !b.loose);
+          renderBlocks(it.c, li, !b.loose, o);
           list.appendChild(li);
         }
         parent.appendChild(list);
@@ -143,7 +162,7 @@ function renderBlocks(blocks: Block[], parent: Node, tight = false): void {
       }
       case 'quote': {
         const q = el('blockquote');
-        renderBlocks(b.c, q);
+        renderBlocks(b.c, q, false, o);
         parent.appendChild(q);
         break;
       }
@@ -160,7 +179,7 @@ function renderBlocks(blocks: Block[], parent: Node, tight = false): void {
           th.scope = 'col';
           const a = b.align[k];
           if (a) th.style.textAlign = a;
-          renderInline(c, th);
+          renderInline(c, th, o);
           hr.appendChild(th);
         });
         thead.appendChild(hr);
@@ -173,7 +192,7 @@ function renderBlocks(blocks: Block[], parent: Node, tight = false): void {
               const td = el('td');
               const a = b.align[k];
               if (a) td.style.textAlign = a;
-              renderInline(c, td);
+              renderInline(c, td, o);
               tr.appendChild(td);
             });
             tbody.appendChild(tr);
@@ -190,9 +209,9 @@ function renderBlocks(blocks: Block[], parent: Node, tight = false): void {
 }
 
 /** Markdown → DOM (safe subset; see markdown.ts). */
-export function renderMarkdown(src: string): DocumentFragment {
+export function renderMarkdown(src: string, o: RenderOptions = {}): DocumentFragment {
   const frag = document.createDocumentFragment();
-  renderBlocks(parseMarkdown(src), frag);
+  renderBlocks(parseMarkdown(src), frag, false, o);
   return frag;
 }
 

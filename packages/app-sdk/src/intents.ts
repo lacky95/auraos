@@ -13,7 +13,7 @@
  * `{ kind: 'noHandler' }`, and a handler declining is `{ kind: 'rejected' }`.
  * `OsClient.startIntent` is a deprecated alias.
  */
-import { OsError, statusCode } from './errors.js';
+import { OsError, statusCode, type OsErrorFacts } from './errors.js';
 import { osAuthHeaders } from './os-auth.js';
 
 export interface StartIntent {
@@ -36,7 +36,7 @@ export type StartIntentResult =
   | { kind: 'disambiguation'; candidates: Array<{ appId: string; score: number }> }
   | { kind: 'noHandler' }
   /** D108 A2: the app may not start yet (setup needed, or blocked); `error` is the D105 body to show. */
-  | { kind: 'setup-required'; appId: string; state: 'blocked' | 'setup-required'; error: { error: string; message: string; category?: string; hint?: string; manifestField?: string } };
+  | { kind: 'setup-required'; appId: string; state: 'blocked' | 'setup-required'; error: { error: string; message: string; details?: { state?: string } } & OsErrorFacts };
 
 export class IntentsApi {
   constructor(private readonly base: () => string) {}
