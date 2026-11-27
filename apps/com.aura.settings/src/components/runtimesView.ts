@@ -42,6 +42,7 @@ export interface MigrationReportEntry {
     current: { runtime: string | null; source: string | null; error?: { code: string; message: string } };
   }>;
   reports: Array<{ file: string; recordedAt: string | null; installations: number; counts: Record<string, number>; error?: string }>;
+  features?: Record<string, FeatureEntry[]>;
 }
 export interface RuntimesState {
   default: string; trusted: boolean; useProotEnv: string | null;
@@ -313,6 +314,13 @@ function renderReport(doc: Document, r: MigrationReportEntry): HTMLElement {
     t.append(tr);
   }
   sec.append(t);
+  // D100 §12: what the runtimes in use can do (feasibility only).
+  for (const [id, fs] of Object.entries(r.features ?? {})) {
+    const limited = fs.filter((f) => f.support !== 'supported');
+    const p = el(doc, 'p', 'rt-note', `${id}: ${limited.length ? limited.map((f) => `${f.id} ${featureText(f)}`).join('; ') : 'every feature supported'}`);
+    p.dataset['reportFeatures'] = id;
+    sec.append(p);
+  }
   for (const f of r.reports) sec.append(el(doc, 'p', 'rt-note', `${f.file}: ${f.error ? `unreadable (${f.error})` : `${f.installations} installation(s)`}`));
   return sec;
 }

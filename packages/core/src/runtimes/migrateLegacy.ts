@@ -27,8 +27,9 @@ import { requirementsOf } from './requirements.js';
 import { RuntimeChangeError, runtimeSettingsRevision, type RuntimeChange, type RuntimeSettingsStore } from './settingsStore.js';
 import {
   missingCapabilities, runtimeRefusal, suggestText, type LegacyRuntime, type RuntimeCapability, type RuntimeMigrationPending, type RuntimeOverride,
-  type RuntimeSettingsRecord, type RuntimeSource,
+  type RuntimeErrorCategory, type RuntimeSettingsRecord, type RuntimeSource,
 } from './types.js';
+import { moduleFeatures, type RuntimeFeature } from './ari.js';
 
 /** What an omitted `sandbox` meant before the runtime release. */
 const LEGACY_OMITTED_SANDBOX = 'proot';
@@ -196,7 +197,7 @@ export interface InstallationResolution {
   runtime: string | null;
   source: RuntimeSource | null;
   settingsRev?: string;
-  error?: { code: string; message: string; missing?: RuntimeCapability[]; suggest?: string[] };
+  error?: { code: string; category?: RuntimeErrorCategory; message: string; missing?: RuntimeCapability[]; suggest?: string[] };
 }
 
 export function resolutionOf(registry: RuntimeRegistry, app: MigrationApp, record: RuntimeSettingsRecord | null): InstallationResolution {
@@ -211,7 +212,7 @@ export function resolutionOf(registry: RuntimeRegistry, app: MigrationApp, recor
     return {
       runtime: chosen?.runtime ?? null, source: chosen?.source ?? null,
       error: refusal
-        ? { code: refusal.code, message: refusal.message, ...(refusal.missing ? { missing: refusal.missing } : {}), ...(refusal.suggest ? { suggest: refusal.suggest } : {}) }
+        ? { code: refusal.code, category: refusal.category, message: refusal.message, ...(refusal.missing ? { missing: refusal.missing } : {}), ...(refusal.suggest ? { suggest: refusal.suggest } : {}) }
         : { code: e.code ?? 'error', message: e.message },
     };
   }
@@ -240,6 +241,8 @@ export interface MigrationReport {
     current: InstallationResolution;
   }>;
   reports: RecordedMigrationReport[];
+  /** D100 §12: the feature view of every runtime an installation resolves to now (feasibility; capabilities still decide). */
+  features: Record<string, RuntimeFeature[]>;
 }
 
 function recordedReports(dataDir: string): RecordedMigrationReport[] {
@@ -273,16 +276,24 @@ export function migrationReport(
   apps: MigrationApp[], deps: { registry: RuntimeRegistry; record: RuntimeSettingsRecord | null; env: LegacyEnv; dataDir: string },
 ): MigrationReport {
   const { record } = deps;
+  const installations = apps.map((a) => ({
+    ...classify(a, deps.env),
+    override: (a.installationId && record?.overrides[a.installationId]) || null,
+    pending: (a.installationId && record?.pending?.[a.installationId]) || null,
+    current: resolutionOf(deps.registry, a, record),
+  })).sort((x, y) => x.appId.localeCompare(y.appId));
+  const features: Record<string, RuntimeFeature[]> = {};
+  for (const id of new Set(installations.map((i) => i.current.runtime).filter((x): x is string => Boolean(x)))) {
+    const m = deps.registry.get(id);
+    const st = m ? deps.registry.settingsState(id, record) : null;
+    if (m && st?.ok) features[id] = moduleFeatures(m, st.settings);
+  }
   return {
     d75: record?.migrations?.d75 ?? null,
     env: deps.env,
-    installations: apps.map((a) => ({
-      ...classify(a, deps.env),
-      override: (a.installationId && record?.overrides[a.installationId]) || null,
-      pending: (a.installationId && record?.pending?.[a.installationId]) || null,
-      current: resolutionOf(deps.registry, a, record),
-    })).sort((x, y) => x.appId.localeCompare(y.appId)),
+    installations,
     reports: recordedReports(deps.dataDir),
+    features,
   };
 }
 

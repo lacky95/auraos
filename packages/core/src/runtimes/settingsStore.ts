@@ -18,7 +18,7 @@ import { builtInRuntimeRecord, type RuntimeRegistry } from './registry.js';
 import { RuntimeSettingsError, settingsDefaults, validateSettings } from './settingsSchema.js';
 import { healthRefusal } from './ari.js';
 import {
-  missingCapabilities, RUNTIME_ID_PATTERN, suggestText,
+  CATEGORY_OF_CODE, missingCapabilities, RUNTIME_ID_PATTERN, suggestText, type RuntimeErrorCategory,
   type RuntimeCapability, type RuntimeMigrationPending, type RuntimeOverride, type RuntimeSettings, type RuntimeSettingsRecord,
 } from './types.js';
 
@@ -108,8 +108,26 @@ export type RuntimeChangeCode =
   /** The record changed after the owner approved the change (compare-and-set on what was shown). */
   | 'conflict';
 
+/**
+ * D100 §17: the category of each change refusal, so clients tell "not
+ * supported" from "temporarily failed" without reading the message. A
+ * capability miss is the runtime layer's own code (`CATEGORY_OF_CODE`).
+ */
+const CHANGE_CATEGORY: Readonly<Record<RuntimeChangeCode, RuntimeErrorCategory>> = Object.freeze({
+  'unknown-runtime': CATEGORY_OF_CODE['runtime-not-installed'],
+  'not-enabled': CATEGORY_OF_CODE['runtime-disabled'],
+  'cannot-disable': 'unsupported-operation',
+  'invalid-settings': 'unsupported-operation',
+  'not-found': 'conflict',
+  'invalid-decision': CATEGORY_OF_CODE['capability-missing'],
+  'capability-missing': CATEGORY_OF_CODE['capability-missing'],
+  'decision-open': CATEGORY_OF_CODE['runtime-decision-needed'],
+  conflict: 'conflict',
+});
+
 export class RuntimeChangeError extends Error {
   override readonly name = 'RuntimeChangeError';
+  get category(): RuntimeErrorCategory { return CHANGE_CATEGORY[this.code]; }
   constructor(
     readonly code: RuntimeChangeCode,
     message: string,

@@ -61,7 +61,7 @@ function errorResponse(err: unknown): Response {
   if (err instanceof core.RuntimeChangeError) {
     const status = err.code === 'not-found' ? 404 : err.code === 'unknown-runtime' ? 404 : err.code === 'invalid-settings' ? 400 : 409;
     return json({
-      error: err.code, message: err.message,
+      error: err.code, category: err.category, message: err.message,
       ...(err.missing ? { missing: err.missing } : {}), ...(err.suggest ? { suggest: err.suggest } : {}),
     }, status);
   }

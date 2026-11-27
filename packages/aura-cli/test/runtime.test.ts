@@ -118,6 +118,8 @@ test('refusals say what kind of no they are (D100 §17): category first, else th
   assert.equal(refusalKind({ category: 'RESTART_REQUIRED' }), 'restart required');
   assert.equal(refusalKind({ category: 'RUNTIME_UNAVAILABLE' }), 'temporarily failed');
   assert.equal(refusalKind({ category: 'ENFORCEMENT_FAILED' }), 'not applied');
+  assert.equal(refusalKind({ category: 'unsupported-feature' }), 'not supported', 'the kernel\'s kebab-case');
+  assert.equal(refusalKind({ category: 'restart-required' }), 'restart required');
   assert.equal(refusalKind({ error: 'capability-missing' }), 'not supported');
   assert.equal(refusalKind({ error: 'conflict' }), 'temporarily failed');
   assert.equal(refusalKind({ error: 'invalid-request' }), null);

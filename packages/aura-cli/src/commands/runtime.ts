@@ -61,6 +61,8 @@ export interface MigrationReportView {
     current: { runtime: string | null; source: string | null; error?: { code: string; message: string; category?: string } };
   }>;
   reports: Array<{ file: string; recordedAt: string | null; installations: number; counts: Record<string, number>; error?: string }>;
+  /** The feature view of the runtimes in use (absent from an older shell). */
+  features?: Record<string, FeatureView[]>;
 }
 export interface OverrideView { installationId: string; appId?: string; runtime: string; source: string; legacy?: string; recordedAt: string; settings?: Record<string, unknown> }
 export interface PendingView { installationId: string; appId: string; legacy: string; reason: string; sandbox: string; recordedAt: string }
@@ -116,7 +118,8 @@ export function featureText(f: FeatureView): string {
  * supported, temporarily failed, restart required, not yet applied.
  */
 export function refusalKind(b: { category?: string; error?: string; code?: string }): string | null {
-  const c = (b.category ?? '').toUpperCase();
+  // The kernel sends kebab-case (`unsupported-feature`); D100 names them UNSUPPORTED_FEATURE.
+  const c = (b.category ?? '').toUpperCase().replace(/-/g, '_');
   if (c === 'PERMISSION_DENIED') return 'not authorized';
   if (c === 'UNSUPPORTED_FEATURE' || c === 'UNSUPPORTED_OPERATION') return 'not supported';
   if (c === 'RUNTIME_UNAVAILABLE' || c === 'OPERATION_TIMEOUT' || c === 'RESOURCE_EXHAUSTED' || c === 'CONFLICT') return 'temporarily failed';
@@ -238,7 +241,9 @@ export function reportRows(r: MigrationReportView): Array<Record<string, string>
     BEFORE: i.legacy,
     D75: i.decision,
     RECORDED: i.pending ? `decision open (${i.pending.reason})` : i.override ? `${i.override.source} → ${i.override.runtime}` : '-',
-    NOW: i.current.error ? color.yellow(`${i.current.runtime ?? '?'}: ${i.current.error.code}`) : `${i.current.runtime} (${i.current.source})`,
+    NOW: i.current.error
+      ? color.yellow(`${i.current.runtime ?? '?'}: ${i.current.error.code}${refusalKind(i.current.error) ? ` (${refusalKind(i.current.error)})` : ''}`)
+      : `${i.current.runtime} (${i.current.source})`,
   }));
 }
 
@@ -253,11 +258,10 @@ async function report(json: boolean): Promise<void> {
   for (const f of r.reports) {
     console.log(`  ${f.file}  ${f.error ? color.yellow(`unreadable: ${f.error}`) : `${f.installations} installation(s): ${f.counts['unchanged'] ?? 0} unchanged, ${f.counts['override'] ?? 0} kept, ${f.counts['incompatible'] ?? 0} decision needed`}`);
   }
-  // D100 §12: the feasibility of the runtimes in use (served once the shell has the feature view).
-  const used = new Set(r.installations.map((i) => i.current.runtime).filter(Boolean));
-  for (const rt of (await state()).runtimes.filter((x) => used.has(x.id) && x.features?.length)) {
-    const limited = rt.features!.filter((f) => f.support !== 'supported');
-    console.log(`\n${rt.id} features: ${limited.length ? limited.map((f) => `${f.id} ${featureText(f)}`).join('; ') : 'all supported'}`);
+  // D100 §12: the feasibility of the runtimes in use (capabilities and permissions still decide).
+  for (const [id, fs] of Object.entries(r.features ?? {})) {
+    const limited = fs.filter((f) => f.support !== 'supported');
+    console.log(`\n${id} features: ${limited.length ? limited.map((f) => `${f.id} ${featureText(f)}`).join('; ') : 'all supported'}`);
   }
   const open = r.installations.filter((i) => i.pending).length;
   if (open) console.log(color.yellow(`\n${open} decision(s) open: aura runtime migrate`));

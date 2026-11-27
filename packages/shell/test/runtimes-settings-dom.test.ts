@@ -149,6 +149,7 @@ const grown = (): RuntimesState => {
   });
   s.installations[0]!.needs = ['mounts'];
   s.report = {
+    features: { proot: [{ id: 'mount.attach', support: 'unsupported' }, { id: 'execution.command', support: 'supported' }] },
     d75: '2026-11-26T12:00:00.000Z', reports: [{ file: '/data/aura/runtime-migration/x.json', recordedAt: 'x', installations: 2, counts: {} }],
     installations: [
       { appId: 'io.ex.kept', installationId: 'i-kept', sandbox: 'omitted', legacy: 'proot-master', decision: 'override', reason: '',
@@ -178,6 +179,7 @@ test('runtimes view (5b): version and ARI, health checks, every capability, feat
   const report = root.querySelector('[data-migration-report]')!;
   assert.match(report.querySelector('tr[data-report-row="io.ex.kept"]')!.textContent ?? '', /proot-master.*kept by the runtime migration: proot.*proot \(kept by the runtime migration\)/);
   assert.match(report.querySelector('tr[data-report-row="io.ex.direct"]')!.textContent ?? '', /decision needed \(master-direct\).*not started: runtime-decision-needed/);
+  assert.equal(report.querySelector('[data-report-features="proot"]')!.textContent, 'proot: mount.attach unsupported');
 });
 
 test('schema form: an env-sourced value is read-only and never sent', () => {

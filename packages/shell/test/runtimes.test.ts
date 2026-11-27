@@ -263,7 +263,8 @@ test('route manifest: the runtimes routes are implemented rows, no longer reserv
 test('override set (ARI-3): dry-run refusal with missing and suggest before any prompt; fresh from Settings; audited; applies to the next start', async () => {
   caller = SETTINGS;
   const refused = await read(await putOverride(req('PUT', { runtime: 'proot' }), 'i-box', deps()));
-  assert.deepEqual([refused.status, refused.body.error, refused.body.missing, refused.body.suggest], [409, 'capability-missing', ['readOnlyBinds'], ['container']]);
+  assert.deepEqual([refused.status, refused.body.error, refused.body.category, refused.body.missing, refused.body.suggest],
+    [409, 'capability-missing', 'unsupported-feature', ['readOnlyBinds'], ['container']]);
   assert.equal(approvals.records.size, 0, 'a refusal needs no password');
   const first = await read(await putOverride(req('PUT', { runtime: 'proot' }), 'i-new', deps()));
   assert.equal(first.status, 409, 'io.ex.new is closed too');
@@ -303,7 +304,7 @@ test('override set: the operator acts directly; a stale `expected`, an unknown i
   // An open D75 decision is decided by migrate first.
   await migrate();
   const open = await read(await putOverride(req('PUT', { runtime: 'container' }), 'i-direct', deps()));
-  assert.deepEqual([open.status, open.body.error], [409, 'decision-open']);
+  assert.deepEqual([open.status, open.body.error, open.body.category], [409, 'decision-open', 'conflict']);
 });
 
 test('migration report: read-only (no record write), the dry-run rows with the recorded state and the current resolution', async () => {
@@ -317,5 +318,7 @@ test('migration report: read-only (no record write), the dry-run rows with the r
   const by = Object.fromEntries(one.body.installations.map((r: any) => [r.appId, r]));
   assert.deepEqual([by['io.ex.kept'].decision, by['io.ex.kept'].current.source], ['override', 'migration']);
   assert.equal(by['io.ex.direct'].pending.reason, 'master-direct');
+  assert.equal(by['io.ex.direct'].current.error.category, 'conflict', 'a decision is needed: not a failure of the runtime');
+  assert.ok(Array.isArray(one.body.features.proot) && one.body.features.proot.some((f: any) => f.id === 'mount.attach'), 'the feature view of the runtimes in use');
   assert.equal(audits.length, 0);
 });

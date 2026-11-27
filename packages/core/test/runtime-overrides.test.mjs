@@ -15,10 +15,12 @@ import { join } from 'node:path';
 
 import {
   RuntimeRegistry, RuntimeSettingsStore, checkOverride, parseRuntimeRecord, runtimeSettingsRevision,
-  migrateLegacyRuntimes, decideMigration, migrationReport, resolutionOf, legacyRuntime,
+  migrateLegacyRuntimes, decideMigration, migrationReport, resolutionOf, legacyRuntime, OsEventBus,
 } from '../dist/index.js';
-import { containerRuntime } from '../dist/runtimes/builtins/container.js';
-import { prootRuntime } from '../dist/runtimes/builtins/proot.js';
+import { containerRuntime } from '../dist/runtimes/container/index.js';
+import { prootRuntime } from '../dist/runtimes/proot/index.js';
+import { AppManager } from '../dist/app-manager/AppManager.js';
+import { mockProvider } from './ari-conformance/mock.mjs';
 import { AppManifestSchema } from '../dist/types/manifest.js';
 import { ContainerRunner } from '../dist/app-manager/ContainerRunner.js';
 import { ProotRunner } from '../dist/app-manager/ProotRunner.js';
@@ -200,4 +202,46 @@ test('no existing installation changes runtime without a recorded decision (D75,
       if (!was.error) assert.equal(is.runtime, was.runtime, `${a.appId}: the default change moved an existing installation`);
     }
   }
+});
+
+test('M + RS: a kernel respawn resolves through the installation\'s owner override (capability-checked), never a recorded runtime', async () => {
+  const dataDir = mkdtempSync(join(TMP, 'mgr-'));
+  const mgr = new AppManager({ appsDir: join(dataDir, 'apps'), dataDir, baseRootfs: ROOTFS, toolchainDir: join(dataDir, 'tc'), runtimes: [mockProvider()] });
+  const s = store(mgr.runtimes);
+  mgr.runtimeSettings = s;
+  const manifests = {
+    'io.r.pinned': manifest('io.r.pinned', { sandbox: 'container' }),
+    'io.r.grown': manifest('io.r.grown', { ports: { exposes: [{ sourceApp: 'io.other', sourcePort: 80 }] } }),
+  };
+  mgr.registry.getById = (id) => manifests[id];
+  mgr.isEnabled = () => true;
+  mgr.installationIdOf = async (appId) => `i-${appId}`;
+  mgr.sourceModeOf = () => ({ mode: 'open' });
+  await s.setEnabled('mock', true);
+  // Owner overrides: both to the mock provider while that was capable (the second app had no port expose then).
+  await s.setOverride({ installationId: 'i-io.r.pinned', appId: 'io.r.pinned', manifest: manifests['io.r.pinned'], sourceMode: 'open' }, 'mock');
+  await s.setOverride({ installationId: 'i-io.r.grown', appId: 'io.r.grown', manifest: manifest('io.r.grown'), sourceMode: 'open' }, 'mock');
+  const resolved = [];
+  // The start's first step is resolveRuntime (spawnInstance): run exactly that, then stop.
+  mgr.start = async (appId) => {
+    const r = await mgr.resolveRuntime(appId, manifests[appId]);
+    resolved.push([appId, r.runtime, r.source]);
+    return `${appId}-9`;
+  };
+  const events = [];
+  const on = (e) => events.push(e);
+  OsEventBus.on('app:respawned', on);
+  try {
+    mgr['respawnFromRecord']([
+      { installationId: 'i-io.r.pinned', appId: 'io.r.pinned', formerInstanceId: 'io.r.pinned-1', state: 'resumed' },
+      { installationId: 'i-io.r.grown', appId: 'io.r.grown', formerInstanceId: 'io.r.grown-1', state: 'resumed' },
+    ]);
+    assert.equal(await mgr.respawnedInstance('io.r.pinned-1'), 'io.r.pinned-9');
+    assert.equal(await mgr.respawnedInstance('io.r.grown-1'), null, 'refused: fails closed, not respawned elsewhere');
+  } finally { OsEventBus.off?.('app:respawned', on); }
+  assert.deepEqual(resolved, [['io.r.pinned', 'mock', 'override']], 'the override wins over the manifest\'s container');
+  assert.deepEqual(events.map((e) => e.appId), ['io.r.pinned']);
+  // The refusal is the start's own: capability-missing with suggest, the override untouched.
+  await assert.rejects(mgr.resolveRuntime('io.r.grown', manifests['io.r.grown']), (e) => e.code === 'capability-missing' && e.missing.includes('portExpose') && e.suggest.includes('container'));
+  assert.equal((await s.get()).overrides['i-io.r.grown'].runtime, 'mock');
 });
