@@ -30,9 +30,10 @@
  *     reports "not provisioned" and exits non-zero (fail closed, visible).
  *     The kernel provisions it in the builder before its start.
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
+import { ALL_TOOLS_PATH, MY_TOOLS_PATH, provisionAllowlist, toolchainMirrorBin } from './tool-provision.js';
 
 /** Printed by the synthesised entrypoint around the provisioning block. */
 export const PROVISION_BEGIN = '@@aura:provision:begin@@';
@@ -292,6 +293,44 @@ export function builderProvisionEnv(appId: string): string[] {
     '-e', 'npm_config_update_notifier=false',
     '-e', 'ASTRO_TELEMETRY_DISABLED=1',
   ];
+}
+
+/**
+ * The toolchain binaries the throwaway builder gets: the OS install
+ * workflow's own OCI retrieval (`aura sdk install` → `oras pull`). OS
+ * infrastructure, not a capability grant: the builder runs no app, and the
+ * binary comes from the image (tool-provision.ts IMAGE_TOOLS), whatever
+ * capabilities.json says. The `aura-base` image has no `oras` of its own.
+ */
+export const BUILDER_TOOLS = ['oras'] as const;
+
+/**
+ * Materialise {@link BUILDER_TOOLS} for one builder run with the allowlist
+ * provisioning every sandbox uses (`provisionAllowlist`: hardlinks from the
+ * volume mirror), under `<dataDir>/aura/runtime/<name>/tools`, and return the
+ * `docker run` arguments that mount it read-only at /aura/my-tools and put it
+ * first on PATH. The builder gets exactly these tools, nothing an app was
+ * granted. `release()` removes the dir after the run.
+ */
+export function provisionBuilderTools(opts: { dataDir: string; appDataVolume: string; name: string }): {
+  args: string[]; dir: string; linked: string[]; missing: string[]; release: () => void;
+} {
+  const subpath = `aura/runtime/${opts.name}/tools`;
+  const dir = join(opts.dataDir, subpath);
+  const res = provisionAllowlist({
+    dataDir: opts.dataDir, dir, tools: [...BUILDER_TOOLS], legacyStoreBin: toolchainMirrorBin(opts.dataDir),
+  });
+  const args = [
+    // Legacy symlink mode resolves the allowlist through the store, exactly
+    // like an app container (ContainerRunner toolMounts).
+    ...(res.mode === 'symlink'
+      ? ['--mount', `type=volume,source=${opts.appDataVolume},target=${ALL_TOOLS_PATH},volume-subpath=aura/toolchain/bin,readonly`]
+      : []),
+    '--mount', `type=volume,source=${opts.appDataVolume},target=${MY_TOOLS_PATH},volume-subpath=${subpath},readonly`,
+    '-e', `PATH=${MY_TOOLS_PATH}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`,
+  ];
+  const release = () => { try { rmSync(join(opts.dataDir, 'aura', 'runtime', opts.name), { recursive: true, force: true }); } catch { /* next run replaces it */ } };
+  return { args, dir, linked: res.linked, missing: res.missing, release };
 }
 
 /**

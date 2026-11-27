@@ -29,7 +29,7 @@ import { OWNER_LABEL, PREVIEW_LABEL } from './instanceOwner.js';
 import { VolumeStore, type VolumeEntry } from '../context/VolumeStore.js';
 import {
   ASTRO_START_SHELL, RAW_START_SHELL, PROVISION_TIMEOUT_MS, ProvisionWatch, nextHealthDeadline,
-  BUILDER_CACHE_PATH, BUILDER_CACHE_SUBPATH, builderProvisionEnv, builderProvisionShell,
+  BUILDER_CACHE_PATH, BUILDER_CACHE_SUBPATH, builderProvisionEnv, builderProvisionShell, provisionBuilderTools,
 } from './provisioning.js';
 import { BUILD_STAGING_DIR, serveState } from './appBuild.js';
 import { BASE_IMAGE, whenBaseImageReady } from './BaseImage.js';
@@ -1536,6 +1536,9 @@ export class ContainerRunner implements SandboxRunner {
     mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
     chmodSync(cacheDir, 0o700);
     const name = `aura-provision-${appId.replace(/[^a-zA-Z0-9_.-]/g, '_')}`;
+    // `oras` for `aura sdk install`, as OS infrastructure (BUILDER_TOOLS).
+    const tools = provisionBuilderTools({ dataDir: this.dataDir, appDataVolume: this.appDataVolume, name });
+    if (tools.missing.length) console.warn(`[provision] ${appId}: the builder lacks ${tools.missing.join(', ')} (not in the toolchain)`);
     const args = [
       'run', '--rm', '--name', name,
       '--network', SHARED_NETWORK, ...rawSocketArgs(),
@@ -1545,6 +1548,7 @@ export class ContainerRunner implements SandboxRunner {
       ...this.workspaceMounts(),
       '--mount', `type=volume,source=${this.nodeModulesVolume},target=/workspace/node_modules,readonly`,
       '--mount', `type=volume,source=${this.appDataVolume},target=${BUILDER_CACHE_PATH},volume-subpath=${BUILDER_CACHE_SUBPATH}`,
+      ...tools.args,
       ...builderProvisionEnv(appId),
       BASE_IMAGE,
       'bash', '-c', builderProvisionShell(runtime),
@@ -1559,7 +1563,7 @@ export class ContainerRunner implements SandboxRunner {
       const child = spawn('docker', args, { stdio: ['ignore', 'pipe', 'pipe'], env: WATCHER_ENV });
       const pid = child.pid;
       if (pid) this.buildPids.add(pid);
-      const untrack = () => { if (pid) this.buildPids.delete(pid); };
+      const untrack = () => { if (pid) this.buildPids.delete(pid); tools.release(); };
       child.stdout?.on('data', keep);
       child.stderr?.on('data', keep);
       const timer = setTimeout(() => {

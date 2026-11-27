@@ -21,7 +21,7 @@ import { ACTIVITY_STATE_MAX_BYTES, FLIGHT_MODES } from '../types/activity.js';
 import { OsEventBus } from '../ipc/OsEventBus.js';
 import { AppRegistry } from './AppRegistry.js';
 import { toolsTrackInstalledCaps } from '../capabilities/tool-allowlist.js';
-import { SHARED_HOME_PATH, toolchainMirrorBin } from './tool-provision.js';
+import { SHARED_HOME_PATH, healImageTools, toolchainMirrorBin } from './tool-provision.js';
 import { readLibMap, replaceLibFile, restoreLibsFromStore, toolchainLibFor, toolchainMirrorLib } from './tool-libs.js';
 import { legacySharedHomeDir, masterHomeDir, userHomeDir } from '../scopes/home.js';
 import { PortAllocator } from './PortAllocator.js';
@@ -781,40 +781,13 @@ export class AppManager {
       }
     }
 
-    // Make sure the host docker CLI is present in /os/toolchain/bin/docker so
-    // wildcard-cap apps (terminal: tools[] = ['*']) get it linked into their
-    // /aura/my-tools allowlist on next cap refresh — required for `aura jump`
-    // into container-mode apps from inside the terminal proot (the host's
-    // docker socket is bind-mounted alongside this; see ProotRunner). Cheap
-    // idempotent copy: skips if the toolchain entry already exists.
-    const dockerToolchain = join(this.toolchainDir, 'bin', 'docker');
-    if (!existsSync(dockerToolchain) && existsSync('/usr/local/bin/docker')) {
-      try {
-        mkdirSync(dirname(dockerToolchain), { recursive: true });
-        copyFileSync('/usr/local/bin/docker', dockerToolchain);
-        chmodSync(dockerToolchain, 0o755);
-        console.log(`[AppManager] healed docker → ${dockerToolchain}`);
-      } catch (err) {
-        console.warn(`[AppManager] could not heal docker into toolchain: ${(err as Error).message}`);
-      }
-    }
-
-    // Same as docker above, but for oras — needed by user-scope apps' synth
-    // entrypoint which calls `aura sdk install` → `oras pull` to fetch
-    // @aura/* packages from the local OCI registry. Without oras in the
-    // toolchain volume, granting `oras` to an app's tools[] would resolve to
-    // nothing — provisionAllowlist reports it as `missing` and the app's
-    // entrypoint fails on the first `oras pull`.
-    const orasToolchain = join(this.toolchainDir, 'bin', 'oras');
-    if (!existsSync(orasToolchain) && existsSync('/usr/local/bin/oras')) {
-      try {
-        mkdirSync(dirname(orasToolchain), { recursive: true });
-        copyFileSync('/usr/local/bin/oras', orasToolchain);
-        chmodSync(orasToolchain, 0o755);
-        console.log(`[AppManager] healed oras → ${orasToolchain}`);
-      } catch (err) {
-        console.warn(`[AppManager] could not heal oras into toolchain: ${(err as Error).message}`);
-      }
+    // The image's infrastructure tools (docker, oras) into /os/toolchain/bin,
+    // so syncToolchainMirror below takes them into the volume mirror: wildcard
+    // apps (the Terminal) need docker for `aura jump`, and the OS install
+    // workflow needs oras (tool-provision.ts IMAGE_TOOLS). Never gated by
+    // capabilities.json: these are not optional capabilities.
+    for (const name of healImageTools(this.toolchainDir)) {
+      console.log(`[AppManager] healed ${name} → ${join(this.toolchainDir, 'bin', name)}`);
     }
 
     // Pre-create the master's home (the OS's own, see scopes/home.ts). Private
