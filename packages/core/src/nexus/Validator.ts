@@ -6,6 +6,7 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { AppManifestSchema, type AppManifest } from '../types/manifest.js';
+import { safeParse3 } from '../types/zodCompat.js';
 
 export class NexusValidationError extends Error {
   constructor(public readonly issues: string[]) {
@@ -31,9 +32,9 @@ export function validateStagedDir(stagingDir: string): AppManifest {
       `app.manifest.json is not valid JSON: ${(err as Error).message}`,
     ]);
   }
-  const result = AppManifestSchema.safeParse(parsed);
+  const result = safeParse3(AppManifestSchema, parsed);
   if (!result.success) {
-    const issues = result.error.issues.map(
+    const issues = result.issues.map(
       (i) => `${i.path.join('.') || '<root>'}: ${i.message}`,
     );
     throw new NexusValidationError(issues);

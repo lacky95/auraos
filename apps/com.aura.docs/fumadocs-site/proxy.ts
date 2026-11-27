@@ -8,9 +8,10 @@ import { auraIdentityHeaders } from '@aura/app-sdk/runtime/next';
 // and the proxy would happily route to a squatter.
 //
 // The matcher is everything (`/(.*)`) so static assets, RSC payloads, and
-// API routes all carry identity. Middleware is the right tier because Next
+// API routes all carry identity. Proxy is the right tier because Next
 // app-router pages don't run a per-request handler we can hook otherwise.
-export function middleware(_req: NextRequest) {
+// (Next 16 renamed middleware to proxy: this file was middleware.ts.)
+export function proxy(_req: NextRequest) {
   const res = NextResponse.next();
   for (const [k, v] of Object.entries(auraIdentityHeaders())) {
     res.headers.set(k, v);
@@ -18,6 +19,6 @@ export function middleware(_req: NextRequest) {
   return res;
 }
 
-// Node.js runtime, not Edge: `@aura/app-sdk/runtime/next` also carries the
-// lifecycle guard, which uses node:crypto (the Edge bundle cannot load it).
-export const config = { matcher: '/(.*)', runtime: 'nodejs' };
+// A proxy always runs on Node.js (Next 16 refuses a `runtime` here), which
+// `@aura/app-sdk/runtime/next` needs: its lifecycle guard uses node:crypto.
+export const config = { matcher: '/(.*)' };

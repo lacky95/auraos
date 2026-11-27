@@ -19,6 +19,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { AppManifestSchema } from '../types/manifest.js';
+import { formatIssues, safeParse3 } from '../types/zodCompat.js';
 import {
   AURA_NPMRC, needsNpmrc, portPackageJsonForScope, portToolsForScope,
 } from '../scopes/portability.js';
@@ -198,12 +199,12 @@ export function rewriteAppIdentity(dir: string, o: RewriteIdentityOpts): Rewrite
   const portedTools = portToolsForScope((m['tools'] as string[] | undefined) ?? [], o.scope);
   if (portedTools.length > 0) m['tools'] = portedTools;
 
-  const parsed = AppManifestSchema.safeParse(m);
+  const parsed = safeParse3(AppManifestSchema, m);
   if (!parsed.success) {
     return {
       ok: false, error: 'manifest-invalid',
-      message: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
-      issues: parsed.error.issues,
+      message: formatIssues(parsed.issues),
+      issues: parsed.issues,
     };
   }
   writeFileSync(manifestPath, JSON.stringify(m, null, 2) + '\n');

@@ -24,7 +24,6 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import type { CallToolResult, Tool, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import { zodToJsonSchema } from 'zod-to-json-schema';
 import {
   NO_UI_MESSAGE, closeActivity, getLockscreen, getMru, getRegion, getWorkspaces, lock, noUi, putWorkspaces,
   getTheme, setColorMode, startApp, stopInstance, ui, unlock,
@@ -105,7 +104,11 @@ function define<S extends z.ZodObject<z.ZodRawShape>>(opts: {
   name: string; title: string; description: string; schema: S; annotations: ToolAnnotations; guard?: boolean;
   run: (args: z.infer<S>, ctx: CallCtx) => CallToolResult | Promise<CallToolResult>;
 }): OwnTool {
-  const { $schema: _drop, ...json } = zodToJsonSchema(opts.schema, { $refStrategy: 'none' }) as Record<string, unknown>;
+  // Input side (defaults optional), closed objects (as zod-to-json-schema gave them).
+  const { $schema: _drop, ...json } = z.toJSONSchema(opts.schema, {
+    io: 'input', reused: 'inline', target: 'draft-07',
+    override: ({ jsonSchema: j }) => { if (j.type === 'object' && j.additionalProperties === undefined) j.additionalProperties = false; },
+  }) as Record<string, unknown>;
   return {
     name: opts.name, title: opts.title, description: opts.description,
     inputSchema: json as Tool['inputSchema'], annotations: opts.annotations,

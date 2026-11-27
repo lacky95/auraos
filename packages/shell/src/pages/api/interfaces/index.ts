@@ -1,5 +1,5 @@
 import type { APIRoute } from 'astro';
-import { getAppManager, ProvidedInterfaceSchema } from '@aura/core';
+import { getAppManager, ProvidedInterfaceSchema, safeParse3 } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../lib/appResponse.js';
 import { actingInstance } from '../../../lib/access/identify.js';
 import { countContractSignal } from '../../../lib/access/contractSignals.ts';
@@ -60,9 +60,9 @@ export const POST: APIRoute = async ({ request, locals }) => {
 
   // Validated at the boundary, not in core: the registry stays transport-
   // agnostic, and this is the same split the rest of the shell uses.
-  const parsed = ProvidedInterfaceSchema.safeParse(body);
+  const parsed = safeParse3(ProvidedInterfaceSchema, body);
   if (!parsed.success) {
-    const first = parsed.error.issues[0];
+    const first = parsed.issues[0];
     return errorResponse(`invalid interface: ${first?.path.join('.') || 'body'} — ${first?.message ?? 'invalid'}`, 400);
   }
 

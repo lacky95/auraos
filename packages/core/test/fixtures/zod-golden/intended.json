@@ -1,0 +1,18 @@
+{"reasons":{
+ "int-aborts": "zod 4's .int() stops at a non-integer: a float for an integer field reports 'Expected integer, received float' alone, not also the range check zod 3 added after it.",
+ "int-union": "Same, inside a union: zod 3 picked the integer branch (its int issue did not abort) and reported its two issues; zod 4 reports the union ('Invalid input').",
+ "int-safe": "zod 4's .int() is a safe integer: values above 2^53 - 1 are refused (zod 3 accepted them)."
+},
+"cases":{
+"AppManifestSchema/max serverPort=float":{"reason":"int-aborts","expect":{"success":false,"issues":[{"code":"invalid_type","expected":"integer","received":"float","path":["serverPort"],"message":"Expected integer, received float"}]}},
+"AppManifestSchema/max viewConfig.defaultWidth=float":{"reason":"int-aborts","expect":{"success":false,"issues":[{"code":"invalid_type","expected":"integer","received":"float","path":["viewConfig","defaultWidth"],"message":"Expected integer, received float"}]}},
+"AppManifestSchema/max viewConfig.defaultHeight=float":{"reason":"int-aborts","expect":{"success":false,"issues":[{"code":"invalid_type","expected":"integer","received":"float","path":["viewConfig","defaultHeight"],"message":"Expected integer, received float"}]}},
+"AppManifestSchema/max flight.edgeSize.length=float":{"reason":"int-union","expect":{"success":false,"issues":[{"code":"invalid_union","path":["flight","edgeSize","length"],"message":"Invalid input"}]}},
+"AppManifestSchema/max flight.edgeSize.depth=float":{"reason":"int-aborts","expect":{"success":false,"issues":[{"code":"invalid_type","expected":"integer","received":"float","path":["flight","edgeSize","depth"],"message":"Expected integer, received float"}]}},
+"AppManifestSchema/max flight.defaultSize.w=float":{"reason":"int-aborts","expect":{"success":false,"issues":[{"code":"invalid_type","expected":"integer","received":"float","path":["flight","defaultSize","w"],"message":"Expected integer, received float"}]}},
+"AppManifestSchema/max flight.defaultSize.h=float":{"reason":"int-aborts","expect":{"success":false,"issues":[{"code":"invalid_type","expected":"integer","received":"float","path":["flight","defaultSize","h"],"message":"Expected integer, received float"}]}},
+"AppManifestSchema/max flight.minSize.w=float":{"reason":"int-aborts","expect":{"success":false,"issues":[{"code":"invalid_type","expected":"integer","received":"float","path":["flight","minSize","w"],"message":"Expected integer, received float"}]}},
+"AppManifestSchema/max flight.minSize.h=float":{"reason":"int-aborts","expect":{"success":false,"issues":[{"code":"invalid_type","expected":"integer","received":"float","path":["flight","minSize","h"],"message":"Expected integer, received float"}]}},
+"AppManifestSchema/max services.0.readiness.timeoutMs=float":{"reason":"int-aborts","expect":{"success":false,"issues":[{"code":"invalid_type","expected":"integer","received":"float","path":["services",0,"readiness","timeoutMs"],"message":"Expected integer, received float"}]}},
+"AppManifestSchema/max maxInstances=9007199254740992":{"reason":"int-safe","expect":{"success":false,"issues":[{"code":"too_big","maximum":9007199254740991,"type":"number","inclusive":true,"exact":false,"path":["maxInstances"],"message":"Number must be less than or equal to 9007199254740991"}]}}
+}}

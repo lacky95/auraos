@@ -25,8 +25,9 @@ onlyBuiltDependencies:
 # `react: ^19.0.0` directly so everyone sees the same single React copy.
 # No overrides needed.
 
-# Next 15 pins postcss 8.4.31 exactly, which has the source-map file-read
-# advisories (GHSA-6g55-p6wh-862q, GHSA-r28c-9q8g-f849). 8.5 is the same
-# major and API; drop this once Next itself ships a fixed postcss.
+# Next pins postcss exactly (16.4: 8.5.23), below the fix of its source-map
+# file-read advisories (GHSA-6g55-p6wh-862q, GHSA-r28c-9q8g-f849, and later
+# ones fixed in 8.5.33). Same major and API; drop this once Next itself ships
+# a fixed postcss.
 overrides:
   next>postcss: ^8.5.33

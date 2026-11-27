@@ -2,7 +2,7 @@ import type { Command } from 'commander';
 import { existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, statSync, chmodSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { AppManifestSchema, AURA_CONTRACT, AURA_NPMRC, initRepo, needsNpmrc, newOriginId, portPackageJsonForScope, portToolsForScope } from '@aura/core';
+import { AppManifestSchema, formatIssues, safeParse3, AURA_CONTRACT, AURA_NPMRC, initRepo, needsNpmrc, newOriginId, portPackageJsonForScope, portToolsForScope } from '@aura/core';
 import { color, error, fail, info, ok, warn } from '../lib/format.js';
 import { CONTRACT_DOCS_HINT, DOCS_HINT, lintAppSources, lintContract, lintManifestKeys, lintTrackedRuntimeData, type Finding } from '../lib/apphost-lint.js';
 import { promptText, promptChoice, promptConfirm, promptMultiSelect, PromptCancelled, BACK, type MultiSelectMode } from '../lib/prompts.js';
@@ -874,8 +874,8 @@ Skips node_modules, dist, .astro and .next. ${DOCS_HINT}; ${CONTRACT_DOCS_HINT}.
         try {
           const text = readFileSync(m, 'utf-8');
           const data = JSON.parse(text) as unknown;
-          const result = AppManifestSchema.safeParse(data);
-          if (!result.success) { warn(`${m}: ${result.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`); failed++; }
+          const result = safeParse3(AppManifestSchema, data);
+          if (!result.success) { warn(`${m}: ${formatIssues(result.issues)}`); failed++; }
           else {
             schemaOk = true;
             ok(`${m}`);

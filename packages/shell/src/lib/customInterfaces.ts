@@ -1,4 +1,4 @@
-import { CustomInterfaceSchema, type AppManager, type CustomInterface } from '@aura/core';
+import { CustomInterfaceSchema, safeParse3, type AppManager, type CustomInterface } from '@aura/core';
 import { defaultKv } from '@aura/kv-store';
 
 /**
@@ -16,7 +16,7 @@ export async function loadCustomInterfaces(): Promise<CustomInterface[]> {
     const raw = await kv.getValue<unknown[]>(NS, KEY);
     // Re-validate on read: a hand-edited or stale entry is skipped, never fatal.
     return (raw ?? []).flatMap((e) => {
-      const p = CustomInterfaceSchema.safeParse(e);
+      const p = safeParse3(CustomInterfaceSchema, e);
       return p.success ? [p.data] : [];
     });
   } finally {
@@ -36,9 +36,9 @@ export async function saveCustomInterfaces(mgr: AppManager, entries: CustomInter
 
 /** Validate a request body; returns the entry or a user-facing error. */
 export function parseCustomInterface(body: unknown): { ok: true; value: CustomInterface } | { ok: false; error: string } {
-  const p = CustomInterfaceSchema.safeParse(body);
+  const p = safeParse3(CustomInterfaceSchema, body);
   if (p.success) return { ok: true, value: p.data };
-  const first = p.error.issues[0];
+  const first = p.issues[0];
   return { ok: false, error: `invalid interface: ${first?.path.join('.') || 'body'} — ${first?.message ?? 'invalid'}` };
 }
 

@@ -28,6 +28,7 @@ import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { parse, stringify } from 'yaml';
 import { z } from 'zod';
+import { formatIssues, safeParse3 } from '../types/zodCompat.js';
 import { MOUNT_ROOT_PATH, PATCHES_DIR_NAME, WORK_DIR_NAME } from '../app-manager/MountManager.js';
 
 export const SERIES_FILE = 'aura-patches.yaml';
@@ -120,9 +121,9 @@ function identityArgs(cwd: string): string[] {
 export function parseSeries(text: string): Series {
   let doc: unknown;
   try { doc = parse(text); } catch (err) { throw new SeriesError(`${SERIES_FILE}: ${(err as Error).message}`); }
-  const r = SeriesSchema.safeParse(doc);
+  const r = safeParse3(SeriesSchema, doc);
   if (!r.success) {
-    throw new SeriesError(`${SERIES_FILE}: ${r.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ')}`);
+    throw new SeriesError(`${SERIES_FILE}: ${formatIssues(r.issues, '(root)')}`);
   }
   return r.data;
 }

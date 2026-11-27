@@ -313,7 +313,8 @@ export const AppManifestSchema = z.object({
    * publisher or code. Optional for apps created before it existed
    * (`aura dev origin --assign` fills it in). See core AppIdentity.ts.
    */
-  originId: z.string().uuid({ message: 'originId must be a UUID' }).optional(),
+  // guid: any 8-4-4-4-12 hex id, as zod 3's uuid check took it (zod 4's .uuid() is RFC 9562 only).
+  originId: z.string().guid({ message: 'originId must be a UUID' }).optional(),
   /**
    * Component archetype — direct counterpart of Android's component model:
    *   'activity' (default) → user-facing app. Spawn lazily on launch, lifecycle
@@ -525,7 +526,9 @@ export const AppManifestSchema = z.object({
     defaultWidth: z.number().int().min(320).default(800),
     defaultHeight: z.number().int().min(240).default(600),
     resizable: z.boolean().default(true),
-  }).default({}),
+  // prefault: an absent block is parsed as {}, so it gets the defaults above
+  // (zod 4's .default({}) would return the {} as it is).
+  }).prefault({}),
   /**
    * Free-flight activities (`presentation: 'flight'`). Opening one needs the
    * `system.overlay` permission. `maxPerApp` caps live flights across all
@@ -576,7 +579,7 @@ export const AppManifestSchema = z.object({
   theme: z.object({
     mode: z.enum(['os-components', 'custom']).default('os-components'),
     accentColor: z.string().optional(),
-  }).default({}),
+  }).prefault({}), // as viewConfig
   /**
    * How the app participates in the OS theming pipeline (Theme Manager v2).
    *   'inherit'  → default. Proxy auto-injects `<link rel="stylesheet" href="/api/os/theme.css">`.

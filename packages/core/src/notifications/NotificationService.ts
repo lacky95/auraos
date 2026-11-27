@@ -57,12 +57,12 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { defaultRedis, type Redis } from '@aura/kv-store';
 import { OsEventBus } from '../ipc/OsEventBus.js';
 import { getAuthServices } from '../auth/services.js';
-import type { ZodError } from 'zod';
 import {
   AnswerSchema, ClearFilterSchema, CreateInputSchema, InteractionInputSchema, ListQuerySchema, UpdatePatchSchema,
   identityOverrideWarnings, outcomeOf, MAX_COMBOBOX_CUSTOM, MAX_MARKDOWN_CHARS,
   type ClearFilter, type CreateInput, type InteractionInput, type ListQuery, type UpdatePatch,
 } from './schema.js';
+import { safeParse3, type Zod3Issue } from '../types/zodCompat.js';
 import {
   KEY_ACTIVE, KEY_ALL, NotificationStore, endedAtOf, senderIndexKey, type RedisProvider,
 } from './NotificationStore.js';
@@ -206,8 +206,8 @@ export interface ListResult {
 
 // ---------------------------------------------------------------------------
 
-function zodDetails(err: ZodError) {
-  return err.issues.map((i) => ({ path: i.path.join('.'), message: i.message }));
+function zodDetails(issues: Zod3Issue[]) {
+  return issues.map((i) => ({ path: i.path.join('.'), message: i.message }));
 }
 
 function hashToken(token: string): string {
@@ -851,8 +851,8 @@ export class NotificationService {
   async create(input: CreateInput | unknown, caller: NotificationPrincipal): Promise<CreateResult> {
     this.assertCaller(caller);
     const warnings = identityOverrideWarnings(input);
-    const parsed = CreateInputSchema.safeParse(input);
-    if (!parsed.success) throw new NotificationError(400, 'invalid notification', zodDetails(parsed.error));
+    const parsed = safeParse3(CreateInputSchema, input);
+    if (!parsed.success) throw new NotificationError(400, 'invalid notification', zodDetails(parsed.issues));
     const p = parsed.data;
     deprecatedScopeWarning(input, warnings);
     const actorName = p.sender?.actor?.name;
@@ -937,8 +937,8 @@ export class NotificationService {
     if (patch && typeof patch === 'object' && 'type' in patch) {
       warnings.push({ code: 'ignored-field', field: 'type', message: 'type is fixed at create' });
     }
-    const parsed = UpdatePatchSchema.safeParse(patch);
-    if (!parsed.success) throw new NotificationError(400, 'invalid update', zodDetails(parsed.error));
+    const parsed = safeParse3(UpdatePatchSchema, patch);
+    if (!parsed.success) throw new NotificationError(400, 'invalid update', zodDetails(parsed.issues));
     const p = parsed.data;
     deprecatedScopeWarning(patch, warnings);
     const actorName = p.sender?.actor?.name;
@@ -1122,8 +1122,8 @@ export class NotificationService {
    * limited to its own senderKey (asking for another sender returns nothing).
    */
   async list(query: ListQuery | unknown = {}, viewer?: ViewerInput): Promise<ListResult> {
-    const parsed = ListQuerySchema.safeParse(query ?? {});
-    if (!parsed.success) throw new NotificationError(400, 'invalid list query', zodDetails(parsed.error));
+    const parsed = safeParse3(ListQuerySchema, query ?? {});
+    if (!parsed.success) throw new NotificationError(400, 'invalid list query', zodDetails(parsed.issues));
     const q = parsed.data;
     const access = await this.accessFor(viewer);
     if (access.kind === 'none') return { items: [] };
@@ -1236,8 +1236,8 @@ export class NotificationService {
   }
 
   async resolve(id: string, answer: unknown, actor: Actor = UNVERIFIED_USER, viewer?: ViewerInput): Promise<Notification> {
-    const parsed = AnswerSchema.safeParse(answer);
-    if (!parsed.success) throw new NotificationError(400, 'invalid answer', zodDetails(parsed.error));
+    const parsed = safeParse3(AnswerSchema, answer);
+    if (!parsed.success) throw new NotificationError(400, 'invalid answer', zodDetails(parsed.issues));
     const access = await this.userAccess(viewer);
     return this.withLock(id, async () => {
       const rec = await this.mustLoad(id);
@@ -1268,8 +1268,8 @@ export class NotificationService {
    * dismiss → `dismiss()`, link → the client opens `href`.
    */
   async interact(id: string, input: InteractionInput | unknown, actor: Actor = UNVERIFIED_USER, viewer?: ViewerInput): Promise<Notification> {
-    const parsed = InteractionInputSchema.safeParse(input);
-    if (!parsed.success) throw new NotificationError(400, 'invalid interaction', zodDetails(parsed.error));
+    const parsed = safeParse3(InteractionInputSchema, input);
+    if (!parsed.success) throw new NotificationError(400, 'invalid interaction', zodDetails(parsed.issues));
     const p = parsed.data;
     const access = await this.userAccess(viewer);
     return this.withLock(id, async () => {
@@ -1448,8 +1448,8 @@ export class NotificationService {
 
   /** User op: remove every active notification matching `filter`, except locked ones. */
   async clear(filter: ClearFilter | unknown = {}, actor: Actor = UNVERIFIED_USER, viewer?: ViewerInput): Promise<{ cleared: number; skippedLocked: number }> {
-    const parsed = ClearFilterSchema.safeParse(filter ?? {});
-    if (!parsed.success) throw new NotificationError(400, 'invalid clear filter', zodDetails(parsed.error));
+    const parsed = safeParse3(ClearFilterSchema, filter ?? {});
+    if (!parsed.success) throw new NotificationError(400, 'invalid clear filter', zodDetails(parsed.issues));
     const f = parsed.data;
     const allowed = await this.bulkGate(viewer, 'clear');
     let cleared = 0;

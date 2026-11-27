@@ -2,34 +2,6 @@
   "about": "Known security debt (tools/security-check.mjs). The gate fails only on findings not listed here; the summary prints the count, which must shrink every phase. Remove an entry when its finding is fixed (the gate warns). Never add one to make a new finding pass without a review: a reviewed-safe exception with no debt behind it belongs in tools/security-allowlist.yaml.",
   "entries": [
     {
-      "check": "deps/advisory",
-      "file": "pnpm-lock.yaml",
-      "id": "GHSA-f88m-g3jw-g9cj",
-      "reason": "sharp 0.34 (libvips CVEs): Astro 7 uses sharp 0.35.5; 0.34 is left only under next 15 (the Docs app, no next/image).",
-      "owner": "Owner: Next 16 upgrade (before 2027-01-31)"
-    },
-    {
-      "check": "deps/advisory",
-      "file": "pnpm-lock.yaml",
-      "id": "GHSA-rgj7-g3m4-5g8c",
-      "reason": "sharp 0.34 (libheif): same as the libvips advisory, left only under next 15 (Docs).",
-      "owner": "Owner: Next 16 upgrade (before 2027-01-31)"
-    },
-    {
-      "check": "deps/advisory",
-      "file": "pnpm-lock.yaml",
-      "id": "GHSA-wq5f-xc86-pv6w",
-      "reason": "sharp 0.34 (librsvg): same as the libvips advisory, left only under next 15 (Docs).",
-      "owner": "Owner: Next 16 upgrade (before 2027-01-31)"
-    },
-    {
-      "check": "deps/advisory",
-      "file": "pnpm-lock.yaml",
-      "id": "GHSA-mrhx-c7xc-m3w5",
-      "reason": "zod 3: memory exhaustion on oversized constrained collections; fixed only in zod 4 (a major, MCP SDK and app schemas).",
-      "owner": "Owner: major upgrades (Astro 7, zod 4) planned right after Phase 3a"
-    },
-    {
       "check": "patterns/html-sink",
       "file": "apps/com.aura.console/src/pages/index.astro",
       "source": "output.innerHTML = `<div class=\"empty\">// ${msg}<span class=\"blink\">_</span></div>`;",

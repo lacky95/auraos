@@ -72,3 +72,10 @@ export function canonical(v) {
 export function dataHash(v) {
   return createHash('sha256').update(JSON.stringify(canonical(v))).digest('hex').slice(0, 16);
 }
+
+/** A case's stable name: `<schema>/<seed> <path>=<value>`. */
+export function caseLabel(c) {
+  const m = c.mutation;
+  const value = !m ? '' : 'literal' in m ? JSON.stringify(m.literal) : m.value;
+  return `${c.schema}/${c.seed ?? '(root)'}${m ? ` ${m.path.join('.') || '(root)'}=${value}` : ''}`;
+}

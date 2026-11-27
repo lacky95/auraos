@@ -44,7 +44,7 @@ const STAMP = 'aura-build.json';
 /** Everything a build depends on. Directories are walked recursively. */
 const SOURCES = [
   'content', 'app', 'lib',
-  'mdx-components.tsx', 'middleware.ts', 'next.config.mjs', 'source.config.ts',
+  'mdx-components.tsx', 'proxy.ts', 'next.config.mjs', 'source.config.ts',
   'postcss.config.mjs', 'package.json',
   // The SDK is bundled into the build (runtime/next, the lifecycle guard): a new one rebuilds.
   'node_modules/@aura/app-sdk/dist',

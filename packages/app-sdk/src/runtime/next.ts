@@ -21,7 +21,7 @@
  * Astro apps get this for free via `auraAppIntegration()` + the `createLifecycleHandler`
  * factories in `../lifecycle.ts`. Next.js apps don't have an integration, so this
  * file ships three thin factories that match the App Router's Route Handler shape
- * (and one helper for response-header middleware).
+ * (and one helper for the response-header proxy, `middleware` before Next 16).
  *
  * Usage in a Next.js 13+ app:
  *
@@ -33,20 +33,20 @@
  *   import { createNextHealthRoute } from '@aura/app-sdk/runtime/next';
  *   export const { GET } = createNextHealthRoute();
  *
- *   // middleware.ts
+ *   // proxy.ts (Next 16; Next 15: middleware.ts exporting `middleware`, plus
+ *   // `runtime: 'nodejs'` in its config — the lifecycle guard uses node:crypto)
  *   import { NextResponse, type NextRequest } from 'next/server';
  *   import { auraIdentityHeaders } from '@aura/app-sdk/runtime/next';
- *   export function middleware(_req: NextRequest) {
+ *   export function proxy(_req: NextRequest) {
  *     const res = NextResponse.next();
  *     for (const [k, v] of Object.entries(auraIdentityHeaders())) res.headers.set(k, v);
  *     return res;
  *   }
- *   // Node.js runtime (Next 15.5+): this module's lifecycle guard uses node:crypto, which Edge can't load.
- *   export const config = { matcher: '/(.*)', runtime: 'nodejs' };
+ *   export const config = { matcher: '/(.*)' };
  *
  * Implementation note: we deliberately do NOT take a runtime dependency on `next`.
  * The Route Handler signature `(req: Request, ctx: { params: ... }) => Response` is
- * web-standard; the middleware helper returns plain header pairs the caller stamps
+ * web-standard; the proxy helper returns plain header pairs the caller stamps
  * onto whichever NextResponse they construct.
  */
 
@@ -80,7 +80,7 @@ function json(body: unknown, status = 200): Response {
 }
 
 // =========================================================================
-//  Identity headers (for middleware.ts)
+//  Identity headers (for proxy.ts / middleware.ts)
 // =========================================================================
 
 /**

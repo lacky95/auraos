@@ -19,7 +19,6 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import type { CallToolResult, Tool } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import { zodToJsonSchema } from 'zod-to-json-schema';
 import { source } from './source';
 
 const CONTENT_DIR = join(process.cwd(), 'content/docs');
@@ -36,9 +35,9 @@ interface DocPage {
 function pages(): DocPage[] {
   return source.getPages().map((p) => ({
     url: p.url,
-    title: String(p.data.title ?? p.file.name),
+    title: String(p.data.title ?? p.path.replace(/^.*\//, '').replace(/\.mdx?$/, '')),
     description: String(p.data.description ?? ''),
-    file: p.file.path,
+    file: p.path,
   }));
 }
 
@@ -126,7 +125,11 @@ export function buildDocsServer(): Server {
       name,
       title,
       description,
-      inputSchema: zodToJsonSchema(schema, { target: 'jsonSchema7' }) as Tool['inputSchema'],
+      // Closed objects, as zod-to-json-schema gave them.
+      inputSchema: z.toJSONSchema(schema, {
+        io: 'input', target: 'draft-07',
+        override: ({ jsonSchema: j }) => { if (j.type === 'object' && j.additionalProperties === undefined) j.additionalProperties = false; },
+      }) as Tool['inputSchema'],
       annotations: { readOnlyHint: true },
     })),
   }));

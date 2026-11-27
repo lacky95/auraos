@@ -2,6 +2,7 @@ import { readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import chokidar from 'chokidar';
 import { AppManifestSchema, type AppManifest } from '../types/manifest.js';
+import { ZOD3 } from '../types/zodCompat.js';
 import { OsEventBus } from '../ipc/OsEventBus.js';
 import type { ScopeDefinition, ScopedManifest } from '../scopes/types.js';
 import type { ManifestHostGuard } from '../app-hosts/manifestHostGuard.js';
@@ -72,7 +73,7 @@ export class AppRegistry {
     if (!existsSync(manifestPath)) return;
     try {
       const raw = JSON.parse(readFileSync(manifestPath, 'utf-8'));
-      const base = AppManifestSchema.parse(raw);
+      const base = AppManifestSchema.parse(raw, ZOD3);
       const candidate = this.guarded({
         ...base,
         scopeId: scope.id,
@@ -126,7 +127,7 @@ export class AppRegistry {
       if (!existsSync(manifestPath)) continue;
       try {
         const raw = JSON.parse(readFileSync(manifestPath, 'utf-8'));
-        const base = AppManifestSchema.parse(raw);
+        const base = AppManifestSchema.parse(raw, ZOD3);
         return this.guarded({ ...base, scopeId: scope.id, appDir: join(scope.appsDir, base.id) });
       } catch { /* skip corrupt */ }
     }
@@ -159,7 +160,7 @@ export class AppRegistry {
       if (!existsSync(manifestPath)) continue;
       try {
         const raw = JSON.parse(readFileSync(manifestPath, 'utf-8'));
-        const base = AppManifestSchema.parse(raw);
+        const base = AppManifestSchema.parse(raw, ZOD3);
         candidates.push({ ...base, scopeId: scope.id, appDir: join(scope.appsDir, base.id) });
       } catch { /* skip */ }
     }

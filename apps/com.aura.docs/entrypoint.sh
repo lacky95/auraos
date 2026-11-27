@@ -9,7 +9,7 @@
 # serve.mjs watches content/ and app/ and rebuilds + restarts on edits, so
 # docs stay editable; a change shows up after one build (~30-60 s).
 #
-# Dev mode (`next dev --turbo`, instant HMR) for heavy layout work:
+# Dev mode (`next dev`, Turbopack, instant HMR) for heavy layout work:
 #   touch /workspace/apps/com.aura.docs/.dev-mode && aura restart app com.aura.docs
 # Remove the marker and restart to go back. Don't leave it on: a long-lived
 # Next dev server grows without bound (11 GB on 2026-11-19).
@@ -32,7 +32,7 @@ fi
 
 if [ "${DOCS_MODE:-}" = "dev" ] || [ -e "$APP_DIR/.dev-mode" ]; then
   echo "[${APP_ID:-com.aura.docs}] DEV mode: Next.js (turbopack) on port ${APP_PORT:-4001}"
-  exec npx next dev --turbo --hostname 0.0.0.0 --port "${APP_PORT:-4001}"
+  exec npx next dev --hostname 0.0.0.0 --port "${APP_PORT:-4001}"
 fi
 
 echo "[${APP_ID:-com.aura.docs}] PROD mode: serve.mjs on port ${APP_PORT:-4001}"

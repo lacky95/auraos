@@ -689,7 +689,7 @@ contract. **(S)** server-only. Used by `com.aura.docs` (this app).
 |---|---|
 | `createNextLifecycleRoutes(impl?: { onCreate…onDestroy, onActivityCreate, onActivityDestroy, onIntent, onSaveState, onAssign })` | Returns `{ POST }` for `app/api/lifecycle/[...hook]/route.ts`. The hooks run through the same handlers as the Astro factories (same bodies, user, stop reason, `IntentRejectedError`). |
 | `createNextHealthRoute()` | Returns `{ GET }` for `app/api/lifecycle/health/route.ts`. |
-| `auraIdentityHeaders()` | Returns `{ 'X-Aura-App-Id', 'X-Aura-Instance-Id' }` — stamp from a Next middleware. |
+| `auraIdentityHeaders()` | Returns `{ 'X-Aura-App-Id', 'X-Aura-Instance-Id' }` — stamp from a Next proxy (`proxy.ts`; `middleware.ts` before Next 16). |
 
 ```ts
 // app/api/lifecycle/[...hook]/route.ts
@@ -698,10 +698,10 @@ export const { POST } = createNextLifecycleRoutes({
   onDestroy: async () => { /* teardown */ },
 });
 
-// middleware.ts
+// proxy.ts (Next 16; on Next 15 middleware.ts exporting `middleware`)
 import { NextResponse } from 'next/server';
 import { auraIdentityHeaders } from '@aura/app-sdk/runtime/next';
-export function middleware() {
+export function proxy() {
   const res = NextResponse.next();
   for (const [k, v] of Object.entries(auraIdentityHeaders())) res.headers.set(k, v);
   return res;
