@@ -6,6 +6,7 @@
  */
 import type { NexusSource } from '../nexus/types.js';
 import type { ExecutionApproval } from '../identity/execution.js';
+import type { InstallationSetupSummary } from '../setup/contracts.js';
 
 export type AppInstallationState = 'active' | 'reserved' | 'retired';
 
@@ -51,6 +52,13 @@ export interface AppInstallation {
   runAsMigration?: AppRunAsMigration;
   /** The journal of the run-as migration that set the current `runAs`: the flip back restores it. */
   runAsJournal?: string;
+  /**
+   * D108: the operational state of an app that declares `setup` or
+   * `profiles` (setup/state.ts); absent for every other app (`ready` by
+   * derivation) and on a new installation (D20: it holds no configuration).
+   * Written only through `AppHostStore.setSetup` (compare-and-set).
+   */
+  setup?: InstallationSetupSummary;
   createdAt: number;
   updatedAt: number;
 }

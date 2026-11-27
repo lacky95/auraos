@@ -5,9 +5,9 @@
  * beyond what the caller passes in.
  *
  *   update, restart, confirmed move   keep the installation
- *   keep-data uninstall               reserved: routes off, labels held
- *   delete app data                   retired: labels tombstoned for good
- *   clone, copy, another publisher    a new installation with fresh hosts
+ *   keep-data uninstall               reserved: routes off, labels held, setup records kept
+ *   delete app data                   retired: labels tombstoned for good, setup records deleted
+ *   clone, copy, another publisher    a new installation with fresh hosts and no setup (D20, D108)
  *
  * Grants follow the installation (Hotfix 2, S1, until grants are bound to the
  * installation id): deleting an app's data, and any new installation that
@@ -59,6 +59,12 @@ function readManifestHostNames(manifestPath: string): string[] {
 export interface AppHostLifecycleOpts {
   /** Revoke the grants given to `appId` in install scope `scope` (GrantStore `revokeAppScope`). */
   revokeAppGrants?: (appId: string, scope: ScopeId) => Promise<unknown>;
+  /**
+   * D108: delete an installation's desired-configuration records, revoking
+   * their vault handles (setup/store.ts `forgetInstallation`). Throws when it
+   * cannot; the installation is then not retired, so the delete can repeat.
+   */
+  forgetSetup?: (installationId: string, userId: string) => Promise<unknown>;
 }
 
 export class AppHostLifecycle {
@@ -218,6 +224,7 @@ export class AppHostLifecycle {
     await this.revokeGrants(appId, scope);
     for (const i of await this.registry.listInstallations(appId)) {
       if (i.scope !== scope || i.state === 'retired') continue;
+      await this.opts.forgetSetup?.(i.installationId, i.userId);
       await this.registry.retire(i.installationId);
       ids.push(i.installationId);
     }

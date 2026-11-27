@@ -5,6 +5,8 @@ The sector rules are in `packages/core/AGENTS.md`. Design: D108 (`app-profiles-s
 ## Files
 
 - **`contracts.ts`** (contract leaf): operational states and transitions, the desired-configuration record, the resolution (desired / authorized / effective), digests, resolver ports, D105 codes (`needs-setup`), the `app.setup.apply` payload and class, API/SDK views, hook contracts, audit and the `app:setup-state` event.
+- **`store.ts`** (P2): `SetupConfigStore`, the sealed `app:config:*` records (`read` → `{value, stored, tampered}`, `compareAndSet`, `update`, `forgetInstallation` revoking handles via `vaultHandleRevoker`). Wiring: `onTampered` → audit `tamperAuditInput`; lifecycle `forgetSetup`.
+- **`state.ts`** (P2): `SetupStateMachine` over `AppHostStore.setSetup`: `state`, `begin`, `transition`, `progress`, `markReady` (the only way into `ready`), `desired` (tamper → `resetTampered`, once). Errors carry `code`.
 - **`index.ts`**: the module's public surface, re-exported by the core barrel. Named exports only; one region per work package.
 - Related leaves outside this directory: `config/schema.ts` (the one field model, also behind runtime settings) and `types/setupManifest.ts` (the manifest blocks `setup`, `profiles`, `homeEnvironments`, env references).
 
