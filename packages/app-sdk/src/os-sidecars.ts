@@ -139,12 +139,10 @@ export interface OsSidecarsOptions {
  * manifest's permissions[].
  */
 export class OsSidecarError extends OsError {
-  readonly permission?: string;
   constructor(status: number, message: string, code: string = statusCode(status)) {
-    super(status, code, message);
-    this.name = 'OsSidecarError';
     const perm = status === 403 ? /(?:not granted|needs) '([\w.]+)'/.exec(message)?.[1] : undefined;
-    if (perm) this.permission = perm;
+    super(status, code, message, perm ? { facts: { permission: perm } } : {});
+    this.name = 'OsSidecarError';
   }
 }
 

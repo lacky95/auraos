@@ -459,7 +459,10 @@ test('decide: an auto-granted permission counts outside enforce only (strict)', 
     accessProfile: 'open', systemMode: 'normal', deployment: 'private',
   });
   assert.deepEqual(await d(input(false)), { outcome: 'allow', reason: 'auto-granted' });
-  assert.deepEqual(await d(input(true)), { outcome: 'deny', reason: 'missing-permission' });
+  // The decision is unchanged; the refusal also names what is missing (refusalText.ts).
+  assert.deepEqual(await d(input(true)), {
+    outcome: 'deny', reason: 'missing-permission', facts: { permission: 'apps.zzz', missing: 'declaration', holder: 'caller' },
+  });
 });
 
 // ── surfaces ────────────────────────────────────────────────────────────────

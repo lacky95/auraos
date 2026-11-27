@@ -49,9 +49,32 @@ const DROPPED_RESPONSE_HEADERS = new Set([
 
 const shellPort = () => process.env.SHELL_PORT ?? process.env.AURA_SHELL_PORT ?? '3000';
 
+/**
+ * What each boundary refusal says (the one error body, core `AuraErrorBody`:
+ * `error` stays the code). Never the origin another app expects, never a
+ * credential: only what the calling page did and how to call correctly.
+ */
+const BOUNDARY_TEXT = {
+  'shell-unavailable': { message: 'AuraOS did not answer this call.', category: 'unavailable', hint: 'Retry in a moment.' },
+  'no-instance': { message: 'This App Host page has no running app instance.', category: 'instance-not-found', hint: 'Open the app again from AuraOS.' },
+  'no-session': { message: 'This App Host page has no session.', category: 'not-authenticated', hint: 'Open the app again from AuraOS.' },
+  'method-not-allowed': { message: 'This method is not allowed on /_aura/os.', category: 'invalid-request' },
+  'cross-site': { message: 'Calls to /_aura/os come only from this app\'s own pages.', category: 'not-grantable' },
+  'origin-mismatch': { message: 'Calls to /_aura/os come only from this app\'s own origin.', category: 'not-grantable' },
+  'origin-required': {
+    message: 'A state-changing call to /_aura/os needs an Origin header.', category: 'invalid-request',
+    hint: 'Call through osClient from the app page (a browser fetch sends it).',
+  },
+  'csrf-required': {
+    message: 'A state-changing call to /_aura/os needs a JSON body or the CSRF token.', category: 'invalid-request',
+    hint: 'Use osClient, or send Content-Type: application/json.',
+  },
+  'not-a-gateway-path': { message: 'This is not an OS API path: /_aura/os/api/… only.', category: 'invalid-request' },
+};
+
 function refuse(res, status, error) {
   res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
-  res.end(res.req?.method === 'HEAD' ? undefined : JSON.stringify({ error }));
+  res.end(res.req?.method === 'HEAD' ? undefined : JSON.stringify({ error, ...(BOUNDARY_TEXT[error] ?? {}) }));
 }
 
 /**
