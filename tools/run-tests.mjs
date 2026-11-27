@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 // Runs every package and app test suite, continues past failures, and prints
 // per-suite results. Usage: pnpm test [-- --only=core,shell] [--timeout=600] [--with-security] [--no-arch]
+//   [--test-concurrency=2] [--allow-live-uncapped=<reason>]
+//
+// Resources (D106): every suite runs with a bounded --test-concurrency (default 2, AURA_TEST_CONCURRENCY), and
+// in the live master container a run must be capped by its cgroup, run under the CPU rule
+// (flock /data/dev/.cpu.lock nice -n 19 ionice -c3) or name a reason (tools/run-tests-guard.mjs).
 //
 // --with-security runs the security gate (tools/security-check.mjs) first; its
 // findings fail the run like a failed suite.
@@ -19,6 +24,7 @@ import { chmodSync, createWriteStream, existsSync, mkdirSync, mkdtempSync, readF
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { cgroupMemoryLimit, isLiveShell, liveShellVerdict, testConcurrency, underCpuLock, withConcurrency } from './run-tests-guard.mjs';
 
 const ROOT = realpathSync(join(dirname(fileURLToPath(import.meta.url)), '..'));
 const OVERRIDE = '--allow-live-workspace';
@@ -29,6 +35,13 @@ if (ROOT === '/workspace' && !args.includes(OVERRIDE)) {
   console.error(`Refusing to run in /workspace: the live shell watches it and tests rewrite dist.\nUse a git worktree, or pass ${OVERRIDE} if the live shell is not using this checkout.`);
   process.exit(2);
 }
+
+let concurrency;
+try { concurrency = testConcurrency(opt('test-concurrency')); }
+catch (err) { console.error(err.message); process.exit(2); }
+const verdict = liveShellVerdict({ args, live: isLiveShell(), memoryLimit: cgroupMemoryLimit(), cpuLock: underCpuLock() });
+if (!verdict.ok) { console.error(verdict.why); process.exit(2); }
+console.log(`resources: ${verdict.why}; --test-concurrency=${concurrency}`);
 
 // Libraries first: later suites import their built dist.
 const ORDER = ['packages/kv-store', 'packages/core', 'packages/app-sdk'];
@@ -152,7 +165,7 @@ function runSuite({ dir, script: declared }) {
   const id = dir.replace(/\W+/g, '-');
   const fileLog = join(runDir, `${id}.files`);
   const files = discoverFiles(dir, declared);
-  let script = FORCE_EXIT.has(dir) ? declared.replace('--test ', '--test --test-force-exit ') : declared;
+  let script = withConcurrency(FORCE_EXIT.has(dir) ? declared.replace('--test ', '--test --test-force-exit ') : declared, concurrency);
   if (files) script = script.replace('--test ', `--test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=${REPORTER} --test-reporter-destination=${join(runDir, `${id}.reporter.out`)} `);
   const logPath = join(runDir, `${id}.log`);
   const log = createWriteStream(logPath);
