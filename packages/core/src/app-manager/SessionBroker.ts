@@ -246,7 +246,7 @@ export class SessionBroker {
     const id = await engine.execCreate(SESSION_BROKER_NAME, {
       Cmd: [helper, 'enter', JSON.stringify(input)], Tty: spec.tty, AttachStdin: true, User: '0',
     });
-    const sock: Duplex = await engine.execStart(id, spec.tty);
+    const sock: Duplex = await engine.execStart(id, spec.tty, { cols: spec.cols, rows: spec.rows });
     let launcherPid = 0;
     for (let i = 0; i < 20 && !launcherPid; i++) {
       const r = await engine.execInspect(id).catch(() => null);

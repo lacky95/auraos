@@ -288,6 +288,8 @@ interface SidecarTarget { container: string; label: string }
 
 const TTY_SIGNAL = (sig: string): string | undefined => TTY_SIGNALS[String(sig).toUpperCase().replace(/^SIG/, '')];
 
+const sleep = (ms: number) => new Promise<void>((res) => { setTimeout(res, ms).unref?.(); });
+
 /** The exit code of an Engine exec once it finished; null if it still runs (a cut session). */
 export async function engineExitCode(engine: EngineClient, id: string): Promise<number | null> {
   for (let i = 0; i < 20; i++) {
@@ -298,11 +300,21 @@ export async function engineExitCode(engine: EngineClient, id: string): Promise<
   return null;
 }
 
+/** While an exec's stream is open, how often its state is read: from the first, backing off to the last. */
+export const EXEC_WATCH_MS = { first: 100, max: 1000, grace: 250 } as const;
+
 /**
  * An `ExecSession` over a started Engine exec (its hijacked stream): the
  * sidecar exec here and the container runtime's session broker share it.
  * `onEnd` runs once when the session is closed by the caller (not when the
  * process exits by itself): the broker ends the session's processes there.
+ *
+ * The session ends when the stream does, or when the exec has ended while
+ * its stream stays open: Docker Engine 29 never closes the hijacked stream
+ * of an exec that wrote nothing at all (`sh -c 'exit 3'`, `true`; TTY or
+ * not, stdin attached or not; the 5-main vm2 finding), so the exec's state is
+ * read while the stream is open (EXEC_WATCH_MS) and, once it has an exit
+ * code, the stream is closed here after a short grace for output in flight.
  */
 export function engineSession(
   engine: EngineClient, id: string, sock: Duplex,
@@ -316,9 +328,11 @@ export function engineSession(
   resize(open.cols, open.rows);
   const demux = open.tty ? null : new EngineDemux(onOutput);
   sock.on('data', (d: Buffer) => { if (demux) demux.push(d); else onOutput(1, d); });
+  let streamOpen = true;
   const exited = new Promise<number | null>((resolve) => {
     let settled = false;
     const finish = () => {
+      streamOpen = false;
       if (settled) return;
       settled = true;
       void (opts.exitCode ?? (() => engineExitCode(engine, id)))().then(resolve, () => resolve(null));
@@ -327,6 +341,18 @@ export function engineSession(
     sock.once('close', finish);
     sock.once('error', finish);
   });
+  void (async () => {
+    for (let wait: number = EXEC_WATCH_MS.first; streamOpen; wait = Math.min(wait * 2, EXEC_WATCH_MS.max)) {
+      await sleep(wait);
+      if (!streamOpen) return;
+      const r = await engine.execInspect(id).catch(() => null);
+      // Not started yet (no exit code) or still running: keep watching.
+      if (!r || r.Running || r.ExitCode === null) continue;
+      await sleep(EXEC_WATCH_MS.grace);
+      if (streamOpen) { try { sock.destroy(); } catch { /* gone */ } }
+      return;
+    }
+  })();
   let ended = false;
   const close = () => {
     if (!ended) { ended = true; try { opts.onEnd?.(); } catch { /* best effort */ } }
@@ -413,7 +439,7 @@ export class ExecBridge {
         const id = await engine.execCreate(t.container, {
           Cmd: open.argv ?? DEFAULT_JUMP_ARGV, Tty: open.tty, Env: env, ...(open.cwd ? { WorkingDir: open.cwd } : {}),
         });
-        return engineSession(engine, id, await engine.execStart(id, open.tty), open, onOutput);
+        return engineSession(engine, id, await engine.execStart(id, open.tty, { cols: open.cols, rows: open.rows }), open, onOutput);
       } catch (err) {
         throw engineError(err);
       }
