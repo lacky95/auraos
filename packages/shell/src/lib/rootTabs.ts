@@ -62,7 +62,7 @@ export async function postRootTab(ctx: Ctx, deps: RootTabDeps = liveRootTabDeps(
   if (!(await deps.enabled())) return json({ error: 'root-disabled', message: 'aura root is disabled on this installation (security option aura-root)' }, 403);
   const inst = deps.mgr.getInstance(instanceId) as (ReturnType<Mgr['getInstance']> & { owner?: string; inPool?: boolean }) | undefined;
   // P5-4: only into the owner's own Terminal instance, its session context.
-  if (!inst || !core.TERMINAL_SESSION_APPS.has(inst.appId) || inst.inPool || inst.owner !== core.DEFAULT_OWNER_ID) {
+  if (!inst || !core.isUserEnvironment(inst) || inst.inPool || inst.owner !== core.DEFAULT_OWNER_ID) {
     return json({ error: 'not-a-terminal', message: 'aura root opens only in your own System Terminal' }, 409);
   }
   const actor = await deps.ownerAction(ctx, {

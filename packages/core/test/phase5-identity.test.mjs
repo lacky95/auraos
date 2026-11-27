@@ -290,8 +290,11 @@ test('planHomeTarget: App Homes for apps, Private Homes only for a verified user
   const d = '/data';
   assert.equal(planHomeTarget(d, { installationId: 'i1', environmentScope: 'global', executionContext: 'application' }).hostPath, '/data/aura/apphomes/i1/global');
   assert.equal(planHomeTarget(d, { installationId: 'i1', environmentScope: 'user', executionContext: 'sidecar', userId: 'default' }).hostPath, '/data/aura/apphomes/i1/users/default');
-  const t = planHomeTarget(d, { installationId: 'i1', environmentScope: 'global', executionContext: 'terminal-session', principal: { userId: 'default', role: 'owner' } });
-  assert.deepEqual({ kind: t.kind, hostPath: t.hostPath }, { kind: 'private', hostPath: '/data/aura/home/default' });
+  // D107 S2: `user-environment`, and `terminal-session` as its read alias, plan the same Private Home.
+  for (const executionContext of ['user-environment', 'terminal-session']) {
+    const t = planHomeTarget(d, { installationId: 'i1', environmentScope: 'global', executionContext, principal: { userId: 'default', role: 'owner' } });
+    assert.deepEqual({ kind: t.kind, hostPath: t.hostPath }, { kind: 'private', hostPath: '/data/aura/home/default' }, executionContext);
+  }
   const reason = (req) => { try { planHomeTarget(d, req); return null; } catch (e) { assert.ok(e instanceof HomeDeniedError); return e.reason; } };
   assert.equal(reason({ installationId: null, environmentScope: 'global', executionContext: 'application' }), 'installation-unresolved');
   assert.equal(reason({ installationId: 'i1', environmentScope: 'user', executionContext: 'application' }), 'user-required');
@@ -310,6 +313,9 @@ test('homePlan: today against the target, per instance', () => {
   assert.deepEqual(rep.rows.map((x) => [x.appId, x.change]), [['com.aura.terminal', 'same'], ['com.example.lost', 'denied'], ['com.example.notes', 'moves']]);
   assert.deepEqual(rep.summary, { same: 1, moves: 1, denied: 1 });
   assert.equal(rep.mode, 'report');
+  // D107 S1/S2: a user environment (isUserEnvironment) reports the generic context, never the alias.
+  assert.deepEqual(rep.rows.map((x) => [x.appId, x.executionContext]),
+    [['com.aura.terminal', 'user-environment'], ['com.example.lost', 'application'], ['com.example.notes', 'application']]);
 });
 
 // ── user records v2 (I.2) ───────────────────────────────────────────────────

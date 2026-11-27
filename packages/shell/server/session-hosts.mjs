@@ -11,7 +11,7 @@
 export const TERMINAL_APP_ID = 'com.aura.terminal';
 /**
  * D69 (stream T): the apps whose instances are each ONE user's session host
- * (core homes/plan.ts TERMINAL_SESSION_APPS). Their upstreams are reached
+ * (core system/systemApps.ts `isUserEnvironment`, D107 S1). Their upstreams are reached
  * only by a caller acting for the instance's user (lib/access/decide.ts
  * `sessionHostReachable`), and their instances and sessions are listed only
  * to that user. The one list for the shell's TS and plain-ESM sides.

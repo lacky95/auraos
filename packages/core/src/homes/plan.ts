@@ -9,7 +9,8 @@
  *   application, sidecar   the App Home: `apphomes/<installationId>/global`, or
  *                          `…/users/<userId>` for `environmentScope: user`;
  *                          never a Private Home (D84: human users only)
- *   terminal-session       the session user's Private Home
+ *   user-environment       the session user's Private Home (D107 S2;
+ *                          `terminal-session` is its read alias)
  *   jump                   `private` (default) the jumping user's Private Home,
  *                          `app` the App Home, `ephemeral` a tmpfs
  *
@@ -19,8 +20,8 @@
  */
 import { join } from 'node:path';
 import { homeDirFor, homeSubpathFor } from '../scopes/home.js';
-import { HomeDeniedError, type EnvironmentScope, type ExecutionContext, type HomeKind, type JumpHomeMode } from './types.js';
-import { SESSION_HOST_APP_IDS } from '../system/systemApps.js';
+import { HomeDeniedError, canonicalExecutionContext, type EnvironmentScope, type ExecutionContext, type HomeKind, type JumpHomeMode } from './types.js';
+import { isUserEnvironment } from '../system/systemApps.js';
 
 /** App Homes, as a subpath inside the app-data volume (D65). */
 export const APP_HOMES_SUBPATH = 'aura/apphomes';
@@ -43,10 +44,10 @@ export interface HomeTargetRequest {
   installationId: string | null;
   environmentScope: EnvironmentScope;
   executionContext: ExecutionContext;
-  /** The instance's owner (application, sidecar) or the session's user (terminal-session, jump). */
+  /** The instance's owner (application, sidecar) or the session's user (user-environment, jump). */
   userId?: string;
   jumpHomeMode?: JumpHomeMode;
-  /** Only `jump` and `terminal-session` carry one (D84: no Private Home without a human user). */
+  /** Only `jump` and `user-environment` carry one (D84: no Private Home without a human user). */
   principal?: { userId: string; role: 'owner' | 'member' };
   /** A preview instance (Track P): its own App Home per user, beside the installation's. */
   preview?: boolean;
@@ -78,12 +79,12 @@ export function planHomeTarget(dataDir: string, req: HomeTargetRequest): HomeTar
     if (req.userId !== undefined && req.userId !== p.userId) throw new HomeDeniedError('not-authorized', 'a Private Home is its own user\'s only');
     return { kind: 'private', hostPath: homeDirFor(dataDir, p.userId), volumeSubpath: homeSubpathFor(p.userId), owner: { kind: 'user', userId: p.userId } };
   };
-  switch (req.executionContext) {
+  switch (canonicalExecutionContext(req.executionContext)) {
     case 'application':
     case 'sidecar':
       if (req.principal) throw new HomeDeniedError('private-home-not-allowed', 'an app process never carries a user principal for its home');
       return appHome();
-    case 'terminal-session':
+    case 'user-environment':
       return privateHome();
     case 'jump':
       switch (req.jumpHomeMode ?? 'private') {
@@ -96,9 +97,6 @@ export function planHomeTarget(dataDir: string, req: HomeTargetRequest): HomeTar
   }
   throw new HomeDeniedError('not-authorized', 'unknown execution context');
 }
-
-/** Apps whose instances are a user's terminal sessions (D69): their home is the owner's Private Home. One list: system/systemApps.ts. */
-export const TERMINAL_SESSION_APPS: ReadonlySet<string> = SESSION_HOST_APP_IDS;
 
 export interface HomePlanInstance {
   instanceId: string;
@@ -135,15 +133,15 @@ export interface HomePlanReport {
 export function homePlan(dataDir: string, instances: readonly HomePlanInstance[], opts: { now?: () => number } = {}): HomePlanReport {
   const rows: HomePlanRow[] = [];
   for (const inst of [...instances].sort((a, b) => a.appId.localeCompare(b.appId) || a.instanceId.localeCompare(b.instanceId))) {
-    const terminal = TERMINAL_SESSION_APPS.has(inst.appId);
-    const executionContext: ExecutionContext = terminal ? 'terminal-session' : 'application';
+    const userEnv = isUserEnvironment(inst);
+    const executionContext: ExecutionContext = userEnv ? 'user-environment' : 'application';
     const base = { instanceId: inst.instanceId, appId: inst.appId, installationId: inst.installationId, executionContext, current: inst.currentHostPath };
     try {
       const target = planHomeTarget(dataDir, {
         installationId: inst.installationId, environmentScope: inst.environmentScope, executionContext,
         ...(inst.owner ? { userId: inst.owner } : {}),
-        // The Terminal's session user is its owner (D69); the role does not choose the home.
-        ...(terminal && inst.owner ? { principal: { userId: inst.owner, role: 'member' as const } } : {}),
+        // A user environment's session user is its owner (D69); the role does not choose the home.
+        ...(userEnv && inst.owner ? { principal: { userId: inst.owner, role: 'member' as const } } : {}),
       });
       rows.push({ ...base, target, change: target.hostPath === inst.currentHostPath ? 'same' : 'moves' });
     } catch (err) {

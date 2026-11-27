@@ -59,7 +59,7 @@ import type { AuthServices } from '../auth/services.js';
 import { defaultIdentityKeyFile } from '../auth/identityKey.js';
 import { HomeDeniedError, type HomeResolver, type ResolvedHome } from '../homes/types.js';
 import { kernelHomeResolver } from '../homes/HomeResolver.js';
-import { TERMINAL_SESSION_APPS } from '../homes/plan.js';
+import { isUserEnvironment, TERMINAL_APP_ID } from '../system/systemApps.js';
 import { requirePrivateHomeIsolation } from './privateHomeNetwork.js';
 import { appJumpPermission } from '../auth/GrantStore.js';
 import {
@@ -428,11 +428,11 @@ export class AppManager {
         .get({ kind: 'user', id: p.userId }, appJumpPermission(installationId))),
     });
     // The installation's runAs decides (P5-3): root as today, or its app identity from the one registry.
-    // A System Terminal instance is its user's session host instead (stream T, D69): that user's uid.
+    // A user environment (the System Terminal's instances) is its user's session host instead (stream T, D69; D107 S1): that user's uid.
     this.identities = opts.identities ?? sessionHostIdentityProvider(
       appIdentityProvider(async () => this.auth().identity),
       {
-        sessionApps: TERMINAL_SESSION_APPS,
+        isUserEnvironment,
         ownerId: DEFAULT_OWNER_ID,
         account: async (userId) => this.auth().users.getUser(userId),
         identity: async (userId) => this.auth().identity.ensureUser(userId),
@@ -2478,7 +2478,7 @@ export class AppManager {
         `${appId} runs as its app identity, and runtime ${opts.runtime.runtime} can't enforce one: not started (no root fallback)`);
     }
     const home = await this.homes.resolve(this.homeRequest(appId, opts.manifest, opts.installation.installationId, identity, opts.runtime.capabilities, user, !!opts.preview));
-    if (TERMINAL_SESSION_APPS.has(appId) && isNonRootIdentity(identity)
+    if (isUserEnvironment({ appId }) && isNonRootIdentity(identity)
       && ownerHomeAwaitsOwnership(home, identity.userId)) {
       // The owner's Private Home is still root's (D70: only the owner-approved
       // ownership apply hands it to uid 1000). As uid 1000 the Terminal could
@@ -2531,13 +2531,13 @@ export class AppManager {
     appId: string, manifest: AppManifest, installationId: string, identity: { uid: number; gid: number } | undefined,
     runtime: ResolvedRuntime['capabilities'], user: string | undefined, preview = false,
   ): Parameters<HomeResolver['resolve']>[0] {
-    const terminal = TERMINAL_SESSION_APPS.has(appId);
+    const userEnv = isUserEnvironment({ appId });
     return {
       installationId, environmentScope: manifest.environmentScope ?? 'global',
-      executionContext: terminal ? 'terminal-session' : 'application',
+      executionContext: userEnv ? 'user-environment' : 'application',
       ...(user ? { userId: user } : {}),
-      // D69: the Terminal's session user is its owner; the role does not choose the home.
-      ...(terminal && user ? { principal: { userId: user, role: user === DEFAULT_OWNER_ID ? 'owner' as const : 'member' as const } } : {}),
+      // D69: a user environment's session user is its owner; the role does not choose the home.
+      ...(userEnv && user ? { principal: { userId: user, role: user === DEFAULT_OWNER_ID ? 'owner' as const : 'member' as const } } : {}),
       appIdentity: identity ? { uid: identity.uid, gid: identity.gid } : null,
       runtime,
       ...(preview ? { preview: true } : {}),
@@ -2552,7 +2552,7 @@ export class AppManager {
    * needs no user.
    */
   private poolHomeUser(appId: string, manifest: AppManifest): string | undefined {
-    return TERMINAL_SESSION_APPS.has(appId) || manifest.environmentScope === 'user' ? DEFAULT_OWNER_ID : undefined;
+    return isUserEnvironment({ appId }) || manifest.environmentScope === 'user' ? DEFAULT_OWNER_ID : undefined;
   }
 
   /**
@@ -2563,7 +2563,7 @@ export class AppManager {
   async resolveAppHome(appId: string, opts: { userId?: string } = {}): Promise<{ installationId: string; home: ResolvedHome; running: string[] }> {
     const manifest = this.registry.getById(appId);
     if (!manifest) throw new Error(`unknown app: ${appId}`);
-    if (TERMINAL_SESSION_APPS.has(appId)) throw new HomeDeniedError('private-home-not-allowed', `${appId} has no App Home: its instances are user sessions (D69)`);
+    if (isUserEnvironment({ appId })) throw new HomeDeniedError('private-home-not-allowed', `${appId} has no App Home: its instances are user sessions (D69)`);
     const installation = await this.installationRunAs(appId);
     if (!installation) throw new HomeDeniedError('installation-unresolved', `${appId} has no recorded installation`);
     const identity = await this.identities.identityFor({ appId, installationId: installation.installationId, runAs: installation.runAs ?? 'root' });
@@ -2635,15 +2635,15 @@ export class AppManager {
 
     // A Terminal instance is its owner's session host (D69, P5-4): nobody else enters it, in any mode,
     // whatever app.jump they hold (another user's sessions and Private Home live there).
-    if (TERMINAL_SESSION_APPS.has(inst.appId) && inst.owner !== user.userId) {
+    if (isUserEnvironment(inst) && inst.owner !== user.userId) {
       throw new HomeDeniedError('not-authorized', 'a Terminal instance is entered only by its own user');
     }
     if (req.caller.root) {
       // J.6: only into the user's own Terminal instance, its session context (P5-4).
-      if (!TERMINAL_SESSION_APPS.has(inst.appId) || inst.owner !== user.userId || inst.inPool) {
+      if (!isUserEnvironment(inst) || inst.owner !== user.userId || inst.inPool) {
         throw new HomeDeniedError('not-authorized', 'a root tab opens only in your own Terminal instance');
       }
-      const home = await this.homes.resolve({ ...homeReq, executionContext: 'terminal-session' });
+      const home = await this.homes.resolve({ ...homeReq, executionContext: 'user-environment' });
       return {
         kind: 'root', home: { mode: 'private', hostPath: home.hostPath }, uid: 0, gid: 0, groups: [],
         env: { ...base, USER: 'root', LOGNAME: 'root', AURA_ROOT_SESSION: '1' }, dockerSocket: true, userId: user.userId,
@@ -2788,7 +2788,7 @@ export class AppManager {
   async runAsOwnershipInput(appId: string, runAs: AppRunAs): Promise<RunAsOwnershipInput & { runAsMigration?: AppRunAsMigration }> {
     const manifest = this.registry.getById(appId);
     if (!manifest) throw new Error(`unknown app: ${appId}`);
-    if (TERMINAL_SESSION_APPS.has(appId)) throw new Error(`${appId}: its instances run as their user (stream T); run-as does not apply`);
+    if (isUserEnvironment({ appId })) throw new Error(`${appId}: its instances run as their user (stream T); run-as does not apply`);
     const installation = await this.installationRunAs(appId);
     if (!installation) throw new HomeDeniedError('installation-unresolved', `${appId} has no recorded installation`);
     const current = installation.runAs ?? 'root';
@@ -2830,8 +2830,9 @@ export class AppManager {
     home: ResolvedHome | undefined,
   ): Promise<void> {
     await this.provisionInBuilder(appId, manifest, appDir);
-    // A session host's data is its server's (stream T2): the Terminal service uid, the user's gid (whose it is).
-    const owner = TERMINAL_SESSION_APPS.has(appId) && isSessionIdentity(identity)
+    // The System Terminal's data is its server's (stream T2, a Terminal refinement of the user environment):
+    // the Terminal service uid, the user's gid (whose it is).
+    const owner = appId === TERMINAL_APP_ID && isSessionIdentity(identity)
       ? { uid: TERMINAL_SERVICE_UID, gid: identity.gid } : { uid: identity.uid, gid: identity.gid };
     const rows = appOwnershipSpecs({
       appId, installationId, appDataRoot: dirname(instanceDataDir), instanceDirs: [basename(instanceDataDir)], appDir,
@@ -2898,7 +2899,7 @@ export class AppManager {
       const sessionId = isNonRootIdentity(spawnCtx.identity)
         ? { uid: spawnCtx.identity.uid, gid: spawnCtx.identity.gid }
         : { uid: LINUX_ID_RANGES.owner.first, gid: LINUX_ID_RANGES.owner.first };
-      if (TERMINAL_SESSION_APPS.has(appId) && retireForeignSessionData(instanceDataDir, sessionId)) {
+      if (isUserEnvironment({ appId }) && retireForeignSessionData(instanceDataDir, sessionId)) {
         this.mounts.forget(instanceId);   // nor its cross-app mounts (normally forgotten at its stop already)
       }
       if (spawnCtx.identity?.approvedRoot) {
@@ -2912,7 +2913,7 @@ export class AppManager {
       // A user's session host runs from its current production build only (owner, 2026-11-26): built
       // here when it is not, through the one build path; never a dev server, Developer Mode or not.
       // The owner's explicit dev run of the Terminal is a Preview (its own workspace, its own caches).
-      if (TERMINAL_SESSION_APPS.has(appId) && !opts.preview) await this.ensureProductionBuild(appId, manifest);
+      if (isUserEnvironment({ appId }) && !opts.preview) await this.ensureProductionBuild(appId, manifest);
       const ident = spawnCtx.identity ?? { uid: 0, gid: 0 };
       this.upsertInstance(instanceId, appId, {
         runAs: isSessionIdentity(nonRoot) ? 'user' : nonRoot ? 'app' : 'root', uid: ident.uid, gid: ident.gid,
@@ -3165,7 +3166,7 @@ export class AppManager {
    * `UserSessionEnders` (auth/identityContracts.ts).
    */
   async endUserSessions(userId: string): Promise<UserSessionsEnded> {
-    const terminals = [...this.instances.values()].filter((i) => TERMINAL_SESSION_APPS.has(i.appId)
+    const terminals = [...this.instances.values()].filter((i) => isUserEnvironment(i)
       && (i.owner === userId || (i.inPool && this.poolHomes.get(i.instanceId) === userId)));
     let stopped = 0;
     for (const inst of terminals) {
@@ -3448,7 +3449,7 @@ export class AppManager {
    * every other app.
    */
   private ownRelayHeaders(appId: string, instanceId: string, method: string, path: string): Record<string, string> {
-    if (!TERMINAL_SESSION_APPS.has(appId)) return {};
+    if (!isUserEnvironment({ appId })) return {};
     const claim = this.relayClaim(instanceId, { method, path, caller: 'system' });
     return claim ? { [RELAY_CLAIM_HEADER]: claim } : {};
   }
