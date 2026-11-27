@@ -856,8 +856,9 @@ Besides the schema, the App Host checks (warnings unless noted) report with file
   - reads of the AURA_APP_BASE_PATH / AURA_APP_ID / AURA_INSTANCE_ID globals or aura-* meta tags
   - /api/proxy/ URLs in browser-served files (pages are served from / on their App Host)
   - notes: on('upgrade') handlers with no path check, hmr: false
-The app contract checks (D48, warnings: report only):
-  - auraContract missing, or newer than this AuraOS (${AURA_CONTRACT})
+The app contract checks (D48, warnings: report only, except the first error):
+  - auraContract newer than this AuraOS (${AURA_CONTRACT}): an error, AuraOS refuses to install or start it
+  - auraContract missing
   - context.get('KEY') of a key not in context[]; reads of the raw Context (/run/context)
   - SDK calls whose permission is missing (user.confirm, storage, osSidecars, notifications)
   - services[] without sidecars.spawn or docker; privileged sidecars without sidecars.privileged

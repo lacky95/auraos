@@ -11,7 +11,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  DEFAULT_SYSTEM_MODE, devBackupsDir, exportPatches, moveToDevBranch, pruneDevBackups, systemMode,
+  DEFAULT_SYSTEM_MODE, devBackupsDir, exportPatches, migrateSystemModeFile, moveToDevBranch, pruneDevBackups, systemMode,
   systemModeFile, systemModeState, workspaceTree, writeSystemMode,
 } from '../src/lib/systemMode.ts';
 import { PUT as systemModePut } from '../src/pages/api/admin/system-mode.ts';
@@ -56,9 +56,9 @@ function dirty(): void {
   writeFileSync(join(ws, 'node_modules', 'x.js'), 'ignored\n');    // ignored: never listed, never touched
 }
 
-test('the mode: developer by default (until Phase 6), the switch file, AURA_SYSTEM_MODE wins', () => {
-  assert.equal(DEFAULT_SYSTEM_MODE, 'developer');
-  assert.deepEqual(systemModeState(), { mode: 'developer', configured: null, env: null, default: 'developer', normalEnforced: false });
+test('the mode: normal by default (Phase 6), the switch file, AURA_SYSTEM_MODE wins', () => {
+  assert.equal(DEFAULT_SYSTEM_MODE, 'normal');
+  assert.deepEqual(systemModeState(), { mode: 'normal', configured: null, env: null, default: 'normal', normalEnforced: false });
   writeSystemMode('normal');
   assert.equal(readFileSync(systemModeFile(), 'utf8'), 'normal\n');
   assert.equal(systemModeState().mode, 'normal');
@@ -69,7 +69,48 @@ test('the mode: developer by default (until Phase 6), the switch file, AURA_SYST
   assert.equal(systemModeState().mode, 'normal', 'an invalid override is ignored');
   writeFileSync(systemModeFile(), 'root\n');
   delete process.env['AURA_SYSTEM_MODE'];
-  assert.equal(systemModeState().mode, 'developer', 'an invalid file falls back to the default');
+  assert.equal(systemModeState().mode, 'normal', 'an invalid file falls back to the default');
+});
+
+test('Phase 6 migration (D60): a checkout install without a mode gets developer, audited once; set files and release trees are untouched', async () => {
+  const audits: Array<Record<string, unknown>> = [];
+  const audit = async (e: Record<string, unknown>) => { audits.push(e); };
+  // An existing (or Developer-layout) install: no file, /workspace a git checkout.
+  assert.deepEqual(migrateSystemModeFile(audit), { mode: 'developer', reason: 'no-file', workspace: ws });
+  assert.equal(readFileSync(systemModeFile(), 'utf8'), 'developer\n');
+  assert.equal(systemMode(), 'developer', 'its mode never changes');
+  assert.deepEqual(audits.map((a) => [a['action'], (a['by'] as { kind: string }).kind, a['outcome']]), [['system-mode.migrated', 'system', 'ok']]);
+  assert.equal(migrateSystemModeFile(audit), null, 'idempotent: the file is set now');
+  assert.equal(audits.length, 1);
+
+  // The owner's choice is never touched.
+  writeSystemMode('normal');
+  assert.equal(migrateSystemModeFile(audit), null);
+  assert.equal(systemMode(), 'normal');
+
+  // An invalid file read as the old default (developer): rewritten to it.
+  writeFileSync(systemModeFile(), 'root\n');
+  assert.equal(migrateSystemModeFile(audit)?.reason, 'invalid-file');
+  assert.equal(systemMode(), 'developer');
+
+  // A worktree checkout (.git is a file) counts as a checkout too.
+  rmSync(systemModeFile());
+  rmSync(join(ws, '.git'), { recursive: true, force: true });
+  writeFileSync(join(ws, '.git'), 'gitdir: /elsewhere\n');
+  assert.equal(migrateSystemModeFile()?.mode, 'developer');
+
+  // A release tree (Normal layout, no .git): nothing written, the default holds.
+  rmSync(systemModeFile());
+  rmSync(join(ws, '.git'));
+  assert.equal(migrateSystemModeFile(audit), null);
+  assert.equal(existsSync(systemModeFile()), false);
+  assert.equal(systemMode(Date.now() + 10_000), 'normal');
+
+  // AURA_SYSTEM_MODE does not stop the record of the old default; the env still wins.
+  process.env['AURA_SYSTEM_MODE'] = 'normal';
+  git('init', '-q');
+  assert.equal(migrateSystemModeFile(() => Promise.reject(new Error('no audit store')))?.mode, 'developer', 'a failing audit never fails it');
+  assert.equal(systemModeState().mode, 'normal');
 });
 
 test('workspaceTree: clean at the release; lists uncommitted, untracked and local commits, never ignored files', () => {
@@ -165,6 +206,7 @@ test('PUT system-mode: bad bodies are 400; switching off with a tree that differ
   assert.equal(await status({ mode: 'root' }), 400);
   assert.equal(await status({ mode: 'normal', cleanup: 'reset' }), 400);
   assert.equal(await status({ mode: 'developer', cleanup: 'branch' }), 400);
+  writeSystemMode('developer');
   dirty();
   const r = await systemModePut({ request: put({ mode: 'normal' }) } as never) as Response;
   assert.equal(r.status, 409);

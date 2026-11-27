@@ -33,6 +33,7 @@ import {
   CATEGORY_OF_CODE, RUNTIME_ID_PATTERN, RuntimeModuleError,
   type RuntimeCapabilities, type RuntimeRefusal, type RuntimeRefusalCode, type RuntimeSettings,
 } from './types.js';
+import { refuseUnknownMajor } from '../contract/types.js';
 
 /** The contract major this kernel implements (ARI §4.3, like `auraContract`). */
 export const ARI_VERSION = 1;
@@ -638,7 +639,9 @@ export function ariRefusal(d: Pick<RuntimeDescriptor, 'id' | 'version' | 'ari' |
   const id = typeof d.id === 'string' ? d.id : String(d.id);
   if (!RUNTIME_ID_PATTERN.test(id)) return new RuntimeModuleError('invalid-runtime-id', id, `runtime id ${JSON.stringify(id)} is not valid (${RUNTIME_ID_PATTERN})`);
   if (!Number.isInteger(d.ari) || d.ari < 1) return new RuntimeModuleError('invalid-descriptor', id, `runtime ${id} declares no valid ARI version`);
-  if (d.ari > ARI_VERSION) return new RuntimeModuleError('ari-unsupported', id, `runtime ${id} needs ARI ${d.ari} (this AuraOS implements ARI ${ARI_VERSION})`);
+  // The one unknown-major refusal (contract/types.ts, D48), shared with the app contract.
+  const major = refuseUnknownMajor('ari', id, d.ari, ARI_VERSION);
+  if (major) return new RuntimeModuleError(major.code, id, major.message);
   if (typeof d.version !== 'string' || !RUNTIME_VERSION_PATTERN.test(d.version)) return new RuntimeModuleError('invalid-descriptor', id, `runtime ${id} has no semver version`);
   if (!Number.isInteger(d.settingsVersion) || d.settingsVersion < 1) return new RuntimeModuleError('invalid-descriptor', id, `runtime ${id} has no valid settings version`);
   return null;

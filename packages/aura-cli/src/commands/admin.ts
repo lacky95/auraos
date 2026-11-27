@@ -310,7 +310,7 @@ export function printContractReport(report: unknown): void {
   console.log(table(r.apps.map((a) => ({
     APP: a.appId,
     SCOPE: a.scope,
-    CONTRACT: a.contract.version === null ? color.yellow('none') : a.contract.status === 'current' ? String(a.contract.version) : color.yellow(`${a.contract.version}?`),
+    CONTRACT: a.contract.version === null ? color.yellow('none') : a.contract.status === 'current' ? String(a.contract.version) : color.red(`${a.contract.version} incompatible`),
     FINDINGS: String(a.findings.length + a.source.length),
     'RAW-CONTEXT': a.readsRawContext ? color.yellow('yes') : '-',
     SIGNALS: Object.entries(a.signals).map(([k, n]) => `${k}=${n}`).join(' ') || '-',

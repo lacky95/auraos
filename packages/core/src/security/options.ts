@@ -145,11 +145,12 @@ export const SECURITY_OPTIONS: readonly SecurityOption[] = Object.freeze([
   {
     id: 'system-mode',
     title: 'System mode',
-    description: 'developer (default until Phase 6): AuraOS runs from its /workspace checkout, `aura mount workspace` and '
+    description: 'developer: AuraOS runs from its /workspace checkout, `aura mount workspace` and '
       + '`aura dev rebuild|restart` work, and the desktop shows the "Developer mode" badge. normal: those are refused '
-      + '(recorded and shown; the locked release comes with Phase 6). Turning it on needs the password; turning it off '
-      + 'lists what differs from the release first. Settings → System, or `aura mode`.',
-    type: 'enum', values: ['normal', 'developer'], default: 'developer', source: 'file', file: 'aura/system-mode',
+      + '(the locked release comes with Phase 6). Turning it on needs the password; turning it off '
+      + 'lists what differs from the release first. Settings → System, or `aura mode`. Default normal (Phase 6): '
+      + 'an install whose /workspace is a git checkout gets developer written at boot, so existing installs keep it (D60).',
+    type: 'enum', values: ['normal', 'developer'], default: 'normal', source: 'file', file: 'aura/system-mode',
     env: 'AURA_SYSTEM_MODE', restartRequired: false, change: 'fresh', since: '2026-11-25', phase: '4 (D60)',
   },
   {

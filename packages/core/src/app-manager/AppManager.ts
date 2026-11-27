@@ -50,6 +50,7 @@ import { RUNTIME_AUDIT_ACTIONS, RuntimeSettingsStore, runtimeSettingsRevision } 
 import { migrateLegacyRuntimes, migrationReport, processLegacyEnv, type MigrationApp, type MigrationReport } from '../runtimes/migrateLegacy.js';
 import { defaultRedis } from '@aura/kv-store';
 import { AdminAudit } from '../auth/AdminAudit.js';
+import { CONTRACT_AUDIT_ACTIONS, contractRefusal } from '../contract/types.js';
 import type { AuthServices } from '../auth/services.js';
 import { defaultIdentityKeyFile } from '../auth/identityKey.js';
 import { HomeDeniedError, type HomeResolver, type ResolvedHome } from '../homes/types.js';
@@ -324,7 +325,14 @@ export class AppManager {
     this.toolchainDir = opts.toolchainDir;
     this.baseRootfs = opts.baseRootfs;
     this.scopeRegistry = new ScopeRegistry({ systemAppsDir: opts.appsDir, dataDir: opts.dataDir });
-    this.registry = new AppRegistry(this.scopeRegistry.getAll());
+    this.registry = new AppRegistry(this.scopeRegistry.getAll(), {
+      // D48: the same audit style as a refused runtime module (`runtime.module-refused`).
+      onContractRefused: (r) => {
+        void new AdminAudit(() => defaultRedis()).record({
+          by: { kind: 'system' }, action: CONTRACT_AUDIT_ACTIONS.refused, target: `app:${r.subject}`, outcome: 'failed', detail: { code: r.code, reason: r.message },
+        }).catch(() => undefined);
+      },
+    });
     this.ports = new PortAllocator(opts.portStart ?? 4001, opts.portEnd ?? 4999);
     this.fsm = new LifecycleStateMachine();
     // Both runners share the same opts. ContainerRunner rewrites osApiBase
@@ -2597,6 +2605,9 @@ export class AppManager {
   ): Promise<string> {
     const manifest = this.registry.getById(appId);
     if (!manifest) throw new Error(`App not found: ${appId}`);
+    // D48: an app built for a newer Aura contract is listed `incompatible` and never started.
+    const refused = contractRefusal(manifest);
+    if (refused) throw new Error(refused.message);
 
     const scope = this.scopeRegistry.getById(manifest.scopeId);
     // A preview is one more instance of the app (`<appId>-<n>`), whatever its instanceMode.
@@ -2815,7 +2826,7 @@ export class AppManager {
     // the reconciler respawns instances after we've killed them all.
     if (this.uninstalling.has(appId)) return;
     const manifest = this.registry.getById(appId);
-    if (!manifest || manifest.warmPool <= 0 || manifest.instanceMode !== 'multi') return;
+    if (!manifest || manifest.warmPool <= 0 || manifest.instanceMode !== 'multi' || contractRefusal(manifest)) return;
     const target   = manifest.warmPool;
     const inPool   = this.countPool(appId);
     const inFlight = this.refillInFlight.get(appId) ?? 0;

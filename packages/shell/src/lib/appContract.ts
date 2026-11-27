@@ -206,7 +206,7 @@ export async function contractReport(deps: ContractReportDeps, opts: { dataDir?:
       apps: rows.length,
       onContract: count((r) => r.contract.status === 'current'),
       noContract: count((r) => r.contract.status === 'none'),
-      unknownContract: count((r) => r.contract.status === 'unknown'),
+      incompatible: count((r) => r.contract.status === 'incompatible'),
       readsRawContext: count((r) => r.readsRawContext),
       undeclaredUse: count((r) => r.findings.length > 0 || r.source.some((s) => s.code !== 'context-raw') || Object.keys(r.signals).some((s) => s.endsWith('undeclared'))),
       ...(dataDir ? { writesOutsideDataDir: count((r) => r.dataDir?.outside === true) } : {}),

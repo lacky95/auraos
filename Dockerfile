@@ -106,9 +106,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copied from the official image rather than apt-installed: bookworm has no
 # valkey package, and this pins the exact version. All of its shared-library
 # deps (libssl3, libsystemd0, libgcrypt20, liblzma5, libzstd1, liblz4-1,
-# libcap2) are already in node:22-slim's bookworm base.
-COPY --from=valkey/valkey:8-bookworm /usr/local/bin/valkey-server /usr/local/bin/valkey-server
-COPY --from=valkey/valkey:8-bookworm /usr/local/bin/valkey-cli    /usr/local/bin/valkey-cli
+# libcap2) are already in node:22-slim's bookworm base. Pinned by tag and
+# digest (Phase 6 G); auraos-e2e diagnose/valkey-version checks what runs.
+COPY --from=valkey/valkey:8.1.3-bookworm@sha256:fea8b3e67b15729d4bb70589eb03367bab9ad1ee89c876f54327fc7c6e618571 /usr/local/bin/valkey-server /usr/local/bin/valkey-server
+COPY --from=valkey/valkey:8.1.3-bookworm@sha256:fea8b3e67b15729d4bb70589eb03367bab9ad1ee89c876f54327fc7c6e618571 /usr/local/bin/valkey-cli    /usr/local/bin/valkey-cli
 
 # Docker CLI — ContainerRunner uses this to drive sibling-container spawns
 # via the host's docker daemon (socket bind-mounted from compose). Static
@@ -160,7 +161,11 @@ RUN git clone --depth 1 https://github.com/proot-me/proot /tmp/proot-src \
  && install -m 0755 /tmp/proot-src/src/proot /usr/local/bin/proot \
  && rm -rf /tmp/proot-src
 
-RUN corepack enable && corepack prepare pnpm@latest --activate
+# pnpm, pinned (no @latest): the same version as the root package.json
+# `packageManager` (a frozen lockfile needs it), so corepack never fetches
+# another one at boot.
+ARG PNPM_VERSION=12.18.0
+RUN corepack enable && corepack prepare "pnpm@${PNPM_VERSION}" --activate
 
 WORKDIR /workspace
 
@@ -260,7 +265,7 @@ COPY os/home-import/ /os/home-import/
 ENV HOME=/home/master
 
 # Corepack caches the pnpm binary under $HOME. The image already baked one
-# (`corepack prepare pnpm@latest --activate` → /root/.cache/node/corepack);
+# (`corepack prepare pnpm@${PNPM_VERSION} --activate` → /root/.cache/node/corepack);
 # moving HOME onto the volume orphaned it, so corepack tried to re-download
 # pnpm and BLOCKED on its interactive "Do you want to continue? [Y/n]" prompt
 # — compose gives this container a TTY, so nothing answered it and the OS
@@ -279,8 +284,6 @@ CMD ["sh", "-c", "mkdir -p /data/aura/home/master /data/aura/home/default && rm 
 # ─── Stage: development ───────────────────────────────────────────────────────
 # Used by docker-compose for local dev — code is volume-mounted from host
 FROM base AS development
-
-RUN corepack enable && corepack prepare pnpm@latest --activate
 
 ENV NODE_ENV=development
 ENV AURA_APPS_DIR=/workspace/apps
@@ -343,7 +346,7 @@ COPY os/toolchain-path.sh /etc/profile.d/aura-toolchain.sh
 ENV HOME=/home/master
 
 # Corepack caches the pnpm binary under $HOME. The image already baked one
-# (`corepack prepare pnpm@latest --activate` → /root/.cache/node/corepack);
+# (`corepack prepare pnpm@${PNPM_VERSION} --activate` → /root/.cache/node/corepack);
 # moving HOME onto the volume orphaned it, so corepack tried to re-download
 # pnpm and BLOCKED on its interactive "Do you want to continue? [Y/n]" prompt
 # — compose gives this container a TTY, so nothing answered it and the OS

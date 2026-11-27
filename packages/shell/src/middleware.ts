@@ -14,7 +14,7 @@ import { GATEWAY_IDENTITY_HEADER } from '@aura/core/host-rules';
 import { shellFramePolicy } from './lib/desktop/shellFramePolicy.ts';
 import { runAfterResponse } from './lib/afterResponse.ts';
 import { installRelaySigner, type RelaySigner } from './lib/access/relay.ts';
-import { isDeveloperMode } from './lib/systemMode.ts';
+import { isDeveloperMode, migrateSystemModeFile } from './lib/systemMode.ts';
 
 // D89 B4: the relay claim signer for the WS proxy and App Hosts (server/access-bridge.mjs `relayClaimOf`).
 installRelaySigner(() => { try { return getAppManager() as unknown as RelaySigner; } catch { return null; } });
@@ -32,6 +32,8 @@ async function ensureAppManager() {
   // Single-threaded event loop: the `??=` plus the `try`/`catch` above run
   // synchronously, so concurrent requests share one in-flight init promise.
   initPromise ??= (async () => {
+    // Phase 6 G (D60): before anything reads the system mode; a checkout install keeps developer.
+    migrateSystemModeFile((e) => core.getAuthServices().audit.record(e));
     // Embedded Valkey MUST come up before AppManager.init() because AppManager
     // starts services + auto-starts apps, both of which may want to read OS
     // state (theme, workspaces) from the KV. `kvServer.start()` is idempotent

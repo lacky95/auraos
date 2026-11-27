@@ -414,7 +414,7 @@ export const CONTRACT_DOCS_HINT = 'Aura Docs: "The Aura app contract" (app-contr
  * The app contract checks: the manifest declares what the app uses
  * (contract version, Context keys, permissions, sidecars and their privileges,
  * docker, consumed interfaces), and the source uses only what it declares.
- * Warnings: nothing is enforced beyond Phase 3a. Core holds the rules
+ * Warnings, except an auraContract newer than this AuraOS (an error: it is refused, D48). Core holds the rules
  * (contract/appContract.ts, contract/sourceScan.ts), shared with the shell's
  * contract report.
  */

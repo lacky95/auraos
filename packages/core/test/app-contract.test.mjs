@@ -2,7 +2,7 @@
 // the dataDir report helpers.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AppManifestSchema } from '../dist/types/manifest.js';
@@ -26,11 +26,11 @@ test('the manifest declares auraContract and context keys; old manifests still p
   assert.equal(AppManifestSchema.safeParse({ ...base, auraContract: 0 }).success, false);
 });
 
-test('contract status: none, current, unknown major', () => {
+test('contract status: none, current, incompatible major', () => {
   assert.equal(AURA_CONTRACT, 1);
   assert.deepEqual(contractStatus({}), { version: null, status: 'none' });
   assert.deepEqual(contractStatus({ auraContract: 1 }), { version: 1, status: 'current' });
-  assert.deepEqual(contractStatus({ auraContract: 2 }), { version: 2, status: 'unknown' });
+  assert.deepEqual(contractStatus({ auraContract: 2 }), { version: 2, status: 'incompatible' });
 });
 
 test('declarations: permissions, context, sidecars with images, consumes, docker, privileged', () => {
@@ -49,7 +49,10 @@ test('declarations: permissions, context, sidecars with images, consumes, docker
 
 test('findings: what the manifest uses but does not declare', () => {
   assert.deepEqual(codes(parse()), ['contract-missing']);
-  assert.deepEqual(codes(parse({ auraContract: 9 })), ['contract-unknown']);
+  assert.deepEqual(codes(parse({ auraContract: 9 })), ['contract-unsupported']);
+  const [refused] = contractFindings(parse({ auraContract: 9 }));
+  assert.equal(refused.severity, 'error', 'aura dev validate fails on it');
+  assert.equal(refused.message, 'com.example.notes is built for Aura contract 9; this AuraOS implements 1. Update AuraOS or install a version built for contract 1.');
   assert.deepEqual(codes(parse({ auraContract: 1, services: [{ name: 'db', image: 'x' }] })), ['sidecars-undeclared']);
   assert.deepEqual(codes(parse({ auraContract: 1, permissions: ['sidecars.spawn'], services: [{ name: 'db', image: 'x', privileged: true }] })), ['privileged-undeclared']);
   assert.deepEqual(codes(parse({ auraContract: 1, permissions: ['sidecars.spawn'], services: [{ name: 'db', image: 'x', inheritDockerSocket: true }] })), ['docker-socket-removed']);
@@ -128,4 +131,83 @@ test('source scan: undeclared context keys, raw Context reads, permissions, dock
   writeFileSync(join(dir, 'src', 'a.ts'), "cat('/run/context/X')\n");
   writeFileSync(join(dir, 'node_modules', 'b.js'), "cat('/run/context/X')\n");
   assert.deepEqual(scanContractSources(dir, parse()).map((x) => [x.file, x.code]), [['src/a.ts', 'context-raw']]);
+});
+
+// ── Phase 6 G: the unknown-major refusal (D48), one helper with the ARI ──────
+
+test('refuseUnknownMajor: one comparison and message for auraContract and ARI; none and current pass', async () => {
+  const { refuseUnknownMajor, contractRefusal, CONTRACT_UNSUPPORTED, CONTRACT_AUDIT_ACTIONS } = await import('../dist/contract/types.js');
+  const { ariRefusal, ARI_VERSION } = await import('../dist/runtimes/ari.js');
+  assert.equal(refuseUnknownMajor('auraContract', 'io.x', 1, 1), null);
+  assert.equal(refuseUnknownMajor('auraContract', 'io.x', 0, 1), null);
+  assert.deepEqual(refuseUnknownMajor('auraContract', 'io.x', 2, 1), {
+    kind: 'auraContract', code: 'contract-unsupported', subject: 'io.x', declared: 2, implemented: 1,
+    message: 'io.x is built for Aura contract 2; this AuraOS implements 1. Update AuraOS or install a version built for contract 1.',
+  });
+  assert.equal(CONTRACT_UNSUPPORTED, 'contract-unsupported');
+  assert.equal(CONTRACT_AUDIT_ACTIONS.refused, 'app.contract-refused');
+  assert.equal(contractRefusal({ id: 'io.x' }), null, 'none (before the contract) stays allowed');
+  assert.equal(contractRefusal({ id: 'io.x', auraContract: AURA_CONTRACT }), null);
+  assert.equal(contractRefusal({ id: 'io.x', auraContract: AURA_CONTRACT + 1 })?.code, 'contract-unsupported');
+  // The ARI refusal is the same helper: same code and message as before 5b's own copy.
+  const ari = refuseUnknownMajor('ari', 'future', ARI_VERSION + 1, ARI_VERSION);
+  const err = ariRefusal({ id: 'future', version: '1.0.0', ari: ARI_VERSION + 1, settingsVersion: 1 });
+  assert.equal(err.code, ari.code);
+  assert.equal(err.message, ari.message);
+});
+
+test('install and patch activation refuse an app built for a newer contract: error event, nobody asked, nothing installed', async () => {
+  const { NexusManager } = await import('../dist/nexus/NexusManager.js');
+  const root = mkdtempSync(join(tmpdir(), 'aura-contract-install-'));
+  const scope = (id, priority, immutable) => ({ id, appsDir: join(root, id, 'apps'), dataDir: join(root, id, 'data'), immutable, priority });
+  const scopes = [scope('system', 0, true), scope('global', 1, false), scope('user', 2, false)];
+  const mgr = new NexusManager({ scopes, rootDataDir: join(root, 'root') });
+  const tree = (name, auraContract) => {
+    const dir = join(root, name);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'app.manifest.json'), JSON.stringify({ ...base, id: 'io.shop.app', ...(auraContract ? { auraContract } : {}) }));
+    return dir;
+  };
+  for (const action of [undefined, 'app.patch.activate']) {
+    const asked = [];
+    const events = [];
+    const it = mgr.install({ ref: tree(`t-${action ?? 'install'}`, AURA_CONTRACT + 1), scope: 'user', ...(action ? { action } : {}), approval: async (b) => { asked.push(b); return true; } });
+    let error = null;
+    try { for (let c = await it.next(); !c.done; c = await it.next()) events.push(c.value); }
+    catch (e) { error = e.message; }
+    const ev = events.find((e) => e.type === 'error');
+    assert.equal(ev?.code, 'contract-unsupported', action ?? 'install');
+    assert.equal(ev.message, `io.shop.app is built for Aura contract ${AURA_CONTRACT + 1}; this AuraOS implements ${AURA_CONTRACT}. Update AuraOS or install a version built for contract ${AURA_CONTRACT}.`);
+    assert.equal(error, ev.message);
+    assert.deepEqual(asked, [], 'refused before the owner is asked');
+    assert.equal(existsSync(join(scopes[2].appsDir, 'io.shop.app')), false);
+  }
+  // `none` (no auraContract) installs as before.
+  const it = mgr.install({ ref: tree('t-none'), scope: 'user', approval: async () => true });
+  let c; for (c = await it.next(); !c.done; c = await it.next()) assert.notEqual(c.value.type, 'error');
+  assert.equal(c.value.id, 'io.shop.app');
+});
+
+test('registry load: an incompatible app is listed, audited through the hook, and never spawned or pooled', async () => {
+  const { AppManager } = await import('../dist/app-manager/AppManager.js');
+  const { AppRegistry } = await import('../dist/app-manager/AppRegistry.js');
+  const root = mkdtempSync(join(tmpdir(), 'aura-contract-reg-'));
+  const dir = join(root, 'apps', 'io.future.app');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'app.manifest.json'), JSON.stringify({ ...base, id: 'io.future.app', auraContract: AURA_CONTRACT + 1, instanceMode: 'multi', warmPool: 1 }));
+  const scopeDef = { id: 'system', appsDir: join(root, 'apps'), dataDir: join(root, 'data'), immutable: true, priority: 0 };
+  const refused = [];
+  const reg = new AppRegistry([scopeDef], { onContractRefused: (r) => refused.push(r) });
+  reg.loadManifestFile(join(dir, 'app.manifest.json'), scopeDef);
+  assert.equal(reg.getById('io.future.app')?.auraContract, AURA_CONTRACT + 1, 'still listed');
+  assert.deepEqual(refused.map((r) => [r.subject, r.code]), [['io.future.app', 'contract-unsupported']]);
+
+  const dataDir = join(root, 'mgr');
+  const rootfs = join(root, 'rootfs'); mkdirSync(rootfs);
+  const mgr = new AppManager({ appsDir: join(root, 'apps'), dataDir, baseRootfs: rootfs, toolchainDir: join(dataDir, 'tc') });
+  const sys = mgr.scopeRegistry.getAll().find((s) => s.id === 'system');
+  mgr.registry.loadManifestFile(join(dir, 'app.manifest.json'), sys);
+  await assert.rejects(mgr.start('io.future.app'), (e) => /is built for Aura contract 2; this AuraOS implements 1/.test(e.message));
+  mgr.scheduleRefill('io.future.app');
+  assert.equal(mgr.getInstancesByApp('io.future.app').length, 0, 'no instance, no pool member');
 });

@@ -49,6 +49,11 @@ An agent in the Terminal can ask for it, but it can't approve it.
 `AURA_SYSTEM_MODE=developer|normal` on the container overrides the switch
 (the file `/data/aura/system-mode`), like `AURA_SHELL_MODE` does for the shell.
 
+Without the file the mode is `normal`. An install that runs from a git
+checkout of AuraOS (every install from before Phase 6, and the Developer
+layout) gets `developer` written into the file at boot, so its mode does not
+change; the audit log records it as `system-mode.migrated`.
+
 ## Rebuild and restart
 
 In Developer Mode:

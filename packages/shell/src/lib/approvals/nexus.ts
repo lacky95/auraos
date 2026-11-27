@@ -111,6 +111,8 @@ export async function runInstall(
         await it.return(null).catch(() => undefined);
         return gate.needsApproval(ev.binding, ev.diff);
       }
+      // D48: an app built for a newer Aura contract is 422 `contract-unsupported` on every install path.
+      if (ev.type === 'error' && ev.code === core.CONTRACT_UNSUPPORTED) return json({ error: ev.code, message: ev.message }, 422);
       if (ev.type === 'error') return json({ error: ev.message }, errorStatus(ev));
       if (ev.type === 'install.done') { await gate.grantContext(); await gate.auditExecution(); return json({ ok: true, record: ev.record }); }
       cursor = await it.next();

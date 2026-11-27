@@ -5,8 +5,10 @@
  *
  *   AURA_SYSTEM_MODE on the container  wins (like AURA_SHELL_MODE)
  *   /data/aura/system-mode             the switch (Settings → System, `aura mode`)
- *   neither                            `developer`: every install runs from
- *                                      /workspace until Phase 6 ships Normal mode
+ *   neither                            `normal` (Phase 6). Every install that ran
+ *                                      before Phase 6, and every Developer layout,
+ *                                      has the file: `migrateSystemModeFile()`
+ *                                      writes `developer` at boot (D60)
  *
  * Normal mode is recorded and shown, but NOT enforced yet: AuraOS still runs
  * from /workspace either way. What the mode changes today: the desktop
@@ -29,8 +31,12 @@ import * as core from '@aura/core';
 import type { SystemMode } from './access/types.ts';
 
 export const SYSTEM_MODES: readonly SystemMode[] = ['normal', 'developer'];
-/** Until Phase 6 ships the release build, every install runs Developer Mode. */
-export const DEFAULT_SYSTEM_MODE: SystemMode = 'developer';
+/**
+ * Without the switch file (Phase 6): only a fresh Normal-layout install
+ * (`install.sh`, a release tree) gets here; `migrateSystemModeFile()` gives
+ * every checkout install `developer` before anything reads the mode.
+ */
+export const DEFAULT_SYSTEM_MODE: SystemMode = 'normal';
 /** How long the automatic clean-up keeps its backup (D4). */
 export const DEV_BACKUP_DAYS = 30;
 
@@ -96,6 +102,52 @@ export function writeSystemMode(mode: SystemMode): SystemModeState {
   const state = systemModeState();
   try { core.OsEventBus.emit('os:systemModeChanged', { mode: state.mode }); } catch { /* no bus in tests */ }
   return state;
+}
+
+// ── the Phase 6 migration (D60: existing installs stay developer) ──────────
+
+export interface SystemModeMigration {
+  /** Always `developer`: the mode this install ran in before (the old default). */
+  mode: 'developer';
+  /** Why: no switch file, or one that names no mode (both read as the old default). */
+  reason: 'no-file' | 'invalid-file';
+  workspace: string;
+}
+
+/**
+ * An install with no valid switch file whose `/workspace` is a git checkout
+ * (the Developer layout: every install before Phase 6, and `install.sh
+ * --developer`) gets `developer` written, so the Normal default never changes
+ * its mode. A release tree (the Normal layout) has no `.git` and keeps the
+ * default. Sync and idempotent; a set file or AURA_SYSTEM_MODE is never
+ * touched. Called once at boot before anything reads the mode (middleware
+ * init, then `bootSystem()`); `audit` gets the `system-mode.migrated` row.
+ */
+export function migrateSystemModeFile(
+  audit?: (entry: { by: { kind: 'system' }; action: string; target: string; outcome: 'ok'; detail: Record<string, unknown> }) => Promise<unknown>,
+): SystemModeMigration | null {
+  if (readConfigured() !== null) return null;
+  const file = systemModeFile();
+  // Only a missing file or one without a mode: an unreadable one stays as it is.
+  let reason: SystemModeMigration['reason'] = 'no-file';
+  try { readFileSync(file, 'utf8'); reason = 'invalid-file'; }
+  catch (err) { if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return null; }
+  const workspace = workspaceDir();
+  let checkout = false;
+  try { checkout = statSync(join(workspace, '.git')) !== null; } catch { /* no checkout */ }
+  if (!checkout) return null;
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, 'developer\n', 'utf8');
+  cached = null;
+  console.log(`[systemMode] ${workspace} is a git checkout and ${file} had no mode: wrote developer (D60)`);
+  const migration: SystemModeMigration = { mode: 'developer', reason, workspace };
+  // The audit trail must never fail the boot.
+  const warn = (err: unknown) => console.warn(`[systemMode] audit of the migration failed: ${(err as Error).message}`);
+  try {
+    audit?.({ by: { kind: 'system' }, action: 'system-mode.migrated', target: 'system:mode', outcome: 'ok', detail: { ...migration } })
+      .catch(warn);
+  } catch (err) { warn(err); }
+  return migration;
 }
 
 // ── the checkout: what differs from the release (D4) ───────────────────────
