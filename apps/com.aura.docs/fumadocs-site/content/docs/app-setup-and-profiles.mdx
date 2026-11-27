@@ -1,0 +1,428 @@
+---
+title: App setup and profiles
+description: How an app declares setup fields, requirements and operating profiles, how AuraOS resolves them into one effective configuration (never a fallback), the operational states, the wizard, the CLI and API, the SDK, the app hooks and the setup approval.
+---
+
+**TL;DR.** `setup` (typed fields, requirements, init) and `profiles` (named
+operating configurations) are two **optional, independent** manifest blocks.
+An app with neither is a *simple app*: it has no setup record and starts
+exactly as before. An app with either is configured once by its owner (in the
+app's own window, or with `aura app setup`), AuraOS checks every requirement
+and asks for every privilege the configuration adds, and only then starts it.
+If anything mandatory is missing, the app does not start: AuraOS never runs a
+weaker configuration instead.
+
+<Callout type="warn" title="What runs on this AuraOS today">
+The manifest model, the API routes, the CLI, the wizard, `osClient.setup.config()`
+and the env references are in place. **The setup engine (Phase 7 cut 7c, package
+P3) is not yet:** until it lands, every setup route answers `503 unavailable`,
+and an app that declares `setup` or `profiles` is refused at every start with
+`setup-unsupported` (category `unsupported-feature`), so it never runs
+unconfigured. The app hooks arrive with the engine. The Private Home profile
+axis (`homeEnvironment: private`) needs the D107-a part (package P9). Sections
+below mark what depends on which.
+</Callout>
+
+## Terms
+
+- **Operating profile**: a named way to run *one app* on *this* AuraOS (for
+  example "personal", "personal with my own logins", "shared for a team"),
+  declared in the app's manifest under `profiles`. It is chosen at setup and
+  can be changed later.
+- **Deployment profile**: how *AuraOS itself* is installed and composed (the
+  infrastructure configuration, the desktop or server composition). It has
+  nothing to do with an app's `profiles`. The two words are kept apart on
+  purpose (owner decision 11).
+- **Setup**: the fields, requirements and initialization an app declares, and
+  the process that turns the owner's choices into a working configuration.
+
+## Simple apps are unchanged
+
+An app without `setup` and `profiles`:
+
+- gets no setup record and no operational state (it is `ready` by definition);
+- launches, starts by intent, spawns and validates exactly as before;
+- needs no manifest change because D108 exists.
+
+The setup API answers for it with `declares: false` and state `ready` (once
+the engine is in place).
+
+## The `setup` block
+
+```json
+"setup": {
+  "version": 1,
+  "fields": {
+    "smtpHost": { "type": "string", "title": "SMTP host", "required": true },
+    "smtpPort": { "type": "integer", "title": "Port", "default": 587, "minimum": 1, "maximum": 65535 },
+    "password": { "type": "secret", "title": "SMTP password", "required": true, "secret": { "source": "ask" } },
+    "sessionKey": { "type": "secret", "title": "Session key", "secret": { "source": "generate", "length": 32 } }
+  },
+  "requirements": [
+    { "feature": "network.isolation", "level": "required", "reason": "the database must not be reachable by other apps" },
+    { "capability": "claude", "level": "optional" }
+  ],
+  "init": { "hook": true, "idempotent": true, "timeoutSec": 300 },
+  "readiness": { "hook": true }
+}
+```
+
+### Fields
+
+Fields use the same field model as the runtime settings (one model, one
+form renderer):
+
+| Key | Meaning |
+|---|---|
+| `type` | `boolean`, `integer`, `string`, `array` (of strings) or `secret` |
+| `title`, `description` | shown in the wizard and the CLI |
+| `default`, `enum`, `enumTitles`, `minimum`, `maximum`, `pattern` | validation; a `pattern` must be short and free of nested quantifiers |
+| `required` | a value must exist (after defaults) before the setup can complete |
+| `scope` | `installation` (default) or `user` (one value per user of a per-user instance; in the alpha: the owner's) |
+| `when` | the field exists only when a condition holds: `{"field": "auth", "equals": "aura"}`, `{"field": "auth", "in": ["aura"]}` or `{"profile": ["personal-private"]}`. Equality and `in` only: no expressions |
+| `secret` | for `type: secret`: `source` is `generate` (the vault creates it, bound to this installation), `vault` (the owner picks an existing vault entry) or `ask` (the owner types it into AuraOS's own credential dialog) |
+
+A field whose `when` is false does not exist: it is not asked, not validated
+and not delivered.
+
+**Secrets are never values.** The setup record, the digests, the API, the CLI
+output, logs, errors and audit rows hold a vault handle (`cred_…`) for a secret
+field, never the secret. The app reads the value on its server with
+`osClient.credentials.get(handle)`; a sidecar gets it at spawn through
+`fromSecret` (below).
+
+### Requirements
+
+Each requirement names exactly one subject:
+
+- `feature`: an ARI feature of the runtime the app resolves to
+  (`network.isolation`, `storage.privateHome`, …);
+- `capability`: a shared tool; the wizard offers to install and grant it;
+- `grant`: a grant that must count, such as `home.private`.
+
+`level` is `required` or `optional`. A required one that is unmet leaves no
+effective configuration (the app does not start). An optional one that is
+unmet is reported as **degraded** (shown to the owner, and to the app in
+`osClient.setup.config().degraded`); AuraOS never satisfies it by weakening
+something else. `aura dev validate` warns when a required feature or grant is
+conditioned on a field value, because a wrong condition would hide a security
+requirement: prefer a profile condition, or none.
+
+### Init and readiness
+
+`init.hook: true` calls the app's `onSetup` hook after the configuration is
+approved; `readiness.hook: true` calls `onValidate` after init (otherwise the
+normal health check and `services[].readiness` decide). Both are described
+under [App hooks](#app-hooks).
+
+## The `profiles` block
+
+```json
+"profiles": [
+  { "id": "personal", "title": "Personal", "recommended": true,
+    "overlay": { "instanceScope": "per-user", "homeEnvironment": "app" } },
+  { "id": "team", "title": "Shared for several users",
+    "overlay": { "instanceScope": "shared", "environmentScope": "global" },
+    "setup": { "fields": { "auth": { "enum": ["native"] } } } }
+]
+```
+
+A profile is an **overlay** on the base manifest. The base manifest stays
+complete: it is what `aura dev validate`, Nexus and the install approval see.
+
+- **The overlay allowlist.** An overlay may set only `instanceScope`,
+  `environmentScope`, `homeEnvironment`, `sandbox`, `services`, `permissions`,
+  `tools`, `context` and `resources`. Anything else is a manifest error.
+- **No images, no identity.** A profile cannot add a sidecar image or a
+  sidecar template (its `services` entries must name existing `services[]`
+  templates, and may set only `env`, `home`, `network`, `limits` and
+  `readiness`), and it can never replace `id`, `originId`, `version`,
+  `provides`, `entrypoint`, `runtime`, the execution request or anything else
+  identity-bearing.
+- **Requests only grow, by union.** `permissions`, `tools` and `context` are
+  added to the base requests, never removed.
+- **Tighten, never loosen.** A profile's `setup.fields` either declares a new
+  field completely or tightens a base field (`required: true`, an `enum`
+  subset, a narrower range); it can't change a field's type or widen it.
+  Profile-only `requirements` are added.
+- **No default profile is needed.** The app launches without asking only when
+  exactly one profile is feasible and needs no input. Otherwise choosing a
+  profile is a setup step; non-interactively, a missing `--profile` is an error
+  that names the feasible profiles (it never picks one for you).
+- **`instanceScope: shared` is refused in the alpha** (shared instances arrive
+  with multi-user). Such a profile is listed as unavailable with its reason.
+- `homeEnvironment: private` needs `homeEnvironments.supported` to include
+  `private` (below) and the `home.private` grant.
+
+### `homeEnvironments` and `services[].home`
+
+```json
+"homeEnvironments": { "supported": ["app", "private"], "recommended": "app" },
+"services": [ { "name": "terminal", "image": "…", "home": "owner-environment" } ]
+```
+
+- `homeEnvironments` says which home environments the app supports. `app` (its
+  own App Home) is always included; `private` (the user's own Private Home) is
+  the opt-in.
+- `services[].home` is a sidecar's home: `none`, `app` (the App Home;
+  `inheritHome: true` is the alias) or `owner-environment` (the same home and
+  identity as the app process: with a private instance, the Private Home under
+  the user's uid, which needs the per-sidecar grant `home.private.sidecar:<name>`).
+
+The Private Home axis needs the D107-a part (package P9).
+
+## Desired, authorized, effective
+
+AuraOS keeps three things apart:
+
+| | What it is |
+|---|---|
+| **desired** | what the owner chose: the profile, the values (secrets as handles), operator overrides. Stored in a kernel-owned, sealed record per installation |
+| **authorized** | for every privileged request in the desired configuration, a grant or approval that counts (the install approval, the setup approval, existing grants, vault handles) |
+| **effective** | the configuration an instance starts with: the requested one, if policy allows it, it is authorized, every required requirement is met and every required field is valid |
+
+If any of these fails, there is **no** effective configuration: the app does
+not start, and the refusal says why. There is never a fallback: no Private
+Home becomes an App Home, no isolated network becomes a shared one, no
+enforced limit becomes unenforced, nothing runs as root instead, and no other
+profile is picked. Security options (D64) always win; they can only refuse.
+
+Two digests bind what was checked: `configDigest` (the whole effective
+configuration, secret handles by name only) and `grantDigest` (only the
+privilege-bearing part). A changed privilege-bearing part needs a new
+approval; a plain value change does not.
+
+## Operational states
+
+Only apps that declare `setup` or `profiles` have one, per installation:
+
+| State | Meaning |
+|---|---|
+| `setup-required` | not configured yet (or a tampered record: configure again) |
+| `configuring` | a setup run is in progress, its step recorded |
+| `awaiting-approval` | the owner's `app.setup.apply` approval is pending (it survives restarts) |
+| `initializing` | the app's `onSetup` runs in a maintenance start |
+| `ready` | configured; written only after init and readiness succeeded, with the digest they validated |
+| `setup-failed` | a step failed (a hook, readiness, a denied approval); the app does not start |
+| `blocked` | a grant was revoked, a policy turned off or a feature lost: workloads are stopped, the desired configuration stays as it was |
+| `repair-required` | an update needs a value, dropped the selected profile or a migration failed |
+
+A start is allowed only in `ready` and only when the stored `configDigest`
+equals the freshly resolved one. Every other state refuses with a D105 body
+of category `needs-setup` (codes `setup-required`, `setup-blocked`,
+`repair-required`, …), carrying `manifestField`, `missing` (features, grants or
+capabilities), `suggest` (other feasible profiles, never picked), `policy` (a
+security option) and `approvalId` where they apply. Every step writes its
+state before it acts, so the wizard, the CLI and the API resume a setup where
+it stopped.
+
+**Revocation is `blocked`, never a silent change.** Revoking a grant the
+configuration needs (for example `home.private`) stops the app, its sidecars
+and its sessions; the desired configuration still says what the owner chose;
+the next start is refused. Granting it again returns to `ready` without asking
+for the values again. Going back to the App Home is a reconfiguration you
+choose.
+
+## The wizard in the app's window
+
+Opening an app that needs setup opens its window in a **setup view**: AuraOS's
+own view (not the app's page) that walks the steps the setup plan lists and
+skips the ones not needed (a profile step only with profiles, a secret step
+only with secrets, an approval only when privileges grow). Secrets of source
+`ask` are typed into AuraOS's own credential dialog, never into the app. When
+the setup reaches `ready`, the same window shows the app. The app's frame is
+never loaded before `ready`. The next launch goes straight to the app.
+
+Settings → Apps → the app → Configuration uses the same components for later
+changes (with change management, package P8).
+
+## The CLI
+
+`aura app setup|config|profile` talk to the same API as the wizard. Secrets are
+passed only by vault handle (`--secret <field>=@vault:<handle>`), never as a
+value on the command line.
+
+| Command | Does |
+|---|---|
+| `aura app setup <app> [--profile <id>] [--values <file.json>] [--secret <field>=@vault:<handle>]` | set the app up; a TTY waits for the owner's approval, then resumes |
+| `aura app setup <app> --resume` | continue an interrupted setup at its recorded step |
+| `aura app config get <app> [-o json]` | the state, the desired and effective values (secrets as handles), what is degraded |
+| `aura app config set <app> field=value … [--values f] [--secret f=@vault:h]` | change plain values; no approval. A privilege change is refused here |
+| `aura app profile ls <app> [-o json]` | the profiles, which are available here and why not |
+| `aura app profile use <app> <id> [--values f]` | switch profile: shows what changes ("data stays where it is"); more privileges ask the owner |
+
+`aura get apps` shows a `SETUP` column (the state, `-` for simple apps), and
+`aura dev validate` checks both blocks.
+
+**Exit codes.**
+
+| Exit | Meaning |
+|---|---|
+| `0` | ready (or unchanged) |
+| `3` | the app needs setup or is blocked (`needs-setup`, an unsupported or unauthorized requirement, a profile that is not available) |
+| `5` | invalid input (an unknown profile or field, an invalid value, a secret given as a value) |
+| `75` | on hold: the owner's approval is pending. The output names the request and the `--resume` command |
+| `1` | anything else (an unknown app; a setup API that answers `503 unavailable` on an AuraOS without the engine) |
+
+**Approvals are never skipped.** There is no `--yes`. An agent without a TTY
+gets exit 75 and the request id; the owner decides in the desktop, or the host
+operator with `aura approve <id>`; then `aura app setup <app> --resume`.
+
+## The API
+
+All under `/api/apps/<appId>/setup`, for the owner (the desktop, Settings) and
+the owner's System Terminal (the CLI, by its own instance token). Other apps,
+members and anonymous callers are refused. Bodies are JSON with only
+`profile`, `values`, `secrets` (field → vault handle) and `overrides`; any
+other key is refused with `422 config-invalid` (including words like `yes` or
+`force`: no approval is ever skipped), and so is a value for a secret field.
+
+| Route | Answer |
+|---|---|
+| `GET /setup` | the state (`declares`, `state`, `profile`, `step`, `configDigest`, `degraded`, `error`) |
+| `GET /setup/profiles` | the profiles with `available` and the `reasons` of the unavailable ones |
+| `GET` or `POST /setup/plan` | the steps, fields, requirements and the approval a proposal would need |
+| `GET` or `PUT /setup/values` | the desired and effective values (handles for secrets); `PUT` changes plain values |
+| `POST /setup/apply` | apply a proposal: `200` ready, `202` on hold (`approvalId`) or initializing, `409`/`422` refused |
+| `POST /setup/resume`, `/setup/repair`, `/setup/reconfigure` | continue, repair, change the configuration |
+| `GET /setup/secrets` | the vault handles this app holds for you (for `source: vault`), no values |
+| `POST /setup/secrets/<field>` | an `ask` secret: opens AuraOS's credential dialog for that field (`202`, `approvalId`) |
+| `GET /api/setup/self` | the calling app's own effective values (instance token only; see below) |
+
+Without the engine, every one of them answers `503` with
+`{"error": "unavailable", "category": "unavailable", …}`.
+
+## In your app: values and secrets
+
+On your **server** (never in a page):
+
+```ts
+import { OsClient } from '@aura/app-sdk';
+const osClient = new OsClient();
+const cfg = await osClient.setup.config();
+// cfg.values.smtpHost, cfg.profile, cfg.degraded, cfg.configDigest
+const password = await osClient.credentials.get(cfg.secrets.password); // secrets are handles
+```
+
+`config()` reads `GET /api/setup/self` with the instance token: only the active
+fields of your own installation (another app's or another user's values are
+never reachable). It fails with `OsError` code `setup-required` while the setup
+is not complete and `unavailable` on an AuraOS without the engine.
+
+**Sidecars** get values by reference in `services[].env` (or a profile's
+service overlay), resolved at spawn; there is no templating language:
+
+```json
+"env": {
+  "WEBUI_AUTH": { "fromSetup": "auth", "map": { "native": "True", "aura": "False" } },
+  "WEBUI_SECRET_KEY": { "fromSecret": "sessionKey" },
+  "LOG_LEVEL": "info"
+}
+```
+
+- `fromSetup` names a plain field; `map` (optional) translates its value to the
+  literal the workload expects, and a value with no entry is a setup error,
+  never passed through. A list value can't be used.
+- `fromSecret` names a secret field; the value is read from the vault at spawn
+  and never stored in the sidecar spec.
+- References need a `setup` block and must name an existing field of the right
+  kind (validate checks it).
+
+## App hooks
+
+<Callout title="Arrives with the setup engine (P3)">
+This is the contract the engine calls; the SDK helpers (`createSetupHandler`,
+`createValidateHandler`) arrive with it.
+</Callout>
+
+Hooks run on your app's own server, in a **maintenance start** (no user traffic
+is routed), under your app's own identity with the lifecycle token and your
+normal permissions only: no owner session, no trusted-UI claim, and they can't
+approve anything. A timeout or an error fails the step (`setup-failed`, your
+message shown labelled as the app's words). Paths under the lifecycle base:
+
+| Hook | Path | Input → answer |
+|---|---|---|
+| `onSetup` | `POST /api/lifecycle/setup` | `{ configDigest, previousDigest, attempt, reason }` with `reason` `setup`, `reconfigure`, `repair` or `migrate`. Must be **idempotent**: AuraOS may call it again with the same digest (after a restart during `initializing`) |
+| `onValidate` | `POST /api/lifecycle/validate` | → `{ ok, fieldErrors?: {field: message}, checks?: [{id, ok, message}] }`; it cannot change state |
+| `onMigrateConfig` | `POST /api/lifecycle/migrate-config` | `{ fromVersion, toVersion, values }` → `{ values }`, after the declarative `setup.renames` of a new `setup.version` |
+
+Secrets reach hooks as handles. No app code runs the wizard: an app supplies
+titles, descriptions and its messages, nothing executable.
+
+## The setup approval
+
+When a configuration adds privileges over what the installation already holds
+(permissions, tools, Context keys, the Private Home, a home sidecar, an
+instance scope, networks, resources, root), applying it creates one
+`app.setup.apply` approval for the owner. AuraOS builds it from the resolved
+configuration (never from the requester's words) and binds it to both
+digests: a changed privilege-bearing part needs a new one, and a stale one is
+refused.
+
+Its class is the strictest part it contains: **forced, with your password**
+(fresh) when it includes the Private Home, a home sidecar or root execution;
+**deferrable** (it can wait on hold, D102) otherwise. A plain value change
+needs no approval.
+
+## Security option `app-private-home`
+
+[Security options](/docs/security-options): `app-private-home` (`grant` by
+default, or `off`) decides whether apps may run with a user's Private Home at
+all. With `grant`, only with that user's explicit, revocable `home.private`
+grant (and `home.private.sidecar:<name>` per sharing sidecar), approved with
+the password. With `off`, such a setup is blocked with this option named; it
+never falls back to the App Home. Enforcement arrives with D107-a (package P9).
+
+## Example: Open WebUI
+
+Open WebUI keeps its sign-in mode as a setup field and offers three operating
+profiles (the planned migration of `io.lakner.openwebui`, package P10):
+
+```json
+"setup": { "version": 1, "fields": {
+  "auth": { "type": "string", "enum": ["native", "aura"], "default": "native", "title": "Sign-in" },
+  "adminPassword": { "type": "secret", "title": "Admin password", "secret": { "source": "generate", "length": 24 }, "when": { "field": "auth", "in": ["native"] } },
+  "sessionKey": { "type": "secret", "title": "Session key", "secret": { "source": "generate", "length": 32 } } },
+  "requirements": [
+    { "feature": "network.isolation", "level": "required", "when": { "field": "auth", "in": ["aura"] },
+      "reason": "Without Open WebUI's own sign-in, only an isolated sidecar network keeps other apps out" } ] },
+"homeEnvironments": { "supported": ["app", "private"], "recommended": "app" },
+"profiles": [
+  { "id": "personal", "title": "Personal (own logins)", "recommended": true,
+    "overlay": { "instanceScope": "per-user", "environmentScope": "user", "homeEnvironment": "app" } },
+  { "id": "personal-private", "title": "Personal, using my Claude/Codex logins",
+    "overlay": { "instanceScope": "per-user", "homeEnvironment": "private",
+                 "services": { "terminal": { "home": "owner-environment", "network": "instance" },
+                               "webui": { "network": "instance" } } },
+    "setup": { "requirements": [
+      { "grant": "home.private", "level": "required" },
+      { "grant": "home.private.sidecar:terminal", "level": "required" },
+      { "feature": "network.isolation", "level": "required" } ] } },
+  { "id": "team", "title": "Shared for several users",
+    "overlay": { "instanceScope": "shared", "environmentScope": "global", "homeEnvironment": "app" },
+    "setup": { "fields": { "auth": { "enum": ["native"] } } } }
+]
+```
+
+- **personal** needs no new privilege: the wizard asks the sign-in mode and the
+  app starts.
+- **personal-private** asks the owner for `home.private` and the terminal
+  sidecar's grant (forced, with the password); the terminal sidecar then runs
+  as the owner with the Private Home, and both sidecars sit on the instance's
+  own network. On an AuraOS where a requirement is unmet, it is shown
+  unavailable with the reasons, never quietly replaced by `personal`.
+- **team** is listed unavailable in the alpha (shared instances arrive with
+  multi-user); it is never picked.
+- From a script: `aura app setup io.lakner.openwebui --profile personal --values v.json`
+  in the System Terminal gets exit 75 if the owner must approve; after
+  `aura approve <id>` (or the owner's click), `--resume` finishes.
+
+## Checklist
+
+- [ ] No `setup`/`profiles` unless the app needs configuration: a simple app stays simple.
+- [ ] Every secret is a `secret` field; read it with `osClient.credentials.get(handle)` on the server.
+- [ ] Sidecar env uses `fromSetup`/`fromSecret`, no values baked into the manifest.
+- [ ] `onSetup` is idempotent and bounded; `onValidate` only checks.
+- [ ] Security-relevant requirements are unconditional or conditioned on a profile, not on a field.
+- [ ] `aura dev validate <dir>` passes.

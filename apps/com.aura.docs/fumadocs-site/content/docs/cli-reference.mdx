@@ -145,6 +145,20 @@ aura build app com.aura.notepad --restart # build, switch the running app to it
 aura build app --all                      # build every app that changed
 ```
 
+### App setup — `aura app setup|config|profile`
+
+For apps that declare `setup` or `profiles` ([App setup and profiles](/docs/app-setup-and-profiles)).
+Secrets only as vault handles; no `--yes` (an approval is never skipped).
+Exit codes: `0` ready, `3` needs setup or blocked, `5` invalid input, `75` on hold for the owner's approval.
+
+| Command | What it does | Key flags |
+|---|---|---|
+| `aura app setup <app>` | Set the app up; resumes where it stopped. A TTY waits for the owner's approval; without one, exit 75 with the request id. | `--profile <id>`, `--values <file.json>`, `--secret <field>=@vault:<handle>`, `--resume`, `-o json` |
+| `aura app config get <app>` | State, desired and effective values (secrets as handles), what is degraded. | `-o json` |
+| `aura app config set <app> field=value…` | Change plain values (no approval); a privilege change is refused here. | `--values`, `--secret`, `-o json` |
+| `aura app profile ls <app>` | The operating profiles, which are available here and why not. | `-o json` |
+| `aura app profile use <app> <id>` | Switch profile; shows what changes. More privileges ask the owner. | `--values`, `-o json` |
+
 ## Install & remove
 
 | Command | What it does | Key flags |
