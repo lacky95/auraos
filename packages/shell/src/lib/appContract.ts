@@ -169,11 +169,15 @@ export interface ContractReportRow {
   signals: Record<string, number>;
   /** Reads the raw mounted Context (source scan): the count the plan's report asks for. */
   readsRawContext: boolean;
+  /** The start gate's refusal code (`contract-unsupported`, `setup-unsupported`) when AuraOS never starts the app; absent otherwise. */
+  blocked?: core.OperationalBlock['error'];
   dataDir?: core.DataDirAppReport;
 }
 
 export async function contractReport(deps: ContractReportDeps, opts: { dataDir?: boolean } = {}): Promise<{
   contract: number; apps: ContractReportRow[]; summary: Record<string, number>;
+  /** Why the `incompatible` apps are refused: a newer Aura contract, or setup/profiles (D108). One cause per app, the contract first. */
+  incompatibleBy: { contract: number; setup: number };
 }> {
   const apps = deps.apps().sort((a, b) => a.appId.localeCompare(b.appId));
   const [keys, signals] = await Promise.all([deps.contextKeys().catch(() => []), deps.signals().catch(() => ({} as Record<string, number>))]);
@@ -194,6 +198,9 @@ export async function contractReport(deps: ContractReportDeps, opts: { dataDir?:
       signals: mine,
       readsRawContext: source.some((f) => f.code === 'context-raw'),
     };
+    // The start gate, as /api/apps lists it (`incompatible`): a newer contract or setup/profiles.
+    const blocked = core.operationalBlock({ ...a.manifest, id: a.appId } as Parameters<typeof core.operationalBlock>[0]);
+    if (blocked) row.blocked = blocked.error;
     const dd = dataDir?.get(a.appId);
     if (dd) row.dataDir = dd;
     return row;
@@ -206,15 +213,20 @@ export async function contractReport(deps: ContractReportDeps, opts: { dataDir?:
       apps: rows.length,
       onContract: count((r) => r.contract.status === 'current'),
       noContract: count((r) => r.contract.status === 'none'),
-      incompatible: count((r) => r.contract.status === 'incompatible'),
+      // Every app the start gate refuses, like /api/apps `incompatible` (the cause: `incompatibleBy`).
+      incompatible: count((r) => r.blocked !== undefined),
       /**
        * @deprecated Owner decision 11: the old name of `incompatible`, kept (same value) for one
        * release so existing API consumers keep working. Read `incompatible`; this field goes after it.
        */
-      unknownContract: count((r) => r.contract.status === 'incompatible'),
+      unknownContract: count((r) => r.blocked !== undefined),
       readsRawContext: count((r) => r.readsRawContext),
       undeclaredUse: count((r) => r.findings.length > 0 || r.source.some((s) => s.code !== 'context-raw') || Object.keys(r.signals).some((s) => s.endsWith('undeclared'))),
       ...(dataDir ? { writesOutsideDataDir: count((r) => r.dataDir?.outside === true) } : {}),
+    },
+    incompatibleBy: {
+      contract: count((r) => r.blocked === 'contract-unsupported'),
+      setup: count((r) => r.blocked === 'setup-unsupported'),
     },
   };
 }

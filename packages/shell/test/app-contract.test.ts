@@ -163,16 +163,28 @@ test('contract report: version, declarations, findings, source scan, signals', a
   assert.deepEqual(r.summary, { apps: 2, onContract: 1, noContract: 1, incompatible: 0, unknownContract: 0, readsRawContext: 1, undeclaredUse: 1, writesOutsideDataDir: 1 });
   const lean = await contractReport({ apps: () => [], contextKeys: async () => { throw new Error('down'); }, signals: async () => ({}) });
   assert.deepEqual(lean.summary, { apps: 0, onContract: 0, noContract: 0, incompatible: 0, unknownContract: 0, readsRawContext: 0, undeclaredUse: 0 });
+  assert.deepEqual(lean.incompatibleBy, { contract: 0, setup: 0 });
 });
 
-test('contract report (owner decision 11): `incompatible` and its deprecated alias `unknownContract` are both present and equal', async () => {
-  const future = core.AppManifestSchema.parse({ id: 'com.ex.future', name: 'Future', version: '1.0.0', auraContract: 2 });
+test('contract report (owner decision 11): `incompatible` counts every app the start gate refuses, by cause; the deprecated `unknownContract` equals it', async () => {
+  const m = (id: string, over: Record<string, unknown>) => core.AppManifestSchema.parse({ id, name: id, version: '1.0.0', ...over });
+  const app = (manifest: ReturnType<typeof m>) => ({
+    appId: manifest.id, name: manifest.name, scope: 'user', dir: mkdtempSync(join(tmpdir(), 'contract-f-')), sandbox: 'container', ownNamespace: true, manifest, instances: [],
+  });
   const r = await contractReport({
-    apps: () => [{ appId: 'com.ex.future', name: 'Future', scope: 'user', dir: mkdtempSync(join(tmpdir(), 'contract-f-')), sandbox: 'container', ownNamespace: true, manifest: future, instances: [] }],
+    apps: () => [
+      app(m('com.ex.future', { auraContract: 2 })),
+      app(m('com.ex.setup', { auraContract: 1, setup: { fields: [] } })),
+      app(m('com.ex.both', { auraContract: 2, profiles: [] })),
+      app(m('com.ex.plain', { auraContract: 1 })),
+    ],
     contextKeys: async () => [], signals: async () => ({}),
   });
-  assert.equal(r.apps[0]!.contract.status, 'incompatible');
+  assert.deepEqual(r.apps.map((a) => [a.appId, a.blocked ?? null]), [
+    ['com.ex.both', 'contract-unsupported'], ['com.ex.future', 'contract-unsupported'], ['com.ex.plain', null], ['com.ex.setup', 'setup-unsupported'],
+  ]);
   assert.ok('incompatible' in r.summary && 'unknownContract' in r.summary);
-  assert.equal(r.summary['incompatible'], 1);
+  assert.equal(r.summary['incompatible'], 3, 'like /api/apps: the newer contracts and the setup/profiles app');
   assert.equal(r.summary['unknownContract'], r.summary['incompatible']);
+  assert.deepEqual(r.incompatibleBy, { contract: 2, setup: 1 }, 'one cause per app, the contract first');
 });

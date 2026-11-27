@@ -7,7 +7,11 @@ import { contractReport, liveContractReportDeps } from '../../../lib/appContract
  * The app contract report (D48, Phase 3b), per installed app:
  *
  *   GET [?datadir=1] → { contract, apps: [{ appId, contract, declares, findings,
- *                        source, signals, readsRawContext, dataDir? }], summary }
+ *                        source, signals, readsRawContext, blocked?, dataDir? }], summary,
+ *                        incompatibleBy: { contract, setup } }
+ * `summary.incompatible` counts every app the start gate refuses (a newer Aura
+ * contract or setup/profiles, like /api/apps); `summary.unknownContract` is its
+ * deprecated old name (same value, one release; owner decision 11).
  *
  * Report only. `datadir=1` adds the writes outside each app's dataDir
  * (install folder, container layer via `docker diff`, the home mount). An

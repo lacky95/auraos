@@ -80,6 +80,21 @@ test('printContractReport prints a table and the details', () => {
   assert.match(text, /contract 1: apps=1 noContract=1/);
 });
 
+test('printContractReport: an app refused for setup is marked, and the summary names the causes (owner decision 11)', () => {
+  const out: string[] = [];
+  const log = console.log;
+  console.log = (...a: unknown[]) => { out.push(a.join(' ')); };
+  try {
+    printContractReport({
+      contract: 1, summary: { apps: 1, incompatible: 1, unknownContract: 1 }, incompatibleBy: { contract: 0, setup: 1 },
+      apps: [{ appId: 'com.example.s', scope: 'user', contract: { version: 1, status: 'current' }, blocked: 'setup-unsupported', findings: [], source: [], signals: {}, readsRawContext: false }],
+    });
+  } finally { console.log = log; }
+  const text = out.join('\n');
+  assert.match(text, /1 incompatible \(setup\)/);
+  assert.match(text, /incompatible=1 unknownContract=1 \(incompatible: contract=0 setup=1\)/);
+});
+
 test('build.release: paths stay in the app dir, cwd and command exist, raw apps without it get a note', () => {
   const bad = AppManifestSchema.safeParse({ id: 'com.example.esc', name: 'x', version: '1.0.0', build: { release: { cwd: '../x', outputs: ['/etc'] } } });
   assert.equal(bad.success, false);
