@@ -498,3 +498,59 @@ export interface SetupStateEvent {
   previous: OperationalState | null;
   step: SetupStep | null;
 }
+
+// ── the engine's surface (P3 implements; the API, CLI and wizard call it) ──
+
+/** Who acts on a setup: the owner (desktop, Settings via D45), the System Terminal for its user, or the host operator. */
+export type SetupActor =
+  | { kind: 'user'; userId: string }
+  | { kind: 'terminal'; userId: string; instanceId: string }
+  | { kind: 'operator' };
+
+/** A proposed desired state (wizard step, CLI `--profile/--values/--secret`). Secrets by vault handle only. */
+export interface SetupProposal {
+  profile?: string | null;
+  values?: Record<string, unknown>;
+  /** field → vault handle (`@vault:<handle>` on the CLI). Never a value. */
+  secrets?: Record<string, string>;
+  overrides?: DesiredOverrides;
+}
+
+/** What `apply`, `resume`, `repair`, `reconfigure` and a value change answer. */
+export interface SetupOutcome {
+  /** `on-hold`: the owner's `app.setup.apply` approval is pending (CLI exit 75); `refused`: see `error` (exit 3 or 5). */
+  status: 'ready' | 'initializing' | 'on-hold' | 'refused' | 'unchanged';
+  state: SetupStateView;
+  approvalId?: string;
+  error?: SetupErrorBody;
+}
+
+/** `aura app config get` / `GET …/setup/values`: desired and effective values; secrets as handles only. */
+export interface SetupValuesView {
+  appId: string;
+  profile: string | null;
+  desired: { values: ConfigValues; secrets: Record<string, string>; overrides: DesiredOverrides; setupVersion: number } | null;
+  effective: { values: ConfigValues; secrets: Record<string, string>; configDigest: string } | null;
+  fields: FieldView[];
+  degraded: DegradedRequirement[];
+}
+
+/**
+ * The setup engine as its clients see it (plain data in and out). Errors are
+ * thrown as an Error carrying `code` and `body: SetupErrorBody`; an app
+ * without setup/profiles answers `declares: false`, state `ready`.
+ */
+export interface SetupServiceContract {
+  state(appId: string): Promise<SetupStateView>;
+  profiles(appId: string): Promise<ProfileOption[]>;
+  plan(appId: string, proposal?: SetupProposal): Promise<SetupPlan>;
+  values(appId: string): Promise<SetupValuesView>;
+  /** Plain-value change: no approval; a change of the privilege-bearing part is refused here (use `apply`). */
+  setValues(appId: string, proposal: SetupProposal, actor: SetupActor): Promise<SetupOutcome>;
+  apply(appId: string, proposal: SetupProposal, actor: SetupActor): Promise<SetupOutcome>;
+  resume(appId: string, actor: SetupActor): Promise<SetupOutcome>;
+  repair(appId: string, proposal: SetupProposal, actor: SetupActor): Promise<SetupOutcome>;
+  reconfigure(appId: string, proposal: SetupProposal, actor: SetupActor): Promise<SetupOutcome>;
+  /** The calling instance's own effective values (`/api/setup/self`). */
+  selfConfig(instance: { appId: string; instanceId: string; userId?: string }): Promise<SetupConfigView>;
+}
