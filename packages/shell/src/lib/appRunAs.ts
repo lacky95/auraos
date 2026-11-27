@@ -99,7 +99,7 @@ export function liveRunAsDeps(): RunAsDeps {
       stop: async (appId) => {
         const restart: Array<{ appId: string; userId?: string }> = [];
         const stopped: string[] = [];
-        const consumers = new Set(mgr.mounts.dataConsumers(appId));
+        const consumers = new Set(mgr.dataConsumersOf(appId));
         for (const inst of mgr.getAllInstances()) {
           if (inst.appId !== appId && !consumers.has(inst.instanceId)) continue;
           stopped.push(inst.instanceId);

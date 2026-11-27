@@ -2653,6 +2653,16 @@ export class AppManager {
    * app start would. A System Terminal is refused: its instances run as
    * their user (stream T), never by runAs.
    */
+  /**
+   * The instances that mount `appId`'s data (a sidecar consumer counts as its
+   * instance), the app's own instances left out: what a change of its data's
+   * ownership affects (the run-as migration). The kernel's answer, so callers
+   * never reach the mount backend (ARI coverage, 5b).
+   */
+  dataConsumersOf(appId: string): string[] {
+    return this.mounts.dataConsumers(appId);
+  }
+
   async runAsOwnershipInput(appId: string, runAs: AppRunAs): Promise<RunAsOwnershipInput & { runAsMigration?: AppRunAsMigration }> {
     const manifest = this.registry.getById(appId);
     if (!manifest) throw new Error(`unknown app: ${appId}`);

@@ -27,6 +27,6 @@ export const SERVER_ONLY_ENV: readonly string[] = Object.freeze([
 
 /** Kernel-set variables a session in the instance may see (the `aura` CLI and tools use them). */
 export const SESSION_VISIBLE_ENV: readonly string[] = Object.freeze([
-  'AURA_INSTANCE_TOKEN', 'AURA_HOSTNAME', 'AURA_SHELL_HOSTNAME', 'AURA_RUN_AS', 'AURA_SESSION_USER', 'AURA_TOOLS_MODE',
+  'AURA_INSTANCE_TOKEN', 'AURA_HOSTNAME', 'AURA_SHELL_HOSTNAME', 'AURA_RUN_AS', 'AURA_SESSION_USER', 'AURA_SESSION_UID', 'AURA_TOOLS_MODE',
   'AURA_LAYER_TAG', 'AURA_MOUNT_ROOT', 'AURA_APP_DATA_VOLUME', 'AURA_APP_DATA_SUBPATH',
 ]);
