@@ -877,6 +877,71 @@
       "alpine:3"
     ]
   ],
+  "sidecar:prepull-credential": {
+    "calls": [
+      [
+        "image",
+        "inspect",
+        "--format",
+        "{{.Id}}",
+        "private.example/team/app/runtime:1"
+      ],
+      [
+        "--config",
+        "/tmp/aura-auth-golden",
+        "pull",
+        "private.example/team/app/runtime:1"
+      ],
+      [
+        "volume",
+        "inspect",
+        "aura-io.test.app-data"
+      ],
+      [
+        "volume",
+        "inspect",
+        "aura-io.test.app-pg"
+      ],
+      [
+        "volume",
+        "inspect",
+        "aura-io.test.app-legacy"
+      ],
+      [
+        "inspect",
+        "--format",
+        "{{.Name}}\t{{.State.Status}}\t{{json .Config.Labels}}\t{{.RestartCount}}",
+        "aura-io.test.app-2--priv"
+      ],
+      [
+        "ps",
+        "-a",
+        "--filter",
+        "label=aura.managed=os",
+        "--filter",
+        "label=aura.parent=io.test.app-2",
+        "--format",
+        "{{.Names}}\t{{.State}}\t{{.Label \"aura.sidecar.spec\"}}"
+      ],
+      [
+        "image",
+        "inspect",
+        "--format",
+        "{{.Id}}",
+        "private.example/other/x:1"
+      ],
+      [
+        "pull",
+        "private.example/other/x:1"
+      ]
+    ],
+    "err": {
+      "name": "ImageAuthError",
+      "code": "image_auth",
+      "status": 502,
+      "message": "image_auth: private.example refused the pull of private.example/other/x:1 without a login (Error response from daemon: unauthorized: authentication required). A private image is pulled with the registry login of the Nexus source the app was installed from, and only when it lives inside the app's own repository there (e.g. <app repository>/runtime); other sources' logins and other repositories are never used. Set that source's login: aura nexus registry login <source>"
+    }
+  },
   "sidecar:remove-exec-logs-reconcile": [
     [
       "volume",

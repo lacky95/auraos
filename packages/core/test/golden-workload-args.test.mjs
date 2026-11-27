@@ -55,12 +55,17 @@ function fakeDocker(t, { failStart = false, dieOnBoot = false, missingImages = [
   t.mock.method(childProcess, 'execFile', (cmd, args, _opts, cb) => {
     assert.equal(cmd, 'docker');
     calls.push([...args]);
-    const [verb] = args;
+    // `docker --config <dir> pull …`: a credentialed pull (the auth file dir is the throwaway one).
+    const [verb] = args[0] === '--config' ? args.slice(2) : args;
     if (verb === 'volume') reply(cb, args.at(-1) === `aura-${APP}-legacy` ? 0 : 1, '', 'no such volume');
     else if (verb === 'image') {
       if (args.includes('{{.Id}}') && missingImages.includes(args.at(-1))) reply(cb, 1, '', 'No such image');
       else reply(cb, 0, args.includes('{{.Id}}') ? 'sha256:x' : 'PATH=/usr/local/bin:/usr/bin:/bin\n');
-    } else if (verb === 'pull') { missingImages.splice(missingImages.indexOf(args[1]), 1); reply(cb, 0); }
+    } else if (verb === 'pull') {
+      const image = args.at(-1);
+      if (image.startsWith('private.example/other/')) reply(cb, 1, '', 'Error response from daemon: unauthorized: authentication required');
+      else { missingImages.splice(missingImages.indexOf(image), 1); reply(cb, 0); }
+    }
     else if (verb === 'inspect') {
       const ref = args.at(-1);
       if (args[2]?.startsWith('{{range .Config.Env}}')) { reply(cb, 0, 'PARENT_ONLY=yes\nK1=from-parent\n'); return { stdin: { end() {} } }; }
@@ -111,9 +116,17 @@ const SERVICES = [
   { name: 'db', image: 'postgres:16', command: [], volumes: [{ name: 'pg', target: '/var/lib/postgresql/data', shared: true }],
     seed: { command: ['init-db'] }, env: { POSTGRES_PASSWORD: 'x' } },
   { name: 'legacy', image: 'alpine:3', command: [], volumes: [{ name: 'legacy', target: '/old' }] },
+  { name: 'priv', image: 'private.example/other/x:1', command: [], volumes: [] },
 ];
 
-function sidecars(t, { toolsMode = 'hardlink' } = {}) {
+/** A Nexus source's login for one image (nexus PullCredential), with a fixed throwaway auth dir. */
+const CRED = {
+  source: 'src-a', host: 'private.example', repository: 'team/app',
+  authFile: () => ({ dir: '/tmp/aura-auth-golden', file: '/tmp/aura-auth-golden/config.json', dispose() {} }),
+  redact: (text) => text,
+};
+
+function sidecars(t, { toolsMode = 'hardlink', pullCredential } = {}) {
   const dataDir = fs.mkdtempSync(join(tmpdir(), 'aura-gw-'));
   fs.mkdirSync(join(dataDir, 'aura', 'toolchain', 'bin'), { recursive: true });
   for (const b of ['jq', 'rg']) fs.writeFileSync(join(dataDir, 'aura', 'toolchain', 'bin', b), `#!/bin/sh\necho ${b}\n`);
@@ -132,6 +145,7 @@ function sidecars(t, { toolsMode = 'hardlink' } = {}) {
     tokens: new InstanceTokens(join(dataDir, 'aura', 'secrets', 'k')),
     mounts: { reapplyConsumer: async () => ({ restored: 0, inherited: 0, failed: 0 }), removeAll: () => {}, forgetConsumer: () => {} },
     context: async () => ({ env: { CTX_KEY: 'ctx-value' }, known: new Set(['CTX_KEY']) }),
+    ...(pullCredential ? { pullCredential } : {}),
     instance: (id) => (id === INST ? { appId: APP, instanceDataDir: join(dataDir, 'scopes/users/default/apps', APP, INST), identity: { uid: 200001, gid: 200001, range: 'app' } } : null),
     appHome: async () => ({ kind: 'app-global', hostPath: join(dataDir, 'aura/apphomes/i/global'), volumeSubpath: 'aura/apphomes/i/global',
       logicalPath: '/home/aura', uid: 200001, gid: 200001, mode: 0o700 }),
@@ -177,6 +191,15 @@ for (const [name, run] of Object.entries(SIDECAR_SCENARIOS)) {
     recorded[`sidecar:${name}`] = normalise(d.calls, dataDir);
   });
 }
+
+// Registry auth (live 0.0.52): a credentialed pull runs with the throwaway auth dir; a refused pull is image_auth.
+test('golden sidecar argv: prepull-credential and image-auth refusal', async (t) => {
+  const d = fakeDocker(t, { missingImages: ['private.example/team/app/runtime:1', 'private.example/other/x:1'] });
+  const { mgr, dataDir } = sidecars(t, { pullCredential: async (_app, image) => (image.includes('team/app') ? CRED : null) });
+  await mgr.prePull({ id: APP, services: [{ name: 'p', image: 'private.example/team/app/runtime:1', prePull: true }] });
+  const err = await mgr.spawn(INST, { template: 'priv' }, app).then(() => null, (e) => e);
+  recorded['sidecar:prepull-credential'] = normalise({ calls: d.calls, err: err && { name: err.name, code: err.code, status: err.status, message: err.message } }, dataDir);
+});
 
 for (const [name, opt] of Object.entries({ 'fail-start': { failStart: true }, 'die-on-boot': { dieOnBoot: true } })) {
   test(`golden sidecar argv: ${name}`, async (t) => {
