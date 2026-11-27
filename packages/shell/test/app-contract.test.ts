@@ -160,7 +160,19 @@ test('contract report: version, declarations, findings, source scan, signals', a
   assert.deepEqual(offRow.signals, { 'context-undeclared': 3 });
   assert.deepEqual(r.apps[1]!.signals, { 'context-get': 5 });
   assert.deepEqual(r.apps[1]!.declares.context, ['OPENAI_API_KEY']);
-  assert.deepEqual(r.summary, { apps: 2, onContract: 1, noContract: 1, incompatible: 0, readsRawContext: 1, undeclaredUse: 1, writesOutsideDataDir: 1 });
+  assert.deepEqual(r.summary, { apps: 2, onContract: 1, noContract: 1, incompatible: 0, unknownContract: 0, readsRawContext: 1, undeclaredUse: 1, writesOutsideDataDir: 1 });
   const lean = await contractReport({ apps: () => [], contextKeys: async () => { throw new Error('down'); }, signals: async () => ({}) });
-  assert.deepEqual(lean.summary, { apps: 0, onContract: 0, noContract: 0, incompatible: 0, readsRawContext: 0, undeclaredUse: 0 });
+  assert.deepEqual(lean.summary, { apps: 0, onContract: 0, noContract: 0, incompatible: 0, unknownContract: 0, readsRawContext: 0, undeclaredUse: 0 });
+});
+
+test('contract report (owner decision 11): `incompatible` and its deprecated alias `unknownContract` are both present and equal', async () => {
+  const future = core.AppManifestSchema.parse({ id: 'com.ex.future', name: 'Future', version: '1.0.0', auraContract: 2 });
+  const r = await contractReport({
+    apps: () => [{ appId: 'com.ex.future', name: 'Future', scope: 'user', dir: mkdtempSync(join(tmpdir(), 'contract-f-')), sandbox: 'container', ownNamespace: true, manifest: future, instances: [] }],
+    contextKeys: async () => [], signals: async () => ({}),
+  });
+  assert.equal(r.apps[0]!.contract.status, 'incompatible');
+  assert.ok('incompatible' in r.summary && 'unknownContract' in r.summary);
+  assert.equal(r.summary['incompatible'], 1);
+  assert.equal(r.summary['unknownContract'], r.summary['incompatible']);
 });

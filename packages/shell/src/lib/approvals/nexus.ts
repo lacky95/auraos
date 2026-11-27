@@ -22,7 +22,7 @@
 import * as core from '@aura/core';
 import type { AccessPrincipal, ApprovalLevel, InstallBinding, InstallRecord, NexusProgressEvent, PermissionDiff } from '@aura/core';
 import { installDisplay, installLevel } from './display.ts';
-import { actionGate, json, presentedApproval, type ApprovalServiceDeps } from './service.ts';
+import { actionGate, json, presentedApproval, requesterSummary, type ApprovalServiceDeps } from './service.ts';
 import { errorResponse } from '../appResponse.js';
 
 type InstallGenerator = AsyncGenerator<NexusProgressEvent, InstallRecord | null, { approve: boolean } | void>;
@@ -90,6 +90,23 @@ export function installGate(
         detail: { appScope: binding.scope, runAs: ex.runAs, digest: ex.digest, via: binding.action, approval: gate.consumed()?.id },
       }).catch(() => undefined);
     },
+    /**
+     * Owner decision 11: an install the start gate refused (422) leaves the same audit row as a refused
+     * app at registry load (`app.contract-refused`), attributed to whoever asked, with `stage: 'install'`.
+     */
+    auditRefused: async (body: core.AuraErrorBody, action: string): Promise<void> => {
+      // The audit trail must never change the answer (the 422 goes out whatever happens here).
+      try {
+        const requester = core.approvalRequester(principal);
+        await contextGrants().audit.record({
+          by: refusalAttribution(principal), action: core.CONTRACT_AUDIT_ACTIONS.refused,
+          ...(body.target ? { target: `app:${body.target}` } : {}), outcome: 'failed',
+          detail: { code: body.error, reason: body.message, stage: 'install', via: action, ...(requester ? { requestedBy: requesterSummary(requester) } : {}) },
+        });
+      } catch (err) {
+        console.warn(`[nexus] audit of the refused install of ${body.target ?? 'an app'} failed: ${(err as Error).message}`);
+      }
+    },
     needsApproval: (binding: InstallBinding, coreDiff: PermissionDiff) => {
       const diff = override?.diff ?? coreDiff;
       return gate.needsApproval({
@@ -98,6 +115,14 @@ export function installGate(
       }, { diff });
     },
   };
+}
+
+/** Who asked for a refused install: their user (an app instance acts for its user, else the owner), or the host operator. */
+function refusalAttribution(p: AccessPrincipal): core.AuditInput['by'] {
+  if (p.kind === 'operator') return core.operatorAttribution();
+  if (p.kind === 'user') return core.userAttribution(p);
+  if (p.kind === 'instance') return core.userAttribution({ userId: p.userId ?? core.DEFAULT_OWNER_ID });
+  return { kind: 'anonymous' };
 }
 
 /**
@@ -122,7 +147,10 @@ export async function runInstall(
         return gate.needsApproval(ev.binding, ev.diff);
       }
       // The start gate (D48, D108 A1): an app this AuraOS never starts is 422 with its D105 body on every install path.
-      if (ev.type === 'error' && ev.body) return errorResponse(422, ev.body);
+      if (ev.type === 'error' && ev.body) {
+        await gate.auditRefused(ev.body, ev.action ?? 'nexus.install');
+        return errorResponse(422, ev.body);
+      }
       if (ev.type === 'error') return json({ error: ev.message }, errorStatus(ev));
       if (ev.type === 'install.done') { await gate.grantContext(); await gate.auditExecution(); return json({ ok: true, record: ev.record }); }
       cursor = await it.next();

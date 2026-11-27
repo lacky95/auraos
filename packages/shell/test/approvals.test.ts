@@ -430,13 +430,24 @@ test('the start gate (D48, D108): core refusing an app is 422 with its D105 body
     core.operationalBlock({ id: 'com.example.notes', setup: { fields: [] } })!,
   ]) {
     async function* refused(): AsyncGenerator<NexusProgressEvent, null, unknown> {
-      yield { type: 'error', code: body.error, message: body.message, body };
+      yield { type: 'error', code: body.error, message: body.message, body, action: 'app.patch.activate' };
       throw new Error(body.message);
     }
-    const gate = installGate(deps(), TERMINAL, new Request('http://shell.test/api/nexus/install', { method: 'POST' }), undefined);
+    // Owner decision 11: the refused install leaves an audit row like the registry's (`app.contract-refused`), stage install.
+    const rows: Array<Record<string, unknown>> = [];
+    const audit = () => ({ grants: {} as never, audit: { record: async (e: Record<string, unknown>) => { rows.push(e); return ''; } } }) as never;
+    const gate = installGate(deps(), TERMINAL, new Request('http://shell.test/api/nexus/install', { method: 'POST' }), undefined, undefined, audit);
     const r = await read(await runInstall(refused(), gate));
     assert.equal(r.status, 422);
     assert.deepEqual(r.body, JSON.parse(JSON.stringify(body)));
+    assert.deepEqual(rows, [{
+      by: { kind: 'user', userId: 'default' }, action: 'app.contract-refused', target: 'app:com.example.notes', outcome: 'failed',
+      detail: { code: body.error, reason: body.message, stage: 'install', via: 'app.patch.activate', requestedBy: 'instance com.aura.terminal-3 (com.aura.terminal) for user default' },
+    }]);
+    // A failing audit store never changes the answer.
+    const broken = () => ({ grants: {} as never, audit: { record: async () => { throw new Error('store down'); } } }) as never;
+    const again = await read(await runInstall(refused(), installGate(deps(), TERMINAL, new Request('http://shell.test/api/nexus/install', { method: 'POST' }), undefined, undefined, broken)));
+    assert.equal(again.status, 422);
   }
   assert.equal(core.operationalBlock({ id: 'com.example.notes', auraContract: 2 })!.message,
     'com.example.notes is built for Aura contract 2; this AuraOS implements 1. Update AuraOS or install a version built for contract 1.');
