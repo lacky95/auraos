@@ -26,6 +26,13 @@ set -u
 SHELL_MODE_FILE=/data/aura/shell-mode
 SHELL_MODE="${AURA_SHELL_MODE:-$(tr -d '[:space:]' < "$SHELL_MODE_FILE" 2>/dev/null)}"
 case "$SHELL_MODE" in prod|dev) ;; *) SHELL_MODE=dev ;; esac
+# Composition (D76, Phase 6 W): AURA_COMPOSITION, else /data/aura/composition, else
+# desktop. `server` builds and serves the shell with no Web Shell (Headless); the
+# kernel, API, App Hosts and WS proxy are the same. Exported for the build and the shell.
+COMPOSITION_FILE=/data/aura/composition
+COMPOSITION="${AURA_COMPOSITION:-$(tr -d '[:space:]' < "$COMPOSITION_FILE" 2>/dev/null)}"
+case "$COMPOSITION" in server|desktop) ;; *) COMPOSITION=desktop ;; esac
+export AURA_COMPOSITION="$COMPOSITION"
 # Prod only: AURA_SHELL_WATCH=1 (or "1"/"on" in /data/aura/shell-watch) makes
 # the running prod shell rebuild itself on source saves and swap to the new
 # build in-process (packages/shell/server/watchRebuild.mjs) — live changes on
@@ -123,7 +130,9 @@ SHELL_INPUTS=" shell core kv-store ui "
 
 stamp_of() { grep "^$1 " "$BUILD_STAMP" 2>/dev/null | cut -d' ' -f2; }
 output_ok() {
-  if [ "$1" = shell ]; then [ -f "/workspace/packages/shell/$SHELL_PROD_DIST/server/entry.mjs" ]
+  # The prod shell build must also be of this composition (its .aura-composition marker).
+  if [ "$1" = shell ]; then [ -f "/workspace/packages/shell/$SHELL_PROD_DIST/server/entry.mjs" ] \
+    && grep -q "\"composition\": \"$COMPOSITION\"" "/workspace/packages/shell/$SHELL_PROD_DIST/.aura-composition" 2>/dev/null
   else [ -d "/workspace/packages/$1/dist" ]; fi
 }
 

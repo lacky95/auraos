@@ -166,9 +166,9 @@ export const SECURITY_OPTIONS: readonly SecurityOption[] = Object.freeze([
     title: 'Build composition',
     description: 'desktop (default): the server layer plus the Web Shell (desktop pages, client bundle). server: the same '
       + 'kernel, API, App Hosts and WS proxy with no Web Shell (Headless, D76); Web Shell boot hooks (desktop session '
-      + 'restore, free-flight windows) do not run. Read at build and at boot; shown in /data/aura/boot/status.json.',
-    type: 'enum', values: ['server', 'desktop'], default: 'desktop', source: 'env', env: 'AURA_COMPOSITION',
-    restartRequired: true, change: 'fresh', since: '2026-11-27', phase: '6 (D76)',
+      + 'restore, free-flight windows) do not run. The env wins over the file; read by os/boot.sh at build and at boot (a prod build of the other composition is rebuilt); shown in /data/aura/boot/status.json.',
+    type: 'enum', values: ['server', 'desktop'], default: 'desktop', source: 'file', file: 'aura/composition',
+    env: 'AURA_COMPOSITION', restartRequired: true, change: 'fresh', since: '2026-11-27', phase: '6 (D76)',
   },
   {
     id: 'runtimes',
