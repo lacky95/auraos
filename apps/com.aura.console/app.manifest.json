@@ -5,6 +5,7 @@
   "icon": "C",
   "version": "0.1.0",
   "auraContract": 1,
+  "serve": "auto",
   "description": "Log collector + viewer. Captures console.log/info/warn/error/debug + uncaught errors from the shell and every app iframe over a WebSocket. Backend stays running headless; opens a tab for the live log viewer on launch.",
   "category": "developer",
   "componentType": "activity",
