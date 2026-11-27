@@ -326,7 +326,7 @@ test('executor: apt is verified and argv; tar runs with -- and members; file and
 });
 
 test('source: no shell anywhere in the privileged path', () => {
-  for (const f of ['../src/lib/privilegedExec.ts', '../src/lib/capabilities.ts', '../src/lib/capabilityInstall.ts', '../src/lib/prootUpgrade.ts', '../src/lib/baseInstall.ts', '../src/lib/chrootDevices.ts',
+  for (const f of ['../src/lib/privilegedExec.ts', '../src/lib/capabilities.ts', '../src/lib/capabilityInstall.ts', '../src/lib/prootUpgrade.ts', '../src/lib/baseInstall.ts', '../../core/src/runtimes/proot/chrootDevices.ts', '../../core/src/runtimes/proot/actions.ts',
     '../src/pages/api/admin/cap.ts', '../src/pages/api/admin/cap-registry.ts', '../src/pages/api/admin/upgrade-proot.ts', '../src/pages/api/admin/base-install.ts']) {
     const src = readFileSync(new URL(f, import.meta.url), 'utf8');
     assert.doesNotMatch(src, /\bexecSync\b|\bexec\(|shell:\s*true|\/bin\/sh -c|bash -c|install_cmd\)/, f);
@@ -342,7 +342,8 @@ test('upgrade-proot: a rebuild needs the password and is audited; reporting an e
     ...deps(),
     run: (file, args) => { ran.push([file, ...args].join(' ')); return file.endsWith('proot') ? 'proot v5.4.0' : ''; },
     exists: (p) => (p === '/usr/local/bin/proot' ? installed : false),
-    baseRootfs: '/os/base-rootfs',
+    // 5b PR: the mechanism is the PRoot module's (the route authorizes and audits).
+    action: (id) => core.prootOwnerActions('/os/base-rootfs')[id],
   });
   const ctx = (q: string, headers: Record<string, string> = {}) => ({ ...req('POST', undefined, headers, `/api/admin/upgrade-proot${q}`), url: new URL(`http://shell.test/api/admin/upgrade-proot${q}`) });
   caller = TERMINAL;

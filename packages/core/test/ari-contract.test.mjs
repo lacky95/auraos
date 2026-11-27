@@ -22,8 +22,8 @@ import {
   RUNTIME_CAPABILITY_KEYS, RUNTIME_BOOLEAN_CAPABILITIES, missingCapabilities, BUILTIN_RUNTIMES, RUNTIME_AUDIT_ACTIONS,
   securityOption,
 } from '../dist/index.js';
-import { containerRuntime } from '../dist/runtimes/builtins/container.js';
-import { prootRuntime } from '../dist/runtimes/builtins/proot.js';
+import { containerRuntime } from '../dist/runtimes/container/index.js';
+import { prootRuntime } from '../dist/runtimes/proot/index.js';
 import { AppManifestSchema } from '../dist/types/manifest.js';
 import { AppManager } from '../dist/app-manager/AppManager.js';
 import { ContainerRunner } from '../dist/app-manager/ContainerRunner.js';
@@ -36,6 +36,8 @@ mkdirSync(ROOTFS);
 
 const CONTAINER_CAPS = ContainerRunner.prototype.capabilities.call({});
 const PROOT_CAPS = ProotRunner.prototype.capabilities.call({});
+/** A test module with no capability groups declares none of their features (5b CR: groups ⇔ features). */
+const NO_GROUP_CAPS = { ...CONTAINER_CAPS, survivesShellRestart: false, sessionExec: false, sidecars: false, usage: false, hostFilesystem: false };
 const runner = (caps) => ({ capabilities: () => caps, getHost: () => null, getPort: () => null });
 const app = (extra = {}) => AppManifestSchema.parse({ id: 'org.k.app', name: 'K', version: '1.0.0', ...extra });
 
@@ -51,7 +53,7 @@ function versioned(migrate = (from, raw) => { if (from !== 1) throw new Error(`u
   return {
     descriptor: { id: 'vers', version: '2.0.0', ari: 1, title: 'V', description: 'v', builtIn: false, settingsVersion: 2,
       settingsSchema: { type: 'object', properties: { slots: { type: 'integer', title: 'Slots', minimum: 1, default: 1 } } } },
-    runner: runner(CONTAINER_CAPS), capabilities: () => CONTAINER_CAPS, health: () => HEALTHY, endpoint: () => null,
+    runner: runner(NO_GROUP_CAPS), capabilities: () => NO_GROUP_CAPS, health: () => HEALTHY, endpoint: () => null,
     ...(migrate ? { migrateSettings: migrate } : {}),
   };
 }

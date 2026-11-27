@@ -1,13 +1,14 @@
 import type { APIRoute } from 'astro';
 import { execSync } from 'node:child_process';
+import * as core from '@aura/core';
+import { actionHost } from '../../../lib/runtimeActions.ts';
 
 /**
- * Micro-benchmark: cold-start overhead of different sandbox layers, doing
- * nothing inside them ("just exec /bin/true"). Pure subsystem cost — no app,
- * no astro boot, no node, no node_modules. The PRoot row is real-machine
- * data from this container; the container row is the best published number
- * for a comparable runc invocation since we can't `docker run` from inside
- * a non-DinD container.
+ * Micro-benchmark: cold-start overhead of the sandbox layers, doing nothing
+ * inside them ("just exec /bin/true"). Pure subsystem cost: no app, no astro
+ * boot, no node, no node_modules. The kernel baselines are measured here;
+ * every installed runtime with a `bench` action adds its own rows (5b PR:
+ * PRoot's), so no runtime-specific command lives in this route.
  */
 function timeNs(cmd: string, iterations: number): { mean_ms: number; min_ms: number; max_ms: number } {
   const samples: number[] = [];
@@ -23,9 +24,8 @@ function timeNs(cmd: string, iterations: number): { mean_ms: number; min_ms: num
   return { mean_ms: +mean.toFixed(2), min_ms: +min.toFixed(2), max_ms: +max.toFixed(2) };
 }
 
-export const GET: APIRoute = () => {
+export const GET: APIRoute = async () => {
   const iterations = 30;
-  const baseRootfs = process.env['AURA_BASE_ROOTFS'] ?? '/os/base-rootfs';
   const results: Record<string, unknown> = { iterations };
 
   // 1. Native: just fork+exec /bin/true. The kernel-only baseline.
@@ -34,21 +34,11 @@ export const GET: APIRoute = () => {
   // 2. Bash subshell: shell parse + fork + exec. The "what a shell costs" line.
   results['bash_subshell'] = timeNs('bash -c true', iterations);
 
-  // 3. PRoot, no binds: minimum proot setup cost.
-  results['proot_no_binds'] = timeNs(`proot --rootfs=${baseRootfs} /bin/true`, iterations);
-
-  // 4. PRoot, AuraOS-shaped binds: what the AppManager actually invokes per
-  //    app spawn (workspace + data + /aura/all-tools + /aura/my-tools etc.).
-  results['proot_aura_binds'] = timeNs(
-    `proot --rootfs=${baseRootfs} \
-      --bind=/workspace:/workspace \
-      --bind=/proc --bind=/dev --bind=/tmp \
-      --bind=/etc/resolv.conf:/etc/resolv.conf \
-      --bind=/usr/local/bin/node:/usr/local/bin/node \
-      --bind=/os/toolchain/bin:/aura/all-tools \
-      /bin/true`,
-    iterations,
-  );
+  // 3. Each runtime's own layer (PRoot: no binds, and AuraOS-shaped binds).
+  for (const m of core.getAppManager().runtimes.list()) {
+    const bench = m.actions?.['bench'];
+    if (bench && !bench.mutating) Object.assign(results, await bench.run({ iterations }, actionHost));
+  }
 
   return new Response(JSON.stringify(results, null, 2), {
     status: 200,

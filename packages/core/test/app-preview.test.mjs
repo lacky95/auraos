@@ -70,6 +70,7 @@ function fakeManager() {
     forceKill(id) { fake.instances.delete(id); },
     // Stream A: an installation record without runAs: the instances run as root (as before).
     async installationRunAs() { return { installationId: 'inst-shop' }; },
+    noteRespawn() {},
   };
   for (const name of ['spawnInstance', 'spawnContext', 'allocateInstanceId', 'transition', 'upsertInstance', 'defaultInstance',
     'startPreview', 'previewsOf', 'stopPreview', 'reapIdlePreviews', 'previewDataSource']) {

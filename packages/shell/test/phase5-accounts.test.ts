@@ -174,8 +174,6 @@ test('C8: a user\'s desktop snapshot holds only that user\'s instances, and the 
   const mgrView = {
     getAllInstances: () => list,
     getManifest: () => ({ activityMode: 'none' }),
-    // Stream R: containers survive a shell restart (no respawn).
-    runtimeCapabilitiesOf: () => ({ survivesShellRestart: true }),
   };
   const all = new Set(list.map((i) => i.instanceId));
   assert.deepEqual(sessionInstances(mgrView as never, all, new Set(), 'default').map((i) => i.instanceId), ['a-1', 'a-3'], 'unlabelled instances are the owner\'s');
@@ -185,6 +183,7 @@ test('C8: a user\'s desktop snapshot holds only that user\'s instances, and the 
   const opened: unknown[] = [];
   const mgr = {
     getInstance: () => undefined, getManifest: () => ({}), isEnabled: () => true,
+    respawnedInstance: async () => null,
     start: async (appId: string, opts: unknown) => { started.push({ appId, opts }); return `${appId}-new`; },
     openActivity: async (_id: string, _d: unknown, opts: unknown) => { opened.push(opts); return { activityId: 'x' }; },
   };
@@ -193,7 +192,7 @@ test('C8: a user\'s desktop snapshot holds only that user\'s instances, and the 
     instances: [{ instanceId: 'a-2', appId: 'io.ex.a', view: true }],
     activities: [{ activityId: 'b-1#1', parentInstanceId: 'b-1', appId: 'io.ex.b', path: '/', createdAt: '2026-11-26T00:00:00.000Z' }],
   };
-  const report: RestoreReport = { restored: 0, respawned: 0, failed: [], idMap: {}, pruned: 0 };
+  const report: RestoreReport = { restored: 0, failed: [], idMap: {}, pruned: 0 };
   await reopenActivities(mgr as never, snap, report, true, MEMBER_ID);
   assert.deepEqual(started, [{ appId: 'io.ex.a', opts: { userId: MEMBER_ID } }, { appId: 'io.ex.b', opts: { userId: MEMBER_ID } }]);
   assert.equal((opened[0] as { userId?: string }).userId, MEMBER_ID);

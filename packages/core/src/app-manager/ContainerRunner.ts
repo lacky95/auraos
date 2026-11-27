@@ -12,6 +12,7 @@ import { containerNetworkArgs, containerNetworkEnv, containerShellBase, rawSocke
 import { TERM_NETWORK_CONTAINER_LABEL, TermNetworks, type TermNetwork } from './TermNetworks.js';
 import { containerIdentityArgs, isNonRootIdentity, writeIdentityFiles } from './spawn/identityArgs.js';
 import { readKernelSessionSecret, sessionHostUser, terminalSessionArgs, writeSessionSecret } from './spawn/sessionArgs.js';
+import { containerName } from '../runtimes/container/names.js';
 import type { RuntimeCapabilities } from '../runtimes/types.js';
 // Value import, but MountManager imports ContainerRunner type-only, so there
 // is no runtime cycle.
@@ -387,7 +388,7 @@ export class ContainerRunner implements SandboxRunner {
   public toolsDir(instanceId: string): string {
     return join(this.dataDir, 'aura', 'runtime', instanceId, 'tools');
   }
-  public provisionToolsDir(instanceId: string, manifest: AppManifest): string {
+  public provisionToolsDir(instanceId: string, manifest: Pick<AppManifest, 'tools'>): string {
     const dir = this.toolsDir(instanceId);
     provisionAllowlist({
       dataDir: this.dataDir,
@@ -948,10 +949,7 @@ export class ContainerRunner implements SandboxRunner {
   }
 
   private containerName(instanceId: string): string {
-    // Docker names must be [a-zA-Z0-9_.-]; instance IDs are
-    // "com.aura.terminal-3" — `.` is allowed but `:` (used in some
-    // instanceId schemes) is not. Sanitise defensively.
-    return 'aura-' + instanceId.replace(/[^a-zA-Z0-9_.-]/g, '_');
+    return containerName(instanceId);
   }
 
   /**

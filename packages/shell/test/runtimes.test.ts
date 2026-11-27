@@ -70,7 +70,7 @@ const CONTAINER_CAPS: core.RuntimeCapabilities = {
   warmPool: true, survivesShellRestart: true, usage: true, gpu: false,
 };
 const PROOT_CAPS: core.RuntimeCapabilities = {
-  ...CONTAINER_CAPS, isolation: 'ptrace', readOnlyBinds: false, mounts: false, portExpose: false, sidecars: false, survivesShellRestart: false,
+  ...CONTAINER_CAPS, isolation: 'ptrace', readOnlyBinds: false, mounts: false, portExpose: false, sidecars: false, survivesShellRestart: false, usage: false,
 };
 
 const parse = (m: Record<string, unknown>) => core.AppManifestSchema.parse({ name: 'A', version: '1.0.0', ...m });

@@ -14,38 +14,41 @@
  * The upstream ref is not pinned (it never was): the approval names it.
  */
 import { existsSync } from 'node:fs';
-import { cpus } from 'node:os';
+import type { ProotActionHost, RuntimeAction } from '@aura/core';
+import * as core from '@aura/core';
 import { json } from './approvals/service.ts';
-import { aptInstallArgv, aptUpdateArgv, auditPrivileged, livePrivilegedDeps, privilegedAction, type PrivilegedDeps } from './privilegedExec.ts';
+import { auditPrivileged, livePrivilegedDeps, privilegedAction, type PrivilegedDeps } from './privilegedExec.ts';
+import { runtimeAction } from './runtimeActions.ts';
 
-export const PROOT_SOURCE = 'https://github.com/proot-me/proot';
-export const PROOT_REF = 'master';
+export const PROOT_SOURCE = core.PROOT_SOURCE;
+export const PROOT_REF = core.PROOT_REF;
 export const PROOT_UPGRADE_OP = 'master.proot-upgrade';
-const SRC = '/tmp/proot-src';
-const BIN = '/usr/local/bin/proot';
+const BIN = core.PROOT_LOCAL_BIN;
 
 type Ctx = Parameters<PrivilegedDeps['ownerAction']>[0] & { url: URL };
 
 export interface ProotUpgradeDeps extends PrivilegedDeps {
+  /** The PRoot module's actions: `version` (read-only) and `upgrade` (the build). The route authorizes and audits. */
+  action(id: 'version' | 'upgrade'): RuntimeAction | Response;
   exists(path: string): boolean;
-  baseRootfs: string;
 }
 
 export function liveProotUpgradeDeps(): ProotUpgradeDeps {
-  return { ...livePrivilegedDeps(), exists: existsSync, baseRootfs: process.env['AURA_BASE_ROOTFS'] ?? '/os/base-rootfs' };
+  return { ...livePrivilegedDeps(), action: (id) => runtimeAction('proot', id), exists: existsSync };
 }
-
-const versionLine = (out: string) => out.split('\n').find((l) => /^proot.*v/i.test(l.trim()))?.trim() ?? out.split('\n')[0] ?? '';
 
 export async function postProotUpgrade(ctx: Ctx, deps: ProotUpgradeDeps = liveProotUpgradeDeps()): Promise<Response> {
   const force = ctx.url.searchParams.get('force') === '1';
-  const log: Record<string, string> = {};
+  const version = deps.action('version');
+  const upgrade = deps.action('upgrade');
+  if (version instanceof Response) return version;
+  if (upgrade instanceof Response) return upgrade;
+  const host: ProotActionHost = { run: deps.run, exists: deps.exists };
 
-  if (!force && deps.exists(BIN)) {
+  if (!force) {
     try {
-      log['version_local'] = versionLine(deps.run(BIN, ['--version'], { timeoutMs: 10_000 }));
-      log['note'] = 'already installed — pass ?force=1 to rebuild';
-      return json({ ok: true, log });
+      const v = await version.run({}, host);
+      if (v['installed']) return json({ ok: true, log: { version_local: String(v['version'] ?? ''), note: 'already installed — pass ?force=1 to rebuild' } });
     } catch { /* rebuild if the version check fails */ }
   }
 
@@ -56,29 +59,13 @@ export async function postProotUpgrade(ctx: Ctx, deps: ProotUpgradeDeps = livePr
   });
   if (actor instanceof Response) return actor;
 
+  let log: Record<string, unknown>;
   try {
-    try { deps.run('dpkg', ['-s', 'libtalloc-dev'], { timeoutMs: 5_000 }); log['talloc'] = 'present'; }
-    catch {
-      deps.run(aptUpdateArgv()[0]!, aptUpdateArgv().slice(1), { timeoutMs: 120_000 });
-      log['apt_install'] = deps.run('apt-get', aptInstallArgv(['libtalloc-dev']).slice(1), { timeoutMs: 120_000 });
-    }
-    if (deps.exists(SRC)) {
-      deps.run('git', ['-C', SRC, 'fetch', 'origin'], { timeoutMs: 60_000 });
-      log['git_pull'] = deps.run('git', ['-C', SRC, 'reset', '--hard', `origin/${PROOT_REF}`], { timeoutMs: 60_000 });
-    } else {
-      log['git_clone'] = deps.run('git', ['clone', '--depth', '1', '--branch', PROOT_REF, '--', PROOT_SOURCE, SRC], { timeoutMs: 120_000 });
-    }
-    try { deps.run('make', ['clean'], { timeoutMs: 60_000, cwd: `${SRC}/src` }); } catch { /* a fresh tree has nothing to clean */ }
-    log['build'] = deps.run('make', [`-j${Math.max(1, cpus().length)}`], { timeoutMs: 180_000, cwd: `${SRC}/src` }).split('\n').slice(-8).join('\n');
-    deps.run('install', ['-m', '0755', `${SRC}/src/proot`, BIN], { timeoutMs: 10_000 });
-    log['installed_at'] = BIN;
-    log['version_new'] = versionLine(deps.run(BIN, ['--version'], { timeoutMs: 10_000 }));
-    try { deps.run(BIN, [`--rootfs=${deps.baseRootfs}`, '/bin/true'], { timeoutMs: 10_000 }); log['smoke_test'] = 'rc=0'; }
-    catch (err) { log['smoke_test'] = (err as Error).message.slice(0, 300); }
+    log = await upgrade.run({}, host);
   } catch (err) {
     await auditPrivileged(deps, actor, PROOT_UPGRADE_OP, { target: `file:${BIN}`, outcome: 'failed', detail: { source: PROOT_SOURCE, ref: PROOT_REF, force }, error: (err as Error).message });
-    return json({ ok: false, error: (err as Error).message, log }, 500);
+    return json({ ok: false, error: (err as Error).message, log: (err as { log?: Record<string, string> }).log ?? {} }, 500);
   }
-  await auditPrivileged(deps, actor, PROOT_UPGRADE_OP, { target: `file:${BIN}`, outcome: 'ok', detail: { source: PROOT_SOURCE, ref: PROOT_REF, force, version: log['version_new'] } });
+  await auditPrivileged(deps, actor, PROOT_UPGRADE_OP, { target: `file:${BIN}`, outcome: 'ok', detail: { source: PROOT_SOURCE, ref: PROOT_REF, force, version: String(log['version_new'] ?? '') } });
   return json({ ok: true, log });
 }

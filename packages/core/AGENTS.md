@@ -99,7 +99,6 @@ Each module creates its own lazily today. Add no new one; Phase 6 K moves their 
 | `nexus/removeApp.ts → AppManager` | Phase 7 (removal contract) |
 | `types/manifest.ts → app-hosts/appHosts` (Foundation not a leaf) | Phase 7 (host-name rules into Foundation) |
 | `AppManager → keymap/KeymapRegistry` (kernel uses presentation) | Phase 8 (AppManager decomposition) |
-| `app-manager ↔ runtimes` (`runtimes/builtins/proot.ts → ProotRunner`, R2) | Phase 5b CR + PR |
 | `agent-agnostic`: the privilege table (N1: one-shot install data) | 5-post (deleted after the migration) |
 | `agent-agnostic`: the `claude-code` alias, onboarding probes, screen scraping (#4–#6) | Phase 6 |
 

@@ -397,6 +397,7 @@ test('pool: a member warmed for a user is that user\'s only; one from before App
     recycling: new Set(),
     instanceAlive: () => true,
     savePoolIds() {},
+    noteRespawn() {},
     registry: { getById: () => null },
     stop: async (id) => { stopped.push(id); },
   };

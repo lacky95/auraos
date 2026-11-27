@@ -48,8 +48,14 @@ const runtime = await this.resolveRuntime(appId, manifest);   // throws, never f
 const pid = await runtime.module.runner.spawn(instanceId, appId, port, manifest, ctx);
 ```
 
-`ContainerRunner.listOrphanRecords()` is how containers survive a shell
-restart: sibling containers tagged `aura-*` get re-adopted at boot.
+Instances survive a shell restart through their runtime's `adoption`
+group (ARI, Phase 5b): at boot the kernel asks every runtime that has one
+for its survivors and adopts them (for `container`: sibling containers
+tagged `aura-*`). A survivor without a workload token is not kept: it is
+stopped through its lifecycle and starts fresh. PRoot instances end with
+the shell; the kernel records the running ones and starts them again at
+boot, with no browser or sign-in needed, and a restored window maps to
+the new instance.
 
 ## The synthesised entrypoint
 
@@ -140,7 +146,11 @@ installed on the host.
 chokidar fires, AND the AppManager calls `provisionToolsDir(instanceId, manifest)`
 again — re-running the symlink loop. The running child sees the new
 binding within a tick without a respawn, because `/aura/my-tools/` is
-the same bound directory.
+the same bound directory. The runtime reports per instance what it
+applied: `aura cap grant` prints `applied (enforced)`, or `advisory` in
+the legacy symlink tool mode (every tool stays reachable by absolute
+path there, so it is never an enforced boundary), `failed` or
+`unsupported`.
 
 ### Identity gate at spawn (`waitHealthy`)
 

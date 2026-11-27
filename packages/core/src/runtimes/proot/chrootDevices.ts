@@ -16,7 +16,8 @@
  *   - a node that is already right is left as is (idempotent).
  *
  * PRoot apps never see these nodes: ProotRunner binds the master's `/dev`
- * over `<rootfs>/dev`.
+ * over `<rootfs>/dev`. Part of the PRoot module (5b PR): the `baseInstall`
+ * action prepares the chroot with it.
  */
 import { randomBytes } from 'node:crypto';
 import { lstatSync, mkdirSync, renameSync, rmSync, type Stats } from 'node:fs';

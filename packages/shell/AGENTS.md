@@ -20,8 +20,8 @@ The principles are in the root `AGENTS.md`. This package holds two layers outsid
   **Existing debt, don't extend it:**
   - `api/admin/apps/enabled.ts` and `api/apps/[id]/remove.ts` write `os:app-enabled` (Phase 6 K);
   - `api/os/lock.ts` and `unlock.ts` write `os:lockscreen` and emit `kv:changed`;
-  - `lib/appRestart.ts` emits `app:restart*`;
-  - `lib/desktopSession.ts` respawns PRoot instances (5b RS).
+  - `lib/appRestart.ts` emits `app:restart*`.
+  (The PRoot respawn left `lib/desktopSession.ts` in 5b RS: the kernel does it; the desktop maps windows only.)
 - **Until Phase 6, `middleware.ts` is the kernel's init owner.** Phase 6 K moves init into core `bootSystem()`, and the middleware then waits for readiness. Don't add init steps here; register server-layer hooks instead (Phase 6, `lib/bootHooks.ts`).
 - **No new `globalThis` or `Symbol.for()` state.** About 35 files already have it. Baselined: `aura.relay.sign` (5-main D89 B4; one key, `server/access-bridge.mjs` `RELAY_SIGNER_KEY`), which must exist from module load and in every access mode, unlike the `aura.access` bridge; Phase 5b folds it into one bridge set up at the composition point.
 - **Agent-agnostic server layer:** `src/lib` and `server/` never name an agent product in code; the Terminal app (or another adapter) owns product strings and hands the shell generic data. Baselined debt: the agent-hooks approval text and route notes (audit #1, 5b), onboarding probes and `terminalScreen.ts` banner scraping (#4, #6, Phase 6).

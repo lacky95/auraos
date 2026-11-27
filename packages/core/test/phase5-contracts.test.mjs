@@ -154,9 +154,10 @@ test('AppManager spawn seam: homes and identities are asked, with the runner cap
 test('AppManager runner selection: a latched runtime id that is not installed is a Q17 error, never PRoot', () => {
   const runtimes = new RuntimeRegistry();
   const p = { id: 'p' }, c = { id: 'c' };
-  runtimes.register({ descriptor: { id: 'proot', version: '1.0.0', ari: 1, settingsVersion: 1, settingsSchema: { type: 'object', properties: {} } }, runner: p });
-  runtimes.register({ descriptor: { id: 'container', version: '1.0.0', ari: 1, settingsVersion: 1, settingsSchema: { type: 'object', properties: {} } }, runner: c });
-  const self = { runtimes, instances: new Map([['a-1', { sandbox: 'proot' }], ['b-1', { sandbox: 'container' }], ['g-1', { sandbox: 'gvisor' }], ['n-1', {}]]) };
+  const caps = () => ({ ...ProotRunner.prototype.capabilities.call({}, {}), hostFilesystem: false });
+  runtimes.register({ descriptor: { id: 'proot', version: '1.0.0', ari: 1, settingsVersion: 1, settingsSchema: { type: 'object', properties: {} } }, runner: p, capabilities: caps });
+  runtimes.register({ descriptor: { id: 'container', version: '1.0.0', ari: 1, settingsVersion: 1, settingsSchema: { type: 'object', properties: {} } }, runner: c, capabilities: caps });
+  const self = { runtimes, instances: new Map([['a-1', { sandbox: 'proot' }], ['b-1', { sandbox: 'container' }], ['g-1', { sandbox: 'gvisor' }], ['n-1', {}]]), moduleOf: AppManager.prototype.moduleOf };
   assert.equal(AppManager.prototype.runnerOf.call(self, 'a-1'), p);
   assert.equal(AppManager.prototype.runnerOf.call(self, 'b-1'), c);
   assert.throws(() => AppManager.prototype.runnerOf.call(self, 'g-1'),

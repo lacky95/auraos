@@ -4,6 +4,7 @@ import { hostname, networkInterfaces, totalmem, freemem, uptime as osUptime, use
 import { execSync } from 'node:child_process';
 import { join } from 'node:path';
 import { color } from '../lib/format.js';
+import { api } from '../lib/client.js';
 
 function safeRead(path: string): string | null {
   try { return readFileSync(path, 'utf-8'); } catch { return null; }
@@ -225,6 +226,15 @@ function diskUsage(paths: string[]): Record<string, string> {
   return out;
 }
 
+/** Where this instance runs, as the kernel knows it (5b, D100 §7); null outside an app or without the shell. */
+interface KernelRuntimeView { instanceId: string; runtime: string; source?: string; features: Array<{ id: string; support: string }> }
+async function kernelRuntime(): Promise<KernelRuntimeView | null> {
+  const id = process.env['APP_INSTANCE_ID'];
+  if (!id) return null;
+  try { return await api.get<KernelRuntimeView>(`/api/instances/${encodeURIComponent(id)}/runtime`); }
+  catch { return null; }
+}
+
 function section(title: string, body: Record<string, string>): void {
   console.log(color.bold(title));
   const maxKey = Math.max(0, ...Object.keys(body).map((k) => k.length));
@@ -246,17 +256,20 @@ export function registerWhereami(program: Command): void {
       .summary('Where am I? Snapshot of the execution context (layers, OS, env, mounts, tools).')
       .description('Where am I? Snapshot of the current execution context: layers, OS, CPU, memory, namespaces, AuraOS env, mounts, tools.')
       .option('--json', 'Emit raw JSON instead of the formatted report')
-      .action((opts: { json?: boolean }) => { whereami(opts); });
+      .action(async (opts: { json?: boolean }) => { await whereami(opts); });
   }
 }
 
-function whereami(opts: { json?: boolean }): void {
+async function whereami(opts: { json?: boolean }): Promise<void> {
   {
     {
+      // The runtime is the kernel's answer (ARI); the layer probes below are local signals only.
+      const runtime   = await kernelRuntime();
       const proot     = detectProot();
       const container = detectContainer();
       const virt      = detectVirt();
       const data = {
+        runtime,
         proot,
         container,
         virt,
@@ -282,7 +295,17 @@ function whereami(opts: { json?: boolean }): void {
       console.log(color.dim('  snapshot at ' + data.time['now']));
       console.log();
 
-      console.log(color.bold('Layers'));
+      console.log(color.bold('Runtime (from the kernel)'));
+      if (runtime) {
+        console.log(`  ${runtime.instanceId} on ${color.green(runtime.runtime)}${runtime.source ? color.dim(` (${runtime.source})`) : ''}`);
+        const supported = runtime.features.filter((f) => f.support !== 'unsupported').map((f) => f.support === 'conditional' ? `${f.id} (conditional)` : f.id);
+        console.log(`  features   ${color.dim(supported.join(', ') || '(none)')}`);
+      } else {
+        console.log(`  ${color.dim('not an app instance, or the shell did not answer')}`);
+      }
+      console.log();
+
+      console.log(color.bold('Layers (local signals)'));
       console.log(`  PRoot      ${proot.inside ? color.green('yes') : color.dim('no')}`);
       if (proot.inside) {
         console.log(`    tracer pid     ${proot.tracerPid}`);

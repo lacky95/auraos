@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { ContainerRunner } from '../dist/app-manager/ContainerRunner.js';
 import { AppManager } from '../dist/app-manager/AppManager.js';
 import { PortAllocator } from '../dist/app-manager/PortAllocator.js';
+import { containerRuntime } from '../dist/runtimes/container/index.js';
 
 let dir;
 let savedPath;
@@ -98,20 +99,26 @@ function fakeManager(records, { pooled = [], running = [] } = {}) {
     registry: { getById: (appId) => (appId === 'io.ex.gone' ? undefined : { id: appId }) },
     providers: { registerInstance: (i) => calls.providers.push(i.instanceId) },
     interfaces: { registerInstance: () => {} },
-    container: {
-      listOrphanRecords: async () => records,
-      isRunning: (id) => running.includes(id),
-      registerAdopted: (o) => calls.registered.push(o.instanceId),
-      onExit: (id) => calls.exits.push(id),
-    },
     loadPoolIds: () => new Set(pooled),
     loadPoolHomes() {},
     handleUnexpectedExit: () => {},
     measureAdopted: async (id) => { calls.measured.push(id); },
+    tokenlessSurvivors: new Set(),
+    modulesWith: AppManager.prototype.modulesWith,
+    adoptFrom: AppManager.prototype.adoptFrom,
   };
+  // 5b CR: adoption goes through the container module's `adoption` group, over the runner's surface.
+  const module = containerRuntime({
+    capabilities: () => ContainerRunner.prototype.capabilities.call({}),
+    listOrphanRecords: async () => records,
+    isRunning: (id) => running.includes(id),
+    registerAdopted: (o) => calls.registered.push(o.instanceId),
+    onExit: (id) => calls.exits.push(id),
+  });
+  fake.runtimes = { list: () => [module] };
   return { fake, calls, adopt: () => AppManager.prototype.adoptOrphans.call(fake) };
 }
-const rec = (instanceId, appId, extra = {}) => ({ instanceId, appId, port: 4001, hostname: `aura-${instanceId}`, pid: 1, ...extra });
+const rec = (instanceId, appId, extra = {}) => ({ instanceId, appId, port: 4001, hostname: `aura-${instanceId}`, pid: 1, tokenNonce: `n-${instanceId}`, ...extra });
 
 test('a failed scan adopts nothing and reports it (the caller retries)', async () => {
   const { fake, adopt } = fakeManager(null);
@@ -122,9 +129,9 @@ test('a failed scan adopts nothing and reports it (the caller retries)', async (
 test('owner label cases: labelled, unlabelled (pre-owner or claimed pool member), idle pool member', async () => {
   const { fake, calls, adopt } = fakeManager([
     rec('com.aura.terminal-3', 'com.aura.terminal', { ownerLabel: 'default', tokenNonce: 'n3' }),
-    rec('com.aura.terminal-4', 'com.aura.terminal'),
-    rec('com.aura.terminal-5', 'com.aura.terminal'),
-    rec('io.ex.board', 'io.ex.board', { ownerLabel: 'BAD OWNER' }),
+    rec('com.aura.terminal-4', 'com.aura.terminal', { tokenNonce: undefined }),
+    rec('com.aura.terminal-5', 'com.aura.terminal', { tokenNonce: undefined }),
+    rec('io.ex.board', 'io.ex.board', { ownerLabel: 'BAD OWNER', tokenNonce: undefined }),
   ], { pooled: ['com.aura.terminal-5'] });
   assert.equal(await adopt(), true);
   const i = (id) => fake.instances.get(id);
@@ -138,8 +145,11 @@ test('owner label cases: labelled, unlabelled (pre-owner or claimed pool member)
   assert.equal(i('io.ex.board').owner, 'default', 'a malformed label falls back to the local owner');
   assert.deepEqual(calls.tokens, [['com.aura.terminal-3', 'n3']]);
   assert.equal(calls.registered.length, 4);
-  assert.equal(calls.exits.length, 4, 'every adopted container has its exit watcher');
-  assert.equal(calls.measured.length, 4, 'every adopted container gets the lifecycle checks again (F0a)');
+  assert.equal(calls.exits.length, 4, 'every survivor has its exit watcher');
+  // D89 (owner answer 5): only the one with a workload token stays adopted and gets the lifecycle checks
+  // again (F0a); the tokenless ones are stopped through their lifecycle by init and start fresh.
+  assert.deepEqual(calls.measured, ['com.aura.terminal-3']);
+  assert.deepEqual([...fake.tokenlessSurvivors].sort(), ['com.aura.terminal-4', 'com.aura.terminal-5', 'io.ex.board']);
   assert.equal(fake.nextInstanceNum.get('com.aura.terminal'), 5, 'new spawns never reuse an adopted name');
 });
 
@@ -201,7 +211,7 @@ test('after adoption every running UI instance holds its App Host slot; pool mem
 test('while the survivors are unknown, sidecars are never reaped', async () => {
   const fake = {
     adoptionPending: true,
-    runtimes: { list: () => [{ runner: { listSidecars: async () => { throw new Error('must not list'); } } }] },
+    runtimes: { list: () => [{ workloads: { list: async () => { throw new Error('must not list'); } } }] },
   };
   await AppManager.prototype.syncSidecars.call(fake, 1);
 });

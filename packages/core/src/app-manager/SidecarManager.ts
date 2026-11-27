@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { sidecarContainerName } from '../runtimes/container/names.js';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, rmdirSync, writeFileSync } from 'node:fs';
 import { defaultKv } from '@aura/kv-store';
@@ -218,9 +219,8 @@ async function dockerOk(args: string[], what: string, timeoutMs?: number): Promi
   return r.stdout;
 }
 
-export function sidecarContainerName(instanceId: string, name: string): string {
-  return `aura-${instanceId}--${name}`;
-}
+/** One definition, owned by the container module (5b CR, dup #10). */
+export { sidecarContainerName };
 
 export class SidecarManager {
   /** consumerKey → what fan-out (and tool refresh) needs about each live OS sidecar. */

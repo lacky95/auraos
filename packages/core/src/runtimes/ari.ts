@@ -333,7 +333,9 @@ export interface RuntimeSessionInfo {
   instanceId: string;
   kind: SessionSpec['kind'];
   userId?: string;
-  [key: string]: unknown;
+  home: SessionSpec['home']['mode'];
+  uid: number;
+  startedAt: string;
 }
 /** `execution.interactive` session management (present ⇔ `sessionExec`). */
 export interface RuntimeSessions {
