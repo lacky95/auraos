@@ -2,7 +2,7 @@ import type { APIRoute } from 'astro';
 import * as core from '@aura/core';
 import { getAppManager } from '@aura/core';
 import { capabilityRefusal } from '../../../../lib/runtimeCaps.ts';
-import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
+import { jsonResponse, errorResponse, failureResponse } from '../../../../lib/appResponse.js';
 
 /**
  * Cross-container port exposes for one instance.
@@ -28,7 +28,7 @@ export const GET: APIRoute = ({ params }) => {
   return jsonResponse({ ports: mgr.portExpose.list(instanceId) });
 };
 
-export const POST: APIRoute = async ({ params, request }) => {
+export const POST: APIRoute = async ({ params, request, locals }) => {
   const instanceId = params['instanceId'];
   if (!instanceId) return errorResponse('Missing instance id', 400);
 
@@ -83,6 +83,7 @@ export const POST: APIRoute = async ({ params, request }) => {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     const conflict = /already exposed|already in use|conflicts|in use/i.test(message);
-    return errorResponse(message, conflict ? 409 : 500);
+    // An app reads it without host paths (D105 Pass B, review §4.4 rule 5).
+    return failureResponse({ request, locals }, err, { status: conflict ? 409 : 500 });
   }
 };

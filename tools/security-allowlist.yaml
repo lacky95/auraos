@@ -34,6 +34,11 @@
   id: f52fbd32b2b3
   reason: A fake URL credential on example.test, the input of the build-log redaction test.
 
+- check: secrets/url-credentials
+  file: packages/shell/test/error-hints-b.test.ts
+  id: 947f9f51c45c
+  reason: A fake URL credential on gitlab.example.com, the input of the D105 redaction test (redactInternal must strip it).
+
 - check: secrets/assigned-secret
   file: packages/core/test/identity.test.mjs
   id: 6141dc0b88de

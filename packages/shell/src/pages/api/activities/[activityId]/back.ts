@@ -1,7 +1,7 @@
 import type { APIRoute } from 'astro';
 import { getAppManager, OsEventBus } from '@aura/core';
 import type { AppActivity } from '@aura/core';
-import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
+import { jsonResponse, errorResponse, failureResponse } from '../../../../lib/appResponse.js';
 
 /**
  * Android-style back navigation for activities. Resolution order:
@@ -18,7 +18,7 @@ import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
  * back to the same logic in-place here so the back chip works without a
  * full container restart.
  */
-export const POST: APIRoute = async ({ params }) => {
+export const POST: APIRoute = async ({ params, request, locals }) => {
   const raw = params['activityId'];
   if (!raw) return errorResponse('Missing activity id', 400);
   const activityId = decodeURIComponent(raw);
@@ -56,6 +56,6 @@ export const POST: APIRoute = async ({ params }) => {
     await mgr.goBack(activityId);
     return jsonResponse({ ok: true, popped: activityId, kind: 'close' });
   } catch (err) {
-    return errorResponse(String(err), 500);
+    return failureResponse({ request, locals }, err);
   }
 };

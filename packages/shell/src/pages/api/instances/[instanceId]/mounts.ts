@@ -1,7 +1,7 @@
 import type { APIRoute } from 'astro';
 import * as core from '@aura/core';
 import { getAppManager } from '@aura/core';
-import { jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
+import { jsonResponse, errorResponse, failureResponse } from '../../../../lib/appResponse.js';
 import { auditOwner, liveOwnerActionDeps, ownerAction } from '../../../../lib/approvals/admin.ts';
 import { authenticate } from '../../../../lib/auth.ts';
 import { liveApprovalDeps } from '../../../../lib/approvals/service.ts';
@@ -99,7 +99,8 @@ export const POST: APIRoute = async (ctx) => {
     const message = err instanceof Error ? err.message : String(err);
     // "already mounted" / "unavailable" are conflicts, not server faults.
     const conflict = /already mounted|unavailable|refusing/i.test(message);
-    return errorResponse(message, conflict ? 409 : 500);
+    // An app reads it without host paths (D105 Pass B, review §4.4 rule 5).
+    return failureResponse(ctx, err, { status: conflict ? 409 : 500 });
   }
 };
 

@@ -1,6 +1,6 @@
 import type { APIRoute } from 'astro';
-import { getAppManager, IntentError } from '@aura/core';
-import { jsonResponse, errorResponse } from '../../../lib/appResponse.js';
+import { auraErrorOf, getAppManager, IntentError } from '@aura/core';
+import { jsonResponse, errorResponse, failureResponse } from '../../../lib/appResponse.js';
 import { isOwnerCaller, verifiedAppCaller } from '../../../lib/terminalCaller.ts';
 import { appHostViewTarget } from '../../../lib/appHostIntent.ts';
 import {
@@ -94,12 +94,12 @@ export const POST: APIRoute = async (ctx) => {
   }
   const asking = caller ?? (openTerminalNeedsProof(intent) && await isOwnerCaller(ctx) ? { owner: true } : null);
   const refusal = await openTerminalRefusal(intent, asking);
-  if (refusal) return jsonResponse({ kind: 'error', code: 'terminal-not-granted', error: refusal }, 403);
+  if (refusal) return jsonResponse({ kind: 'error', code: 'terminal-not-granted', error: refusal, message: refusal, ...terminalGrantFacts(intent, caller) }, 403);
   try {
     // The verified caller's user (D46): the handler's hook gets it.
     const userId = (await requestUserId(request)) ?? undefined;
     const result = await getAppManager().startIntent(intent, userId ? { userId } : {});
-    if (result.kind === 'noHandler') return errorResponse('No app handles this intent', 404);
+    if (result.kind === 'noHandler') return noHandler(intent);
     if (result.kind === 'rejected') return jsonResponse({ ...result, error: result.message }, result.status);
     // D108 A2: the app may not start (no setup engine yet, or a newer Aura contract): its D105 body.
     if (result.kind === 'setup-required') return jsonResponse(result, 409);
@@ -119,7 +119,43 @@ export const POST: APIRoute = async (ctx) => {
     if (err instanceof IntentError) {
       return jsonResponse({ kind: 'error', code: err.code, error: err.message, ...(err.hint ? { hint: err.hint } : {}) }, err.status);
     }
-    return errorResponse(String(err), 500);
+    // A coded refusal (409 app-disabled, …) in the intent error shape: `code` the code, `error` the sentence.
+    const coded = auraErrorOf(err);
+    if (coded) {
+      const { error: code, ...facts } = coded.body;
+      return jsonResponse({ kind: 'error', code, error: facts.message, ...facts }, coded.status);
+    }
+    return failureResponse(ctx, err);
   }
 };
 
+/**
+ * 404 when no installed app handles the intent (D105 Pass B, review row 23):
+ * what was asked and where a handler declares it. `kind: 'noHandler'` stays
+ * the answer the SDK reads.
+ */
+function noHandler(intent: { action: string; type?: string; appId?: string }): Response {
+  const what = `'${intent.action}'${intent.type ? ` (${intent.type})` : ''}`;
+  return jsonResponse({
+    kind: 'noHandler', error: 'no-handler', category: 'not-found', manifestField: 'intents[]',
+    message: intent.appId ? `${intent.appId} does not handle the intent ${what}, or it is not installed.` : `No installed app handles the intent ${what}.`,
+    hint: 'An app handles an intent it declares in app.manifest.json intents[]; aura get apps -o wide lists the installed apps.',
+  }, 404);
+}
+
+
+/**
+ * What an app may do about a refused OPEN_TERMINAL (D105 Pass B, review row
+ * 25). Only `background` is the app's to get: the owner's `terminal.embed`
+ * grant. `command` and other sessions are nobody's to grant (no hint).
+ */
+function terminalGrantFacts(intent: { extras?: Record<string, unknown> }, caller: { appId: string } | null): Record<string, string> {
+  const extras = intent.extras ?? {};
+  if (!caller || Object.hasOwn(extras, 'command') || Object.hasOwn(extras, 'sessionId') || extras['background'] !== true) {
+    return { category: 'not-grantable' };
+  }
+  return {
+    category: 'missing-permission', permission: 'terminal.embed', holder: 'owner-grant', manifestField: 'permissions[]',
+    hint: `Declare "terminal.embed" in permissions[]; the owner grants it: aura grant notif-perms ${caller.appId} terminal.embed.`,
+  };
+}

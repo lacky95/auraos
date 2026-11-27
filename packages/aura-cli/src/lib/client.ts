@@ -1,4 +1,4 @@
-import type { AuraErrorBody } from '@aura/core';
+import { sourceClosedBody, type AuraErrorBody } from '@aura/core';
 import { shellUrl } from './shell-url.js';
 import { APPROVAL_HEADER, askOwner, needsApprovalOf } from './approval.js';
 import { shellFetch } from './identity.js';
@@ -32,6 +32,26 @@ export function exitCodeOf(err: unknown): number {
 
 const statusExit = (status: number | undefined): number =>
   status === 401 || status === 403 ? EXIT.refused : status === 404 ? EXIT.notFound : EXIT.error;
+
+/**
+ * A local write the file system refused as read-only (EROFS) as the one
+ * error body (D105 Pass B, review row 30): under /mnt/aura/<app> that is a
+ * closed install's source, with the way out; elsewhere it says what is
+ * read-only. Null for any other error.
+ */
+export function readOnlyError(err: unknown): ShellError | null {
+  const e = err as NodeJS.ErrnoException | null;
+  if (e?.code !== 'EROFS') return null;
+  const appId = /\/mnt\/aura\/([a-z][a-z0-9]*(?:\.[a-z][a-z0-9-]*)+)(?:\/|$)/.exec(e.path ?? '')?.[1];
+  const body: AuraErrorBody = appId ? sourceClosedBody(appId) : {
+    error: 'read-only', category: 'not-grantable', message: `${e.path ?? 'This path'} is read-only here.`,
+    hint: 'aura dev status <app> prints where an app is writable.',
+  };
+  const out = new Error(`${body.message}\n  Fix: ${body.hint}`) as ShellError;
+  out.data = body as ErrorBodyView;
+  out.exitCode = EXIT.error;
+  return out;
+}
 
 /** `-o json`, `-ojson`, `--output json`, `--output=json` or `--json`: errors go out as JSON too. */
 export function wantsJsonErrors(argv: readonly string[]): boolean {

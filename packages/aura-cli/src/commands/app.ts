@@ -210,8 +210,10 @@ interface PermEditResult {
   permission: string;
   changed: boolean;
   permissions: string[];
-  /** Not in BUILTIN_PERMISSIONS — probably a typo, since it would grant nothing. */
+  /** Not a permission AuraOS knows — probably a typo, since it would grant nothing. */
   unknown?: boolean;
+  /** The known permission it most likely means. */
+  suggest?: string[];
   /** Whether the running registry picked the change up. False ⇒ needs a restart. */
   reloaded?: boolean;
   reloadError?: string;
@@ -237,7 +239,7 @@ function reportPerm(res: PermEditResult, verb: string): void {
   if (!res.changed) info(`${res.appId} already ${verb === 'granted' ? 'has' : 'lacks'} ${color.bold(res.permission)}`);
   else ok(`${verb} ${color.bold(res.permission)} ${verb === 'granted' ? 'to' : 'from'} ${color.bold(res.appId)}`);
   if (res.unknown) {
-    warn(`'${res.permission}' is not a built-in permission — it will grant nothing unless an app defines it.`);
+    warn(`'${res.permission}' is not a known permission — it will grant nothing unless an app defines it.${res.suggest?.length ? ` Did you mean '${res.suggest[0]}'?` : ''}`);
   }
   if (verb === 'granted' && res.changed && (res.permission === 'notifications.locked' || res.permission === 'notifications.popup' || res.permission === 'notifications.systemModal')) {
     info(`'${res.permission}' is privileged: the manifest now REQUESTS it — an admin must also grant it: aura grant notif-perms ${res.appId} ${res.permission.split('.')[1]}`);

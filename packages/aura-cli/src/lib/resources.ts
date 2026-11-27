@@ -9,7 +9,7 @@
  */
 import { api } from './client.js';
 import { color, stateColor, uptime } from './format.js';
-import { loadRegistry, loadState, type State } from './registry.js';
+import { fetchState, isCapInstalled, loadRegistry, loadState } from './registry.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { sidecarWorkloadName } from '@aura/core';
@@ -330,13 +330,11 @@ const capabilities: ResourceDef<CapRow> = {
   list: async (ctx) => {
     const reg = loadRegistry();
     // The shell is the state writer; the local file can be stale inside a PRoot.
-    let state: State;
-    try { state = (await api.get<{ state: State }>('/api/admin/cap')).state; }
-    catch { state = loadState(); }
+    const state = await fetchState();
     const manifests = (await fetchApps()).map((a) => a.manifest);
     return Object.entries(reg.capabilities)
       .map(([name, entry]) => {
-        const installed = state.capabilities[name]?.installed === true || entry.source === 'builtin';
+        const installed = isCapInstalled(state, name, entry);
         const declaredBy = manifests
           .filter((m) => Array.isArray(m.tools) && (m.tools.includes(name) || (installed && m.tools.includes('*'))))
           .map((m) => m.id);

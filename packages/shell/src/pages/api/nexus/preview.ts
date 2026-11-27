@@ -3,6 +3,7 @@ import { getNexusManager, computePermissionDiff, validateStagedDir } from '@aura
 import { join } from 'node:path';
 import { existsSync, rmSync, mkdirSync } from 'node:fs';
 import { jsonResponse, errorResponse } from '../../../lib/appResponse.js';
+import { nexusFailure } from '../../../lib/nexusErrors.ts';
 import { getAppManager } from '@aura/core';
 
 /**
@@ -13,7 +14,7 @@ import { getAppManager } from '@aura/core';
  *
  * Used by the Nexus GUI app's detail page + the CLI's `aura nexus info`.
  */
-export const POST: APIRoute = async ({ request }) => {
+export const POST: APIRoute = async ({ request, locals }) => {
   const body = await request.json().catch(() => ({})) as { ref?: string };
   if (!body.ref) return errorResponse('missing `ref`', 400);
 
@@ -40,7 +41,7 @@ export const POST: APIRoute = async ({ request }) => {
 
     return jsonResponse({ ok: true, resolved, manifest, diff });
   } catch (err) {
-    return errorResponse((err as Error).message, 500);
+    return nexusFailure({ request, locals }, err);
   } finally {
     try { rmSync(stagingDir, { recursive: true, force: true }); }
     catch { /* best-effort */ }
