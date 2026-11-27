@@ -536,6 +536,11 @@ export async function build(o) {
     }
     if (!o.validateOnly && existsSync(join(L.release(id), COMPLETE_MARKER))) {
       // The same inputs were built before (a rollback target, a retried install): reuse it.
+      if (o.expectInputs) {
+        // Reusing a release is reusing its build: it must have been built from the approved inputs.
+        const diff = inputsDiff(o.expectInputs, readJson(join(L.release(id), RELEASE_RECORD))?.inputs ?? {});
+        if (diff.length) refuse('build-inputs-moved', `release ${id} exists but was built from other inputs: ${diff.join('; ')}`);
+      }
       for (const k of ['images', 'base-check', 'deps', 'build', 'check', 'manifest', 'finalize']) step(k, 'skipped', `release ${id} exists`);
       removeTree(staging);
       finalized = true;

@@ -228,7 +228,11 @@ test('binding: an approved build that resolves another Node, package manager or 
   assert.equal(e.code, 'build-inputs-moved');
   assert.match(e.message, /node\(base\) v22\.23\.5 → v22\.24\.0/);
   assert.equal((await err(s.go({ series: { dir }, expectInputs: { ...want, images: { ...want.images, shell: 'sha256:00' } } }))).code, 'build-inputs-moved');
-  assert.equal((await s.go({ series: { dir }, expectInputs: want })).ok, true);
+  const built = await s.go({ series: { dir }, expectInputs: want });
+  assert.equal(built.ok, true);
+  // The release exists now: reusing it is allowed only for the inputs it was built from.
+  assert.equal((await s.go({ series: { dir }, expectInputs: want })).reused, true);
+  assert.equal((await err(s.go({ series: { dir }, expectInputs: { ...want, lockfileHash: 'sha256:00' } }))).code, 'build-inputs-moved');
 });
 
 test('isolation: an unapproved series is installed without its scripts while networked, gets credentials only when it changes no dependency input, and never touches the approved store', async () => {
