@@ -15,8 +15,17 @@
 //   aura/release/jobs/<job>.json      a build/activate job checklist
 //   aura/release/jobs/<job>.d/        per-job files (build secrets 0400, removed after the run)
 //   aura/release/snapshots/           data snapshots before the first write (stream U, Q35)
+//   aura/release/trusted-keys/        operator-added release keys (*.pub, revoked.txt; D64 release-trusted-keys)
+//   aura/boot/writes-held             the release is verifying: mutating requests answer 503 (stream U)
 //   aura/pnpm-store                   the shared pnpm store of the throwaway builds
+//   aura/overlay/apps/<appId>.json    the settings overlay of one app (stream O)
+//   aura/overlay/capabilities.yaml    the capability registry overlay (stream O)
+//   aura/workspaces/, aura/patches/   app patch workspaces and patch repositories (Track P)
 //   patches/system/aura-patches.yaml  the system patch series (Phase 7; the D68 slot)
+//
+// packages/core/src/release/paths.ts is this module's typed twin (core cannot
+// import os/ at runtime); packages/core/test/release-contracts.test.mjs
+// compares both. Change them together.
 import { join } from 'node:path';
 
 export const RELEASES_DIR = 'releases';
@@ -27,7 +36,14 @@ export const SOURCE_FILE = `${RELEASE_DIR}/source.json`;
 export const MIRROR_DIR = `${RELEASE_DIR}/mirror.git`;
 export const JOBS_DIR = `${RELEASE_DIR}/jobs`;
 export const SNAPSHOTS_DIR = `${RELEASE_DIR}/snapshots`;
+export const TRUSTED_KEYS_DIR = `${RELEASE_DIR}/trusted-keys`;
+export const WRITES_HELD_FILE = 'aura/boot/writes-held';
 export const PNPM_STORE_DIR = 'aura/pnpm-store';
+export const OVERLAY_DIR = 'aura/overlay';
+export const OVERLAY_APPS_DIR = `${OVERLAY_DIR}/apps`;
+export const OVERLAY_CAPABILITIES_FILE = `${OVERLAY_DIR}/capabilities.yaml`;
+export const APP_WORKSPACES_DIR = 'aura/workspaces';
+export const APP_PATCHES_DIR = 'aura/patches';
 export const SYSTEM_SERIES_DIR = 'patches/system';
 export const SYSTEM_SERIES_FILE = `${SYSTEM_SERIES_DIR}/aura-patches.yaml`;
 export const RELEASE_RECORD = 'release.json';
@@ -38,6 +54,8 @@ export const STAGING_PREFIX = '.staging-';
 export const JOB_ID_RE = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z$/;
 /** A release id: `<version or "main">-<commit12>-<inputs8>`; a directory name, never a path. */
 export const RELEASE_ID_RE = /^[0-9A-Za-z][0-9A-Za-z.+_-]{0,100}$/;
+/** An app id as a file name (reverse-domain); never a path. */
+export const APP_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 export const newJobId = (now = new Date()) => now.toISOString().replace(/[:.]/g, '-');
 
@@ -57,7 +75,14 @@ export function layout(dataRoot) {
     job: (job) => { assertJobId(job); return p(`${JOBS_DIR}/${job}.json`); },
     jobFiles: (job) => { assertJobId(job); return p(`${JOBS_DIR}/${job}.d`); },
     snapshots: p(SNAPSHOTS_DIR),
+    trustedKeys: p(TRUSTED_KEYS_DIR),
+    writesHeld: p(WRITES_HELD_FILE),
     pnpmStore: p(PNPM_STORE_DIR),
+    overlayApps: p(OVERLAY_APPS_DIR),
+    overlayApp: (appId) => { assertAppId(appId); return p(`${OVERLAY_APPS_DIR}/${appId}.json`); },
+    overlayCapabilities: p(OVERLAY_CAPABILITIES_FILE),
+    appWorkspaces: p(APP_WORKSPACES_DIR),
+    appPatches: p(APP_PATCHES_DIR),
     series: p(SYSTEM_SERIES_FILE),
   };
 }
@@ -74,4 +99,7 @@ export function assertJobId(job) {
 }
 export function assertReleaseId(id) {
   if (typeof id !== 'string' || !RELEASE_ID_RE.test(id) || id.startsWith(STAGING_PREFIX)) throw new Error(`bad release id ${JSON.stringify(id)}`);
+}
+export function assertAppId(appId) {
+  if (typeof appId !== 'string' || !APP_ID_RE.test(appId) || appId.includes('..')) throw new Error(`bad app id ${JSON.stringify(appId)}`);
 }

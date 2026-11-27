@@ -110,12 +110,21 @@ export type ApprovalClass = (typeof APPROVAL_CLASSES)[number];
  *                      its rollback tree (`/api/apps/<id>/activate`)
  *   app.source.open    open an installed app's source for direct development
  *                      (`/api/apps/<id>/source-mode`, `aura dev open`)
+ *
+ * Releases (Phase 6, frozen in Stage 1b; stream U asks for it):
+ *   system.release.activate  switch to a built release (`/api/admin/release/activate`,
+ *                      `aura release activate`, the Normal-mode `aura update`). The
+ *                      payload is core `release/types.ts` `ReleaseActivationBinding`
+ *                      {releaseId, commit, treeDigest, metaDigest, provenance,
+ *                      composition, series {digest, base, order}, infraDigest},
+ *                      recomputed from the release before the switch
  */
 export const APPROVAL_ACTIONS = [
   'nexus.install', 'nexus.update', 'os.context.write', 'user.confirm', 'app.adapter-change',
   'credential.store', 'credential.read',
   'admin.grant', 'admin.revoke', 'admin.api-key', 'admin.manifest-edit', 'admin.read', 'admin.change',
   'app.patch.activate', 'app.source.open', 'app.create',
+  'system.release.activate',
 ] as const;
 export type ApprovalAction = (typeof APPROVAL_ACTIONS)[number];
 
@@ -131,6 +140,7 @@ export const APPROVAL_CLASS: Readonly<Record<ApprovalAction, ApprovalClass>> = {
   'nexus.update': 'forced',
   'app.patch.activate': 'forced',
   'app.create': 'forced',
+  'system.release.activate': 'forced',
   'user.confirm': 'forced',
   'admin.change': 'forced',
   'os.context.write': 'deferrable',

@@ -112,3 +112,9 @@ composeKernel();
 // Phase 6 Stage 1b (6B.0, D108 A3): the frozen maintenance-start / updateInstance contract (stream M implements it).
 export { MAINTENANCE_REASONS } from './app-manager/maintenance.js';
 export type * from './app-manager/maintenance.js';
+// Phase 6 Stage 1b (6B.0): the frozen release contracts (streams B, L, O, U, S, I; Phase 7), the one
+// release path list (twin of os/release/layout.mjs) and the D94 infrastructure contracts (IC-5 fills propagate).
+export * from './release/types.js';
+export * as releasePaths from './release/paths.js';
+export * from './infra/types.js';
+export { InfraPropagationError, buildSecrets, infraExecEnv, renderDigest } from './infra/propagate.js';

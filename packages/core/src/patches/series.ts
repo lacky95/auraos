@@ -29,6 +29,7 @@ import { basename, join, resolve } from 'node:path';
 import { parse, stringify } from 'yaml';
 import { z } from 'zod';
 import { MOUNT_ROOT_PATH, PATCHES_DIR_NAME, WORK_DIR_NAME } from '../app-manager/MountManager.js';
+import { APP_PATCHES_DIR, APP_WORKSPACES_DIR } from '../release/paths.js';
 
 export const SERIES_FILE = 'aura-patches.yaml';
 export const PATCHES_DIR = 'patches';
@@ -86,7 +87,7 @@ export function safeDirectoryArgs(dir: string): string[] {
   const override = patchesOverride();
   const roots = [
     join(MOUNT_ROOT_PATH, WORK_DIR_NAME), join(MOUNT_ROOT_PATH, PATCHES_DIR_NAME),
-    join(data, 'aura', 'workspaces'), join(data, 'aura', 'patches'), ...(override ? [override] : []),
+    join(data, APP_WORKSPACES_DIR), join(data, APP_PATCHES_DIR), ...(override ? [override] : []),
   ];
   return roots.some((r) => top.startsWith(`${resolve(r)}/`)) ? ['-c', `safe.directory=${top}`] : [];
 }

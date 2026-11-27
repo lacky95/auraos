@@ -10,7 +10,7 @@ import { ROUTE_ACCESS_MANIFEST } from '../src/lib/access/routeManifest.ts';
 import { SURFACE_MANIFEST } from '../src/lib/access/surfaceManifest.ts';
 import { dispatchedMethods, effectiveRule } from '../src/lib/access/resolve.ts';
 import { ROUTE_METHODS } from '../src/lib/access/types.ts';
-import type { AccessRule, AccessSurface, RouteAccessManifest } from '../src/lib/access/types.ts';
+import type { AccessRule, AccessSurface, RouteAccessManifest, RouteMethod } from '../src/lib/access/types.ts';
 import {
   analyzeExports, attachedSurfaces, auditRoutes, auditSurfaces, enumerateRoutes, listenerSites, listenersIn,
 } from './helpers/enumerateRoutes.ts';
@@ -325,12 +325,25 @@ test('fails when a surface decision is missing', () => {
 
 test('every reserved Phase 5 row has moved into routes; J\'s root tab is an owner action', () => {
   const reserved = ROUTE_ACCESS_MANIFEST.reserved ?? {};
-  // Streams R, X, I, A, H and J moved their rows into `routes`.
-  assert.deepEqual(Object.keys(reserved), []);
+  // Streams R, X, I, A, H and J moved their rows into `routes`; what is reserved now is Phase 6's (below).
+  assert.deepEqual(Object.keys(reserved).filter((r) => !r.startsWith('/api/admin/release')), []);
   for (const method of ['GET', 'POST', 'DELETE'] as const) {
     const r = effectiveRule(ROUTE_ACCESS_MANIFEST, { route: '/api/admin/root', handlers: [method] }, method);
     assert.deepEqual(r?.allow, ['own-instance', 'owner'], `${method} /api/admin/root`);
     assert.equal(r?.systemApp, 'com.aura.terminal', 'only the System Terminal asks the owner');
+  }
+});
+
+test('Phase 6 Stage 1b: the release routes are reserved, every method denied until stream U implements them', () => {
+  const reserved = ROUTE_ACCESS_MANIFEST.reserved ?? {};
+  const rows: Array<[string, RouteMethod]> = [
+    ['/api/admin/release', 'GET'], ['/api/admin/release/build', 'POST'], ['/api/admin/release/activate', 'POST'],
+    ['/api/admin/release/rollback', 'POST'], ['/api/admin/release/accept-writes', 'POST'], ['/api/admin/release/jobs/[id]', 'GET'],
+  ];
+  assert.deepEqual(Object.keys(reserved).sort(), rows.map(([r]) => r).sort());
+  for (const [route, method] of rows) {
+    assert.ok(!(route in ROUTE_ACCESS_MANIFEST.routes), `${route} is not implemented yet`);
+    assert.deepEqual(reserved[route]?.methods?.[method]?.allow, [], `${method} ${route} is denied`);
   }
 });
 
