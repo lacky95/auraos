@@ -13,6 +13,11 @@
   match: searchParams.set('code'
   reason: Same single-use handoff code as appFrame.ts (consumeCode in app-host-auth.mjs), issued for the one embed session.
 
+- check: patterns/credential-in-url
+  file: packages/shell/src/lib/appView.ts
+  match: searchParams.set('code'
+  reason: Same single-use, audience-bound handoff code (consumeCode in app-host-auth.mjs, 60 s), issued for a D104 view and returned only to the requesting app server by its instance token; the router refuses to redeem it from a browser (Fetch Metadata) and the view cookie it sets is never a browser credential.
+
 - check: patterns/referer-trust
   file: packages/shell/src/lib/access/guard.ts
   match: referer
