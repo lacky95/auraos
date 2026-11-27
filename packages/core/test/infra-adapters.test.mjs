@@ -100,7 +100,7 @@ test('canary secrets: in the per-operation secret files only, never in the publi
   const cfg = C.parseInfraConfig(EXAMPLE).config;
   const resolve = SEC.bootstrapResolver(f.creds);
   const secrets = A.renderSecrets(cfg, resolve);
-  assert.deepEqual(Object.keys(secrets), ['infra_apt_auth', 'infra_docker_config', 'infra_git', 'infra_npm_basic', 'infra_npmrc', 'infra_pip', 'infra_proxy']);
+  assert.deepEqual(Object.keys(secrets), ['infra_apt_auth', 'infra_docker_config', 'infra_git', 'infra_mtls', 'infra_npm_basic', 'infra_npmrc', 'infra_pip', 'infra_proxy']);
   assert.match(secrets.infra_npm_basic, /ART-CANARY/);
   assert.match(Buffer.from(JSON.parse(secrets.infra_docker_config).auths['artifactory.corp.example'].auth, 'base64').toString(), /ART-CANARY/);
   const staged = STORE.stageConfig(f.file);
@@ -190,7 +190,7 @@ test('build-env.sh with the rendered config and secrets: env, rewrites, apt mirr
   const deb822 = 'Types: deb\nURIs: http://deb.debian.org/debian\nSuites: bookworm\n\nTypes: deb\nURIs: http://deb.debian.org/debian-security\nSuites: bookworm-security\n';
   const { out, aw } = runHelper({
     files: tree, secrets, sources: { 'sources.list.d/debian.sources': deb822 },
-    script: 'echo "P=$HTTPS_PROXY"; echo "N=$NO_PROXY"; echo "U=$NPM_CONFIG_USERCONFIG"; echo "A=$APT_CONFIG"; echo "G=$GIT_CONFIG_VALUE_0"; echo "C=$COREPACK_NPM_USERNAME"; aura_url https://github.com/project-zot/zot/releases/download/v1/zot; aura_url https://example.org/x',
+    script: 'echo "P=$HTTPS_PROXY"; echo "N=$NO_PROXY"; echo "U=$NPM_CONFIG_USERCONFIG"; echo "A=$APT_CONFIG"; echo "G=$GIT_CONFIG_VALUE_2"; echo "K=$GIT_CONFIG_KEY_0"; echo "C=$COREPACK_NPM_USERNAME"; aura_url https://github.com/project-zot/zot/releases/download/v1/zot; aura_url https://example.org/x',
   });
   const v = Object.fromEntries(out.trim().split('\n').filter((l) => /^[A-Z]=/.test(l)).map((l) => [l[0], l.slice(2)]));
   assert.equal(v.P, `http://${CANARY.proxy}@proxy.corp.example:3128/`, 'the secret proxy URL, for this step only');
@@ -198,7 +198,8 @@ test('build-env.sh with the rendered config and secrets: env, rewrites, apt mirr
   assert.equal(v.U, join(aw, 'npmrc'));
   assert.match(readFileSync(v.U, 'utf8'), /registry=https:\/\/artifactory[\s\S]*_auth=/, 'public npmrc + auth (pnpm reads no global npmrc)');
   assert.equal(v.C, 'art');
-  assert.match(v.G, /^store --file=.*infra_git$/);
+  assert.match(v.G, /^store --file=.*infra_git$/, 'after the two mTLS entries (IC-8)');
+  assert.equal(v.K, 'http.https://artifactory.corp.example/.sslCert');
   assert.match(out, /^https:\/\/artifactory\.corp\.example\/github-releases\/project-zot\/zot\/releases\/download\/v1\/zot$/m);
   assert.match(out, /^https:\/\/example\.org\/x$/m);
   const aptConf = readFileSync(v.A, 'utf8');
@@ -299,7 +300,7 @@ test('Dockerfile: every network step reads the infrastructure inputs; nothing se
   const net = runs().filter((l) => /curl -|apt-get |git clone|pnpm install|corepack prepare|npm (i|install) /.test(l));
   assert.ok(net.length >= 10, `${net.length} network steps`);
   for (const l of net) {
-    for (const need of ['source=os/infra/build-env.sh', 'from=aura-infra-public,target=/etc/aura/infra', 'id=infra_proxy ', 'type=tmpfs,target=/run/aura-build', '. /run/aura-infra/build-env.sh']) {
+    for (const need of ['source=os/infra/build-env.sh', 'from=aura-infra-public,target=/etc/aura/infra', 'id=infra_proxy ', 'id=infra_mtls ', 'type=tmpfs,target=/run/aura-build', '. /run/aura-infra/build-env.sh']) {
       assert.ok(l.includes(need), `${need} missing in: ${l.slice(0, 120)}`);
     }
     if (/apt-get /.test(l)) assert.ok(l.includes('id=infra_apt_auth'), l.slice(0, 120));
@@ -339,9 +340,13 @@ test('compose: no hard-coded DNS (O11: the host resolver unless configured)', ()
   assert.doesNotMatch(readFileSync(join(ROOT, 'docker-compose.yml'), 'utf8'), /8\.8\.8\.8|1\.1\.1\.1/);
 });
 
-test('boot.sh: pnpm install gets the rendered env only when a config exists', () => {
+test('boot.sh (IC-5): the rendered env is exported for the install and the shell only when a config exists', () => {
   const boot = readFileSync(join(ROOT, 'os/boot.sh'), 'utf8');
   assert.match(boot, /if \[ -f \/data\/aura\/infra\/config\.yaml \]; then\n\s+if run node \/workspace\/os\/infra\/render\.mjs apply --data \/data/);
-  assert.match(boot, /exec pnpm install' boot-install "\$INFRA_ENV" "\$INFRA_NPMRC"/);
+  assert.match(boot, /\n {4}\. \/etc\/aura\/infra\/env\.sh\n/, 'exported into the boot shell itself (the server inherits it)');
+  assert.match(boot, /exec pnpm install' boot-install "\$INFRA_NPMRC"/);
   assert.ok(boot.indexOf('render.mjs apply') < boot.indexOf('exec pnpm install'), 'rendered before the install');
+  assert.ok(boot.indexOf('. /etc/aura/infra/env.sh') < boot.indexOf('exec node server.mjs'), 'before the shell starts');
+  // Without a config: no env, and links of an earlier config go.
+  assert.match(boot, /else\n\s+infra_links off\n\s+rm -f \/etc\/aura\/infra\nfi/);
 });

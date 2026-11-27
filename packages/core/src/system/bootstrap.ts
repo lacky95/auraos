@@ -5,10 +5,14 @@
  * before it serves, the dev server plugin at startup; never a request (D78).
  *
  * Order (the golden test `test/bootstrap-order.test.mjs` pins it):
+ *   0. D94 IC-5: the infrastructure config applied to this process (CA, proxy
+ *      routing, env; live reload) before anything can reach the network;
+ *      `status.json.infra`. No config: nothing changes;
  *   1. A2: the system identity first (no KV needed; `status.json` carries
  *      `systemId` from its first write), then the `early` step (mode file);
- *   2. the embedded Valkey, the KV seed, the retired admin credential, the
- *      notification sweeper;
+ *   2. the embedded Valkey, the KV seed, the infrastructure seed (D94 O2: the
+ *      install config's policy into D64; the bootstrap credentials into the
+ *      System Context), the retired admin credential, the notification sweeper;
  *   3. `beforeApps` hooks (base-image readiness, the onboarding card);
  *   4. Context materialize, volumes ensure;
  *   5. the app manager: enable state (owned by AppManager, hydrated in its
@@ -44,6 +48,9 @@ import { ThemeManager } from '../theme/ThemeManager.js';
 import { DEFAULT_WORKSPACE_STATE } from '../types/workspace.js';
 import { migrateUserData } from '../users/userData.js';
 import { DEFAULT_OWNER_ID } from '../auth/identityContracts.js';
+import { loadInfrastructure } from '../infra/kernel.js';
+import { seedInfraPolicy } from '../infra/policy.js';
+import { importBootstrapCredentials } from '../infra/credentials.js';
 
 const SYSTEM_KEY = Symbol.for('aura.system');
 /** Docker stops after 10 s; the kernel shutdown stays under it. */
@@ -135,6 +142,20 @@ export function bootSystem(options: BootOptions): SystemHandle {
     },
   };
   g[SYSTEM_KEY] = state;
+  // 0. D94 IC-5: infrastructure before any outbound call (synchronous: nothing else ran yet).
+  try {
+    status.infra = loadInfrastructure({
+      dataDir, watch: !opts.kernel,
+      onChange: (infra) => { state.status.infra = infra; save(state); },
+    });
+  } catch (err) {
+    status.infra = {
+      configured: true, digest: null, state: 'failed', corporateCas: 0, proxy: 'off', kernelProxy: false,
+      restartRequired: false, issues: [(err as Error).message], appliedAt: null,
+    };
+  }
+  if (status.infra.state !== 'none') console.log(`[boot] infrastructure ${status.infra.state}${status.infra.issues.length ? `: ${status.infra.issues.join('; ')}` : ''}`);
+  save(state);
   if (opts.handleSignals) installSignalHandlers();
   void (async () => {
     try {
@@ -227,6 +248,23 @@ async function bootKernel(state: SystemState, { first }: { first: boolean }): Pr
         migrateUserData: (kv, dir) => migrateUserData(kv as never, { ownerId: DEFAULT_OWNER_ID, dataDir: dir }),
       },
     });
+    // D94: the install seed (policy, O2) and the bootstrap credentials (O3) into their stores; never blocks boot.
+    if (st.infra?.configured) {
+      try {
+        const auth = getAuthServices();
+        await seedInfraPolicy(dataDir, { securityPolicy: auth.securityPolicy, audit: auth.audit });
+        const imp = await importBootstrapCredentials({ dataDir });
+        if (imp.imported.length) {
+          await auth.audit.record({ by: { kind: 'operator' }, action: 'infra.credentials-imported', outcome: 'ok', detail: { names: imp.imported } });
+        }
+        st.infra = { ...st.infra, credentialsImported: imp.bootstrapRefsLeft === 0 };
+        save(state);
+      } catch (err) {
+        console.warn(`[boot] infrastructure seed failed: ${(err as Error).message}`);
+        st.infra = { ...st.infra, state: 'degraded', issues: [...st.infra.issues, `seed: ${(err as Error).message}`] };
+        save(state);
+      }
+    }
     // D50: the shared admin credential is retired; never blocks boot.
     try { void retireSharedAdminCredential(getAuthServices(), dataDir); }
     catch (err) { console.warn(`[boot] retiring the admin credential failed: ${(err as Error).message}`); }

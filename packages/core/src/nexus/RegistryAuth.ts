@@ -29,7 +29,8 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ContextStore } from '../context/ContextStore.js';
-import { orasHostFromUrl } from './RegistryConfig.js';
+import { LOCAL_REGISTRY_HOST, orasHostFromUrl } from './RegistryConfig.js';
+import { infraExecEnv } from '../infra/propagate.js';
 import type { OciSource, SourcesConfig } from './SourcesConfig.js';
 import { DEFAULT_APP_REPO_PREFIX } from './SourcesConfig.js';
 import type { PullCredential } from './types.js';
@@ -327,6 +328,16 @@ export function artifactTypeOf(m: {
   return cfg && cfg !== OCI_IMAGE_CONFIG && cfg !== 'application/vnd.oci.empty.v1+json' ? cfg : undefined;
 }
 
+/**
+ * oras's environment (D94 IC-5): the master's own, plus the infrastructure config's non-secret
+ * env with the local registry in NO_PROXY (an internal Docker name no config can list). No
+ * config: the master's env unchanged.
+ */
+function orasEnv(): NodeJS.ProcessEnv {
+  const infra = infraExecEnv('nexus', { noProxyExtra: [LOCAL_REGISTRY_HOST] });
+  return Object.keys(infra).length ? { ...process.env, ...infra } : process.env;
+}
+
 /** The auth file for one oras call (when the target host has a login). */
 function orasAuth(args: string[], login?: RegistryLogin): { fullArgs: string[]; host: string | null; hadLogin: boolean; cleanup: () => void } {
   const host = orasTargetHost(args);
@@ -355,7 +366,7 @@ function orasError(err: unknown, host: string | null, hadLogin: boolean): Error 
 export function orasSync(args: string[], opts: ExecFileSyncOptions = {}, login?: RegistryLogin): Buffer {
   const a = orasAuth(args, login);
   try {
-    return execFileSync('oras', a.fullArgs, { stdio: ['ignore', 'pipe', 'pipe'], ...opts }) as Buffer;
+    return execFileSync('oras', a.fullArgs, { stdio: ['ignore', 'pipe', 'pipe'], env: orasEnv(), ...opts }) as Buffer;
   } catch (err) {
     throw orasError(err, a.host, a.hadLogin);
   } finally {
@@ -372,7 +383,7 @@ export async function orasAsync(
   try {
     return await new Promise<Buffer>((resolve, reject) => {
       execFile('oras', a.fullArgs, {
-        encoding: 'buffer', timeout: opts.timeout, maxBuffer: opts.maxBuffer ?? 16 * 1024 * 1024, cwd: opts.cwd,
+        encoding: 'buffer', timeout: opts.timeout, maxBuffer: opts.maxBuffer ?? 16 * 1024 * 1024, cwd: opts.cwd, env: orasEnv(),
       }, (err, stdout, stderr) => {
         if (err) { Object.assign(err, { stdout, stderr }); reject(err); } else resolve(stdout);
       });

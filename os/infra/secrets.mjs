@@ -104,18 +104,13 @@ export const bootstrapResolver = (dir, opts) => (ref) => {
  * credentials: `{ id: content }`. The contents come from the adapters
  * (os/infra/adapters, one rendering per ecosystem); this keeps the ids the
  * Dockerfile consumes (BUILD_SECRET_IDS: infra_proxy[_http], infra_npmrc,
- * infra_npm_basic, infra_apt_auth, infra_git) plus the install-time client keys
- * infra_mtls_<name>_key (O8, IC-8).
+ * infra_npm_basic, infra_apt_auth, infra_git, and infra_mtls: the install-time
+ * client keys, O8, IC-8). `resolve` defaults to the bootstrap files of `dir`;
+ * the kernel passes its own resolver (system: refs, core infra/credentials.ts).
  */
-export function renderBuildSecrets(cfg, dir, opts) {
-  const resolve = bootstrapResolver(dir, opts);
+export function renderBuildSecrets(cfg, dir, opts, resolve = bootstrapResolver(dir, opts)) {
   const all = renderSecrets(cfg, resolve);
-  const out = Object.fromEntries(Object.entries(all).filter(([id]) => BUILD_SECRET_IDS.includes(id)));
-  for (const cc of cfg.clientCertificates ?? []) {
-    const c = resolve(cc.key.ref);
-    if (c) out[`infra_mtls_${cc.name.replace(/-/g, '_')}_key`] = c.pem;
-  }
-  return out;
+  return Object.fromEntries(Object.entries(all).filter(([id]) => BUILD_SECRET_IDS.includes(id)));
 }
 
 /** Every secret value of a credentials dir for redaction (never printed). */

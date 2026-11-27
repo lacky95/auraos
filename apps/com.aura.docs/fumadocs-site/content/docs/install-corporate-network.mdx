@@ -1,0 +1,111 @@
+---
+title: Install in a corporate network
+description: Install AuraOS behind a proxy, with an internal CA, internal mirrors and client certificates, using install.sh --config.
+---
+
+A default install needs none of this: no proxy, no certificates, no mirror. This page is for a
+network where the public internet is reachable only through a proxy, TLS is inspected with a
+corporate CA, and packages and images come from internal mirrors. The settings themselves are
+described in [Infrastructure configuration](/docs/infrastructure-configuration).
+
+## Before you start (prerequisites)
+
+The installer can only be fetched once these are in place. AuraOS never installs or configures
+them for you, and it never changes the host's Docker or DNS settings.
+
+1. **Docker Engine with the compose plugin and buildx** (BuildKit), installed by your own package
+   management. BuildKit is required as soon as a credential is configured: secrets reach the
+   image build only through BuildKit secret mounts, never through layers.
+2. **The host trusts the corporate CA**, and `git` on the host reaches an **internal mirror of the
+   AuraOS repository** (recommended) or the public repository through the proxy.
+3. **The Docker daemon pulls through your proxy or registry.** Internal registries need the CA in
+   `/etc/docker/certs.d/<registry>/ca.crt`; Docker Hub either through `registry-mirrors` or with
+   the AuraOS base images mirrored under your registry prefix (then set `registries.oci.mirrors`).
+4. **DNS** on the host resolves the proxy, the mirrors and the Git host. AuraOS uses the host's
+   resolver by default; set `network.dns` only to override it.
+5. **The mirrored content** is present: run `sh install.sh --print-requirements --config <file>`
+   on any machine with the installer: it lists the base images, the downloads of the image build
+   (with the URL each is rewritten to), the Git clones, the npm package count and the apt mirrors.
+6. An NTLM or Kerberos proxy is not supported directly: run a local helper (such as `px` or
+   `cntlm`) and point `network.proxy` at it.
+
+## Credentials
+
+Secrets never go into the config file. Each credential the config names
+(`credential: { ref: "bootstrap:<name>" }`) is a file `<credentials-dir>/<name>`:
+
+- mode `0600`, owned by the user running the installer;
+- one line `username:password` (proxy, npm, PyPI, apt, Git and OCI registries),
+- or a PEM private key (a client certificate's key, see mTLS below).
+
+```bash
+mkdir -m 700 ~/aura-creds
+printf '%s\n' 'svc-aura:…' > ~/aura-creds/proxy && chmod 600 ~/aura-creds/proxy
+```
+
+## Run the installer
+
+```bash
+sh install.sh --check-only --config infrastructure.yaml --credentials-dir ~/aura-creds
+sh install.sh --config infrastructure.yaml --credentials-dir ~/aura-creds
+```
+
+`--check-only` runs the preflight and stops. It checks Docker, compose and buildx, the config's
+schema, that every credential file exists with mode 0600, DNS of each configured host, TCP and TLS
+to the proxy and each registry **with the configured CA** (never skipping verification), proxy
+authentication (a 407 is reported as such), the client certificate handshakes, the Docker daemon's
+pull, and under `publicFallback: deny` every build input that would still go public. Each failure
+names its category, the endpoint and the fix; no value is printed.
+
+The install then stages the config and credentials under `--state-dir` (default `/etc/auraos`,
+outside any checkout and build context), fetches the source through the configured proxy and CA,
+verifies the release signature, builds with BuildKit secrets, and starts AuraOS. The first boot:
+
+- imports the config into `/data/aura/infra/config.yaml` (only when none exists yet);
+- seals each bootstrap credential into the System Context, bound to the hosts the config uses
+  it for, and rewrites its reference to `system:INFRA_<NAME>`;
+- writes the config's `policy:` block once into the security options `infra-public-fallback` and
+  `infra-proxy` (audited as the host operator) and removes it from the config;
+- renders the config for every consumer and reports it in `/data/aura/boot/status.json`
+  (`infra.state`: `none`, `ok`, `degraded` or `failed`).
+
+When the import is confirmed, the installer deletes its copy of the credentials
+(`--keep-bootstrap-credentials` keeps them, for operators who rebuild from the host).
+
+## Client certificates (mTLS) at install
+
+Endpoints that require a client certificate are listed under `clientCertificates`, one PEM
+certificate and key per entry:
+
+```yaml
+clientCertificates:
+  - name: artifactory-mtls
+    hosts: [artifactory.corp.example]
+    certificate: { file: ./certs/aura-system.crt }
+    key: { ref: "bootstrap:artifactory-mtls-key" }
+```
+
+The key is a credential file like the others. During install, system builds and system updates,
+Git, npm/pnpm/yarn, pip and apt present the certificate to those hosts; the key exists only for
+the step that needs it (a BuildKit secret, or a temporary file), never in an image, a log or an
+app. A tool or endpoint that can't do the configured mTLS fails with "certificate required"; TLS
+verification is never turned off. App and user certificates, PKCS#12 and rotation come with the
+beta.
+
+## After the install
+
+```bash
+docker exec aura-shell aura admin infra doctor
+```
+
+The doctor checks the config, its render, certificate expiry, the security options against the
+config, the credential references (names only) and every configured endpoint through the proxy
+and CA. See [Infrastructure configuration](/docs/infrastructure-configuration#troubleshooting).
+
+## What is not in the alpha
+
+Network-level enforcement (a relay that blocks direct egress), proxy credentials for apps,
+Maven/Gradle/Go/Cargo registries, developer `docker pull` and app or user credentials arrive with
+the beta (track BT-I). In the alpha, apps get the CA, the proxy without credentials and the
+registry pointers; an authenticated proxy is used by the installer, the system builders and the
+updater only.

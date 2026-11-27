@@ -8,6 +8,8 @@
       "ca-certificates/aura-infra-corp-root.crt": "-----BEGIN CERTIFICATE-----\nCORP-ROOT\n-----END CERTIFICATE-----\n",
       "corporate-ca.pem": "-----BEGIN CERTIFICATE-----\nCORP-ROOT\n-----END CERTIFICATE-----\n",
       "gitconfig": "# AuraOS infrastructure configuration (D94): system layer, managed. ~/.gitconfig wins.\n[include]\n\tpath = /etc/gitconfig\n[http]\n\tsslCAInfo = /etc/aura/infra/ca-bundle.pem\n[url \"https://git.corp.example/mirror/github/\"]\n\tinsteadOf = https://github.com/\n",
+      "mtls/artifactory-mtls.crt": "-----BEGIN CERTIFICATE-----\nCLIENT\n-----END CERTIFICATE-----\n",
+      "mtls/clients": "artifactory-mtls\tartifactory.corp.example\n",
       "npmrc": "# AuraOS infrastructure configuration (D94): global layer, managed. ~/.npmrc and a project .npmrc win.\nregistry=https://artifactory.corp.example/api/npm/npm-remote/\n@corp:registry=https://artifactory.corp.example/api/npm/npm-local/\nproxy=http://proxy.corp.example:3128\nhttps-proxy=http://proxy.corp.example:3128\nnoproxy=.corp.example,10.0.0.0/8,artifactory.corp.example,localhost,127.0.0.1,::1,.localhost,aura-shell,aura-net,.aura-net\ncafile=/etc/aura/infra/ca-bundle.pem\n",
       "oci/mirrors": "docker.io\tartifactory.corp.example/docker-remote\nghcr.io\tartifactory.corp.example/ghcr-remote\n",
       "xdg/pip/pip.conf": "# AuraOS infrastructure configuration (D94): system layer, managed. User and venv pip.conf win.\n[global]\nindex-url = https://artifactory.corp.example/api/pypi/pypi-remote/simple\ncert = /etc/aura/infra/ca-bundle.pem\n",

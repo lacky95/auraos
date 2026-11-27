@@ -4,6 +4,7 @@
  * implementation; the server layer (the shell's `lib/bootHooks.ts`) composes
  * it with its hooks.
  */
+import type { InfraBootStatus } from '../infra/types.js';
 
 /** The two build compositions of the one shell project (D76). */
 export type Composition = 'server' | 'desktop';
@@ -89,8 +90,8 @@ export interface BootStatus {
   services: Record<string, BootServiceStatus>;
   firstRequestAt: string | null;
   hooks: Record<string, { layer: BootHookLayer; ok: boolean; at: string; error?: string }>;
-  /** D94 IC-5 fills it (6b); reserved. */
-  infra: null;
+  /** D94 IC-5: what boot step 0 applied of the infrastructure config (null before step 0). */
+  infra: InfraBootStatus | null;
   error?: string;
   stoppingAt?: string;
   stoppedAt?: string;

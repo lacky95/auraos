@@ -25,6 +25,7 @@
  * 2. github   — branch, push, open or update the PR.
  */
 
+import { infraEndpoints } from '../infra/endpoints.js';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -89,12 +90,15 @@ export class SubmitError extends Error {
  *  under /data and would keep the credential on disk. Never in argv either,
  *  where `ps` would show it. `GIT_CONFIG_COUNT` injects an http.extraheader for
  *  one invocation only; this is the mechanism actions/checkout uses. */
+/** GitHub's web base: the infrastructure config's `endpoints.github` (GitHub Enterprise), else github.com (audit #7). */
+const githubWeb = (): string => infraEndpoints().github.replace(/\/+$/, '');
+
 function gitEnv(token?: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
   if (token) {
     const basic = Buffer.from(`x-access-token:${token}`).toString('base64');
     env['GIT_CONFIG_COUNT']   = '1';
-    env['GIT_CONFIG_KEY_0']   = 'http.https://github.com/.extraheader';
+    env['GIT_CONFIG_KEY_0']   = `http.${githubWeb()}/.extraheader`;
     env['GIT_CONFIG_VALUE_0'] = `Authorization: Basic ${basic}`;
   }
   return env;
@@ -366,7 +370,7 @@ function openClone(o: {
   branch: string; log: (m: string) => void;
 }): { cloneDir: string; defaultBranch: string } {
   const cloneDir = join(o.dataDir, 'nexus', 'store-submit', `${o.owner}-${o.repo}`);
-  const upstream = `https://github.com/${o.owner}/${o.repo}.git`;
+  const upstream = `${githubWeb()}/${o.owner}/${o.repo}.git`;
 
   if (existsSync(join(cloneDir, '.git'))) {
     o.log('refreshing the store clone...');
@@ -457,7 +461,7 @@ async function buildAndOpenPr(o: {
     await gh.ensureFork(owner, repo, login);
     // Branch from UPSTREAM but push to the fork: a stale fork would otherwise
     // turn the PR into a pile of unrelated reverts.
-    const forkUrl = `https://github.com/${login}/${repo}.git`;
+    const forkUrl = `${githubWeb()}/${login}/${repo}.git`;
     try { git(cloneDir, ['remote', 'add', 'fork', forkUrl], o.token); }
     catch { git(cloneDir, ['remote', 'set-url', 'fork', forkUrl], o.token); }
     pushRemote = 'fork';

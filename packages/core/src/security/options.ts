@@ -67,6 +67,12 @@ export const UPDATE_CHANNEL = 'update-channel';
 export const SECURITY_UPDATE_POLICY = 'security-update-policy';
 export const RELEASE_AUTO_UPDATE = 'release-auto-update';
 export const RELEASE_TRUSTED_KEYS = 'release-trusted-keys';
+/** D94 infrastructure switches (IC-6; the config itself is /data/aura/infra/config.yaml). */
+export const INFRA_PUBLIC_FALLBACK = 'infra-public-fallback';
+export const INFRA_PROXY = 'infra-proxy';
+export const INFRA_INHERIT = 'infra-inherit';
+export const INFRA_PUBLIC_ROOTS = 'infra-public-roots';
+export const INFRA_CREDENTIAL_GRANTS = 'infra-credential-grants';
 
 export const SECURITY_OPTIONS: readonly SecurityOption[] = Object.freeze([
   {
@@ -276,6 +282,53 @@ export const SECURITY_OPTIONS: readonly SecurityOption[] = Object.freeze([
       + 'audited. A revoked key is never trusted again.',
     type: 'record', default: null, source: 'record', record: 'aura/release/trusted-keys', restartRequired: false,
     change: 'fresh', since: '2026-11-27', phase: '6 (D71, Stage 1b)',
+  },
+  {
+    id: INFRA_PUBLIC_FALLBACK,
+    title: 'Public fallback of the infrastructure config',
+    description: 'Whether AuraOS may still reach public endpoints when an infrastructure configuration names internal '
+      + 'mirrors (D94). allow (default): what the config does not cover goes to the public default. deny: AuraOS-run '
+      + 'operations use only the configured endpoints; the default Nexus store index, a capability download from a public '
+      + 'URL and the updater\'s compose download are refused with a diagnostic, and install.sh refuses a build input that '
+      + 'would go public. Seeded once from the install config\'s policy block (host operator, audited).',
+    type: 'enum', values: ['allow', 'deny'], default: 'allow', source: 'policy',
+    restartRequired: false, change: 'fresh', since: '2026-11-27', phase: '6 (D94 IC-6)',
+  },
+  {
+    id: INFRA_PROXY,
+    title: 'Corporate proxy',
+    description: 'off (default): no proxy policy. configured: a proxy is set in the infrastructure config and AuraOS, the '
+      + 'builders and apps (without credentials) use it; the doctor reports a mismatch between this option and the config. '
+      + 'enforced (beta, BT-I): network-level enforcement. Seeded once from the install config\'s policy block.',
+    type: 'enum', values: ['off', 'configured'], default: 'off', source: 'policy',
+    restartRequired: false, change: 'fresh', since: '2026-11-27', phase: '6 (D94 IC-6)',
+  },
+  {
+    id: INFRA_INHERIT,
+    title: 'Apps inherit the infrastructure defaults',
+    description: 'defaults (default): every app and sidecar gets the non-secret infrastructure settings with no manifest '
+      + 'change: the CA bundle, the proxy without credentials, NO_PROXY and the registry pointers (read-only under '
+      + '/etc/aura/infra). none: apps get nothing (an app then reaches the network as without a config). Credentials never '
+      + 'reach an app either way (O4). Applies at an instance\'s next start.',
+    type: 'enum', values: ['defaults', 'none'], default: 'defaults', source: 'policy',
+    restartRequired: false, change: 'fresh', since: '2026-11-27', phase: '6 (D94 IC-6)',
+  },
+  {
+    id: INFRA_PUBLIC_ROOTS,
+    title: 'Public certificate roots',
+    description: 'keep (default): the corporate CAs are added to the public roots. replace: only the corporate CAs are '
+      + 'trusted; the infrastructure config must say trust.publicRoots: replace as well (both are needed: an explicit '
+      + 'choice, never a side effect of a config apply). A mismatch is reported by the doctor and the boot status.',
+    type: 'enum', values: ['keep', 'replace'], default: 'keep', source: 'policy',
+    restartRequired: true, change: 'fresh', since: '2026-11-27', phase: '6 (D94 IC-6)',
+  },
+  {
+    id: INFRA_CREDENTIAL_GRANTS,
+    title: 'Infrastructure credentials for apps',
+    description: 'Granting an app or a user an infrastructure credential (proxy, registry, client certificate). Not yet '
+      + 'available: in the alpha only the installer, the system builders and the updater use them; apps never do.',
+    type: 'enum', values: ['none'], default: 'none', source: 'reserved',
+    restartRequired: false, change: 'fresh', since: '2026-11-27', phase: 'beta (BT-I)',
   },
   {
     id: 'access-profile',

@@ -73,7 +73,7 @@ test('infra/types.ts constants = os/infra (config version, render version, store
   assert.deepEqual([...I.BUILD_SECRET_IDS], [...ADAPTERS.BUILD_SECRET_IDS]);
 });
 
-test('infra propagation before IC-5: no config = today (empty env, no secrets); a rendered config is refused, not ignored', async () => {
+test('infra propagation (IC-5): no config = today (empty env, no secrets); an unreadable render is refused, not ignored', async () => {
   const data = tmp('b0-infra');
   assert.equal(renderDigest(data), null);
   assert.deepEqual(infraExecEnv('release-build', { dataDir: data }), {});
@@ -84,6 +84,7 @@ test('infra propagation before IC-5: no config = today (empty env, no secrets); 
   mkdirSync(join(data, I.INFRA_GENERATED_DIR, hex), { recursive: true });
   symlinkSync(hex, join(data, I.INFRA_CURRENT_LINK));
   assert.equal(renderDigest(data), `sha256:${hex}`);
+  // A rendered dir without its manifest: fail closed (a spawn or build without the configured proxy/CA would go public).
   assert.throws(() => infraExecEnv('app', { dataDir: data }), (e) => e instanceof InfraPropagationError && e.code === 'infra-not-propagated');
   await assert.rejects(buildSecrets({ jobDir: join(data, 'job'), dataDir: data }), (e) => e.code === 'infra-not-propagated');
 });

@@ -3,6 +3,8 @@
   "pages": [
     "introduction",
     "installation",
+    "install-corporate-network",
+    "infrastructure-configuration",
     "reaching-auraos",
     "getting-started",
     "quick-start",

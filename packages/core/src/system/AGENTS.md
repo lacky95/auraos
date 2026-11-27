@@ -12,10 +12,10 @@ Principles: root `AGENTS.md`; sectors and direction: `packages/core/AGENTS.md`.
 - Domain modules receive collaborators (AppManager `opts.auth`, `opts.appHosts`, `contractScan`); they never fetch them.
 
 ## Boot order (golden: `test/bootstrap.test.mjs`)
-1. identity first (A2), then `early` (mode-file migration); 2. Valkey, KV seed, retired admin credential, notification sweeper; 3. `beforeApps` hooks; 4. Context files, volumes; 5. AppManager (enable state in its `init()`, custom interfaces, `init()`: adoption, boot reconciliation, respawn, services); 6. `kernelReadyAt`, then `ready` hooks (server layer first; Web Shell only in `desktop`).
+0. D94 IC-5: the infrastructure config applied to this process before any outbound call (`infra/kernel.ts` `loadInfrastructure()`: CA, proxy routing with internal traffic direct, env, live reload; `status.json.infra`); no config changes nothing; 1. identity first (A2), then `early` (mode-file migration); 2. Valkey, KV seed, the infrastructure seed (O2 policy, bootstrap credentials into the System Context), retired admin credential, notification sweeper; 3. `beforeApps` hooks; 4. Context files, volumes; 5. AppManager (enable state in its `init()`, custom interfaces, `init()`: adoption, boot reconciliation, respawn, services); 6. `kernelReadyAt`, then `ready` hooks (server layer first; Web Shell only in `desktop`).
 
 ## State it owns
-- `/data/aura/boot/status.json` (atomic rename; `systemId`, `kernelReadyAt`, `firstRequestAt`, `services`, `hooks`, `stoppedAt`).
+- `/data/aura/boot/status.json` (atomic rename; `systemId`, `kernelReadyAt`, `firstRequestAt`, `services`, `hooks`, `infra`, `stoppedAt`).
 
 ## Invariants
 - Init never depends on a request (D78); the server layer starts it (`server.mjs`, the dev plugin).

@@ -7,7 +7,8 @@
 #     `additional_contexts`; without one it is the empty stage below, and the
 #     build is exactly the public default.
 #   - BuildKit secrets (infra_proxy[_http], infra_apt_auth, infra_npmrc,
-#     infra_npm_basic, infra_git), mounted for that RUN only: nothing secret
+#     infra_npm_basic, infra_git, infra_mtls: the install-time client keys),
+#     mounted for that RUN only: nothing secret
 #     reaches a layer, an ENV, an ARG or the history.
 # No corporate CA and no mirror is baked into an image (O7): both are only
 # mounted while a step runs.
@@ -42,7 +43,7 @@ FROM ${DOCKER_IO_REGISTRY}/library/node:22.23.5-bookworm AS aura-base
 # restart or code reload.
 RUN --mount=type=bind,source=os/infra/build-env.sh,target=/run/aura-infra/build-env.sh \
     --mount=type=bind,from=aura-infra-public,target=/etc/aura/infra \
-    --mount=type=secret,id=infra_proxy --mount=type=secret,id=infra_proxy_http \
+    --mount=type=secret,id=infra_proxy --mount=type=secret,id=infra_proxy_http --mount=type=secret,id=infra_mtls \
     --mount=type=tmpfs,target=/run/aura-build \
     --mount=type=secret,id=infra_apt_auth,mode=0444 \
     . /run/aura-infra/build-env.sh \
@@ -65,7 +66,7 @@ RUN --mount=type=bind,source=os/infra/build-env.sh,target=/run/aura-infra/build-
 ARG ZOT_VERSION=v2.1.7
 RUN --mount=type=bind,source=os/infra/build-env.sh,target=/run/aura-infra/build-env.sh \
     --mount=type=bind,from=aura-infra-public,target=/etc/aura/infra \
-    --mount=type=secret,id=infra_proxy --mount=type=secret,id=infra_proxy_http \
+    --mount=type=secret,id=infra_proxy --mount=type=secret,id=infra_proxy_http --mount=type=secret,id=infra_mtls \
     --mount=type=tmpfs,target=/run/aura-build \
     . /run/aura-infra/build-env.sh \
  && ARCH=$(dpkg --print-architecture) \
@@ -100,7 +101,7 @@ FROM ${DOCKER_IO_REGISTRY}/library/debian:bookworm-slim AS base-rootfs
 # outside world without first installing a thing.
 RUN --mount=type=bind,source=os/infra/build-env.sh,target=/run/aura-infra/build-env.sh \
     --mount=type=bind,from=aura-infra-public,target=/etc/aura/infra \
-    --mount=type=secret,id=infra_proxy --mount=type=secret,id=infra_proxy_http \
+    --mount=type=secret,id=infra_proxy --mount=type=secret,id=infra_proxy_http --mount=type=secret,id=infra_mtls \
     --mount=type=tmpfs,target=/run/aura-build \
     --mount=type=secret,id=infra_apt_auth,mode=0444 \
     . /run/aura-infra/build-env.sh \
@@ -129,7 +130,7 @@ FROM ${DOCKER_IO_REGISTRY}/library/node:22.23.5-bookworm-slim AS base
 
 RUN --mount=type=bind,source=os/infra/build-env.sh,target=/run/aura-infra/build-env.sh \
     --mount=type=bind,from=aura-infra-public,target=/etc/aura/infra \
-    --mount=type=secret,id=infra_proxy --mount=type=secret,id=infra_proxy_http \
+    --mount=type=secret,id=infra_proxy --mount=type=secret,id=infra_proxy_http --mount=type=secret,id=infra_mtls \
     --mount=type=tmpfs,target=/run/aura-build \
     --mount=type=secret,id=infra_apt_auth,mode=0444 \
     . /run/aura-infra/build-env.sh \
@@ -168,7 +169,7 @@ COPY --from=valkey /usr/local/bin/valkey-cli    /usr/local/bin/valkey-cli
 ARG DOCKER_VERSION=29.3.1
 RUN --mount=type=bind,source=os/infra/build-env.sh,target=/run/aura-infra/build-env.sh \
     --mount=type=bind,from=aura-infra-public,target=/etc/aura/infra \
-    --mount=type=secret,id=infra_proxy --mount=type=secret,id=infra_proxy_http \
+    --mount=type=secret,id=infra_proxy --mount=type=secret,id=infra_proxy_http --mount=type=secret,id=infra_mtls \
     --mount=type=tmpfs,target=/run/aura-build \
     . /run/aura-infra/build-env.sh \
  && ARCH=$(uname -m) \
@@ -186,7 +187,7 @@ RUN --mount=type=bind,source=os/infra/build-env.sh,target=/run/aura-infra/build-
 ARG ORAS_VERSION=1.2.0
 RUN --mount=type=bind,source=os/infra/build-env.sh,target=/run/aura-infra/build-env.sh \
     --mount=type=bind,from=aura-infra-public,target=/etc/aura/infra \
-    --mount=type=secret,id=infra_proxy --mount=type=secret,id=infra_proxy_http \
+    --mount=type=secret,id=infra_proxy --mount=type=secret,id=infra_proxy_http --mount=type=secret,id=infra_mtls \
     --mount=type=tmpfs,target=/run/aura-build \
     . /run/aura-infra/build-env.sh \
  && ARCH=$(dpkg --print-architecture) \
@@ -205,7 +206,7 @@ RUN --mount=type=bind,source=os/infra/build-env.sh,target=/run/aura-infra/build-
 ARG COMPOSE_VERSION=2.40.3
 RUN --mount=type=bind,source=os/infra/build-env.sh,target=/run/aura-infra/build-env.sh \
     --mount=type=bind,from=aura-infra-public,target=/etc/aura/infra \
-    --mount=type=secret,id=infra_proxy --mount=type=secret,id=infra_proxy_http \
+    --mount=type=secret,id=infra_proxy --mount=type=secret,id=infra_proxy_http --mount=type=secret,id=infra_mtls \
     --mount=type=tmpfs,target=/run/aura-build \
     . /run/aura-infra/build-env.sh \
  && ARCH=$(uname -m) \
@@ -220,7 +221,7 @@ RUN --mount=type=bind,source=os/infra/build-env.sh,target=/run/aura-infra/build-
 ARG BUILDX_VERSION=0.29.1
 RUN --mount=type=bind,source=os/infra/build-env.sh,target=/run/aura-infra/build-env.sh \
     --mount=type=bind,from=aura-infra-public,target=/etc/aura/infra \
-    --mount=type=secret,id=infra_proxy --mount=type=secret,id=infra_proxy_http \
+    --mount=type=secret,id=infra_proxy --mount=type=secret,id=infra_proxy_http --mount=type=secret,id=infra_mtls \
     --mount=type=tmpfs,target=/run/aura-build \
     . /run/aura-infra/build-env.sh \
  && ARCH=$(dpkg --print-architecture) \
@@ -238,7 +239,7 @@ RUN --mount=type=bind,source=os/infra/build-env.sh,target=/run/aura-infra/build-
 # The clone goes through registries.git.rewrites (the rendered gitconfig).
 RUN --mount=type=bind,source=os/infra/build-env.sh,target=/run/aura-infra/build-env.sh \
     --mount=type=bind,from=aura-infra-public,target=/etc/aura/infra \
-    --mount=type=secret,id=infra_proxy --mount=type=secret,id=infra_proxy_http \
+    --mount=type=secret,id=infra_proxy --mount=type=secret,id=infra_proxy_http --mount=type=secret,id=infra_mtls \
     --mount=type=tmpfs,target=/run/aura-build \
     --mount=type=secret,id=infra_git \
     . /run/aura-infra/build-env.sh \
@@ -254,7 +255,7 @@ RUN --mount=type=bind,source=os/infra/build-env.sh,target=/run/aura-infra/build-
 ARG PNPM_VERSION=12.18.0
 RUN --mount=type=bind,source=os/infra/build-env.sh,target=/run/aura-infra/build-env.sh \
     --mount=type=bind,from=aura-infra-public,target=/etc/aura/infra \
-    --mount=type=secret,id=infra_proxy --mount=type=secret,id=infra_proxy_http \
+    --mount=type=secret,id=infra_proxy --mount=type=secret,id=infra_proxy_http --mount=type=secret,id=infra_mtls \
     --mount=type=tmpfs,target=/run/aura-build \
     --mount=type=secret,id=infra_npm_basic --mount=type=secret,id=infra_npmrc \
     . /run/aura-infra/build-env.sh \
@@ -302,7 +303,7 @@ COPY packages/aura-cli/package.json ./packages/aura-cli/package.json
 
 RUN --mount=type=bind,source=os/infra/build-env.sh,target=/run/aura-infra/build-env.sh \
     --mount=type=bind,from=aura-infra-public,target=/etc/aura/infra \
-    --mount=type=secret,id=infra_proxy --mount=type=secret,id=infra_proxy_http \
+    --mount=type=secret,id=infra_proxy --mount=type=secret,id=infra_proxy_http --mount=type=secret,id=infra_mtls \
     --mount=type=tmpfs,target=/run/aura-build \
     --mount=type=secret,id=infra_npmrc \
     . /run/aura-infra/build-env.sh \

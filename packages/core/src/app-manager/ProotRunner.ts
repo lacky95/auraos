@@ -6,6 +6,7 @@ import type { AppManifest } from '../types/manifest.js';
 import { ALL_TOOLS_PATH, MY_TOOLS_PATH, SHARED_HOME_PATH, currentToolsMode, provisionAllowlist } from './tool-provision.js';
 import { prootHomeBind } from '../runtimes/spawn/homeArgs.js';
 import { prootContextBinds } from '../runtimes/spawn/contextArgs.js';
+import { infraEnvFor, prootInfraBinds } from '../runtimes/spawn/infraArgs.js';
 import { prootIdentityLaunch, requireProotIdentity, writeIdentityFiles } from '../runtimes/spawn/identityArgs.js';
 import { WORKSPACE_ROOT_FILES } from '../runtimes/spawn/systemTreeArgs.js';
 import type { SpawnIdentity } from '../identity/types.js';
@@ -94,6 +95,8 @@ export interface ProotBindSpec {
   identityBinds: string[];
   /** The Context Volumes (spawn/contextArgs.ts); never `/run/context`. */
   contextBinds: string[];
+  /** D94 IC-5: the infrastructure render at /etc/aura/infra (spawn/infraArgs.ts); absent without a config. */
+  infraBinds?: string[];
   /** The allowlist dir, and the store too in legacy symlink mode; null without a toolchain. */
   tools: { myTools: string; allTools: string | null } | null;
 }
@@ -147,6 +150,8 @@ export function prootBinds(spec: ProotBindSpec): string[] {
     ...spec.identityBinds,
     // OS-managed shared Context Volumes (spawn/contextArgs.ts).
     ...spec.contextBinds,
+    // The infrastructure defaults, read-only by ownership (spawn/infraArgs.ts, D94).
+    ...(spec.infraBinds ?? []),
     // Expose the app's own source dir at its real absolute path. Required for
     // user/global-scope apps, whose appDir lives UNDER /data (e.g.
     // /data/scopes/users/<u>/apps/<id>): the `${dataDir}:/data` bind above
@@ -347,6 +352,7 @@ export class ProotRunner implements SandboxRunner {
       tmpDir: this.instanceTmpDir(instanceId, identity),
       identityBinds: ident.binds,
       contextBinds: prootContextBinds({ volumesDir: this.volumeStore.volumesDir, volumes: contextVolumes }),
+      infraBinds: prootInfraBinds({ infra: ctx.infra, dataDir: this.dataDir }),
       tools: existsSync(toolBinDir)
         ? { myTools: this.toolsDir(instanceId), allTools: currentToolsMode(this.dataDir) === 'symlink' ? toolBinDir : null }
         : null,
@@ -360,6 +366,8 @@ export class ProotRunner implements SandboxRunner {
     // process tree (see provisionAllowlist).
     const shellHostname = process.env['AURA_SHELL_HOSTNAME'];
     const env: Record<string, string> = {
+      // D94 IC-5: the infrastructure defaults (none without a config); a granted Context key wins.
+      ...infraEnvFor(ctx.infra),
       // The Context keys the kernel granted this start (declared AND granted,
       // stream C); the fixed OS vars below override, so a key can't clobber them.
       ...(ctx.contextEnv ?? {}),

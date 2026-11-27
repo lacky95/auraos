@@ -1,0 +1,114 @@
+---
+title: Infrastructure configuration
+description: One file for the proxy, CAs, DNS, package and image mirrors, client certificates and AuraOS's own endpoints; how it reaches the shell, builds and apps.
+---
+
+AuraOS keeps one infrastructure configuration: `/data/aura/infra/config.yaml`. Without it AuraOS
+behaves exactly as a default install (public registries, the host's DNS). With it, every part of
+AuraOS that reaches the network, and every app by default, uses the corporate proxy, the
+corporate CAs and the internal mirrors. It is set at install
+(`install.sh --config`, see [Install in a corporate network](/docs/install-corporate-network)).
+
+## The file
+
+```yaml
+version: 1
+network:
+  proxy:
+    http:  http://proxy.corp.example:3128          # no user:password in URLs
+    https: http://proxy.corp.example:3128
+    noProxy: [".corp.example", "10.0.0.0/8"]        # AuraOS's internal names are added for you
+    credential: { ref: "bootstrap:proxy" }         # Basic auth, by reference only
+  dns: host                                        # host (default) | [10.1.1.1] | { servers, search }
+trust:
+  caCertificates:
+    - { name: corp-root, file: ./certs/corp-root.pem }
+  publicRoots: keep                                # keep | replace
+clientCertificates:                                # install-time mTLS, see the install page
+  - { name: artifactory-mtls, hosts: [artifactory.corp.example],
+      certificate: { file: ./certs/aura-system.crt }, key: { ref: "bootstrap:artifactory-mtls-key" } }
+registries:
+  npm:       { url: https://artifactory.corp.example/api/npm/npm-remote/, credential: { ref: "bootstrap:artifactory" } }
+  python:    { index: https://artifactory.corp.example/api/pypi/pypi-remote/simple }
+  apt:       { mirrors: { "deb.debian.org": https://artifactory.corp.example/debian-remote } }
+  oci:       { mirrors: { "docker.io": artifactory.corp.example/docker-remote } }
+  git:       { rewrites: { "https://github.com/": "https://git.corp.example/mirror/github/" } }
+  artifacts: { rewrites: { "https://github.com/": "https://artifactory.corp.example/github-releases/" } }
+endpoints:                                         # AuraOS's own public services
+  nexusIndex: https://store.corp.example/index.yaml
+  nexusStoreRepo: corp/auraos-store
+  github: https://ghe.corp.example
+  githubApi: https://ghe.corp.example/api/v3
+policy:                                            # install seed only, see below
+  publicFallback: deny
+  proxy: configured
+```
+
+Rules the validator enforces:
+
+- **No secret in the file.** Credentials are references (`bootstrap:<name>` at install,
+  `system:INFRA_<NAME>` after the first boot). A URL with `user:password@`, a field named
+  `password`, `token` or `_authToken`, or a private key is refused.
+- **TLS can't be weakened.** There is no `insecure`, `strict-ssl`, `sslVerify` or `trusted-host`
+  field. A plain `http://` mirror is allowed, but reported as unencrypted.
+- **Unknown fields are refused.** Maven, Gradle, Go, Cargo and Yarn Berry registries are beta.
+
+`endpoints` replaces the built-in defaults of the official Nexus store
+(`https://nexus.aura.lakner.io/index.yaml`, `lacky95/auraos-store`) and of GitHub
+(`https://github.com`, `https://api.github.com`), for example with an internal mirror of the store
+or GitHub Enterprise. A missing key keeps its default.
+
+## Where it reaches
+
+The config is rendered into `/data/aura/infra/generated/<digest>/` (an atomic `current` link,
+the previous render kept). Each tool gets it in its **system** layer, so a user's or a project's
+own settings still win: `~/.npmrc` and a project `.npmrc` over the global npmrc, `~/.gitconfig`
+over the system gitconfig, a venv's `pip.conf` over the system one.
+
+| Consumer | What it gets |
+|---|---|
+| The shell and its kernel | The proxy (internal traffic to apps, sidecars and the shell itself stays direct), the CAs, every child process's env. A CA or proxy change applies live; a proxy configured for the first time needs `aura restart os` (the boot status says so). |
+| Apps (containers and PRoot) | Read-only at `/etc/aura/infra`: the CA bundle, npmrc, pip/uv and git config; env `HTTPS_PROXY`/`NO_PROXY` without credentials, `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, `NPM_CONFIG_GLOBALCONFIG`, `GIT_CONFIG_SYSTEM`. No manifest change. A granted Context key of the same name wins. Applies at an instance's next start. |
+| OS sidecars | The proxy env, and their image through `registries.oci.mirrors`. |
+| The System Terminal | Like an app. pnpm reads no global npmrc: in a session it takes the registry from your `~/.npmrc` or the project's `.npmrc`. |
+| Capability installs | The proxy and CA env; downloads through `registries.artifacts.rewrites`. |
+| Nexus (oras, store index) | The proxy and CA; the store from `endpoints`. |
+| Image builds, the release builder and updates | Everything, including the credentials, as BuildKit secrets for the step that needs them. |
+
+**Credentials never reach an app** in the alpha (security option `infra-credential-grants` is
+reserved for the beta). An app behind an authenticating proxy has no proxy access until then.
+
+## Security options
+
+The switches are [security options](/docs/security-options), changed with your password
+(`aura admin security set <id> <value>`):
+
+| Option | Effect |
+|---|---|
+| `infra-public-fallback` | `deny`: what the config does not cover is refused instead of going public: the default store index, a capability download from a public URL, the updater's compose download; `install.sh` refuses a public build input. |
+| `infra-proxy` | `configured` when the config sets a proxy (the doctor reports a mismatch). |
+| `infra-inherit` | `none`: apps get none of the defaults above. |
+| `infra-public-roots` | `replace` together with `trust.publicRoots: replace`: only the corporate CAs are trusted. |
+
+The config's `policy:` block is only a seed: the first boot writes it into these options once and
+removes it from the file. From then on the options are the only truth.
+
+## Troubleshooting
+
+```bash
+aura admin infra doctor            # from the System Terminal (asks the owner) or on the host:
+docker exec aura-shell aura admin infra doctor
+aura admin infra doctor --offline  # without contacting the proxy and registries
+```
+
+| Message | Fix |
+|---|---|
+| `TLS verification failed (corporate CA missing in trust.caCertificates?)` | Add the issuing CA of the TLS-inspecting proxy or the mirror under `trust.caCertificates`. |
+| `the proxy requires authentication` | The kernel's own requests go without credentials (alpha). Allow AuraOS's address on the proxy, or mirror the store (`endpoints.nexusIndex`). |
+| `generated/current is not the render of config.yaml` | Restart AuraOS (`aura restart os`): the boot renders the config. |
+| `infra-public-roots is keep but trust.publicRoots is replace` | Both must say `replace`. |
+| `… is a public endpoint and infra-public-fallback is deny` | Add a mirror for it (`registries.artifacts.rewrites`, `endpoints.nexusIndex`), or set the option to `allow`. |
+| `credential … missing` | Re-run `install.sh --config … --credentials-dir …`. |
+
+`/data/aura/boot/status.json` shows what the boot applied under `infra` (state, digest, number of
+corporate CAs, whether the kernel's own requests use the proxy, issues); never a value.

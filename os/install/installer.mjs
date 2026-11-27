@@ -17,7 +17,7 @@
 //   fingerprint FILE...                                          key ids and fingerprints
 //   requirements --repo R [--config F]                           what to mirror (D94 §6.1.5)
 //   audit-public --repo R --config F                             public build inputs under publicFallback: deny
-//   write-data  --data D [--seed S] [--system-mode M] [--source-json F]   first-boot handoff into the data volume
+//   write-data  --data D [--seed S] [--credentials C] [--system-mode M] [--source-json F]   first-boot handoff into the data volume
 //   build-inputs --state-dir S [--config F]                      the release builder's D94 inputs (JSON; paths, never values)
 //   runner-plan --root R [--config F] [--node-image I]           RUNNER_TAG/RUNNER_NODE/RUNNER_CLI KEY=value lines
 //   redact      [--config F --credentials-dir D]                 stdin → stdout with secrets redacted
@@ -313,9 +313,18 @@ function cmdAuditPublic(a) {
 }
 
 /** First-boot handoff into the data volume (run in a container with the volume at --data). */
-export function writeData({ data, seed, systemMode, sourceJson }) {
+export function writeData({ data, seed, credentials, systemMode, sourceJson }) {
   const out = {};
   if (seed) out.infra = importSeedIfAbsent(infraDir(data), seed);
+  if (credentials) {
+    // D94 IC-5: the kernel's first boot seals these into the System Context and deletes the dir.
+    const imp = join(infraDir(data), 'import');
+    mkdirSync(imp, { recursive: true, mode: 0o700 });
+    chmodSync(imp, 0o700);
+    const names = readdirSync(credentials).filter((n) => !n.startsWith('.'));
+    for (const n of names) writeSecretFile(join(imp, n), readFileSync(join(credentials, n)));
+    out.credentials = names.length;
+  }
   if (systemMode) {
     if (!['normal', 'developer'].includes(systemMode)) throw new Error(`bad system mode ${systemMode}`);
     mkdirSync(join(data, 'aura'), { recursive: true });
@@ -416,7 +425,7 @@ export function main(argv = process.argv.slice(2)) {
       case 'fingerprint': return verifierMain(['fingerprint', ...rest]);
       case 'requirements': need('repo'); return cmdRequirements(a);
       case 'audit-public': need('repo', 'config'); return cmdAuditPublic(a);
-      case 'write-data': need('data'); say(JSON.stringify(writeData({ data: a.data, seed: a.seed, systemMode: a['system-mode'], sourceJson: a['source-json'] }))); return 0;
+      case 'write-data': need('data'); say(JSON.stringify(writeData({ data: a.data, seed: a.seed, credentials: a.credentials, systemMode: a['system-mode'], sourceJson: a['source-json'] }))); return 0;
       case 'store-show': need('data'); { const s = readStore(infraDir(a.data)); say(s ? `${s.file} ${s.digest}` : 'no infrastructure config'); return 0; }
       case 'runner-plan': need('root'); return cmdRunnerPlan(a);
       case 'build-inputs': need('state-dir'); say(JSON.stringify(buildInputs({ stateDir: a['state-dir'], config: a.config }))); return 0;

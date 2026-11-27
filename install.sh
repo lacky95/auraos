@@ -424,6 +424,8 @@ write_data() {
     --label com.docker.compose.project="$1" --label com.docker.compose.volume=aura-app-data "$vol" || die 1 "cannot create volume $vol"
   seedargs=
   [ -d "$STATE_DIR/seed" ] && seedargs="--seed $STATE_DIR/seed"
+  # D94 IC-5: the bootstrap credentials for the first boot's import into the System Context (then deleted there).
+  [ -d "$STATE_DIR/credentials" ] && seedargs="$seedargs --credentials $STATE_DIR/credentials"
   # shellcheck disable=SC2086
   logged docker run --rm --network none -e HOME=/tmp -v "$INSTALLER_ROOT:$INSTALLER_ROOT:ro" -v "$STATE_DIR:$STATE_DIR:ro" \
     -v "$TMP:$TMP:ro" -v "$vol:/data" "$NODE_IMAGE" node "$HELPER" write-data --data /data $seedargs \

@@ -17,6 +17,8 @@
  * Merge rule: sources are visited in ascending `priority`; the FIRST source to
  * provide a given app id wins (lower priority number = higher precedence).
  */
+import { readInfraPolicy, refusePublic } from '../infra/policy.js';
+import { renderDigest } from '../infra/propagate.js';
 import { execFileSync } from 'node:child_process';
 import {
   existsSync, mkdirSync, readFileSync, statSync, writeFileSync,
@@ -31,7 +33,7 @@ import { orasFlagsForUrl, orasHostFromUrl } from './RegistryConfig.js';
 import { artifactTypeOf, OrasAuthError, orasAsync } from './RegistryAuth.js';
 import { catalogRepo, readOciCatalogAsync } from './OciCatalog.js';
 import {
-  DEFAULT_APP_REPO_PREFIX, sortedSources,
+  DEFAULT_APP_REPO_PREFIX, OFFICIAL_INDEX_URL, sortedSources,
   type GitIndexSource, type OciSource, type SourceEntry, type SourcesConfig,
 } from './SourcesConfig.js';
 
@@ -468,6 +470,11 @@ export class CatalogAggregator {
  *  unparseable — the aggregator catches and degrades; the POST validator
  *  surfaces the error to reject a bad registration. */
 export async function loadGitIndexDoc(src: GitIndexSource): Promise<IndexDocument> {
+  // D94 IC-6: the built-in public store index is refused under infra-public-fallback=deny
+  // (a configured endpoints.nexusIndex is not public: it replaces the URL in SourcesConfig).
+  if (src.url === OFFICIAL_INDEX_URL && renderDigest() !== null) {
+    refusePublic(await readInfraPolicy(), 'the default Nexus store index', src.url, 'set endpoints.nexusIndex to an internal mirror of the store, or remove the official source');
+  }
   const text = /\.ya?ml$/i.test(src.url)
     ? await fetchYamlUrl(src.url)
     : cloneAndReadIndex(src.url, src.ref);
