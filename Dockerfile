@@ -40,11 +40,15 @@ RUN ARCH=$(dpkg --print-architecture) \
  && chmod +x /usr/local/bin/zot \
  && zot --version
 
-# Stream T (D69): the System Terminal's server runs from an execute-only copy of node. A process started from a
-# binary its user can't read is made non-dumpable by the kernel, so the user's own session processes (same uid)
-# can't read its /proc/<pid>/{environ,mem,fd,maps} or ptrace it (the lifecycle token stays in the server).
-# Children it starts (tmux, the sessions) exec readable binaries and are ordinary again.
-RUN install -m 0111 -o root -g root /usr/local/bin/node /usr/local/bin/node-sealed
+# Stream T2 (owner decision 2026-11-27): the System Terminal's session launcher. The Terminal container
+# starts it as root with only SETUID/SETGID (and no-new-privileges); it runs the Terminal server as the
+# non-login service uid and every session command (tmux, the shells) as the session user, for the server only.
+# `aura-term-tmux` (a link) is the server's tmux. See os/term-launch/term-launch.c.
+COPY os/term-launch/term-launch.c /tmp/term-launch.c
+RUN mkdir -p /usr/local/libexec \
+ && cc -std=gnu11 -O2 -Wall -Wextra -Werror -static -o /usr/local/libexec/aura-term-launch /tmp/term-launch.c \
+ && ln -s aura-term-launch /usr/local/libexec/aura-term-tmux \
+ && rm /tmp/term-launch.c
 
 # ─── Stage: base-rootfs ───────────────────────────────────────────────────────
 # Debian-slim filesystem with the tools an app sandbox needs, exported as a

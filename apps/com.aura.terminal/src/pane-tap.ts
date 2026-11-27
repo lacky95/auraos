@@ -22,14 +22,22 @@
  * any pipe (a plain read stream on a FIFO would park a threadpool thread per
  * session).
  */
-import { constants, mkdirSync, openSync, rmSync } from 'node:fs';
+import { chmodSync, constants, mkdirSync, openSync, rmSync } from 'node:fs';
 import { Socket } from 'node:net';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { TMUX_CONF, TMUX_SOCKET_ARGS, sessionEnvArgs, shellArgv, tmuxBin, tmuxName } from './tmux-control.ts';
+import { TMUX_CONF, TMUX_SOCKET_ARGS, sessionEnvArgs, sessionLauncher, shellArgv, tmuxBin, tmuxName } from './tmux-control.ts';
 
-const TAP_DIR = join(tmpdir(), `aura-term-tap-${process.getuid?.() ?? 0}`);
+/**
+ * Where the FIFOs live. Under the session launcher (stream T2) the pane's
+ * `cat` runs as the session user and this server as the Terminal service uid:
+ * the FIFOs are in the server's own runtime dir (AURA_TERM_TAP_DIR, in its
+ * 0711 tmpfs), the dir 0711 and each FIFO 0622, so the user's tmux can write
+ * into one by its name but can't list, create or replace anything there.
+ */
+const SERVICE = sessionLauncher() !== null;
+const TAP_DIR = process.env['AURA_TERM_TAP_DIR'] || join(tmpdir(), `aura-term-tap-${process.getuid?.() ?? 0}`);
 
 export interface PaneTap {
   /** Stop the pipe, close the FIFO, remove it. Idempotent. */
@@ -63,9 +71,10 @@ export function openPaneTap(
   const fifo = join(TAP_DIR, `${name}.fifo`);
   let sock: Socket;
   try {
-    mkdirSync(TAP_DIR, { recursive: true, mode: 0o700 });
+    mkdirSync(TAP_DIR, { recursive: true, mode: SERVICE ? 0o711 : 0o700 });
+    if (SERVICE) chmodSync(TAP_DIR, 0o711);
     rmSync(fifo, { force: true });
-    if (spawnSync('mkfifo', ['-m', '600', fifo]).status !== 0) return null;
+    if (spawnSync('mkfifo', ['-m', SERVICE ? '622' : '600', fifo]).status !== 0) return null;
     const fd = openSync(fifo, constants.O_RDWR | constants.O_NONBLOCK);
     sock = new Socket({ fd, readable: true, writable: false });
   } catch {

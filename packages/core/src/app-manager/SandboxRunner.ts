@@ -163,6 +163,8 @@ export interface SandboxRunner {
     addresses?: string[];
     dialByAddress?: boolean;
     lifecycleToken?: string;
+    /** A session host's session uid:gid (stream T2, container runtime). */
+    sessionUser?: string;
   }): void;
   /**
    * The lifecycle checks again for an instance adopted from a previous shell

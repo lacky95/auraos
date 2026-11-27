@@ -178,12 +178,10 @@ fi`;
  * The start command of an Astro app that ships no entrypoint of its own —
  * shared by ContainerRunner and ProotRunner (they used to carry a copy each).
  *
- * `AURA_SERVER_SEALED=1` (a user's session host, spawn/sessionArgs.ts): only
- * the production build, never `astro dev`, and the server runs from the
- * execute-only `node-sealed` (aura-base): the kernel makes a process started
- * from a binary its user can't read non-dumpable, so the user's own session
- * processes (same uid) can't read its /proc/<pid>/{environ,mem,fd,maps} or
- * ptrace it. Either missing: the start fails (exit 78), visibly.
+ * `AURA_SESSION_HOST=1` (a user's session host, spawn/sessionArgs.ts): only
+ * the production build, never `astro dev` (exit 78, visibly). Its server runs
+ * as the Terminal service uid under the session launcher (stream T2), which
+ * started this script.
  *
  * `AURA_SERVE=prod` (set by the runner when the app's build matches its
  * sources, see appBuild.ts) starts the production server: the app's own
@@ -195,26 +193,18 @@ export const ASTRO_START_SHELL = `set -e
 export PORT="\${APP_PORT:-4001}"
 ${LISTEN_HOST_SHELL}
 ${PROVISION_SHELL}
-NODE_BIN=node
-if [ "\${AURA_SERVER_SEALED:-}" = 1 ]; then
-  if [ "\${AURA_SERVE:-dev}" != prod ] || [ ! -f dist/server/entry.mjs ]; then
-    echo "[\${APP_ID:-app}] refused: a sealed session host runs only from its current production build (no dev server)" >&2
-    exit 78
-  fi
-  if [ ! -x /usr/local/bin/node-sealed ]; then
-    echo "[\${APP_ID:-app}] refused: this aura-base image has no /usr/local/bin/node-sealed; rebuild aura-base" >&2
-    exit 78
-  fi
-  NODE_BIN=/usr/local/bin/node-sealed
+if [ "\${AURA_SESSION_HOST:-}" = 1 ] && { [ "\${AURA_SERVE:-dev}" != prod ] || [ ! -f dist/server/entry.mjs ]; }; then
+  echo "[\${APP_ID:-app}] refused: a session host runs only from its current production build (no dev server)" >&2
+  exit 78
 fi
 if [ "\${AURA_SERVE:-dev}" = prod ] && [ -f dist/server/entry.mjs ]; then
   export HOST="$LISTEN_HOST" NODE_ENV=production
   if [ -f server.mjs ]; then
     echo "[\${APP_ID:-app}] Starting production server (server.mjs) on port \$PORT"
-    exec "\$NODE_BIN" server.mjs
+    exec node server.mjs
   fi
   echo "[\${APP_ID:-app}] Starting production server (dist) on port \$PORT"
-  exec "\$NODE_BIN" dist/server/entry.mjs
+  exec node dist/server/entry.mjs
 fi
 ASTRO="node_modules/.bin/astro"
 [ -x "\$ASTRO" ] || ASTRO="/workspace/node_modules/.bin/astro"

@@ -16,10 +16,15 @@
  *   AURA_RUN_AS=app                       for the start shell's messages only; it decides by `id -u`
  *   ASTRO_TELEMETRY_DISABLED=1            no telemetry state in the App Home, and no first-run prompt
  *
- * A user's session identity (stream T, D69): the System Terminal instance of
- * user U runs as U's uid/gid (range `owner` or `user`), with the same flags
- * and no capability either; its passwd names U by username, `pw_dir=/home/aura`,
- * and `AURA_RUN_AS=user`.
+ * A user's session identity (stream T, D69; T2): the System Terminal instance
+ * of user U hosts U's sessions as U's uid/gid (range `owner` or `user`), while
+ * its server runs as the non-login service uid (`aura-terminal`,
+ * TERMINAL_SERVICE_UID). The container starts as uid 0 with only SETUID and
+ * SETGID (`--cap-drop ALL --cap-add SETUID --cap-add SETGID`,
+ * no-new-privileges) for its session launcher (os/term-launch, sessionArgs.ts),
+ * which drops to those two uids and nothing else; every other process has no
+ * capability. Its passwd names U by username (`pw_dir=/home/aura`) and the
+ * service account (`/nonexistent`, nologin); `AURA_RUN_AS=user`.
  *
  * There is no fallback: the runner never retries a failed non-root start as
  * root (P5-3). Sidecars keep their image user, except an `aura-base` sidecar
@@ -30,6 +35,7 @@ import { chmodSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { SpawnIdentity } from '../../identity/types.js';
 import { appAccountName, renderGroup, renderPasswd } from '../../identity/passwd.js';
+import { TERMINAL_SERVICE_ACCOUNT, TERMINAL_SERVICE_GID, TERMINAL_SERVICE_UID } from '../../identity/types.js';
 
 /** Where an instance's rendered identity files live, relative to the root dataDir. */
 export function identityFilesSubpath(instanceId: string): string {
@@ -76,7 +82,7 @@ export function identityAccountName(identity: SpawnIdentity, installationId: str
   if (identity.range === 'app' && installationId) return appAccountName(installationId);
   if (isSessionIdentity(identity)) {
     const name = (identity.account ?? '').toLowerCase();
-    return ACCOUNT_RE.test(name) && !BASE_NAMES.has(name) ? name : `user-${identity.uid}`;
+    return ACCOUNT_RE.test(name) && !BASE_NAMES.has(name) && name !== TERMINAL_SERVICE_ACCOUNT ? name : `user-${identity.uid}`;
   }
   return `aura-${identity.range}-${identity.uid}`;
 }
@@ -84,10 +90,13 @@ export function identityAccountName(identity: SpawnIdentity, installationId: str
 /** The rendered `/etc/passwd` and `/etc/group` of a non-root app container. Pure. */
 export function renderIdentityFiles(identity: SpawnIdentity, installationId: string | null): { passwd: string; group: string } {
   const name = identityAccountName(identity, installationId);
-  const gecos = isSessionIdentity(identity) ? 'AuraOS user' : 'AuraOS app';
+  const session = isSessionIdentity(identity);
+  const gecos = session ? 'AuraOS user' : 'AuraOS app';
+  // A session host's server runs as the Terminal service account (stream T2).
+  const service = session ? [{ name: TERMINAL_SERVICE_ACCOUNT, uid: TERMINAL_SERVICE_UID, gid: TERMINAL_SERVICE_GID, gecos: 'AuraOS Terminal server', home: '/nonexistent', shell: '/usr/sbin/nologin' }] : [];
   return {
-    passwd: renderPasswd(BASE_PASSWD, [{ name, uid: identity.uid, gid: identity.gid, gecos }]),
-    group: renderGroup(BASE_GROUP, [{ name, gid: identity.gid }]),
+    passwd: renderPasswd(BASE_PASSWD, [{ name, uid: identity.uid, gid: identity.gid, gecos }, ...service]),
+    group: renderGroup(BASE_GROUP, [{ name, gid: identity.gid }, ...service.map((x) => ({ name: x.name, gid: x.gid }))]),
   };
 }
 
@@ -114,6 +123,21 @@ function processIdentityFlags(identity: SpawnIdentity): string[] {
   return [
     '--user', `${identity.uid}:${identity.gid}`,
     '--cap-drop', 'ALL',
+    '--security-opt', 'no-new-privileges',
+  ];
+}
+
+/**
+ * A session host (stream T2): uid 0 with SETUID and SETGID only, for its
+ * session launcher, which starts the server as the service uid and the
+ * sessions as the user's uid; no-new-privileges, so no exec gains anything.
+ */
+function sessionHostFlags(): string[] {
+  return [
+    '--user', '0:0',
+    '--cap-drop', 'ALL',
+    '--cap-add', 'SETUID',
+    '--cap-add', 'SETGID',
     '--security-opt', 'no-new-privileges',
   ];
 }
@@ -148,7 +172,7 @@ export function containerIdentityArgs(identity: SpawnIdentity | undefined, opts?
   if (!isNonRootIdentity(identity)) return [];
   if (!opts) throw new Error('a non-root app identity needs its identity files');
   return [
-    ...processIdentityFlags(identity),
+    ...(isSessionIdentity(identity) ? sessionHostFlags() : processIdentityFlags(identity)),
     ...identityFileMounts(opts.appDataVolume, opts.instanceId),
     '-e', `AURA_RUN_AS=${isSessionIdentity(identity) ? 'user' : 'app'}`,
     // No Astro telemetry state in the App Home (and no first-run notice).

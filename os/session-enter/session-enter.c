@@ -300,6 +300,7 @@ struct spec {
   int kind, home, tty;
   uid_t uid;
   gid_t gid;
+  uid_t session_host_uid;   /* a System Terminal's own user (0: not a session host) */
   gid_t groups[32];
   int ngroups;
   char **env, **argv;
@@ -353,6 +354,9 @@ static void read_spec(const char *json, struct spec *sp) {
   if (sp->kind == KIND_ROOT && (sp->uid != 0 || sp->gid != 0)) { errno = 0; die("spec: a root session runs as 0:0"); }
   if (sp->kind == KIND_APP && sp->home != HOME_APP) { errno = 0; die("spec: an app session has the App Home"); }
   if (sp->kind != KIND_APP && sp->home == HOME_APP) { errno = 0; die("spec: the App Home is the app identity's"); }
+  /* A System Terminal (stream T2) runs its launcher as root: its own user, and only they, may enter it. */
+  jv *sh = jget(o, "sessionHostUid");
+  if (sh) sp->session_host_uid = (uid_t)jnum(o, "sessionHostUid", 1, 0x7ffffffe);
   sp->cwd = jstr(o, "cwd", 0);
   if (sp->cwd && !valid_abs_path(sp->cwd)) { errno = 0; die("spec: cwd must be an absolute path"); }
   sp->passwd = jstr(o, "passwd", 0);
@@ -509,7 +513,9 @@ static void pin(const struct spec *sp, struct pinned *pn) {
   if (!uidline) { errno = 0; die("no Uid in the app's init status"); }
   unsigned ruid = 0, euid = 0;
   if (sscanf(uidline + 5, "%u %u", &ruid, &euid) != 2) { errno = 0; die("bad Uid line"); }
-  if (sp->kind == KIND_USER && (ruid == 0 || euid == 0)) { errno = 0; die("the app runs as root: a user session is refused (capability-missing: identity)"); }
+  /* T2: a session host's init is root (its session launcher, SETUID/SETGID only); its own user's session may enter it. */
+  int own_terminal = sp->session_host_uid != 0 && sp->kind == KIND_USER && sp->uid == sp->session_host_uid;
+  if (sp->kind == KIND_USER && (ruid == 0 || euid == 0) && !own_terminal) { errno = 0; die("the app runs as root: a user session is refused (capability-missing: identity)"); }
   free(status);
 
   char procs[4200];

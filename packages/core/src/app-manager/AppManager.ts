@@ -53,7 +53,7 @@ import {
   APP_ROOT_EXECUTION_OPTION, RootExecutionError, executionConfigOf, executionDecision, type AppRootExecutionPolicy, type ExecutionApproval,
 } from '../identity/execution.js';
 import { securityPolicyValue } from '../security/options.js';
-import { LINUX_ID_RANGES, ROOT_SPAWN_IDENTITY, linuxIdRangeOf, type AppRunAs, type SpawnIdentity, type SpawnIdentityProvider } from '../identity/types.js';
+import { LINUX_ID_RANGES, ROOT_SPAWN_IDENTITY, TERMINAL_SERVICE_UID, linuxIdRangeOf, type AppRunAs, type SpawnIdentity, type SpawnIdentityProvider } from '../identity/types.js';
 import { appIdentityProvider, sessionHostIdentityProvider } from '../identity/appIdentityProvider.js';
 import { grantedContextEnv, liveGrantedContextDeps, type GrantedContextDeps } from '../context/grantedContext.js';
 import { ContextStore } from '../context/ContextStore.js';
@@ -117,21 +117,24 @@ export function ownerHomeAwaitsOwnership(
  * Stream T: a System Terminal instance's data dir (scrollback, saved
  * directories, launch commands) belongs to the one user whose sessions it
  * held. Instance ids are reused (D85 A7), so when the dir was left by another
- * user's uid it is moved aside, root-only, and the new user starts empty:
- * nothing of one user's sessions is replayed, restored or run in another's.
- * Ownership is the dir's own uid (chowned at each non-root start), which a
- * capability-less user can't forge; root-owned dirs predate stream T and
- * were the owner's.
+ * user it is moved aside, root-only, and the new user starts empty: nothing
+ * of one user's sessions is replayed, restored or run in another's.
+ * Whose it is: the dir's group when the Terminal service account owns it
+ * (stream T2: `aura-terminal:<user gid>`, chowned at each start), else its own
+ * uid (stream T: the user's); neither can a capability-less user forge.
+ * Root-owned dirs predate stream T and were the owner's.
  */
-export function retireForeignSessionData(dir: string, uid: number, now = Date.now()): string | null {
+export function retireForeignSessionData(dir: string, id: { uid: number; gid: number }, now = Date.now()): string | null {
   let st;
   try { st = lstatSync(dir); } catch { return null; }
-  if (!st.isDirectory() || st.isSymbolicLink() || st.uid === 0 || st.uid === uid) return null;
-  const aside = join(dirname(dir), `.${basename(dir)}.retired-${st.uid}-${now}`);
+  if (!st.isDirectory() || st.isSymbolicLink() || st.uid === 0 || st.uid === id.uid) return null;
+  if (st.uid === TERMINAL_SERVICE_UID && st.gid === id.gid) return null;
+  const was = st.uid === TERMINAL_SERVICE_UID ? `g${st.gid}` : String(st.uid);
+  const aside = join(dirname(dir), `.${basename(dir)}.retired-${was}-${now}`);
   renameSync(dir, aside);
   chmodSync(aside, 0o700);
   mkdirSync(dir, { recursive: true });
-  console.log(`[AppManager] ${basename(dir)}: its data was another user's (uid ${st.uid}); moved aside, starting empty`);
+  console.log(`[AppManager] ${basename(dir)}: its data was another user's (${st.uid === TERMINAL_SERVICE_UID ? `gid ${st.gid}` : `uid ${st.uid}`}); moved aside, starting empty`);
   return aside;
 }
 
@@ -2351,14 +2354,17 @@ export class AppManager {
     home: ResolvedHome | undefined,
   ): Promise<void> {
     await this.provisionInBuilder(appId, manifest, appDir);
+    // A session host's data is its server's (stream T2): the Terminal service uid, the user's gid (whose it is).
+    const owner = TERMINAL_SESSION_APPS.has(appId) && isSessionIdentity(identity)
+      ? { uid: TERMINAL_SERVICE_UID, gid: identity.gid } : { uid: identity.uid, gid: identity.gid };
     const rows = appOwnershipSpecs({
       appId, installationId, appDataRoot: dirname(instanceDataDir), instanceDirs: [basename(instanceDataDir)], appDir,
       devServed: manifest.runtime !== 'raw' && serveState(appDir, manifest).mode !== 'prod',
-      identity: { uid: identity.uid, gid: identity.gid },
+      identity: owner,
       ...(home?.hostPath && home.kind !== 'private' ? { appHomes: [home.hostPath] } : {}),
     });
-    const r = applyAppOwnership(rows, identity);
-    if (r.changed || r.created.length) console.log(`[AppManager] ${appId}: ownership for uid ${identity.uid}: ${r.changed} changed, ${r.created.length} created`);
+    const r = applyAppOwnership(rows, owner);
+    if (r.changed || r.created.length) console.log(`[AppManager] ${appId}: ownership for uid ${owner.uid}: ${r.changed} changed, ${r.created.length} created`);
     for (const x of r.skipped) console.warn(`[AppManager] ${appId}: ownership: ${x}`);
   }
 
@@ -2408,8 +2414,10 @@ export class AppManager {
       const appDir = opts.preview?.appDir ?? manifest.appDir;
       // A session host's data is its user's: never another user's (stream T).
       // (A Terminal as root is only ever the owner's, before the ownership apply: the owner's uid then.)
-      const sessionUid = isNonRootIdentity(spawnCtx.identity) ? spawnCtx.identity.uid : LINUX_ID_RANGES.owner.first;
-      if (TERMINAL_SESSION_APPS.has(appId) && retireForeignSessionData(instanceDataDir, sessionUid)) {
+      const sessionId = isNonRootIdentity(spawnCtx.identity)
+        ? { uid: spawnCtx.identity.uid, gid: spawnCtx.identity.gid }
+        : { uid: LINUX_ID_RANGES.owner.first, gid: LINUX_ID_RANGES.owner.first };
+      if (TERMINAL_SESSION_APPS.has(appId) && retireForeignSessionData(instanceDataDir, sessionId)) {
         this.mounts.forget(instanceId);   // nor its cross-app mounts (normally forgotten at its stop already)
       }
       if (spawnCtx.identity?.approvedRoot) {

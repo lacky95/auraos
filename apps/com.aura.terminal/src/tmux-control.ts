@@ -37,14 +37,37 @@ export const HOST_LABEL = process.env['AURA_SHELL_HOSTNAME'] ?? 'aura-shell';
 export const TMUX_SOCKET = process.env['AURA_TERM_TMUX_SOCKET'] ?? 'aura';
 
 /**
+ * The session launcher (stream T2): this server runs as the Terminal service
+ * uid and every session command runs as the session user through
+ * `aura-term-launch run` (core spawn/sessionArgs.ts; `AURA_TERM_TMUX_BIN` is
+ * its tmux alias). Null when this server runs as the session user itself (a
+ * root Terminal in the deploy window, tests, a dev run).
+ */
+export function sessionLauncher(env: NodeJS.ProcessEnv = process.env, uid: number = process.getuid?.() ?? 0): string | null {
+  const launch = env['AURA_TERM_LAUNCH'];
+  const sessionUid = Number(env['AURA_SESSION_UID'] ?? NaN);
+  return launch && Number.isInteger(sessionUid) && sessionUid !== uid ? launch : null;
+}
+
+/** argv to run `file args` as the session user: through the launcher, or directly when this server is that user. */
+export function asSessionUser(file: string, args: readonly string[], env: NodeJS.ProcessEnv = process.env): { file: string; args: string[] } {
+  const launch = sessionLauncher(env);
+  return launch ? { file: launch, args: ['run', '--', file, ...args] } : { file, args: [...args] };
+}
+
+/**
  * Where the tmux server listens (stream T, D69): an explicit socket per uid,
  * `-S /run/aura-term/<uid>/tmux.sock`, in the tmpfs the runtime mounts for a
  * session host (owned by the session uid, 0700; core spawn/sessionArgs.ts).
- * A named test socket (`AURA_TERM_TMUX_SOCKET`) keeps `-L`; a server started
- * by hand without that directory uses the per-uid temp dir.
+ * Under the launcher (T2) the uid is the session user's (`AURA_SESSION_UID`):
+ * the tmux server and its clients run as that user, never as this server,
+ * which can't even enter that directory. A named test socket
+ * (`AURA_TERM_TMUX_SOCKET`) keeps `-L`; a server started by hand without that
+ * directory uses the per-uid temp dir.
  */
 export function tmuxSocketArgs(env: NodeJS.ProcessEnv = process.env, uid: number = process.getuid?.() ?? 0): string[] {
   if (env['AURA_TERM_TMUX_SOCKET']) return ['-L', env['AURA_TERM_TMUX_SOCKET']];
+  if (sessionLauncher(env, uid)) return ['-S', join(env['AURA_TERM_TMUX_DIR'] || '/run/aura-term', String(Number(env['AURA_SESSION_UID'])), 'tmux.sock')];
   for (const root of [env['AURA_TERM_TMUX_DIR'] || '/run/aura-term', join(tmpdir(), 'aura-term')]) {
     const dir = join(root, String(uid));
     try {
@@ -62,7 +85,8 @@ export const TMUX_SOCKET_ARGS: readonly string[] = tmuxSocketArgs();
  * tokens), plus the server's own listen and build settings.
  */
 const SERVER_ONLY_ENV = new Set([
-  'AURA_LIFECYCLE_TOKEN', 'AURA_LIFECYCLE_TOKEN_FILE', 'AURA_SERVER_SEALED', 'AURA_RELAY_STRICT', 'AURA_LISTEN_SUBNET', 'AURA_SHELL_PEERS', 'AURA_SERVE',
+  'AURA_LIFECYCLE_TOKEN', 'AURA_LIFECYCLE_TOKEN_FILE', 'AURA_SESSION_HOST', 'AURA_RELAY_STRICT', 'AURA_LISTEN_SUBNET', 'AURA_SHELL_PEERS', 'AURA_SERVE',
+  'AURA_TERM_LAUNCH', 'AURA_TERM_TMUX_BIN', 'AURA_TERM_TAP_DIR',
   'PORT', 'APP_PORT', 'HOST', 'NODE_ENV', 'ASTRO_NODE_AUTOSTART',
 ]);
 const SERVER_ONLY_PREFIXES = ['npm_', 'ASTRO_', 'VITE_', 'PNPM_'];
@@ -71,7 +95,8 @@ const SERVER_ONLY_PREFIXES = ['npm_', 'ASTRO_', 'VITE_', 'PNPM_'];
  * A session's environment: the container's (the OS variables, the user's
  * context keys, `AURA_INSTANCE_TOKEN` for the `aura` CLI) without the
  * server's own (SERVER_ONLY_ENV), `HOME=/home/aura`, and the account's
- * `USER`/`LOGNAME` from the generated passwd. A denylist on purpose: the
+ * `USER`/`LOGNAME` from the generated passwd (under the launcher, T2, the
+ * launcher sets them from the session account: this server is not it). A denylist on purpose: the
  * container env also carries the user's context keys (stream C), which a
  * fixed allowlist would drop.
  */
@@ -84,7 +109,8 @@ export function sessionEnv(base: NodeJS.ProcessEnv = process.env): Record<string
   env['HOME'] = '/home/aura';
   try {
     const name = userInfo().username;
-    if (name && (process.getuid?.() ?? 0) !== 0) { env['USER'] = name; env['LOGNAME'] = name; }
+    if (sessionLauncher(base)) { delete env['USER']; delete env['LOGNAME']; }   // the service's: the launcher sets the user's
+    else if (name && (process.getuid?.() ?? 0) !== 0) { env['USER'] = name; env['LOGNAME'] = name; }
   } catch { /* no passwd entry: leave them */ }
   env['AURA_TERM_LABEL'] = HOST_LABEL;
   return env;

@@ -11,7 +11,9 @@ import { containerContextEnv, containerContextMounts } from './spawn/contextArgs
 import { containerNetworkArgs, containerNetworkEnv, containerShellBase, rawSocketArgs, terminalNetworkUser } from './spawn/networkArgs.js';
 import { TERM_NETWORK_CONTAINER_LABEL, TermNetworks, type TermNetwork } from './TermNetworks.js';
 import { containerIdentityArgs, isNonRootIdentity, writeIdentityFiles } from './spawn/identityArgs.js';
-import { readKernelSessionSecret, sessionHostUser, terminalSessionArgs, writeSessionSecret } from './spawn/sessionArgs.js';
+import {
+  SESSION_IDENTITY_LABEL, readKernelSessionSecret, sessionHostUser, sessionServerOwner, terminalSessionArgs, terminalSessionCommand, writeSessionSecret,
+} from './spawn/sessionArgs.js';
 import type { RuntimeCapabilities } from '../runtimes/types.js';
 // Value import, but MountManager imports ContainerRunner type-only, so there
 // is no runtime cycle.
@@ -228,6 +230,12 @@ function lifecycleUrl(address: string, port: number, hook: string): string {
   return `http://${address.includes(':') ? `[${address}]` : address}:${port}${lifecyclePath(hook)}`;
 }
 
+/** A session host's own user, from its label (stream T2): the session launcher's target check. */
+function sessionHostTarget(label: string | undefined): { sessionHostUid?: number } {
+  const uid = Number(/^(\d+):\d+$/.exec(label ?? '')?.[1] ?? 0);
+  return uid > 0 ? { sessionHostUid: uid } : {};
+}
+
 interface TrackedContainer {
   /** Watches the app's log to tell "installing dependencies" from "failing
    *  to boot", so the health deadline can stay open for the former. */
@@ -255,6 +263,8 @@ interface TrackedContainer {
   addresses: string[];
   /** This start's lifecycle secret (`AURA_LIFECYCLE_TOKEN` in the container's env). */
   lifecycleToken?: string;
+  /** A session host's session uid:gid (stream T2): `docker exec` runs as it, never as the container's root launcher. */
+  sessionUser?: string;
   /** Health identity and runtime-check result, once healthy (not for adopted containers). */
   lifecycle?: LifecycleStatus;
   port: number;
@@ -480,7 +490,7 @@ export class ContainerRunner implements SandboxRunner {
     // (`-e AURA_LIFECYCLE_TOKEN` without a value), not its command line.
     const lifecycleToken = newLifecycleToken();
     // A session host's server takes its token from a one-time file, not its env (stream T).
-    if (sessionHostUser(appId, ctx)) writeSessionSecret(this.dataDir, instanceId, lifecycleToken, ctx.identity ?? { uid: 0, gid: 0 });
+    if (sessionHostUser(appId, ctx)) writeSessionSecret(this.dataDir, instanceId, lifecycleToken, sessionServerOwner(ctx.identity));
     const r = spawnSync('docker', args, {
       stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000, encoding: 'utf-8',
       env: { ...process.env, AURA_LIFECYCLE_TOKEN: lifecycleToken },
@@ -519,6 +529,7 @@ export class ContainerRunner implements SandboxRunner {
     const tracked: TrackedContainer = {
       containerId, hostname, address, dialByAddress: !!term, addresses, lifecycleToken, port, appId, logTail, pid,
       exitCb: null, expectingKill: false, provision,
+      ...(sessionHostUser(appId, ctx) && ctx.identity?.uid ? { sessionUser: `${ctx.identity.uid}:${ctx.identity.gid}` } : {}),
     };
     this.containers.set(instanceId, tracked);
 
@@ -881,7 +892,8 @@ export class ContainerRunner implements SandboxRunner {
       ...terminalSessionArgs(appId, ctx, { appDataVolume, instanceId }),
       BASE_IMAGE,
     );
-    a.push(...entrypoint);
+    // A session host's command runs under its session launcher (spawn/sessionArgs.ts, stream T2).
+    a.push(...terminalSessionCommand(appId, ctx, entrypoint));
     void manifest; // unused — kept for future per-manifest customisation
     return a;
   }
@@ -1104,8 +1116,10 @@ export class ContainerRunner implements SandboxRunner {
     dialByAddress?: boolean;
     lifecycleToken?: string;
     preview?: string;
-    /** `Config.User` (P5-3): `<uid>:<gid>` of a non-root app; empty for root. */
+    /** `Config.User` (P5-3): `<uid>:<gid>` of a non-root app; empty for root. A session host's session uid:gid (its label). */
     user?: string;
+    /** A session host's session uid:gid (stream T2). */
+    sessionUser?: string;
   }> | null> {
     type DockerInspect = {
       Config: { Env: string[]; Labels?: Record<string, string>; User?: string }; State: { Pid: number };
@@ -1125,7 +1139,7 @@ export class ContainerRunner implements SandboxRunner {
       return null;
     }
     const names = psOut.split('\n').map((l) => l.trim()).filter(Boolean);
-    const out: Array<{ instanceId: string; appId: string; port: number; hostname: string; pid: number; tokenNonce?: string; ownerLabel?: string; address?: string; addresses?: string[]; dialByAddress?: boolean; lifecycleToken?: string; preview?: string; user?: string }> = [];
+    const out: Array<{ instanceId: string; appId: string; port: number; hostname: string; pid: number; tokenNonce?: string; ownerLabel?: string; address?: string; addresses?: string[]; dialByAddress?: boolean; lifecycleToken?: string; preview?: string; user?: string; sessionUser?: string }> = [];
     for (const name of names) {
       if (!name.startsWith('aura-')) continue;
       // Skip aura-shell itself — it's not an app instance, just the
@@ -1176,7 +1190,9 @@ export class ContainerRunner implements SandboxRunner {
         // A session host has none in its env: the kernel's own copy (spawn/sessionArgs.ts).
         lifecycleToken: env['AURA_LIFECYCLE_TOKEN'] || readKernelSessionSecret(this.dataDir, instanceId) || undefined,
         ...(inspect.Config?.Labels?.[PREVIEW_LABEL] ? { preview: inspect.Config.Labels[PREVIEW_LABEL] } : {}),
-        ...(inspect.Config?.User ? { user: inspect.Config.User } : {}),
+        // A session host runs as root (its launcher): its session identity is the label's (stream T2).
+        ...(inspect.Config?.Labels?.[SESSION_IDENTITY_LABEL] ? { user: inspect.Config.Labels[SESSION_IDENTITY_LABEL], sessionUser: inspect.Config.Labels[SESSION_IDENTITY_LABEL] }
+          : inspect.Config?.User ? { user: inspect.Config.User } : {}),
       });
     }
     return out;
@@ -1199,6 +1215,7 @@ export class ContainerRunner implements SandboxRunner {
     addresses?: string[];
     dialByAddress?: boolean;
     lifecycleToken?: string;
+    sessionUser?: string;
   }): void {
     if (this.containers.has(rec.instanceId)) return;
     // We don't have the container ID handy — docker inspect would have it,
@@ -1227,6 +1244,7 @@ export class ContainerRunner implements SandboxRunner {
       dialByAddress: rec.dialByAddress === true,
       addresses:     [...(rec.addresses ?? [])],
       ...(rec.address && rec.lifecycleToken ? { lifecycleToken: rec.lifecycleToken } : {}),
+      ...(rec.sessionUser ? { sessionUser: rec.sessionUser } : {}),
       port:          rec.port,
       appId:         rec.appId,
       logTail,
@@ -1580,7 +1598,9 @@ export class ContainerRunner implements SandboxRunner {
     const c = this.containers.get(instanceId);
     if (!c || !argv.length) throw new Error(`${instanceId} is not running in a container`);
     const envFlags = Object.entries(opts.env ?? {}).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
-    return execFileAsync('docker', ['exec', '-w', `/workspace/apps/${c.appId}`, ...envFlags, this.containerName(instanceId), ...argv], {
+    // A session host's container runs as root (its launcher): an exec runs as its session user (stream T2).
+    const user = c.sessionUser ? ['--user', c.sessionUser] : [];
+    return execFileAsync('docker', ['exec', '-w', `/workspace/apps/${c.appId}`, ...user, ...envFlags, this.containerName(instanceId), ...argv], {
       timeout: opts.timeoutMs ?? 120_000, maxBuffer: 16 * 1024 * 1024,
     });
   }
@@ -1634,7 +1654,7 @@ export class ContainerRunner implements SandboxRunner {
     }
     return broker.openSession({
       ...spec, env: { ...env, ...spec.env }, cwd: spec.cwd ?? `/workspace/apps/${c.appId}`,
-    }, { containerId: info.Id, pid: info.State.Pid }, onOutput);
+    }, { containerId: info.Id, pid: info.State.Pid, ...sessionHostTarget(info.Config?.Labels?.[SESSION_IDENTITY_LABEL]) }, onOutput);
   }
 
   isRunning(instanceId: string): boolean {

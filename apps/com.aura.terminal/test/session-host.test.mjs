@@ -79,7 +79,8 @@ test('hook token: keyed from the token the server took from its one-time file (n
     delete process.env.AURA_LIFECYCLE_TOKEN;
     globalThis[KEY] = 'lt-from-file';
     assert.equal(hookToken('com.aura.terminal-2#a1'), hookToken('com.aura.terminal-2#a1', 'lt-from-file'));
-    assert.equal(tc.sessionEnv({ AURA_LIFECYCLE_TOKEN_FILE: '/run/aura-secret/lifecycle-token', AURA_SERVER_SEALED: '1' }).AURA_LIFECYCLE_TOKEN_FILE, undefined);
+    const env = tc.sessionEnv({ AURA_LIFECYCLE_TOKEN_FILE: '/run/aura-secret/lifecycle-token', AURA_SESSION_HOST: '1', AURA_TERM_LAUNCH: '/x', AURA_TERM_TMUX_BIN: '/y', AURA_TERM_TAP_DIR: '/z' });
+    for (const k of ['AURA_LIFECYCLE_TOKEN_FILE', 'AURA_SESSION_HOST', 'AURA_TERM_LAUNCH', 'AURA_TERM_TMUX_BIN', 'AURA_TERM_TAP_DIR']) assert.equal(env[k], undefined, k);
   } finally {
     delete globalThis[KEY];
     process.env.AURA_LIFECYCLE_TOKEN = saved;

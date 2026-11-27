@@ -15,7 +15,12 @@ import { join } from 'node:path';
 import { appIdentityProvider, sessionHostIdentityProvider } from '../dist/identity/appIdentityProvider.js';
 import { APP_MIGRATION, buildPrivilegeReview } from '../dist/identity/privilegeReview.js';
 import { containerIdentityArgs, identityAccountName, isSessionIdentity, renderIdentityFiles } from '../dist/app-manager/spawn/identityArgs.js';
-import { readKernelSessionSecret, sessionSecretSubpath, terminalSessionArgs, writeSessionSecret, SESSION_SECRET_FILE, TERMINAL_RUN_DIR } from '../dist/app-manager/spawn/sessionArgs.js';
+import {
+  readKernelSessionSecret, sessionSecretSubpath, sessionServerOwner, terminalSessionArgs, terminalSessionCommand, writeSessionSecret,
+  SESSION_IDENTITY_LABEL, SESSION_SECRET_FILE, TERMINAL_RUN_DIR, TERMINAL_SERVER_RUN_DIR, TERM_LAUNCH_BIN, TERM_TMUX_BIN,
+} from '../dist/app-manager/spawn/sessionArgs.js';
+import { LINUX_ID_RANGES, TERMINAL_SERVICE_ACCOUNT, TERMINAL_SERVICE_GID, TERMINAL_SERVICE_UID, linuxIdRangeOf } from '../dist/identity/types.js';
+import { enterSpec } from '../dist/app-manager/SessionBroker.js';
 import { ASTRO_START_SHELL } from '../dist/app-manager/provisioning.js';
 import { ContainerRunner } from '../dist/app-manager/ContainerRunner.js';
 import { SECURITY_OPTIONS } from '../dist/security/options.js';
@@ -88,24 +93,85 @@ test('T: the session identity\'s passwd names the user (pw_dir /home/aura); unsa
   assert.match(files.group, /^lukas:x:1000:$/m);
 });
 
-test('T: a session host container: the user\'s uid, no capabilities, AURA_RUN_AS=user', () => {
-  const args = containerIdentityArgs({ uid: 100000, gid: 100000, range: 'user', userId: 'u2', account: 'bob' }, { appDataVolume: 'v', instanceId: `${TERMINAL}-2` });
-  const at = (flag) => args[args.indexOf(flag) + 1];
-  assert.equal(at('--user'), '100000:100000');
-  assert.equal(at('--cap-drop'), 'ALL');
-  assert.equal(at('--security-opt'), 'no-new-privileges');
-  assert.ok(args.includes('AURA_RUN_AS=user'));
+// T2 (owner decision 2026-11-27): the server under its own non-login service uid, for the owner's AND a member's Terminal.
+const SESSION_USERS = [
+  { who: 'owner', identity: { uid: 1000, gid: 1000, range: 'owner', userId: 'default', account: 'lukas' } },
+  { who: 'member', identity: { uid: 100000, gid: 100000, range: 'user', userId: 'u2', account: 'bob' } },
+];
+
+test('T2: the Terminal service uid is a fixed OS service id: outside every user, app, ARI and principal range', () => {
+  assert.equal(linuxIdRangeOf(TERMINAL_SERVICE_UID), 'service');
+  assert.equal(TERMINAL_SERVICE_GID, TERMINAL_SERVICE_UID);
+  assert.ok(TERMINAL_SERVICE_UID < LINUX_ID_RANGES.owner.first && TERMINAL_SERVICE_UID > 0);
+  for (const r of ['owner', 'user', 'app', 'ari', 'principal']) {
+    assert.ok(TERMINAL_SERVICE_UID < LINUX_ID_RANGES[r].first || TERMINAL_SERVICE_UID > LINUX_ID_RANGES[r].last, r);
+  }
 });
 
-test('T: terminalSessionArgs: the built-in Terminal only; its user and the tmux socket tmpfs owned by its uid', () => {
+for (const { who, identity } of SESSION_USERS) {
+  test(`T2 (${who}): a session host container: root with SETUID/SETGID only (its launcher), no-new-privileges, AURA_RUN_AS=user`, () => {
+    const args = containerIdentityArgs(identity, { appDataVolume: 'v', instanceId: `${TERMINAL}-2` });
+    const all = (flag) => args.flatMap((a, i) => (a === flag ? [args[i + 1]] : []));
+    assert.deepEqual(all('--user'), ['0:0']);
+    assert.deepEqual(all('--cap-drop'), ['ALL']);
+    assert.deepEqual(all('--cap-add').sort(), ['SETGID', 'SETUID'], 'nothing else: no DAC_OVERRIDE, KILL, SYS_PTRACE, CHOWN');
+    assert.deepEqual(all('--security-opt'), ['no-new-privileges']);
+    assert.ok(!args.includes('--privileged'));
+    assert.ok(args.includes('AURA_RUN_AS=user'));
+  });
+
+  test(`T2 (${who}): its passwd names the user (uid ${identity.uid}) and the non-login service account; a user can't take its name`, () => {
+    const { passwd, group } = renderIdentityFiles(identity, null);
+    assert.match(passwd, new RegExp(`^${identity.account}:x:${identity.uid}:${identity.gid}:`, 'm'));
+    assert.match(passwd, new RegExp(`^${TERMINAL_SERVICE_ACCOUNT}:x:${TERMINAL_SERVICE_UID}:${TERMINAL_SERVICE_GID}:[^:]*:/nonexistent:/usr/sbin/nologin$`, 'm'));
+    assert.match(group, new RegExp(`^${TERMINAL_SERVICE_ACCOUNT}:x:${TERMINAL_SERVICE_GID}:$`, 'm'), 'the user is no member of the service group');
+    assert.equal(identityAccountName({ ...identity, account: TERMINAL_SERVICE_ACCOUNT }, null), `user-${identity.uid}`);
+    // An app identity has no service account.
+    assert.doesNotMatch(renderIdentityFiles({ uid: 200001, gid: 200001, range: 'app' }, 'inst1').passwd, /aura-terminal/);
+  });
+
+  test(`T2 (${who}): terminalSessionArgs: the user, the user's tmux tmpfs, the server's tmpfs, the launcher's tmux, the token file`, () => {
+    const { uid, gid, userId } = identity;
+    assert.deepEqual(terminalSessionArgs(TERMINAL, { appDir: '/workspace/apps/com.aura.terminal', owner: userId, identity }, { appDataVolume: 'vol', instanceId: `${TERMINAL}-2` }), [
+      '-e', `AURA_SESSION_USER=${userId}`,
+      '-e', `AURA_SESSION_UID=${uid}`,
+      '--label', `${SESSION_IDENTITY_LABEL}=${uid}:${gid}`,
+      '--tmpfs', `${TERMINAL_RUN_DIR}/${uid}:rw,nosuid,nodev,noexec,mode=0700,uid=${uid},gid=${gid}`,
+      '--tmpfs', `${TERMINAL_SERVER_RUN_DIR}:rw,nosuid,nodev,noexec,mode=0711,uid=${TERMINAL_SERVICE_UID},gid=${TERMINAL_SERVICE_GID}`,
+      '-e', 'AURA_SESSION_HOST=1',
+      '-e', `AURA_TERM_TMUX_BIN=${TERM_TMUX_BIN}`,
+      '-e', `AURA_TERM_LAUNCH=${TERM_LAUNCH_BIN}`,
+      '-e', `AURA_TERM_TAP_DIR=${TERMINAL_SERVER_RUN_DIR}/tap`,
+      '--mount', `type=volume,source=vol,target=/run/aura-secret,volume-subpath=${sessionSecretSubpath(`${TERMINAL}-2`)}`,
+      '-e', `AURA_LIFECYCLE_TOKEN_FILE=${SESSION_SECRET_FILE}`,
+    ]);
+    // The command: the launcher serves the server as the service uid and the sessions as this user.
+    assert.deepEqual(terminalSessionCommand(TERMINAL, { appDir: '/workspace/apps/com.aura.terminal', owner: userId, identity }, ['bash', '-c', 'x']), [
+      TERM_LAUNCH_BIN, 'serve', '--service', `${TERMINAL_SERVICE_UID}:${TERMINAL_SERVICE_GID}`, '--user', `${uid}:${gid}`, '--', 'bash', '-c', 'x',
+    ]);
+    assert.deepEqual(sessionServerOwner(identity), { uid: TERMINAL_SERVICE_UID, gid: TERMINAL_SERVICE_GID }, 'the token file is never the user\'s');
+  });
+
+  test(`T2 (${who}): only its own user's session may enter its Terminal (J's launcher: its init is root)`, () => {
+    const spec = { sessionId: 's1', kind: 'user', home: { mode: 'ephemeral' }, uid: identity.uid, gid: identity.gid, groups: [], env: {}, argv: ['bash'], tty: true };
+    const target = { containerId: 'a'.repeat(64), pid: 42, sessionHostUid: identity.uid };
+    assert.equal(enterSpec(spec, target).sessionHostUid, identity.uid);
+    assert.equal(enterSpec(spec, { containerId: 'a'.repeat(64), pid: 42 }).sessionHostUid, undefined);
+  });
+}
+
+test('T2: a root Terminal (the deploy window) runs as before, without the launcher; other apps are untouched', () => {
+  const root = { uid: 0, gid: 0, range: 'root', userId: 'default' };
+  const args = terminalSessionArgs(TERMINAL, { appDir: '/workspace/apps/com.aura.terminal', owner: 'default', identity: root });
+  assert.ok(args.includes('AURA_SESSION_HOST=1') && args.includes(`${TERMINAL_RUN_DIR}:rw,nosuid,nodev,noexec,mode=0700,uid=0,gid=0`));
+  assert.ok(!args.some((a) => a.startsWith('AURA_TERM_LAUNCH')));
+  assert.deepEqual(terminalSessionCommand(TERMINAL, { appDir: '/workspace/apps/com.aura.terminal', owner: 'default', identity: root }, ['x']), ['x']);
+  assert.deepEqual(terminalSessionCommand('com.aura.counter', { appDir: '/workspace/apps/com.aura.counter', owner: 'default', identity: SESSION_USERS[0].identity }, ['x']), ['x']);
+  assert.deepEqual(sessionServerOwner(root), { uid: 0, gid: 0 });
+});
+
+test('T: terminalSessionArgs: the built-in Terminal only', () => {
   const identity = { uid: 100000, gid: 100000, range: 'user', userId: 'u2' };
-  assert.deepEqual(terminalSessionArgs(TERMINAL, { appDir: '/workspace/apps/com.aura.terminal', owner: 'u2', identity }, { appDataVolume: 'vol', instanceId: `${TERMINAL}-2` }), [
-    '-e', 'AURA_SESSION_USER=u2',
-    '--tmpfs', `${TERMINAL_RUN_DIR}:rw,nosuid,nodev,noexec,mode=0700,uid=100000,gid=100000`,
-    '-e', 'AURA_SERVER_SEALED=1',
-    '--mount', `type=volume,source=vol,target=/run/aura-secret,volume-subpath=${sessionSecretSubpath(`${TERMINAL}-2`)}`,
-    '-e', `AURA_LIFECYCLE_TOKEN_FILE=${SESSION_SECRET_FILE}`,
-  ]);
   // A pool member (no owner yet) names the user its identity is for.
   assert.ok(terminalSessionArgs(TERMINAL, { appDir: '/workspace/apps/com.aura.terminal', identity }).includes('AURA_SESSION_USER=u2'));
   assert.deepEqual(terminalSessionArgs(TERMINAL, { appDir: '/data/scopes/users/default/apps/com.aura.terminal', owner: 'u2', identity }), [], 'a same-id copy is no session host');
@@ -131,33 +197,36 @@ test('T: the root transition is a deploy window only: a root-owned `deploy` swit
   assert.equal(opt.env, undefined, 'no host variable can open it beyond the window');
 });
 
-test('T: a sealed session host serves its production build only, from the execute-only node; else exit 78', () => {
-  const at = ASTRO_START_SHELL.indexOf('AURA_SERVER_SEALED');
+test('T2: a session host serves its production build only; else exit 78. No execute-only node is claimed as a boundary', () => {
+  const at = ASTRO_START_SHELL.indexOf('AURA_SESSION_HOST');
   assert.ok(at > 0 && at < ASTRO_START_SHELL.indexOf('dev --host'), 'decided before any dev server');
-  assert.match(ASTRO_START_SHELL, /AURA_SERVE:-dev\}" != prod \] \|\| \[ ! -f dist\/server\/entry\.mjs \];\s*then[^]*?exit 78/);
-  assert.match(ASTRO_START_SHELL, /\/usr\/local\/bin\/node-sealed \];\s*then[^]*?exit 78/);
-  assert.match(ASTRO_START_SHELL, /exec "\$NODE_BIN" server\.mjs/);
+  assert.match(ASTRO_START_SHELL, /AURA_SESSION_HOST:-\}" = 1 \] && \{ \[ "\$\{AURA_SERVE:-dev\}" != prod \] \|\| \[ ! -f dist\/server\/entry\.mjs \]; \}; then[^]*?exit 78/);
+  assert.doesNotMatch(ASTRO_START_SHELL, /node-sealed|AURA_SERVER_SEALED/);
   const dockerfile = readFileSync(new URL('../../../Dockerfile', import.meta.url), 'utf-8');
-  assert.match(dockerfile, /install -m 0111 -o root -g root \/usr\/local\/bin\/node \/usr\/local\/bin\/node-sealed/, 'aura-base ships it execute-only');
+  assert.doesNotMatch(dockerfile, /node-sealed/, 'no execute-only node');
+  assert.match(dockerfile, /mkdir -p \/usr\/local\/libexec\s*\\\s*&& cc [^\n]*-o \/usr\/local\/libexec\/aura-term-launch \/tmp\/term-launch\.c/, 'aura-base builds the session launcher');
+  assert.match(dockerfile, /ln -s aura-term-launch \/usr\/local\/libexec\/aura-term-tmux/);
 });
 
 test('T: a session host gets its lifecycle token as a one-time file, never in its container env', { skip: process.getuid?.() !== 0 && 'needs root to chown' }, () => {
   const root = mkdtempSync(join(tmpdir(), 'aura-t-sec-'));
   try {
     const dataDir = join(root, 'data');
-    writeSessionSecret(dataDir, `${TERMINAL}-4`, 'lt-secret-1', { uid: 1000, gid: 1000 });
+    const svc = sessionServerOwner({ uid: 1000, gid: 1000, range: 'owner', userId: 'default' });
+    writeSessionSecret(dataDir, `${TERMINAL}-4`, 'lt-secret-1', svc);
     const dir = join(dataDir, sessionSecretSubpath(`${TERMINAL}-4`));
     const f = lstatSync(join(dir, 'lifecycle-token'));
-    assert.equal(f.uid, 1000); assert.equal(f.mode & 0o777, 0o400);
+    assert.equal(f.uid, TERMINAL_SERVICE_UID, 'the server\'s, not the user\'s'); assert.equal(f.mode & 0o777, 0o400);
+    assert.equal(lstatSync(dir).uid, TERMINAL_SERVICE_UID);
     assert.equal(lstatSync(dir).mode & 0o777, 0o700);
     const k = lstatSync(join(dataDir, 'aura/runtime', `${TERMINAL}-4`, 'lifecycle-token.kernel'));
     assert.equal(k.uid, 0); assert.equal(k.mode & 0o777, 0o600);
     assert.equal(readKernelSessionSecret(dataDir, `${TERMINAL}-4`), 'lt-secret-1', 'a shell restart re-learns it');
-    writeSessionSecret(dataDir, `${TERMINAL}-4`, 'lt-secret-2', { uid: 1000, gid: 1000 });
+    writeSessionSecret(dataDir, `${TERMINAL}-4`, 'lt-secret-2', svc);
     assert.equal(readFileSync(join(dir, 'lifecycle-token'), 'utf-8'), 'lt-secret-2', 'replaced at the next start');
     rmSync(dir, { recursive: true });
     symlinkSync('/etc', dir);
-    assert.throws(() => writeSessionSecret(dataDir, `${TERMINAL}-4`, 'x', { uid: 1000, gid: 1000 }), /not a directory/);
+    assert.throws(() => writeSessionSecret(dataDir, `${TERMINAL}-4`, 'x', svc), /not a directory/);
 
     // The container: the token's name only for an ordinary app; nothing for the session host.
     const appDir = join(dataDir, 'scopes/system/apps/com.aura.terminal');
@@ -170,7 +239,11 @@ test('T: a session host gets its lifecycle token as a one-time file, never in it
     const term = args(TERMINAL, '/workspace/apps/com.aura.terminal');
     assert.ok(!term.includes('AURA_LIFECYCLE_TOKEN'), 'no lifecycle token in the session host\'s env');
     assert.ok(term.includes(`AURA_LIFECYCLE_TOKEN_FILE=${SESSION_SECRET_FILE}`));
-    assert.ok(term.includes('AURA_SERVER_SEALED=1'));
+    assert.ok(term.includes('AURA_SESSION_HOST=1'));
+    // The launcher is the command; the server and its sessions get their uids from it.
+    const at = term.indexOf(TERM_LAUNCH_BIN);
+    assert.ok(at > 0 && term[at + 1] === 'serve' && term.slice(at).includes('1000:1000'));
+    assert.equal(term[term.indexOf('--user') + 1], '0:0');
     assert.ok(args('com.aura.counter', '/workspace/apps/com.aura.counter').includes('AURA_LIFECYCLE_TOKEN'), 'an ordinary app keeps it');
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -193,8 +266,8 @@ test('T: a reused instance id never hands one user\'s session data to another', 
     mkdirSync(join(dir, 'scrollback'), { recursive: true });
     writeFileSync(join(dir, 'launch-commands.json'), '{"x":"rm -rf ~"}');
     chownSync(dir, 100000, 100000);
-    assert.equal(retireForeignSessionData(dir, 100000), null, 'its own user: kept');
-    const aside = retireForeignSessionData(dir, 1000, 42);
+    assert.equal(retireForeignSessionData(dir, { uid: 100000, gid: 100000 }), null, 'its own user: kept');
+    const aside = retireForeignSessionData(dir, { uid: 1000, gid: 1000 }, 42);
     assert.ok(aside && aside.endsWith(`.${TERMINAL}-3.retired-100000-42`));
     assert.deepEqual(readdirSync(dir), [], 'the new user starts empty');
     assert.ok(existsSync(join(aside, 'launch-commands.json')));
@@ -202,8 +275,14 @@ test('T: a reused instance id never hands one user\'s session data to another', 
     // Root-owned: from before stream T, the owner's.
     chownSync(dir, 0, 0);
     writeFileSync(join(dir, 'session-cwd.json'), '{}');
-    assert.equal(retireForeignSessionData(dir, 1000), null);
+    assert.equal(retireForeignSessionData(dir, { uid: 1000, gid: 1000 }), null);
     assert.ok(existsSync(join(dir, 'session-cwd.json')));
+    // T2: the service uid's, with a user's group: that user's (kept); another user's group: moved aside.
+    chownSync(dir, TERMINAL_SERVICE_UID, 1000);
+    assert.equal(retireForeignSessionData(dir, { uid: 1000, gid: 1000 }), null, 'the owner\'s (service uid, owner gid)');
+    const aside2 = retireForeignSessionData(dir, { uid: 100000, gid: 100000 }, 43);
+    assert.ok(aside2 && aside2.endsWith(`.${TERMINAL}-3.retired-g1000-43`), 'the member never gets the owner\'s');
+    assert.deepEqual(readdirSync(dir), []);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
