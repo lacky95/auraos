@@ -25,7 +25,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { GROUP_FEATURE, GROUPS_PENDING_EXTRACTION, RUNTIME_FEATURE_IDS, moduleFeatures } from '../dist/index.js';
+import { GROUP_FEATURE, RUNTIME_FEATURE_IDS, moduleFeatures } from '../dist/index.js';
 import { containerRuntime } from '../dist/runtimes/container/index.js';
 import { prootRuntime } from '../dist/runtimes/proot/index.js';
 import { ContainerRunner } from '../dist/app-manager/ContainerRunner.js';
@@ -80,9 +80,9 @@ export const INVENTORY = [
   { id: 'cli.cap-status', surface: 'cap grant/revoke applied|failed|unsupported', status: 'fixed', by: '5b CR/G', feature: 'tools.liveGrant', group: 'tools' },
   { id: 'cli.cap-doctor', surface: 'cap doctor (each runtime\'s diagnostics.probeTools)', status: 'fixed', by: '5b-2 D-C', feature: 'tools.provision' },
   { id: 'cli.inspect-tools', surface: 'inspect-tools (tools.status)', status: 'fixed', by: '5b-2 D-C', feature: 'tools.provision', group: 'tools' },
-  { id: 'cli.mount', surface: 'mount ls/add/rm', status: 'bypass', row: 'D-M', feature: 'mount.attach' },
-  { id: 'cli.mount-workspace', surface: 'mount workspace', status: 'bypass', row: 'D-M', feature: 'mount.attach' },
-  { id: 'cli.patch-mounts', surface: 'dev patch start/save/activate (work, patches mounts)', status: 'bypass', row: 'D-M', feature: 'mount.attach' },
+  { id: 'cli.mount', surface: 'mount ls/add/rm (mounts.attach/detach/verify)', status: 'fixed', by: 'Phase 6 ari-rest (D-M)', feature: 'mount.attach', group: 'mounts' },
+  { id: 'cli.mount-workspace', surface: 'mount workspace (mounts.attach)', status: 'fixed', by: 'Phase 6 ari-rest (D-M)', feature: 'mount.attach', group: 'mounts' },
+  { id: 'cli.patch-mounts', surface: 'dev patch start/save/activate (work, patches mounts: mounts.attach)', status: 'fixed', by: 'Phase 6 ari-rest (D-M)', feature: 'mount.attach', group: 'mounts' },
   { id: 'cli.port', surface: 'port ls/expose/rm (endpoints)', status: 'fixed', by: '5b-2 D-P', feature: 'network.endpointExposure', group: 'endpoints' },
   { id: 'cli.sidecars', surface: 'get/describe/start/stop/restart/delete sc|svc (workloads.listOf/inspect/destroy)', status: 'fixed', by: 'Phase 6 ari-rest (D-S)', feature: 'workload.dynamic', group: 'workloads' },
   { id: 'cli.sidecar-create', surface: 'sidecar create, sidecar tools (workloads.create/start/seed; tools stay kernel storage, A4)', status: 'fixed', by: 'Phase 6 ari-rest (D-S)', feature: 'workload.dynamic', group: 'workloads' },
@@ -91,7 +91,7 @@ export const INVENTORY = [
   { id: 'feat.tools-host-dir', surface: 'tool refresh as a host dir', status: 'fixed', by: '5b K/CR (tools group)', feature: 'tools.liveGrant', group: 'tools' },
   { id: 'cli.whereami', surface: 'whereami (the kernel answers)', status: 'fixed', by: '5b CR', feature: 'instance.lifecycle' },
   { id: 'feat.reaper', surface: 'orphan reaper, reap-orphans (the runtimes\' orphans.scan; liveness by isRunning)', status: 'fixed', by: '5b-2 D-#11', feature: 'instance.adoption' },
-  { id: 'feat.mount-reapply', surface: 'mount reapply, fan-out to sidecars', status: 'bypass', row: 'D-M', feature: 'mount.inheritance' },
+  { id: 'feat.mount-reapply', surface: 'mount reapply, fan-out to sidecars, reconcile (mounts.attach/table)', status: 'fixed', by: 'Phase 6 ari-rest (D-M)', feature: 'mount.inheritance', group: 'mounts' },
   { id: 'feat.sidecar-reconcile', surface: 'OS sidecar reconcile, orphan sidecars (workloads.listManaged/destroy)', status: 'fixed', by: 'Phase 6 ari-rest (D-S)', feature: 'workload.dynamic', group: 'workloads' },
   { id: 'feat.term-networks', surface: 'Terminal private networks (container module internals)', status: 'fixed', by: '5b-2 D-T', feature: 'network.isolation' },
   { id: 'feat.datadir-report', surface: 'data-dir and contract report (diagnostics.inspectWrites)', status: 'fixed', by: '5b-2 D-R', feature: 'observability.logs' },
@@ -119,21 +119,11 @@ const EXEMPT = {
   'packages/core/src/types/manifest.ts': 'R2 schema rule (execution.runAs root on proot): a manifest parse has no registry; the start gate is capability-based',
 };
 
-/** Direct or indirect runtime-specific use outside the boundary, each with its inventory rows. */
+/**
+ * Direct or indirect runtime-specific use outside the boundary, each with its inventory rows. Phase 6 ari-rest
+ * emptied it for the 49 rows (D-S, D-M); what is left is the SDK's direct-Docker mode (D-SDK, the PHASE6 ledger).
+ */
 const BASELINE = {
-  // AppManager: the composition point (constructs the providers and managers until Phase 6 K bootSystem());
-  // it still constructs MountManager, which holds Docker mechanism (D-M).
-  'packages/core/src/app-manager/AppManager.ts': ['cli.mount'],
-  'packages/core/src/app-manager/MountManager.ts': ['cli.mount', 'cli.mount-workspace', 'cli.patch-mounts', 'feat.mount-reapply'],
-  'packages/core/src/patches/series.ts': ['cli.patch-mounts'],
-  'packages/shell/src/lib/appSource.ts': ['cli.patch-mounts'],
-  'packages/shell/src/pages/api/admin/manifest-edit.ts': ['cli.mount'],
-  'packages/shell/src/pages/api/admin/system-mode.ts': ['cli.mount-workspace'],
-  'packages/shell/src/pages/api/nexus/publish.ts': ['cli.patch-mounts'],
-  'packages/shell/src/pages/api/instances/[instanceId]/mounts.ts': ['cli.mount', 'cli.mount-workspace'],
-  'packages/shell/src/pages/api/instances/[instanceId]/mounts/[mountId].ts': ['cli.mount'],
-  'packages/shell/src/pages/api/instances/[instanceId]/sidecars/[name]/mounts.ts': ['feat.mount-reapply'],
-  'packages/shell/src/pages/api/instances/[instanceId]/sidecars/[name]/mounts/[mountId].ts': ['feat.mount-reapply'],
   'packages/app-sdk/src/sidecars.ts': ['sdk.docker-mode'],
 };
 
@@ -157,8 +147,8 @@ const DETAIL = [
   ['kind check', /\bsandbox\s*(===|!==)\s*['"](container|proot)['"]|['"](container|proot)['"]\s*(===|!==)\s*[\w.?]*sandbox\b/],
   ['container name', /`aura-\$\{[^}]*[iI]nstance[^}]*\}/],
 ];
-/** Shell code reaching a kernel manager that holds the Docker mechanism (MountManager until Phase 6 D-M). */
-const MANAGER = /\b(?:mgr|getAppManager\(\)|this\.mgr|deps\.mgr|core\.getAppManager\(\))\.(mounts|container)\b/;
+/** Shell code reaching the container runner itself (the managers hold no Docker mechanism since Phase 6 D-S, D-M). */
+const MANAGER = /\b(?:mgr|getAppManager\(\)|this\.mgr|deps\.mgr|core\.getAppManager\(\))\.(container)\b/;
 
 function sourceFiles() {
   const out = [];
@@ -225,7 +215,7 @@ test('ARI coverage: the §2 inventory has its 49 rows, each well-formed (status,
     if (r.status === 'bypass') {
       assert.ok(r.row in ROW, `${r.id}: names its 5b-2 extraction row`);
       const group = ROW[r.row];
-      if (group) assert.ok(GROUPS_PENDING_EXTRACTION.includes(group) || group in GROUP_FEATURE, `${r.id}: ${r.row} lands in a typed group (${group})`);
+      if (group) assert.ok(group in GROUP_FEATURE, `${r.id}: ${r.row} lands in a typed group (${group})`);
     }
     if (r.status === 'fixed') assert.ok(r.by, `${r.id}: says what fixed it`);
     if (r.status !== 'bypass' && r.group) assert.ok(r.group in GROUP_FEATURE, `${r.id}: ${r.group} is an implemented group`);
@@ -233,7 +223,7 @@ test('ARI coverage: the §2 inventory has its 49 rows, each well-formed (status,
   for (const r of INVENTORY) counts[r.status]++;
   // §2.3: 18 through ARI and 31 bypasses at 283378f; 5b-1 (K..G) and 5-main B6 closed 13 of the 31,
   // 5b-2 stream D the rest row by row (D-T, D-R, D-C, D-#11, D-X, D-P, D-B), Phase 6 ari-rest D-S and D-M.
-  assert.deepEqual(counts, { ari: 18, fixed: 27, bypass: 4 });
+  assert.deepEqual(counts, { ari: 18, fixed: 31, bypass: 0 });
 });
 
 test('ARI coverage: every group an ari/fixed row is served by is declared by the reference provider (container)', () => {
@@ -281,25 +271,28 @@ test('ARI coverage: the baseline shrinks: every entry still bypasses, and names 
 });
 
 /**
- * The rows 5b-2 stream D left open, each with its reason and its Phase 6 owner (owner decision 5: at the
- * latest Phase 6, never Phase 8). Phase 6 empties this table; a row is closed by moving its mechanism
- * behind the group, never by a baseline entry.
+ * The rows still open, each with its exact reason and its Phase 6 owner (owner decision 5: at the latest
+ * Phase 6, never Phase 8). Phase 6 ari-rest closed D-S and D-M; a row is closed by moving its mechanism behind
+ * a group, never by a baseline entry. What is left is D-SDK, and it waits on an owner decision only.
  */
 const PHASE6 = {
-  'D-M': 'Phase 6 K: the mounts group (attach/detach/list/verify by consumer) over the container module. MountManager '
-    + 'interleaves policy (kinds, nesting, D80 cross-uid plan, persistence, fan-out) with the helper-container bind, the '
-    + 'consumer mount-table verify and the legacy-root inspect; the split needs the VM mount matrix (idmap-mount, '
-    + 'mount reapply after restart), not an L1/L2 refactor.',
-  'D-SDK': 'Phase 6, after the apps move: the owner precondition ("every existing app is on OS-managed sidecars") '
-    + 'does not hold. Two installed apps (io.lakner.trilium, io.lakner.steelaibrowser) call createSidecars() '
-    + 'without a mode, i.e. the SDK docker mode; they move to mode \'os\' (app patches) first, then the mode, its '
-    + 'options and docs are removed.',
+  'D-SDK': 'Phase 6, owner decision pending (the one remaining row; no kernel or runtime code is left to move): '
+    + 'packages/app-sdk/src/sidecars.ts keeps the direct-Docker sidecar mode (`docker` CLI, the socket path, '
+    + '`aura-${instanceId}` names), the default when createSidecars() gets no `mode`. The owner precondition '
+    + 'for removing it ("every existing app is on OS-managed sidecars") does not hold: two installed apps, '
+    + 'io.lakner.trilium (server.mjs) and io.lakner.steelaibrowser (src/lib/steel.ts), call createSidecars() '
+    + 'without a mode. Routing the docker mode through the OS path inside the SDK is not compatible (onSeed, '
+    + 'per-app volumes and volume/subpath overrides have no OS equivalent: sidecar-spec.ts refuses them) and '
+    + 'would change those apps at their next SDK refresh. Owner question: patch both apps to mode \'os\' '
+    + '(services[].seed instead of onSeed), then delete the mode, its options and docs in one step.',
 };
 
-test('ARI coverage: every open bypass is a 5b-2 extraction row, at the latest Phase 6 (owner decision 5): the ledger', () => {
+test('ARI coverage: every open bypass is in the Phase 6 ledger with its exact reason (owner decision 5): only D-SDK is left', () => {
   const ledger = {};
   for (const r of ALL.filter((x) => x.status === 'bypass')) (ledger[r.row] ??= []).push(r.id);
-  // The rows 5b-2 stream D leaves open, each with its reason and a Phase 6 owner; never Phase 8.
+  // The rows left open, each with its reason and a Phase 6 owner; never Phase 8. The 49 inventory rows are all closed.
   assert.deepEqual(Object.keys(ledger).sort(), Object.keys(PHASE6).sort());
+  assert.deepEqual(Object.keys(ledger), ['D-SDK']);
+  assert.deepEqual(ledger['D-SDK'], ['sdk.docker-mode']);
   for (const [row, why] of Object.entries(PHASE6)) assert.match(why, /^Phase 6\b/, `${row}: owned by Phase 6`);
 });

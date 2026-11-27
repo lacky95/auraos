@@ -431,11 +431,13 @@ export class AppManager {
     // replaces instance objects on every transition, so a held reference
     // would go stale immediately.
     this.interfaces  = new InterfaceRegistry((id) => this.instances.get(id));
+    const liveMounts = this.runtimes.list().find((m) => m.mounts)?.mounts;
     this.mounts      = new MountManager({
       dataDir:       opts.dataDir,
       registry:      this.registry,
       scopeRegistry: this.scopeRegistry,
-      runner:        this.container,
+      // The runtime that realises the binds (D-M): the one with the `mounts` group (the container module).
+      ...(liveMounts ? { mounts: liveMounts } : {}),
       sourceMode:    (appId) => this.sourceModeOf(appId)?.mode ?? 'closed',
       // D80: the consumer's process identity (an OS sidecar: as before, no cross-uid handling).
       consumerIdentity: (consumer) => (isSidecarConsumer(consumer) ? null : this.processIdentityOf(consumer)),

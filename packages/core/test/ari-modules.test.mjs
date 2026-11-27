@@ -33,7 +33,7 @@ test('CR: one containerName(); the runtime modules import no app-manager code at
   assert.equal(containerName('a:b/c'), 'aura-a_b_c');
   for (const f of ['container/index.ts', 'container/diagnostics.ts', 'container/endpoints.ts', 'container/networks.ts', 'proot/index.ts', 'proot/actions.ts',
     'proot/diagnostics.ts', 'proot/host.ts', 'proot/orphans.ts', 'hostTools.ts', 'respawn.ts', 'spawnSpec.ts', 'builtins/index.ts',
-    'container/sidecars.ts', 'spawn/networkArgs.ts', 'spawn/identityArgs.ts', 'spawn/homeArgs.ts', 'spawn/contextArgs.ts', 'spawn/sessionArgs.ts',
+    'container/sidecars.ts', 'container/mounts.ts', 'spawn/networkArgs.ts', 'spawn/identityArgs.ts', 'spawn/homeArgs.ts', 'spawn/contextArgs.ts', 'spawn/sessionArgs.ts',
     'spawn/socketArgs.ts', 'spawn/paths.ts']) {
     const src = readFileSync(new URL(`../src/runtimes/${f}`, import.meta.url), 'utf8');
     for (const line of src.split('\n').filter((l) => /^import .*app-manager\//.test(l))) {

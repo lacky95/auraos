@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { containerMounts } from '../dist/runtimes/container/mounts.js';
 import { MountManager, KIND_POLICY, isSidecarConsumer, parentOfConsumer } from '../dist/app-manager/MountManager.js';
 
 const INST = 'io.test.app-2';
@@ -69,11 +70,11 @@ function world(t, { noCat = new Set(), noMountRoot = new Set(), pidFallbackFails
     dataDir,
     registry: { getById: (id) => (id.startsWith('gone.') ? undefined : { id, appDir: `/workspace/apps/${id}`, scopeId: id.startsWith('com.aura.') ? 'system' : 'global' }) },
     scopeRegistry: { getById: () => ({ dataDir: join(dataDir, 'scopes', 'system') }) },
-    runner: {
+    mounts: containerMounts({
       canPropagateMounts: () => ({ ok: true }),
       mountRootDir,
       toDaemonHostPath: (p) => p,
-    },
+    }, { helperImage: 'aura-base' }),
     instanceDataDir: (k) => join(dataDir, 'scopes', 'system', 'apps', 'io.test.app', parentOfConsumer(k)),
     fanoutTargets: () => targets,
     sourceMode: (id) => (closed.has(id) ? 'closed' : 'open'),

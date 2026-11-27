@@ -295,9 +295,8 @@ export function operationResult(
 // carry instance ids, workload ids and opaque refs: never a PID, a container
 // name or id, a host path or an engine handle. 5b-2 stream D moved the
 // endpoints, build, diagnostics, logs and workload exec/logs mechanisms behind
-// these groups; the mounts group and workload create still live in the kernel
-// managers (rows D-M, D-S: Phase 6) and their presence is not required yet
-// (`GROUPS_PENDING_EXTRACTION`).
+// these groups; Phase 6 (ari-rest) moved OS sidecars (`workloads`, D-S) and
+// cross-app mounts (`mounts`, D-M).
 
 /** An instance that outlived the previous kernel, as its runtime reports it (D77). */
 export interface RuntimeSurvivor {
@@ -557,18 +556,49 @@ export interface RuntimeDiagnostics {
   probeTools?(probe: { script: string; binDir: string; libDir: string }): { stdout: string } | { skipped: string; missing?: string };
 }
 
-/** `mount.*` (5b-2 D-M): a mount by logical source, never a host path. */
-export interface RuntimeMountSpec {
-  source: { appId: string; kind: string; subpath?: string };
-  target: string;
+/**
+ * One cross-app bind as the kernel resolved it (Phase 6 D-M): MountManager
+ * decides the source (kind, nesting, closed sources), the destination under
+ * the consumer's mount root, the mode and a D80 idmapping; the runtime only
+ * binds. Host paths as the runtime's host sees them (`hostPath`): a runtime
+ * with `hostFilesystem` only (A4).
+ */
+export interface RuntimeMountBind {
+  source: string;
+  dest: string;
   mode: 'ro' | 'rw';
-  inherit?: boolean;
+  /** D80: the on-disk owner (`from`, `uid:gid`) shows as the consumer (`to`) inside the bind only. */
+  idmap?: { from: string; to: string };
 }
+/** One line of a consumer's own mount table: where, and its options (`ro`, `idmapped`, ...). */
+export interface RuntimeMountEntry { destination: string; options: string[] }
+/** What a consumer's own mount table says about a promised bind. */
+export type RuntimeMountCheck = 'ok' | 'unreadable' | 'missing' | 'writable' | 'not-idmapped';
+/**
+ * `mount.*` (present ⇔ `mounts`; Phase 6 D-M): live binds into a running
+ * consumer (an instance, or its OS sidecar `<instanceId>--<name>`). The
+ * kernel keeps kinds, persistence, fan-out and authorization; the runtime
+ * attaches, detaches, lists and verifies. Synchronous and terminal; a
+ * failure throws with the runtime's words.
+ */
 export interface RuntimeMounts {
-  attach(consumer: string, spec: RuntimeMountSpec): Promise<RuntimeOperationResult>;
-  detach(consumer: string, target: string): Promise<RuntimeOperationResult>;
-  list(consumer: string): Promise<RuntimeMountSpec[]>;
-  limits(): Record<string, string | boolean>;
+  /** Live mounts work on this host at all (propagation into running workloads). */
+  capable(): { ok: boolean; reason?: string };
+  /** D80: idmapped binds work here (probed at boot; fail closed until then). */
+  idmapProbe(): { ok: boolean; reason?: string };
+  /** The kernel-side dir a consumer's binds land under. */
+  rootDir(consumer: string): string;
+  /** A kernel-side path as the runtime's host sees it (bind sources and destinations). */
+  hostPath(shellPath: string): string;
+  /** Where a consumer's binds appear: its mount root (`canonical`) or, without one, under its data dir (`legacy`). */
+  rootOf(consumer: string): 'canonical' | 'legacy';
+  attach(consumer: string, bind: RuntimeMountBind): void;
+  /** Ends every bind stacked at `dest` (a host path); throws when the runtime could not. */
+  detach(consumer: string, dest: string): void;
+  /** The consumer's own mount table; null when it can't be read. */
+  table(consumer: string): RuntimeMountEntry[] | null;
+  /** Whether a promised bind arrived in the consumer as promised. */
+  verify(consumer: string, expect: { path: string; mode: 'ro' | 'rw'; idmap: boolean }): RuntimeMountCheck;
 }
 /**
  * One port exposure (`aura port expose`, 5b-2 D-P): a source instance's port
@@ -646,10 +676,9 @@ export const GROUP_FEATURE = Object.freeze({
   usage: 'observability.metrics',
   endpoints: 'network.endpointExposure',
   build: 'build.execute',
+  mounts: 'mount.attach',
 } as const satisfies Record<string, RuntimeFeatureId>);
 export type RuntimeGroupName = keyof typeof GROUP_FEATURE;
-/** Typed groups whose mechanism moves behind ARI in 5b-2 stream D (at the latest Phase 6). */
-export const GROUPS_PENDING_EXTRACTION = Object.freeze(['mounts'] as const);
 
 /**
  * Why a module's groups and features disagree (a group without its
@@ -685,6 +714,7 @@ export interface RuntimeModule extends Pick<AuraRuntime,
   readonly tools?: RuntimeTools;
   readonly endpoints?: RuntimeEndpoints;
   readonly build?: RuntimeBuild;
+  readonly mounts?: RuntimeMounts;
   /** Orphan app processes in the runtime's process space (no feature of its own; D-#11). */
   readonly orphans?: RuntimeOrphans;
   /**

@@ -28,13 +28,14 @@ import {
 import { containerDiagnostics } from './diagnostics.js';
 import { containerEndpoints } from './endpoints.js';
 import { containerSidecars } from './sidecars.js';
+import { containerMounts } from './mounts.js';
 import { RuntimeExecError } from '../types.js';
 import { hostToolsGroup, toolsEnforcement, toolsFeatureOverrides, type HostToolStore, type ToolsMode } from '../hostTools.js';
 
 /** The runner surface the module adapts: the SandboxRunner contract plus the container's own groups. */
 export type ContainerRunnerSurface = SandboxRunner & Partial<Pick<ContainerRunner,
   'openSessions' | 'endSession' | 'canPropagateMounts' | 'instanceLogs' | 'execWorkload' | 'workloadLogs' | 'forwarderFacts' | 'buildApp' | 'provisionApp'
-  | 'sidecarRuntime' | 'mountRootSubpath'>>;
+  | 'sidecarRuntime' | 'mountRootSubpath' | 'mountRootDir' | 'toDaemonHostPath' | 'canIdmapMounts' | 'idmapHelperHostPath'>>;
 
 type OrphanRecord = NonNullable<Awaited<ReturnType<NonNullable<SandboxRunner['listOrphanRecords']>>>>[number] & { user?: string };
 
@@ -143,6 +144,20 @@ export function containerRuntime(runner: ContainerRunnerSurface, deps: Container
     } satisfies RuntimeWorkloads } : {}),
     // The instance's own output: the engine's log (5b-2 D-X).
     ...(runner.instanceLogs ? { logs: (instanceId: string, req: RuntimeLogsRequest, onChunk: (stream: RuntimeOutputStream, data: Buffer) => void) => runner.instanceLogs!(instanceId, req, onChunk) } : {}),
+    // Cross-app mounts into running containers (Phase 6 D-M): the helper bind, the mount-table verify, the root inspect.
+    ...(caps.mounts ? { mounts: containerMounts({
+      canPropagateMounts: () => runner.canPropagateMounts?.() ?? { ok: false, reason: 'the container runner has no mount propagation' },
+      canIdmapMounts: () => runner.canIdmapMounts?.() ?? { ok: false, reason: 'the container runner has no idmap probe' },
+      idmapHelperHostPath: () => runner.idmapHelperHostPath?.() ?? null,
+      mountRootDir: (consumer) => {
+        if (!runner.mountRootDir) throw new Error('the container runner has no mount root');
+        return runner.mountRootDir(consumer);
+      },
+      toDaemonHostPath: (p) => {
+        if (!runner.toDaemonHostPath) throw new Error('the container runner has no daemon path map');
+        return runner.toDaemonHostPath(p);
+      },
+    }, { helperImage: deps.baseImage ?? 'aura-base' }) } : {}),
     ...(caps.portExpose ? { endpoints: containerEndpoints(() => {
       if (!runner.forwarderFacts) throw new Error('the container runner has no forwarder facts');
       return runner.forwarderFacts();
