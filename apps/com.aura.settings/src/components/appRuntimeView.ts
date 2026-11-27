@@ -15,11 +15,11 @@
  * written and at every start. Nothing is auto-picked (Q17): `suggest` only
  * names the runtimes that could run it. DOM only; the page wires `actions`.
  */
+import { checkText, type RuntimeCheck } from '@aura/ui/setup';
 import { SOURCE_TEXT, type RuntimesState } from './runtimesView';
 
-export interface RuntimeCheck {
-  ok: boolean; missing: string[]; suggest?: string[]; enabled?: boolean; unavailable?: string;
-}
+// The dry run's shape and wording are the setup runtime selector's (@aura/ui/setup): one text for both.
+export { checkText, type RuntimeCheck };
 
 export interface AppRuntimeActions {
   check(appId: string, runtime: string): Promise<RuntimeCheck>;
@@ -33,19 +33,6 @@ function el<K extends keyof HTMLElementTagNameMap>(doc: Document, tag: K, cls?: 
   if (cls) e.className = cls;
   if (text !== undefined) e.textContent = text;
   return e;
-}
-
-/** What a dry run says, for people. */
-export function checkText(c: RuntimeCheck): string {
-  if (c.ok) return 'ok: it can run there';
-  const why: string[] = [];
-  if (c.missing.length) {
-    why.push(`missing ${c.missing.join(', ')}`);
-    if (c.suggest) why.push(c.suggest.length ? `it could run on: ${c.suggest.join(', ')}` : 'no installed runtime can run it');
-  }
-  if (c.enabled === false) why.push('the runtime is disabled');
-  if (c.unavailable) why.push(`unavailable: ${c.unavailable}`);
-  return `no: ${why.join('; ') || 'refused'}`;
 }
 
 /** Render `appId`'s runtime line (and its closed editor) into `slot`. */

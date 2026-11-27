@@ -1,0 +1,56 @@
+/*
+ * @aura/ui setup components (src/setup/**): the wizard in the Activity
+ * window and Settings → Apps → Configuration. Plain CSS, theme tokens only
+ * (the closed `--aura-color-*` set of /api/os/theme.css, no literal
+ * fallbacks), so light and dark modes follow the theme. The schema form's
+ * `sf-*` rows are styled here only inside `.su-form` (renderFieldViews);
+ * Settings → Runtimes keeps its own page styles.
+ */
+.su-form { display: flex; flex-direction: column; gap: 10px; }
+.su-form .sf-row { display: grid; grid-template-columns: 160px 1fr; gap: 4px 12px; align-items: center; font-size: 0.7rem; color: var(--aura-color-text); }
+.su-form .sf-row[hidden] { display: none; }
+.su-form .sf-title { color: var(--aura-color-text-dim); letter-spacing: 0.06em; text-transform: uppercase; font-size: 0.62rem; }
+.su-form .sf-required { color: var(--aura-color-warning); text-transform: none; letter-spacing: 0; }
+.su-form .sf-desc { grid-column: 2; font-size: 0.62rem; color: var(--aura-color-text-dim); line-height: 1.5; }
+.su-form .sf-error { grid-column: 2; font-size: 0.62rem; color: var(--aura-color-danger); }
+.su-form .sf-empty { font-size: 0.65rem; color: var(--aura-color-text-dim); margin: 0; }
+.su-form .sf-select, .su-form .sf-input,
+.su-secret .sf-select { font: inherit; font-size: 0.7rem; background: var(--aura-color-surface); color: var(--aura-color-text); border: 1px solid var(--aura-color-border); padding: 3px 6px; }
+.su-form .sf-row[data-invalid] .sf-input, .su-form .sf-row[data-invalid] .sf-select { border-color: var(--aura-color-danger); }
+.su-secret { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.su-secret .sf-desc { flex-basis: 100%; font-size: 0.62rem; color: var(--aura-color-text-dim); }
+
+.su-section { display: flex; flex-direction: column; gap: 8px; margin: 0 0 14px; color: var(--aura-color-text); font-size: 0.7rem; }
+.su-heading { margin: 0; font-size: 0.65rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--aura-color-primary); font-weight: 400; }
+.su-note { margin: 0; font-size: 0.65rem; color: var(--aura-color-text-dim); line-height: 1.5; }
+.su-options { display: flex; flex-direction: column; gap: 6px; }
+.su-option { display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; padding: 8px; border: 1px solid var(--aura-color-border); background: var(--aura-color-surface); cursor: pointer; }
+.su-option:has(input:checked) { border-color: var(--aura-color-primary); }
+.su-option.su-unavailable { cursor: default; opacity: 0.7; }
+.su-option-title { color: var(--aura-color-text); }
+.su-option-desc, .su-option .su-reasons { grid-column: 2; font-size: 0.62rem; color: var(--aura-color-text-dim); line-height: 1.5; }
+.su-badge { font-size: 0.55rem; letter-spacing: 0.08em; text-transform: uppercase; padding: 1px 5px; border: 1px solid var(--aura-color-primary); color: var(--aura-color-primary); }
+.su-badge.su-badge-off { border-color: var(--aura-color-text-dim); color: var(--aura-color-text-dim); }
+.su-reasons { margin: 0; padding-left: 16px; }
+.su-reason-text { display: block; color: var(--aura-color-text); }
+.su-reason-hint { display: block; color: var(--aura-color-text-dim); }
+.su-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.su-item { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
+.su-item-title { color: var(--aura-color-text); }
+.su-item-desc { flex-basis: 100%; font-size: 0.62rem; color: var(--aura-color-text-dim); line-height: 1.5; }
+.su-ok { color: var(--aura-color-success); }
+.su-no { color: var(--aura-color-danger); }
+.su-warn { color: var(--aura-color-warning); }
+.su-risk { padding: 6px 8px; border: 1px solid var(--aura-color-danger); }
+.su-risk-title { color: var(--aura-color-danger); font-weight: 700; letter-spacing: 0.08em; margin-bottom: 4px; }
+.su-risk-item { color: var(--aura-color-danger); font-weight: 700; }
+.su-approval-title { margin: 0; color: var(--aura-color-text); }
+.su-steps { list-style: none; margin: 0 0 14px; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; font-size: 0.62rem; }
+.su-step { display: flex; gap: 6px; align-items: center; padding: 3px 8px; border: 1px solid var(--aura-color-border); color: var(--aura-color-text-dim); }
+.su-step.su-step-current { border-color: var(--aura-color-primary); color: var(--aura-color-primary); }
+.su-step[data-status="done"] .su-step-status { color: var(--aura-color-success); }
+.su-step[data-status="blocked"] .su-step-status { color: var(--aura-color-danger); }
+.su-step-n { color: var(--aura-color-text-dim); }
+.su-section .btn, .su-form .btn { align-self: flex-start; font: inherit; font-size: 0.65rem; letter-spacing: 0.08em; padding: 3px 9px; background: var(--aura-color-surface); color: var(--aura-color-text); border: 1px solid var(--aura-color-border); cursor: pointer; }
+.su-section .btn:hover:not(:disabled), .su-form .btn:hover:not(:disabled) { color: var(--aura-color-primary); }
+.su-section .btn:disabled, .su-form .btn:disabled { opacity: 0.4; cursor: default; }

@@ -11,15 +11,30 @@
       "types": "./dist/index.d.ts"
     },
     "./styles/scificn-bridge.css": "./dist/styles/scificn-bridge.css",
+    "./styles/setup.css": "./dist/styles/setup.css",
     "./lib/utils": {
       "import": "./dist/lib/utils.js",
       "types": "./dist/lib/utils.d.ts"
+    },
+    "./setup": {
+      "import": "./dist/setup/index.js",
+      "types": "./dist/setup/index.d.ts"
+    },
+    "./schema-form": {
+      "import": "./dist/setup/schemaForm.js",
+      "types": "./dist/setup/schemaForm.d.ts"
     }
   },
   "typesVersions": {
     "*": {
       "lib/utils": [
         "./dist/lib/utils.d.ts"
+      ],
+      "setup": [
+        "./dist/setup/index.d.ts"
+      ],
+      "schema-form": [
+        "./dist/setup/schemaForm.d.ts"
       ]
     }
   },
@@ -33,6 +48,7 @@
     "README.md"
   ],
   "dependencies": {
+    "@aura/core": "workspace:*",
     "@radix-ui/react-checkbox": "^1.1.2",
     "@radix-ui/react-dialog": "^1.1.2",
     "@radix-ui/react-label": "^2.1.8",
