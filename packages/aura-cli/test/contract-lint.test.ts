@@ -8,7 +8,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AppManifestSchema, AURA_CONTRACT } from '@aura/core';
-import { lintContract } from '../src/lib/apphost-lint.js';
+import { lintContract, lintReleaseBuild } from '../src/lib/apphost-lint.js';
 import { printContractReport } from '../src/commands/admin.js';
 
 const root = mkdtempSync(join(tmpdir(), 'aura-contract-lint-'));
@@ -69,4 +69,21 @@ test('printContractReport prints a table and the details', () => {
   assert.match(text, /context-undeclared=2/);
   assert.match(text, /src\/a\.ts:3: reads \/run\/context/);
   assert.match(text, /contract 1: apps=1 noContract=1/);
+});
+
+test('build.release: paths stay in the app dir, cwd and command exist, raw apps without it get a note', () => {
+  const bad = AppManifestSchema.safeParse({ id: 'com.example.esc', name: 'x', version: '1.0.0', build: { release: { cwd: '../x', outputs: ['/etc'] } } });
+  assert.equal(bad.success, false);
+  assert.match(JSON.stringify(bad.error!.issues), /inside the app dir/);
+  const raw = app('rawnobuild', { runtime: 'raw' }, { 'entrypoint.sh': '#!/bin/sh\n' });
+  const n = lintReleaseBuild(raw.file, raw.text, raw.parsed);
+  assert.deepEqual(n.map((f) => [f.severity, f.rule]), [['info', 'release-build']]);
+  assert.match(n[0]!.message, /own-entrypoint/);
+  const asIs = app('rawasis', { runtime: 'raw', build: { release: {} } }, { 'entrypoint.sh': '#!/bin/sh\n' });
+  assert.deepEqual(lintReleaseBuild(asIs.file, asIs.text, asIs.parsed), []);
+  const missing = app('rawmissing', { runtime: 'raw', build: { release: { command: ['./build.mjs'], cwd: 'site' } } }, { 'entrypoint.sh': '#!/bin/sh\n' });
+  const m = lintReleaseBuild(missing.file, missing.text, missing.parsed);
+  assert.deepEqual(m.map((f) => f.severity), ['error', 'error', 'warn']);
+  assert.match(m[0]!.message, /cwd site does not exist/);
+  assert.match(m[2]!.message, /no outputs/);
 });

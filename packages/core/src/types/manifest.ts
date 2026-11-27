@@ -310,6 +310,12 @@ export const AppHostSchema = z.object({
 });
 export type AppHost = z.infer<typeof AppHostSchema>;
 
+/** A path inside the app dir: relative, no `..`, no leading `/` (build.release). */
+const appRelativePath = z.string().min(1).refine(
+  (p) => !p.startsWith('/') && !p.split('/').includes('..') && !p.includes('\0'),
+  'must be a path inside the app dir (relative, no "..")',
+);
+
 export const AppManifestSchema = z.object({
   id: z.string().regex(/^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$/, {
     message: 'App ID must be reverse-domain notation: com.example.app',
@@ -392,9 +398,27 @@ export const AppManifestSchema = z.object({
    *   'dev'  → always `astro dev`.
    */
   serve: z.enum(['auto', 'dev']).optional(),
-  /** Build settings: `ignore` = globs (relative to the app dir) that are not
-   *  sources, so changing them does not mark the build stale. */
-  build: z.object({ ignore: z.array(z.string()).optional() }).optional(),
+  /**
+   * Build settings.
+   *   ignore   globs (relative to the app dir) that are not sources, so
+   *            changing them does not mark the build stale.
+   *   release  how the app builds into a read-only AuraOS release tree
+   *            (Phase 6 release builder, os/release/build-apps.mjs), for apps
+   *            the Astro rule (appBuild.ts prodCapability) does not cover:
+   *            `command` = argv run once in `cwd` (relative to the app dir) at
+   *            release build time, no shell, NODE_ENV=production, no network;
+   *            `outputs` = paths it must produce. `{}` = the app runs from its
+   *            sources as is (nothing to build). After the build the tree is
+   *            read-only: the app must not write into its own dir at runtime.
+   */
+  build: z.object({
+    ignore: z.array(z.string()).optional(),
+    release: z.object({
+      command: z.array(z.string().min(1)).min(1).optional(),
+      cwd: appRelativePath.optional(),
+      outputs: z.array(appRelativePath).optional(),
+    }).optional(),
+  }).optional(),
   /**
    * What `/_aura/runtime.js` installs in the app's pages on its App Host, and
    * which paths of a service the machine proxy (`/api/proxy/<id>/`) exposes.

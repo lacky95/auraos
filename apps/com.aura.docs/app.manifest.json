@@ -11,6 +11,7 @@
   "sandbox": "container",
   "runtime": "raw",
   "entrypoint": "entrypoint.sh",
+  "build": { "release": { "command": ["node", "serve.mjs", "--build-only"], "cwd": "fumadocs-site", "outputs": ["fumadocs-site/.next"] } },
   "autoStart": true,
   "backgroundService": true,
   "themeStrategy": "inherit",

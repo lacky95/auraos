@@ -15,7 +15,7 @@
  */
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { dirname, extname, join, relative, resolve, sep } from 'node:path';
-import { contractFindings, scanContractSources, type AppManifest } from '@aura/core';
+import { contractFindings, prodCapability, scanContractSources, type AppManifest } from '@aura/core';
 
 export type Severity = 'error' | 'warn' | 'info';
 
@@ -23,7 +23,7 @@ export interface Finding {
   file: string;
   line: number;
   severity: Severity;
-  rule: 'manifest-key' | 'sdk-import' | 'removed-global' | 'proxy-path' | 'upgrade-catch-all' | 'hmr-off' | 'contract';
+  rule: 'manifest-key' | 'sdk-import' | 'removed-global' | 'proxy-path' | 'upgrade-catch-all' | 'hmr-off' | 'contract' | 'release-build';
   message: string;
 }
 
@@ -428,6 +428,42 @@ export function lintContract(manifestFile: string, text: string, parsed: AppMani
     for (const f of scanContractSources(appDir, parsed)) {
       out.push({ file: join(appDir, f.file), line: f.line, severity: f.severity, rule: 'contract', message: f.message });
     }
+  }
+  return out;
+}
+
+// ─── builds in a read-only release (Phase 6, build.release) ─────────────────
+
+/**
+ * How the app builds into an AuraOS release (os/release/build-apps.mjs): an
+ * Astro app the serve rule calls prod-capable is built as usual; any other app
+ * declares `build.release`. The schema checks the paths; this checks that
+ * `cwd` and the command exist, and notes apps the release builder would skip.
+ */
+export function lintReleaseBuild(manifestFile: string, text: string, parsed: AppManifest): Finding[] {
+  const appDir = dirname(manifestFile);
+  const lines = text.split('\n');
+  const at = (path: string[]) => jsonKeyLine(lines, path);
+  const rel = parsed.build?.release;
+  const out: Finding[] = [];
+  if (!rel) {
+    const cap = prodCapability(appDir, parsed);
+    if (!cap.capable) {
+      out.push({ file: manifestFile, line: at(['build']), severity: 'info', rule: 'release-build',
+        message: `no build.release: in an AuraOS release (read-only, Normal Mode) this app is not built (${cap.reason}); declare its build, or "build": { "release": {} } when it runs from its sources as is` });
+    }
+    return out;
+  }
+  const cwd = join(appDir, rel.cwd ?? '.');
+  if (rel.cwd && !existsSync(cwd)) {
+    out.push({ file: manifestFile, line: at(['build', 'release', 'cwd']), severity: 'error', rule: 'release-build', message: `build.release.cwd ${rel.cwd} does not exist in the app dir` });
+  }
+  const bin = rel.command?.[0];
+  if (bin && (bin.startsWith('./') || bin.includes('/')) && !existsSync(join(cwd, bin))) {
+    out.push({ file: manifestFile, line: at(['build', 'release', 'command']), severity: 'error', rule: 'release-build', message: `build.release.command ${bin} does not exist (relative to ${rel.cwd ?? 'the app dir'})` });
+  }
+  if (rel.command && !rel.outputs?.length) {
+    out.push({ file: manifestFile, line: at(['build', 'release']), severity: 'warn', rule: 'release-build', message: 'build.release has a command but no outputs: the release builder cannot check that the build produced anything' });
   }
   return out;
 }

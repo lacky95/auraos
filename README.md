@@ -120,6 +120,23 @@ itself. The first build takes a few minutes (compose builds the shell and
 `aura-base`, the image container apps run from); after that the desktop comes
 up in seconds.
 
+### The installer (`install.sh`, Phase 6, in progress)
+
+`install.sh` installs a **verified** release unattended, without the Web Shell:
+
+```bash
+sh install.sh --check-only                          # preflight only: Docker, Compose, buildx, disk, network
+sh install.sh --trusted-key release.pub --developer # newest signed release, Developer layout at /opt/auraos
+sh install.sh --config infrastructure.yaml --credentials-dir ./creds …   # corporate proxy, CA, mirrors, DNS, mTLS (D94)
+```
+
+It verifies the release's Ed25519 signature (`tools/release/README.md`) before anything
+from it runs, and applies `--config` before anything is downloaded or built. Credentials
+are only referenced from the config (files in `--credentials-dir`, mode 0600) and never
+land in Git, images, layers or logs. Normal Mode (the default) needs the release builder,
+which is not built yet; until then use `--developer`. `sh install.sh --help` lists every
+option.
+
 On the desktop, the bell at the bottom right holds a *Welcome to AuraOS*
 checklist with the next steps. Open the launcher with the `⣿` button in the
 dock or `Ctrl+Alt+Space`.
