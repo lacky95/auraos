@@ -21,6 +21,7 @@ import type { InstallRecord, ResolvedRef } from './types.js';
 import type { ScopeId } from '../scopes/types.js';
 import { APP_ID_PATTERN, isOriginId, readOriginId } from '../app-manager/AppIdentity.js';
 import { readPublishMarker, type AppSourceInfo, type SourceMode } from './AppSource.js';
+import { isRuntimeDataEntry } from './PublishFiles.js';
 
 export interface InstallerOpts {
   appsDir: string;
@@ -354,8 +355,7 @@ function readdirSafe(p: string): string[] {
  * app's own. A release never contains them (PublishFiles' deny list).
  */
 export function runtimeDataEntries(appDir: string, appId: string): string[] {
-  const instanceDir = new RegExp(`^${appId.replace(/\./g, '\\.')}(-\\d+)?$`);
-  return readdirSafe(appDir).filter((name) => name === '.sidecars' || name === '.data' || instanceDir.test(name));
+  return readdirSafe(appDir).filter((name) => isRuntimeDataEntry(name, appId));
 }
 
 /**

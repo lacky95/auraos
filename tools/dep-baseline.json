@@ -27,6 +27,7 @@
     "core-module-cycle: core/app-hosts -> core/app-manager": "app-hosts/lifecycle.ts needs AppIdentity helpers from app-manager while AppManager wires the App Host services: move the identity helpers into a leaf contract file. Owner: Phase 7 (D97 module entry points; Phase 5b CR touches the region).",
     "core-module-cycle: core/nexus -> core/app-manager": "nexus/removeApp.ts drives AppManager directly (removal orchestration across System Management and Execution). Owner: Phase 7 (removal contract, D97).",
     "foundation-leaf: core/src/types/manifest.ts -> core/src/app-hosts/appHosts.ts": "The manifest schema (Foundation) validates host names with app-hosts helpers: move the host-name rules (already a leaf, @aura/core/host-rules) under Foundation. Owner: Phase 7 (A1 module entry points).",
-    "kernel-presentation: core/src/app-manager/AppManager.ts -> core/src/keymap/KeymapRegistry.ts": "AppManager registers manifest keymaps into the presentation keymap registry. Owner: Phase 8 (AppManager decomposition: keymap registration leaves the kernel; headless must not need it)."
+    "kernel-presentation: core/src/app-manager/AppManager.ts -> core/src/keymap/KeymapRegistry.ts": "AppManager registers manifest keymaps into the presentation keymap registry. Owner: Phase 8 (AppManager decomposition: keymap registration leaves the kernel; headless must not need it).",
+    "agent-agnostic: core/src/nexus/PublishFiles.ts -> claude": "0.0.55 security fix e14b3fc (a publish never ships credentials): the deny list names '.claude.json', a CLI login's account file. Kept as shipped live (a security deny list; never weakened in a merge). Owner: Phase 6 (credential file names declared by the capability entry, like audit #4/#5)."
   }
 }

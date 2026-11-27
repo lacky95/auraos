@@ -1,5 +1,5 @@
 import type { APIRoute } from 'astro';
-import { getAppManager, getNexusManager } from '@aura/core';
+import { getAppManager, getNexusManager, RuntimeDataTrackedError } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../lib/appResponse.js';
 import { resolveCaller } from '../../../lib/auth.ts';
 import { mountedSourcePath, type ScopedApp } from '../../../lib/appSource.ts';
@@ -106,6 +106,8 @@ export const POST: APIRoute = async ({ request }) => {
 
     return jsonResponse({ ok: true, source: 'oci', result, messages });
   } catch (err) {
+    // The app tracks runtime data or secrets: the D105 body names them and the fix.
+    if (err instanceof RuntimeDataTrackedError) return errorResponse(400, err.body);
     return errorResponse((err as Error).message, 500);
   }
 };

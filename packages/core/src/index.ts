@@ -43,6 +43,9 @@ export * from './keymap/index.js';
 export * from './nexus/index.js';
 export * from './logger.js';
 export * from './scopes/index.js';
+// AF1: what a scaffold payload may contain, and the unprivileged install of a new app.
+export { refusedScaffoldFiles, scaffoldFileMode, SCAFFOLD_INSTALL_ARGS, type ScaffoldFileRefusal, type ScaffoldPayloadFile } from './scopes/scaffoldPayload.js';
+export { installAppDepsUnprivileged, unprivilegedInstallEnv, unprivilegedInstallPaths, INSTALL_UID, INSTALL_GID, type InstallStep } from './app-manager/unprivilegedInstall.js';
 export * from './context/index.js';
 export * from './contract/appContract.js';
 export * from './contract/dataDirReport.js';

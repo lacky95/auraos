@@ -169,13 +169,19 @@ function readFileOr(p: string): string | null {
  * `git init -b main` plus one commit of everything in `dir` (honouring its
  * .gitignore). Used for a new app (`aura dev new`) and a new patch repo.
  * A dir that already is a repo is left alone. Returns the commit, or null
- * when the dir already was a repo.
+ * when the dir already was a repo. `exclude` lines go to `.git/info/exclude`
+ * first: an existing app dir also holds its runtime data (PublishFiles
+ * `runtimeDataIgnoreLines`), which must never be in that commit.
  */
-export function initRepo(dir: string, message: string): string | null {
+export function initRepo(dir: string, message: string, exclude: readonly string[] = []): string | null {
   if (existsSync(join(dir, '.git'))) return null;
   mkdirSync(dir, { recursive: true });
   try {
     git(dir, ['init', '-q', '-b', 'main']);
+    if (exclude.length) {
+      mkdirSync(join(dir, '.git', 'info'), { recursive: true });
+      writeFileSync(join(dir, '.git', 'info', 'exclude'), `${readFileOr(join(dir, '.git', 'info', 'exclude')) ?? ''}${exclude.join('\n')}\n`);
+    }
     git(dir, ['add', '-A']);
     git(dir, [...identityArgs(dir), 'commit', '-q', '--allow-empty', '-m', message]);
     return git(dir, ['rev-parse', 'HEAD']).trim();

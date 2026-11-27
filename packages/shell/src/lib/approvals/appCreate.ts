@@ -378,6 +378,16 @@ export function validateScaffold(body: Record<string, unknown>, env: ScaffoldEnv
   const list = files as CreateFile[];
   const dup = duplicateFile(list);
   if (dup !== null) return refuse(422, { error: 'duplicate-file', category: 'invalid-input', file: dup, message: `files[] names ${dup} twice.` });
+  // AF1: files that would make the install or git run payload code in the shell, refused before the owner is asked.
+  const refusedFiles = core.refusedScaffoldFiles(list);
+  if (refusedFiles.length) {
+    return refuse(400, {
+      error: 'refused-file', category: 'invalid-request',
+      message: `The scaffold payload contains ${refusedFiles.length === 1 ? 'a file' : 'files'} the shell does not install: ${refusedFiles.map((r) => r.file).join(', ')}. Nothing was written.`,
+      hint: 'Send the files `aura dev new` renders; add install settings, hooks or non-registry dependencies after creation, inside the app.',
+      details: { refused: refusedFiles },
+    });
+  }
   const inputs = checkCreateInputs(body['summary'], body['plan']);
   if (inputs) return inputs;
   const parsed = manifestFromFiles(list, appId);

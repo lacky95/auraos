@@ -4,7 +4,7 @@ import { join, resolve, dirname } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { AppManifestSchema, AURA_CONTRACT, AURA_NPMRC, initRepo, needsNpmrc, newOriginId, portPackageJsonForScope, portToolsForScope, requirementsOf, type AppManifest, type RuntimeRequirements } from '@aura/core';
 import { color, error, fail, info, ok, warn } from '../lib/format.js';
-import { CONTRACT_DOCS_HINT, DOCS_HINT, lintAppSources, lintContract, lintManifestKeys, lintReleaseBuild, type Finding } from '../lib/apphost-lint.js';
+import { CONTRACT_DOCS_HINT, DOCS_HINT, lintAppSources, lintContract, lintManifestKeys, lintReleaseBuild, lintTrackedRuntimeData, type Finding } from '../lib/apphost-lint.js';
 import { promptText, promptChoice, promptConfirm, promptMultiSelect, PromptCancelled, BACK, type MultiSelectMode } from '../lib/prompts.js';
 import { fetchCapabilities, loadState } from '../lib/registry.js';
 import { api } from '../lib/client.js';
@@ -918,6 +918,7 @@ Skips node_modules, dist, .astro and .next. ${DOCS_HINT}; ${CONTRACT_DOCS_HINT}.
             findings.push(...lintContract(m, text, result.data, { source: opts.source !== false }));
             findings.push(...lintReleaseBuild(m, text, result.data));
             requirements.push({ manifest: result.data, req: requirementsOf(result.data) });
+            findings.push(...lintTrackedRuntimeData(dirname(m), result.data.id));
           }
         } catch (err) { warn(`${m}: ${String(err)}`); failed++; }
         if (opts.source !== false) findings.push(...lintAppSources(dirname(m)));

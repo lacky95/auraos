@@ -1,6 +1,6 @@
 {
   "name": "aura",
-  "version": "0.0.53",
+  "version": "0.0.55",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@12.18.0",

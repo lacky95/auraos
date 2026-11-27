@@ -14,8 +14,15 @@
  * The caller (the shell) names the candidate rows; this module measures them
  * and decides what is refused. Symlinks are never followed, a row's own path
  * must not be a symlink, and a walk stays on its row's filesystem.
- * Deterministic: rows are sorted, and the digest covers every row and count
- * but not `generatedAt`, so a changed tree changes the digest.
+ * Deterministic: rows are sorted, and the digest covers every row's
+ * security-relevant facts (owner decision D5, 2026-11-27): its path, kind,
+ * planned owner and mode, the top entry's filesystem identity (dev:ino),
+ * owner and mode, whether it exists, whether root-owned entries exist, the
+ * refusals (blanket roots, symbolic links) and the containment findings.
+ * Not `generatedAt` and not the counts: ordinary content and byte-count
+ * changes (an app writing between the dry run and the apply) keep the
+ * digest; a changed identity, owner, mode, symlink or containment changes
+ * it. The apply recomputes it right before applying (ownershipApply.ts).
  */
 import { createHash } from 'node:crypto';
 import { lstat, opendir } from 'node:fs/promises';
@@ -52,6 +59,9 @@ export interface OwnershipRow {
   owner?: string;
   /** The top directory's current `uid:gid`; null when the path does not exist. */
   from: string | null;
+  /** The top entry's filesystem identity `dev:ino` and its mode (octal); absent when the path does not exist. */
+  fsId?: string;
+  topMode?: string;
   to: string | null;
   /** Only entries owned by this `uid:gid`'s uid change; the rest keep their owner. */
   onlyFrom?: string;
@@ -78,7 +88,7 @@ export interface OwnershipRow {
 export interface OwnershipReport {
   version: 1;
   generatedAt: string;
-  /** sha256 over every row and count (not `generatedAt`): what an apply approves. */
+  /** sha256 over every row's security-relevant facts (`ownershipDigest`; not the counts, not `generatedAt`): what an apply approves. */
   digest: string;
   planned: OwnershipRow[];
   plannedUserPaths: OwnershipRow[];
@@ -102,6 +112,8 @@ const DEFAULT_MAX_ENTRIES = 2_000_000;
 interface Walked {
   exists: boolean;
   from: string | null;
+  fsId: string | null;
+  topMode: string | null;
   entries: number;
   files: number;
   bytes: number;
@@ -114,13 +126,15 @@ interface Walked {
 
 async function walk(spec: OwnershipRowSpec, maxEntries: number): Promise<Walked> {
   const out: Walked = {
-    exists: false, from: null, entries: 0, files: 0, bytes: 0, toChange: 0, rootOwned: 0, rootOwnedGit: 0,
+    exists: false, from: null, fsId: null, topMode: null, entries: 0, files: 0, bytes: 0, toChange: 0, rootOwned: 0, rootOwnedGit: 0,
     truncated: false, symlinkRoot: false,
   };
   let top;
   try { top = await lstat(spec.path); } catch { return out; }
   out.exists = true;
   out.from = `${top.uid}:${top.gid}`;
+  out.fsId = `${top.dev}:${top.ino}`;
+  out.topMode = (top.mode & 0o7777).toString(8).padStart(4, '0');
   if (top.isSymbolicLink()) { out.symlinkRoot = true; return out; }
   const exclude = new Set(spec.exclude ?? []);
   const count = (st: { uid: number; gid: number; size: number; isFile(): boolean }, inGit: boolean) => {
@@ -185,6 +199,8 @@ export async function buildOwnershipReport(specs: readonly OwnershipRowSpec[], o
       path, kind: spec.kind,
       ...(spec.owner ? { owner: spec.owner } : {}),
       from: w.from,
+      ...(w.fsId ? { fsId: w.fsId } : {}),
+      ...(w.topMode ? { topMode: w.topMode } : {}),
       to: spec.to ? `${spec.to.uid}:${spec.to.gid}` : null,
       ...(spec.onlyFrom ? { onlyFrom: `${spec.onlyFrom.uid}:${spec.onlyFrom.gid}` } : {}),
       ...(spec.mode ? { mode: spec.mode } : {}),
@@ -197,7 +213,7 @@ export async function buildOwnershipReport(specs: readonly OwnershipRowSpec[], o
       ...(w.truncated ? { truncated: true as const } : {}),
     };
     report[spec.section].push(row);
-    if (w.truncated) report.findings.push(`${path}: more than ${maxEntries} entries; the counts are lower bounds`);
+    if (w.truncated) report.findings.push(`${path}: more than ${maxEntries} entries; the counts are lower bounds${TRUNCATED_MARK}`);
     if (spec.section !== 'reportOnly' && !spec.to && w.exists) report.findings.push(`${path}: its identity is not allocated yet, so the row is not applicable`);
   }
   // A recursive row that covers another row (of any section) would chown it too: a planned
@@ -214,9 +230,34 @@ export async function buildOwnershipReport(specs: readonly OwnershipRowSpec[], o
       }
     }
   }
-  report.digest = createHash('sha256').update(JSON.stringify({
+  report.digest = ownershipDigest({
     planned: report.planned, plannedUserPaths: report.plannedUserPaths, plannedAppPaths: report.plannedAppPaths,
-    reportOnly: report.reportOnly, refused: report.refused,
-  })).digest('hex');
+    reportOnly: report.reportOnly, refused: report.refused, findings: report.findings,
+  });
   return report;
+}
+
+/** Marks the count-only finding (a truncated walk), which the digest leaves out. */
+const TRUNCATED_MARK = ' (truncated)';
+
+/**
+ * A row as the digest binds it (D5): every field but the counts. Root-owned
+ * entries count only as present or not, so a root writer adding files keeps
+ * the digest while a tree that had none and now has one changes it.
+ */
+export function ownershipRowBinding(row: OwnershipRow): Record<string, unknown> {
+  const { entries: _e, files: _f, bytes: _b, toChange: _t, rootOwned, rootOwnedGit, truncated: _x, ...facts } = row;
+  return { ...facts, hasRootOwned: rootOwned + (rootOwnedGit ?? 0) > 0 };
+}
+
+/** The digest of an ownership plan (D5): `rows` sections bound by `ownershipRowBinding`, other fields as they are; count-only findings left out. */
+export function ownershipDigest(body: Record<string, unknown>): string {
+  const bound = Object.fromEntries(Object.entries(body).map(([k, v]) => {
+    if (k === 'findings' && Array.isArray(v)) return [k, (v as string[]).filter((f) => !f.endsWith(TRUNCATED_MARK))];
+    if (Array.isArray(v) && v.every((r) => r && typeof r === 'object' && 'entries' in r && 'path' in r)) {
+      return [k, (v as OwnershipRow[]).map(ownershipRowBinding)];
+    }
+    return [k, v];
+  }));
+  return createHash('sha256').update(JSON.stringify(bound)).digest('hex');
 }

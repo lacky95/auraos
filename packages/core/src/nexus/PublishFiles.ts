@@ -13,12 +13,19 @@
  *      `.sidecars/<svc>/data`, the per-app data dir `<appId>/`, `.env` files,
  *      keys, databases. Publishing those would ship a customer's state and
  *      logins to everyone who can pull the app.
+ *   4. A file the deny list keeps out as runtime data or a secret must not be
+ *      TRACKED either: a release leaves it out, but the source repo (`aura dev
+ *      publish`, any git push) carries it. A publish refuses while one is
+ *      tracked (`refuseTrackedRuntimeData`, D105 `runtime-data-tracked`);
+ *      `aura dev validate` warns. `runtimeDataIgnoreLines` is what keeps them
+ *      untracked (the scaffold's .gitignore carries the same lines).
  *
  * Paths are relative to the app dir, `/`-separated, files and symlinks only.
  */
 import { execFileSync } from 'node:child_process';
 import { lstatSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import type { AuraErrorBody } from '../errors/contracts.js';
 
 export const DEFAULT_PUBLISH_IGNORE = ['node_modules', '.next', 'dist', '.astro', '.turbo', '.cache'];
 
@@ -36,7 +43,8 @@ const DENY_FILES: RegExp[] = [
   /\.sqlite\./i,                                          // sqlite side files (x.sqlite.lock.sqlite …)
   /credentials?(\.[a-z0-9-]+)*\.json$/i,                  // trilium-credentials.json, credentials.json
   /^\.netrc$/, /^\.git-credentials$/, /^\.pgpass$/,
-  /^auth\.json$/i, /^token(s)?\.json$/i,
+  /^auth\.json$/i, /^token(s)?\.json$/i, /^secrets?\.json$/i,
+  /^\.claude\.json$/,                                      // a CLI login's account file (home, never source)
 ];
 
 /** `.env.example` & co. are documentation, not secrets. */
@@ -60,11 +68,44 @@ export interface PublishFileOpts {
   ignore?: string[];
 }
 
+/**
+ * An instance's data dir at the app root: `<appId>` or `<appId>-<n>`. In the
+ * global and user scopes an app's dir is also its data dir (AppManager:
+ * `<scope data>/apps/<appId>/<instanceId>`).
+ */
+export function isInstanceDataDir(name: string, appId: string): boolean {
+  return name === appId || (name.startsWith(`${appId}-`) && /^\d+$/.test(name.slice(appId.length + 1)));
+}
+
+/** An app-root entry that is runtime state, not code: an instance data dir, `.sidecars/` (sidecar volumes), `.data/`. */
+export function isRuntimeDataEntry(name: string, appId: string): boolean {
+  return name === '.sidecars' || name === '.data' || isInstanceDataDir(name, appId);
+}
+
+/**
+ * The .gitignore lines that keep an app's runtime data and credentials out of
+ * its repository. The scaffold template (`aura dev new`) carries the same
+ * lines; `aura dev publish` puts them in `.git/info/exclude` when it makes a
+ * repo of an existing app dir.
+ */
+export function runtimeDataIgnoreLines(appId: string): string[] {
+  return [
+    `/${appId}/`, `/${appId}-[0-9]*/`, '.sidecars/', '/.data/',
+    '.env', '.env.*', '!.env.example', 'secrets.json', 'auth.json', '.credentials.json', '.claude.json',
+    '*.db', '*.db-*', '*.sqlite', '*.sqlite3',
+  ];
+}
+
+/** Deny-list reasons that mean runtime data or a secret (not just build output): tracked, they are refused. */
+const SENSITIVE_REASONS = new Set([
+  'app data dir', '.sidecars/', '.sidecars', '.data/', '.data', 'secret or runtime data', 'contains a registry login',
+]);
+
 /** Why the deny list keeps `rel` out, or null when it may ship. */
 export function withheldReason(rel: string, appId: string, readFile?: (rel: string) => string): string | null {
   const parts = rel.split('/');
   const base = parts[parts.length - 1] ?? '';
-  if (parts[0] === appId && parts.length > 1) return 'app data dir';
+  if (parts.length > 1 && isInstanceDataDir(parts[0]!, appId)) return 'app data dir';
   for (const p of parts.slice(0, -1)) if (DENY_DIRS.has(p)) return `${p}/`;
   if (DENY_DIRS.has(base)) return base;
   if (ENV_TEMPLATE.test(base)) return null;
@@ -130,7 +171,7 @@ function walkCandidates(appPath: string, ignore: string[], appId: string): strin
       try { st = lstatSync(join(appPath, r)); } catch { continue; }
       if (st.isDirectory()) {
         // Prune early: never descend into what can't ship anyway.
-        if (DENY_DIRS.has(name) || (!rel && name === appId) || ignoredByManifest(r, ignore)) continue;
+        if (DENY_DIRS.has(name) || (!rel && isInstanceDataDir(name, appId)) || ignoredByManifest(r, ignore)) continue;
         walk(r);
       } else if (st.isFile() || st.isSymbolicLink()) out.push(r);
     }
@@ -154,4 +195,79 @@ export function publishFileList(appPath: string, opts: PublishFileOpts): Publish
     files.push(rel);
   }
   return { files, withheld };
+}
+
+// ─── tracked runtime data ───────────────────────────────────────────────────
+
+/** A tracked file that is runtime data or a secret, and the deny-list reason. */
+export interface TrackedRuntimeFile { file: string; reason: string }
+
+function gitText(appPath: string, args: string[]): string | null {
+  try {
+    return execFileSync('git', ['-C', appPath, '-c', 'core.quotePath=false', ...args],
+      { stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000, maxBuffer: 256 * 1024 * 1024 }).toString();
+  } catch { return null; }
+}
+
+/**
+ * Tracked files of `appPath` that the deny list keeps out as runtime data or
+ * a secret: the index, and with `pushing` also every file the commits of that
+ * revision range add or change (e.g. `['main', '--not', '--remotes']`: what a
+ * push of `main` sends). Contents (an rc file's login) are read from git, not
+ * the work tree. [] outside a git work tree. Names only: nothing is printed.
+ */
+export function trackedRuntimeData(appPath: string, appId: string, opts: { pushing?: string[] } = {}): TrackedRuntimeFile[] {
+  const found = new Map<string, string>();
+  const check = (rel: string, blob: string) => {
+    if (!rel || found.has(rel)) return;
+    const reason = withheldReason(rel, appId, () => {
+      const text = gitText(appPath, ['cat-file', 'blob', blob]);
+      if (text === null) throw new Error('unreadable');
+      return text;
+    });
+    if (reason && SENSITIVE_REASONS.has(reason)) found.set(rel, reason);
+  };
+  const index = gitText(appPath, ['ls-files', '-z', '--cached']);
+  if (index === null) return [];
+  for (const rel of index.split('\0')) check(rel, `:./${rel}`);
+  if (opts.pushing?.length) {
+    const log = gitText(appPath, ['log', '--format=%x01%H', '--name-only', '--relative', '--diff-filter=AMRC', ...opts.pushing, '--']) ?? '';
+    for (const chunk of log.split('\x01')) {
+      const [commit, ...names] = chunk.split('\n').filter(Boolean);
+      for (const rel of names) check(rel, `${commit}:./${rel}`);
+    }
+  }
+  return [...found].map(([file, reason]) => ({ file, reason })).sort((a, b) => a.file.localeCompare(b.file));
+}
+
+/** The D105 body of a publish refused for tracked runtime data or secrets. */
+export function trackedRuntimeDataRefusal(appId: string, files: TrackedRuntimeFile[], action = 'publish'): AuraErrorBody {
+  const shown = files.slice(0, 8).map((f) => f.file);
+  const more = files.length > shown.length ? `, … (${files.length - shown.length} more)` : '';
+  const quoted = shown.map((f) => `'${f.replace(/'/g, "'\\''")}'`).join(' ');
+  return {
+    error: 'runtime-data-tracked',
+    message: `${action} refused: ${appId} has ${files.length} tracked file(s) that are runtime data or secrets `
+      + `(instance data, sidecar volumes, logins, databases): ${shown.join(', ')}${more}. Nothing was published.`,
+    category: 'invalid-request',
+    hint: `untrack them (git rm -r --cached -- ${quoted}${more ? ' …' : ''}), add the runtime-data lines to .gitignore `
+      + `(${runtimeDataIgnoreLines(appId).slice(0, 4).join(' ')} and the credential files), commit, then publish again. `
+      + 'If a commit with them was ever pushed: rotate those credentials and rewrite that history.',
+    target: appId,
+    details: { files },
+  };
+}
+
+/** A publish refused by `refuseTrackedRuntimeData`; `body` is the D105 error body. */
+export class RuntimeDataTrackedError extends Error {
+  constructor(readonly body: AuraErrorBody) {
+    super(body.hint ? `${body.message} Fix: ${body.hint}` : body.message);
+    this.name = 'RuntimeDataTrackedError';
+  }
+}
+
+/** Throw RuntimeDataTrackedError when `appPath` tracks runtime data or secrets (see trackedRuntimeData). */
+export function refuseTrackedRuntimeData(appPath: string, appId: string, opts: { pushing?: string[]; action?: string } = {}): void {
+  const files = trackedRuntimeData(appPath, appId, opts);
+  if (files.length) throw new RuntimeDataTrackedError(trackedRuntimeDataRefusal(appId, files, opts.action));
 }

@@ -17,7 +17,7 @@ It never presents anything, and it never transports anything itself. HTTP lives 
 
 ## Sectors (D97, owner-adopted)
 
-Sectors are logical groups over the existing directories. There is no sector directory, and nothing gets moved to make one. Each module (a top-level directory under `src/`) belongs to exactly one sector.
+Sectors are logical groups over the existing directories. There is no sector directory. Each module (a top-level directory under `src/`) belongs to exactly one sector.
 
 `tools/dep-check.mjs` reads the block below. Adding, removing or renaming a module without updating it fails `pnpm arch`.
 

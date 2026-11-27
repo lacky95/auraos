@@ -15,7 +15,7 @@
  */
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { dirname, extname, join, relative, resolve, sep } from 'node:path';
-import { contractFindings, prodCapability, scanContractSources, type AppManifest } from '@aura/core';
+import { contractFindings, prodCapability, runtimeDataIgnoreLines, scanContractSources, trackedRuntimeData, type AppManifest } from '@aura/core';
 
 export type Severity = 'error' | 'warn' | 'info';
 
@@ -23,7 +23,7 @@ export interface Finding {
   file: string;
   line: number;
   severity: Severity;
-  rule: 'manifest-key' | 'sdk-import' | 'removed-global' | 'proxy-path' | 'upgrade-catch-all' | 'hmr-off' | 'contract' | 'release-build';
+  rule: 'manifest-key' | 'sdk-import' | 'removed-global' | 'proxy-path' | 'upgrade-catch-all' | 'hmr-off' | 'contract' | 'release-build' | 'runtime-data';
   message: string;
 }
 
@@ -466,6 +466,20 @@ export function lintReleaseBuild(manifestFile: string, text: string, parsed: App
     out.push({ file: manifestFile, line: at(['build', 'release']), severity: 'warn', rule: 'release-build', message: 'build.release has a command but no outputs: the release builder cannot check that the build produced anything' });
   }
   return out;
+}
+
+/**
+ * Runtime data or secrets the app's git repo tracks (PublishFiles
+ * `trackedRuntimeData`): an app dir in the user and global scopes also holds
+ * its instances' data (`<appId>/`) and sidecar volumes (`.sidecars/`).
+ * `aura dev publish` and `nexus app publish` refuse them; this says so first.
+ */
+export function lintTrackedRuntimeData(appDir: string, appId: string): Finding[] {
+  return trackedRuntimeData(appDir, appId).map((f) => ({
+    file: join(appDir, f.file), line: 1, severity: 'warn' as const, rule: 'runtime-data' as const,
+    message: `tracked by git but runtime data or a secret (${f.reason}): publishing refuses it — git rm --cached it and add `
+      + `the runtime-data lines to .gitignore (${runtimeDataIgnoreLines(appId).slice(0, 3).join(' ')} …)`,
+  }));
 }
 
 // ─── one app ────────────────────────────────────────────────────────────────

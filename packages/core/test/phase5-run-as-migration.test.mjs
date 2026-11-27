@@ -14,7 +14,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  appendFileSync, chownSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync,
+  appendFileSync, chmodSync, chownSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
@@ -192,13 +192,16 @@ test('an interrupted apply is restored exactly from its journal (the recovery); 
   } finally { rmSync(f.d, { recursive: true, force: true }); }
 });
 
-test('the plan: a changed tree changes the digest; same identity both ways is refused; a pending migration blocks the start', async () => {
+test('the plan: content keeps the digest, a changed mode changes it (D5); same identity both ways is refused; a pending migration blocks the start', async () => {
   const f = fixture();
   try {
     const a = await runAsOwnershipPlan(input(f, 'app'), { refuseRoots: refuseRoots(f) });
     writeFileSync(join(f.data, 'more'), 'more');
     const b = await runAsOwnershipPlan(input(f, 'app'), { refuseRoots: refuseRoots(f) });
-    assert.notEqual(a.plan.digest, b.plan.digest);
+    assert.equal(a.plan.digest, b.plan.digest, 'an app writing between the dry run and the apply keeps the digest (D5)');
+    chmodSync(f.data, 0o777);
+    const c = await runAsOwnershipPlan(input(f, 'app'), { refuseRoots: refuseRoots(f) });
+    assert.notEqual(a.plan.digest, c.plan.digest, 'a changed mode changes it');
     await assert.rejects(runAsOwnershipPlan({ ...input(f, 'app'), from: APP }, { refuseRoots: refuseRoots(f) }), /from root to an app identity or back/);
     assert.equal(runAsMigrationBlock('org.t.app', {}), null);
     assert.match(runAsMigrationBlock('org.t.app', { runAsMigration: { to: 'app', digest: 'a'.repeat(64), journal: 'j.ndjson', startedAt: 0 } }),
