@@ -42,10 +42,10 @@ test('CR: one containerName(); the runtime modules import no app-manager code at
 test('CR: AppManager reaches adoption, sessions, workloads and usage only through the groups', () => {
   const src = readFileSync(new URL('../src/app-manager/AppManager.ts', import.meta.url), 'utf8');
   assert.doesNotMatch(src, /this\.container\.(listOrphanRecords|registerAdopted|measureAdopted|killAllForApp|reapSiblingsOf|listSidecars|removeSidecars|usage|openSessions|endSession|clearMountRoot|onExit)\b/);
-  // What stays on the runner: builds/provisioning (5b-2 D-B), the managers' wiring and the D80 idmap probe
-  // of the mount backend (5b G; both move behind the `mounts` group with D-M).
+  // What stays on the runner: the managers' wiring and the D80 idmap probe of the mount backend
+  // (5b G; both move behind the `mounts` group with D-M). Builds go through the `build` group (5b-2 D-B).
   const left = [...src.matchAll(/this\.container\.(\w+)/g)].map((m) => m[1]);
-  assert.deepEqual([...new Set(left)].sort(), ['buildApp', 'probeIdmappedMounts', 'provisionApp', 'survivorsUnknown']);
+  assert.deepEqual([...new Set(left)].sort(), ['probeIdmappedMounts', 'survivorsUnknown']);
 });
 
 test('CR (D77): the kernel adopts survivors from any provider with the adoption group: the reference mock, no Docker', async () => {

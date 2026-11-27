@@ -15,60 +15,24 @@
  *
  * ## Mechanism
  *
- * A forwarder is a tiny throwaway container running a node TCP pipe proxy
- * (`node -e`, node is guaranteed in `aura-base`). It is parameterised entirely
- * through env vars, so no user-controlled string is ever interpolated into a
- * shell.
- *
- *   into <targetApp>: the forwarder JOINS the target's network namespace
- *     (`--network container:aura-<target>`) and listens on the target's
- *     127.0.0.1:<port>, forwarding to `aura-<source>:<sourcePort>` over
- *     aura-net. Nothing new is published anywhere — the port appears only on
- *     the target's own loopback.
- *
- *   host: the forwarder stays on aura-net and docker PUBLISHES a host port
- *     (`-p <bindAddr>:<hostPort>:5000`) that forwards to
- *     `aura-<source>:<sourcePort>`. Default bind is 127.0.0.1 (host loopback
- *     only); 0.0.0.0 or a NIC IP must be asked for explicitly.
+ * The runtime realises an exposure through its `endpoints` group (5b-2 D-P;
+ * the container module: forwarder containers, runtimes/container/endpoints.ts)
+ * and is the record of what runs: `list()` rehydrates the live set after a
+ * shell restart. This manager keeps the policy: ids, the running-source and
+ * running-target checks, declarations, replay, and reaping exposures whose
+ * owner is gone for good (`reconcile()`).
  *
  * ## Lifecycle & state
- *
- * Docker is authoritative: each forwarder carries `aura.port=1` (so the generic
- * sidecar reaper in sidecars.ts skips it) plus `aura.port.spec=<json>` holding
- * its full record, so a shell restart rehydrates the live set with one
- * `docker ps`. The `aura.parent=<ownerInstanceId>` label ties a forwarder to
- * its owner: `ContainerRunner.reapSiblingsOf` removes it when the owner
- * restarts, and `reconcile()` removes it when the owner is gone for good.
  *
  * Exposes are ephemeral by default. A `sticky` expose ALSO writes a declaration
  * to `<dataDir>/aura/ports/.state/<ownerInstanceId>.json`, which `reapply()`
  * replays after the owner's container comes back up (mirrors MountManager).
  */
-import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { AppRegistry } from './AppRegistry.js';
 import type { ContainerPortBackend } from '../runtimes/container/backends.js';
-import { containerName as instanceContainer } from '../runtimes/container/names.js';
-import { BASE_IMAGE } from './BaseImage.js';
-import { rawSocketArgs } from './spawn/networkArgs.js';
-
-const HELPER_IMAGE = BASE_IMAGE;
-const SHARED_NETWORK = process.env['AURA_DOCKER_NETWORK'] ?? 'aura-net';
-
-/**
- * The forwarder body. A bidirectional TCP pipe: everything the listener accepts
- * is spliced to a fresh upstream connection and back. Target host/port are
- * re-resolved per connection, so a source container that restarts (new IP, same
- * name) keeps working. Kept to a single line so it survives `node -e` intact.
- */
-const PROXY_JS =
-  'const net=require("net");' +
-  'net.createServer(c=>{' +
-  'const u=net.connect(+process.env.PF_TARGET_PORT,process.env.PF_TARGET_HOST);' +
-  'c.pipe(u);u.pipe(c);' +
-  'const k=()=>{c.destroy();u.destroy()};c.on("error",k);u.on("error",k);' +
-  '}).listen(+process.env.PF_LISTEN_PORT,process.env.PF_LISTEN_HOST);';
+import type { RuntimeEndpoints, RuntimeExposure } from '../runtimes/ari.js';
 
 export type PortExposeKind = 'into' | 'host';
 
@@ -90,35 +54,17 @@ export interface ExposeSpec {
   sticky?: boolean;
 }
 
-/** A forwarder that IS running. Also JSON-serialised into the `aura.port.spec` label. */
-export interface AuraPortExpose {
-  /** `into-<port>` or `host-<bindAddr>-<port>`. Unique per owner instance. */
-  id: string;
-  kind: PortExposeKind;
-  /** For `into`: the target instance. For `host`: the source instance. */
-  ownerInstanceId: string;
-  sourceAppId: string;
-  sourceInstanceId: string;
-  sourcePort: number;
-  /** Listen port (into) / published host port (host). */
-  port: number;
-  /** `host` only. */
-  bindAddr?: string;
-  sticky: boolean;
-  containerName: string;
-  createdAt: string;
-}
+/** An exposure that IS running, as its runtime keeps it (`RuntimeExposure`). */
+export type AuraPortExpose = RuntimeExposure;
 
 interface PortManagerOpts {
   dataDir: string;
   runner: ContainerPortBackend;
+  /** The runtime's `endpoints` group (the container module's). */
+  endpoints: RuntimeEndpoints;
   registry: AppRegistry;
   /** Resolve an appId to its running instance (any running one). Null if none. */
   resolveRunningInstance(appId: string): { instanceId: string } | null;
-}
-
-function sanitizeToken(s: string): string {
-  return s.replace(/[^a-zA-Z0-9_.-]/g, '_');
 }
 
 export class PortManager {
@@ -169,40 +115,11 @@ export class PortManager {
     return `into-${port}`;
   }
 
-  private containerNameForExpose(kind: PortExposeKind, ownerInstanceId: string, bindAddr: string, port: number): string {
-    if (kind === 'host') return `aura-porth--${sanitizeToken(bindAddr)}--${port}`;
-    return `aura-port--${sanitizeToken(ownerInstanceId)}--${port}`;
-  }
-
   // ─── Queries ─────────────────────────────────────────────────────────────
 
-  /**
-   * The live set of forwarders, read straight from docker labels. Docker is
-   * authoritative, so this needs no in-process cache to stay honest across
-   * shell restarts or out-of-band `docker rm`.
-   */
+  /** The live set, as the runtime keeps it (authoritative across shell restarts). */
   private snapshot(): AuraPortExpose[] {
-    let out = '';
-    try {
-      out = execFileSync(
-        'docker',
-        ['ps', '-a', '--filter', 'label=aura.port=1', '--format', '{{.Label "aura.port.spec"}}'],
-        { stdio: ['ignore', 'pipe', 'pipe'], timeout: 15_000, encoding: 'utf-8' },
-      );
-    } catch (err) {
-      console.warn(`[PortManager] snapshot failed: ${(err as Error).message}`);
-      return [];
-    }
-    const exposes: AuraPortExpose[] = [];
-    for (const line of out.split('\n')) {
-      if (!line.trim()) continue;
-      try {
-        exposes.push(JSON.parse(line) as AuraPortExpose);
-      } catch {
-        /* a forwarder without a parseable spec label — ignore */
-      }
-    }
-    return exposes;
+    return this.opts.endpoints.list();
   }
 
   /** Exposes owned by one instance (or all, when no id is given). */
@@ -216,104 +133,24 @@ export class PortManager {
   async expose(ownerInstanceId: string, spec: ExposeSpec): Promise<AuraPortExpose> {
     const source = this.opts.resolveRunningInstance(spec.sourceAppId);
     if (!source) throw new Error(`source app ${spec.sourceAppId} has no running instance to expose`);
-    const sourceInstanceId = source.instanceId;
-    const sourceContainer = instanceContainer(sourceInstanceId);
-
-    const kind = spec.kind;
-    const port = spec.port ?? spec.sourcePort;
-    const bindAddr = spec.bindAddr ?? '127.0.0.1';
     const id = this.specId(spec);
-    const containerName = this.containerNameForExpose(kind, ownerInstanceId, bindAddr, port);
 
-    // Already exposed? Deterministic names make this a cheap check and give a
-    // clean 409 upstream instead of a docker name-conflict stack trace.
+    // Already exposed? Deterministic ids make this a cheap check and give a
+    // clean 409 upstream instead of a runtime name-conflict stack trace.
     if (this.list(ownerInstanceId).some((e) => e.id === id)) {
       throw new Error(`${id} is already exposed on ${ownerInstanceId}`);
     }
+    if (spec.kind === 'into' && !this.opts.runner.isRunning(ownerInstanceId)) {
+      throw new Error(`target instance ${ownerInstanceId} is not running`);
+    }
 
-    const record: AuraPortExpose = {
-      id, kind, ownerInstanceId,
-      sourceAppId: spec.sourceAppId, sourceInstanceId,
-      sourcePort: spec.sourcePort, port,
-      ...(kind === 'host' ? { bindAddr } : {}),
+    const record = await this.opts.endpoints.expose({
+      id, kind: spec.kind, ownerInstanceId,
+      sourceAppId: spec.sourceAppId, sourceInstanceId: source.instanceId,
+      sourcePort: spec.sourcePort, port: spec.port ?? spec.sourcePort,
+      ...(spec.kind === 'host' ? { bindAddr: spec.bindAddr ?? '127.0.0.1' } : {}),
       sticky: spec.sticky === true,
-      containerName,
-      createdAt: new Date().toISOString(),
-    };
-
-    const labels = [
-      '--label', 'aura.port=1',
-      '--label', `aura.parent=${ownerInstanceId}`,
-      '--label', `aura.app=${spec.sourceAppId}`,
-      '--label', `aura.port.spec=${JSON.stringify(record)}`,
-    ];
-    const env = [
-      '-e', `PF_TARGET_HOST=${sourceContainer}`,
-      '-e', `PF_TARGET_PORT=${spec.sourcePort}`,
-    ];
-
-    let args: string[];
-    if (kind === 'into') {
-      if (!this.opts.runner.isRunning(ownerInstanceId)) {
-        throw new Error(`target instance ${ownerInstanceId} is not running`);
-      }
-      args = [
-        'create', '--name', containerName,
-        '--network', `container:${instanceContainer(ownerInstanceId)}`,
-        ...rawSocketArgs(),
-        '--restart', 'unless-stopped',
-        ...labels,
-        ...env,
-        '-e', 'PF_LISTEN_HOST=127.0.0.1',
-        '-e', `PF_LISTEN_PORT=${port}`,
-        HELPER_IMAGE, 'node', '-e', PROXY_JS,
-      ];
-    } else {
-      // Docker publishes in the daemon host's network namespace. A Node bind
-      // probe here would test the shell container instead, falsely rejecting
-      // host NIC addresses with EADDRNOTAVAIL (and missing real host conflicts).
-      // Let Docker's atomic bind operation be the authority.
-      args = [
-        'create', '--name', containerName,
-        '--network', SHARED_NETWORK,
-        ...rawSocketArgs(),
-        '-p', `${bindAddr}:${port}:5000`,
-        '--restart', 'unless-stopped',
-        ...labels,
-        ...env,
-        '-e', 'PF_LISTEN_HOST=0.0.0.0',
-        '-e', 'PF_LISTEN_PORT=5000',
-        HELPER_IMAGE, 'node', '-e', PROXY_JS,
-      ];
-    }
-
-    let createdId: string | undefined;
-    try {
-      // Separate create/start so a failed host bind can be cleaned up by its
-      // exact new ID. Never delete a pre-existing container on a name conflict.
-      createdId = execFileSync('docker', args,
-        { stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000, encoding: 'utf-8' }).toString().trim();
-      execFileSync('docker', ['start', createdId],
-        { stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 });
-    } catch (err) {
-      let msg = stderrOf(err);
-      if (createdId) {
-        try { this.forceRemove(createdId); }
-        catch (cleanupError) { msg += `; forwarder cleanup failed: ${stderrOf(cleanupError)}`; }
-      }
-      throw new Error(/already in use|already allocated|Conflict/i.test(msg) ? `${id} conflicts: ${msg}` : `could not start forwarder: ${msg}`);
-    }
-
-    // The proxy can bind-fail INSIDE the netns (e.g. the port is already taken
-    // there) and exit after `docker start` has already returned success. Confirm
-    // it is still up; if not, surface its logs and clean up.
-    await sleep(400);
-    if (!this.isContainerRunning(containerName)) {
-      const logs = this.containerLogs(containerName);
-      this.forceRemove(containerName);
-      throw new Error(`forwarder for ${id} exited immediately: ${logs || '(no output)'}`);
-    }
-
+    });
     if (record.sticky) this.addDecl(ownerInstanceId, spec);
     return record;
   }
@@ -321,7 +158,7 @@ export class PortManager {
   remove(ownerInstanceId: string, portId: string): void {
     const existing = this.list(ownerInstanceId).find((e) => e.id === portId);
     if (!existing) throw new Error(`${portId} is not exposed on ${ownerInstanceId}`);
-    this.forceRemove(existing.containerName);
+    this.opts.endpoints.remove(existing.containerName);
     this.dropDecl(ownerInstanceId, portId);
   }
 
@@ -332,7 +169,7 @@ export class PortManager {
    */
   removeAll(instanceId: string): void {
     for (const e of this.list(instanceId)) {
-      try { this.forceRemove(e.containerName); }
+      try { this.opts.endpoints.remove(e.containerName); }
       catch (err) { console.warn(`[PortManager] remove ${e.id} failed: ${(err as Error).message}`); }
     }
   }
@@ -385,7 +222,7 @@ export class PortManager {
     for (const e of this.snapshot()) {
       if (liveInstanceIds.has(e.ownerInstanceId)) continue;
       try {
-        this.forceRemove(e.containerName);
+        this.opts.endpoints.remove(e.containerName);
         reaped++;
         console.log(`[PortManager] reaped orphan forwarder ${e.id} (dead owner ${e.ownerInstanceId})`);
       } catch (err) {
@@ -395,36 +232,4 @@ export class PortManager {
     if (reaped) console.log(`[PortManager] reconcile: reaped ${reaped}`);
     return { reaped };
   }
-
-  // ─── docker helpers ──────────────────────────────────────────────────────
-
-  private isContainerRunning(name: string): boolean {
-    try {
-      const out = execFileSync('docker', ['inspect', '-f', '{{.State.Running}}', name],
-        { stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000, encoding: 'utf-8' });
-      return out.trim() === 'true';
-    } catch { return false; }
-  }
-
-  private containerLogs(name: string): string {
-    try {
-      return execFileSync('docker', ['logs', '--tail', '20', name],
-        { stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000, encoding: 'utf-8' }).trim();
-    } catch { return ''; }
-  }
-
-  private forceRemove(name: string): void {
-    execFileSync('docker', ['rm', '-f', name], { stdio: ['ignore', 'pipe', 'pipe'], timeout: 15_000 });
-  }
 }
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function stderrOf(err: unknown): string {
-  const e = err as { stderr?: Buffer | string; message?: string };
-  const s = e?.stderr ? e.stderr.toString() : '';
-  return (s || e?.message || String(err)).trim();
-}
-

@@ -477,14 +477,54 @@ export interface RuntimeMounts {
   list(consumer: string): Promise<RuntimeMountSpec[]>;
   limits(): Record<string, string | boolean>;
 }
-/** `network.endpointExposure` (5b-2 D-P). */
-export interface RuntimeEndpoints {
-  expose(instanceId: string, port: number, scope: 'app' | 'host'): Promise<RuntimeOperationResult & { endpoint?: RuntimeEndpoint }>;
-  unexpose(instanceId: string, port: number): Promise<RuntimeOperationResult>;
+/**
+ * One port exposure (`aura port expose`, 5b-2 D-P): a source instance's port
+ * made reachable `into` the owner's loopback or on the `host`. The kernel
+ * decides the request (who, which id, persistence); the runtime realises it.
+ */
+export interface RuntimeExposeRequest {
+  /** The kernel's id of the exposure, unique per owner (`into-<port>`, `host-<addr>-<port>`). */
+  id: string;
+  kind: 'into' | 'host';
+  /** `into`: the instance whose loopback gets the port; `host`: the source instance. */
+  ownerInstanceId: string;
+  sourceAppId: string;
+  sourceInstanceId: string;
+  sourcePort: number;
+  /** The listen port (into) or the published host port (host). */
+  port: number;
+  /** `host` only: the host address bound. */
+  bindAddr?: string;
+  sticky: boolean;
 }
-/** `build.execute` (5b-2 D-B). */
+/**
+ * A live exposure as the runtime keeps it (its record of what runs, D100 §13
+ * actual state). `containerName` is the runtime's opaque handle of it (the
+ * container module: its forwarder), named so for the stored records and the
+ * port API, which keep their shape (5b-2 is refactor only).
+ */
+export interface RuntimeExposure extends RuntimeExposeRequest { containerName: string; createdAt: string }
+/** `network.endpointExposure` (present ⇔ `portExpose`; 5b-2 D-P). */
+export interface RuntimeEndpoints {
+  /** Every live exposure; [] when they can't be read. */
+  list(): RuntimeExposure[];
+  /** Realises one; throws (nothing left behind) when it can't. */
+  expose(req: RuntimeExposeRequest): Promise<RuntimeExposure>;
+  /** Ends one by its handle; throws when the runtime could not. */
+  remove(containerName: string): void;
+}
+/**
+ * `build.execute` (5b-2 D-B): app builds and dependency provisioning in a
+ * throwaway sandbox of this runtime, never in the app and never in the
+ * kernel. The kernel decides when and stages the result; the runtime only
+ * runs it. `appDir` is a host path (A4: a runtime with `hostFilesystem`). The
+ * AuraOS release builder is OS infrastructure, outside ARI.
+ */
 export interface RuntimeBuild {
-  run(spec: { appId: string; kind: 'build' | 'provision' }): Promise<RuntimeOperationResult>;
+  /** `astro build` the app's sources into its staging dir. */
+  build(spec: { appId: string; appDir: string; timeoutMs?: number }): Promise<{ ok: boolean; output: string }>;
+  /** Installs the app's dependencies (its package manager's tree, the `@aura/*` packages). */
+  provision(spec: { appId: string; appDir: string; runtime: 'astro' | 'raw'; onLine?: (line: string) => void }): Promise<{ ok: boolean; output: string }>;
 }
 
 /**
@@ -511,10 +551,12 @@ export const GROUP_FEATURE = Object.freeze({
   workloads: 'workload.dynamic',
   tools: 'tools.provision',
   usage: 'observability.metrics',
+  endpoints: 'network.endpointExposure',
+  build: 'build.execute',
 } as const satisfies Record<string, RuntimeFeatureId>);
 export type RuntimeGroupName = keyof typeof GROUP_FEATURE;
 /** Typed groups whose mechanism moves behind ARI in 5b-2 stream D (at the latest Phase 6). */
-export const GROUPS_PENDING_EXTRACTION = Object.freeze(['mounts', 'endpoints', 'build'] as const);
+export const GROUPS_PENDING_EXTRACTION = Object.freeze(['mounts'] as const);
 
 /**
  * Why a module's groups and features disagree (a group without its
@@ -548,6 +590,8 @@ export interface RuntimeModule extends Pick<AuraRuntime,
   readonly sessions?: RuntimeSessions;
   readonly workloads?: RuntimeWorkloads;
   readonly tools?: RuntimeTools;
+  readonly endpoints?: RuntimeEndpoints;
+  readonly build?: RuntimeBuild;
   /** Orphan app processes in the runtime's process space (no feature of its own; D-#11). */
   readonly orphans?: RuntimeOrphans;
   /**

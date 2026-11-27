@@ -20,15 +20,16 @@
 import type { ContainerRunner } from '../../app-manager/ContainerRunner.js';
 import type { SandboxRunner } from '../../app-manager/SandboxRunner.js';
 import {
-  runnerEndpoint, type RuntimeAdoption, type RuntimeLogsRequest, type RuntimeOutputStream, type RuntimeHealthCheck, type RuntimeModule, type RuntimeSessions, type RuntimeSurvivor, type RuntimeWorkloads,
+  runnerEndpoint, type RuntimeAdoption, type RuntimeBuild, type RuntimeLogsRequest, type RuntimeOutputStream, type RuntimeHealthCheck, type RuntimeModule, type RuntimeSessions, type RuntimeSurvivor, type RuntimeWorkloads,
 } from '../ari.js';
 import { containerDiagnostics } from './diagnostics.js';
+import { containerEndpoints } from './endpoints.js';
 import { RuntimeExecError } from '../types.js';
 import { hostToolsGroup, toolsEnforcement, toolsFeatureOverrides, type HostToolStore, type ToolsMode } from '../hostTools.js';
 
 /** The runner surface the module adapts: the SandboxRunner contract plus the container's own groups. */
 export type ContainerRunnerSurface = SandboxRunner & Partial<Pick<ContainerRunner,
-  'openSessions' | 'endSession' | 'canPropagateMounts' | 'instanceLogs' | 'execWorkload' | 'workloadLogs'>>;
+  'openSessions' | 'endSession' | 'canPropagateMounts' | 'instanceLogs' | 'execWorkload' | 'workloadLogs' | 'forwarderFacts' | 'buildApp' | 'provisionApp'>>;
 
 type OrphanRecord = NonNullable<Awaited<ReturnType<NonNullable<SandboxRunner['listOrphanRecords']>>>>[number] & { user?: string };
 
@@ -64,7 +65,7 @@ export function containerRuntime(runner: ContainerRunnerSurface, deps: Container
     },
     runner,
     capabilities: () => runner.capabilities({}),
-    // App builds and provisioning run on this runtime today (the kernel build service; D-B moves them behind `build`).
+    // App builds and provisioning run on this runtime (its `build` group, D-B).
     featureOverrides: () => ({ 'build.execute': { support: 'supported' }, ...toolsFeatureOverrides(runner.capabilities({}), toolsMode()) }),
     // Never `unavailable`: the default runtime must not be blocked by a probe. A failed check degrades (and its
     // feature fails closed where it is used: a mount without propagation is refused by MountManager).
@@ -126,6 +127,21 @@ export function containerRuntime(runner: ContainerRunnerSurface, deps: Container
     } satisfies RuntimeWorkloads } : {}),
     // The instance's own output: the engine's log (5b-2 D-X).
     ...(runner.instanceLogs ? { logs: (instanceId: string, req: RuntimeLogsRequest, onChunk: (stream: RuntimeOutputStream, data: Buffer) => void) => runner.instanceLogs!(instanceId, req, onChunk) } : {}),
+    ...(caps.portExpose ? { endpoints: containerEndpoints(() => {
+      if (!runner.forwarderFacts) throw new Error('the container runner has no forwarder facts');
+      return runner.forwarderFacts();
+    }) } : {}),
+    // App builds and provisioning in a throwaway builder container (D-B; the runner's `buildApp`/`provisionApp`).
+    build: {
+      build: async ({ appId, appDir, timeoutMs }) => {
+        if (!runner.buildApp) throw new Error('the container runner has no builder');
+        return runner.buildApp(appId, appDir, timeoutMs !== undefined ? { timeoutMs } : {});
+      },
+      provision: async ({ appId, appDir, runtime, onLine }) => {
+        if (!runner.provisionApp) throw new Error('the container runner has no builder');
+        return runner.provisionApp(appId, appDir, runtime, onLine ? { onLine } : {});
+      },
+    } satisfies RuntimeBuild,
     ...(caps.hostFilesystem ? { tools: hostToolsGroup(runner, toolsMode, () => deps.toolStore?.() ?? null) } : {}),
     diagnostics: containerDiagnostics({
       baseImage: deps.baseImage ?? 'aura-base',

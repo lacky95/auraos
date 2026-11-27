@@ -14,6 +14,7 @@ import { containerIdentityArgs, isNonRootIdentity, writeIdentityFiles } from './
 import { readKernelSessionSecret, sessionHostUser, terminalSessionArgs, writeSessionSecret } from './spawn/sessionArgs.js';
 import { containerName } from '../runtimes/container/names.js';
 import type { RuntimeCapabilities } from '../runtimes/types.js';
+import type { ForwarderFacts } from '../runtimes/container/endpoints.js';
 import type { RuntimeLogsRequest, RuntimeLogsStream, RuntimeOutputStream, RuntimeWorkloadExec } from '../runtimes/ari.js';
 import { IDMAP_HELPER_PATH, type ContainerMountBackend, type ContainerPortBackend, type ContainerSidecarBackend, type FacilityProbe, type SidecarRuntimeFacts } from '../runtimes/container/backends.js';
 // Value import, but MountManager imports ContainerRunner type-only, so there
@@ -1637,6 +1638,11 @@ export class ContainerRunner implements SandboxRunner, ContainerMountBackend, Co
   async instanceLogs(instanceId: string, req: RuntimeLogsRequest, onChunk: (stream: RuntimeOutputStream, data: Buffer) => void): Promise<RuntimeLogsStream> {
     if (!this.containers.has(instanceId)) throw new ExecBridgeError(409, 'runtime-unsupported', `${instanceId} keeps no output log`);
     return engineLogs(this.engine(), this.containerName(instanceId), req, onChunk);
+  }
+
+  /** What a port forwarder is created with (the module's `endpoints`, 5b-2 D-P). */
+  forwarderFacts(): ForwarderFacts {
+    return { image: BASE_IMAGE, network: SHARED_NETWORK, rawSocketArgs: rawSocketArgs() };
   }
 
   /** A process in a running associated workload (`workloads.exec`, 5b-2 D-X): an Engine exec in its container. */

@@ -43,7 +43,7 @@ import { RuntimeRegistry, type ResolvedRuntime, type RuntimeModule } from '../ru
 import {
   RESPAWN_FREEZE_MS, readRespawnRecord, respawnEntries, writeRespawnRecord, type RespawnEntry,
 } from '../runtimes/respawn.js';
-import { moduleFeatures, operationResult, type RuntimeFeature, type RuntimeOperationResult, type RuntimeDiagnostics, type RuntimeOrphanProcess, type RuntimeSessionInfo, type RuntimeToolsStatus } from '../runtimes/ari.js';
+import { moduleFeatures, operationResult, type RuntimeFeature, type RuntimeOperationResult, type RuntimeBuild, type RuntimeDiagnostics, type RuntimeEndpoints, type RuntimeOrphanProcess, type RuntimeSessionInfo, type RuntimeToolsStatus } from '../runtimes/ari.js';
 import { BUILTIN_RUNTIMES } from '../runtimes/builtins/index.js';
 import { RUNTIME_AUDIT_ACTIONS, RuntimeSettingsStore, runtimeSettingsRevision } from '../runtimes/settingsStore.js';
 import { migrateLegacyRuntimes, migrationReport, processLegacyEnv, type MigrationApp, type MigrationReport } from '../runtimes/migrateLegacy.js';
@@ -460,6 +460,8 @@ export class AppManager {
       dataDir:  opts.dataDir,
       registry: this.registry,
       runner:   this.container,
+      // The runtime that realises exposures (D-P): the one with the `endpoints` group (the container module).
+      endpoints: this.runtimes.list().find((m) => m.endpoints)?.endpoints ?? NO_ENDPOINTS,
       resolveRunningInstance: (appId) => {
         const inst = this.getInstancesByApp(appId).find(
           (i) => i.state === 'resumed' || i.state === 'resuming' || i.state === 'started',
@@ -1414,6 +1416,18 @@ export class AppManager {
     return manifest ? serveState(manifest.appDir, manifest) : null;
   }
 
+  /**
+   * The runtime app builds and provisioning run on (5b-2 D-B, D100 owner
+   * decision 2): the first installed runtime with the `build` group (the
+   * container module today, as before). None: builds fail closed, never in
+   * the kernel or the app.
+   */
+  private builder(): RuntimeBuild {
+    const b = this.runtimes.list().find((m) => m.build)?.build;
+    if (!b) throw new Error('capability-missing: build.execute (no installed runtime builds apps)');
+    return b;
+  }
+
   /** One app build at a time (each is a capped container, still heavy). */
   private buildChain: Promise<unknown> = Promise.resolve();
 
@@ -1448,7 +1462,7 @@ export class AppManager {
       let res: { ok: boolean; output: string };
       try {
         prepareBuildStaging(manifest.appDir);
-        res = await this.container.buildApp(appId, manifest.appDir);
+        res = await this.builder().build({ appId, appDir: manifest.appDir });
         if (res.ok) {
           installBuild(manifest.appDir, { prune: this.getInstancesByApp(appId).length === 0 });
           writeBuildStamp(manifest.appDir, fingerprint);
@@ -1506,7 +1520,7 @@ export class AppManager {
     if (running) return running;
     const run = (async () => {
       console.log(`[AppManager] provision: ${appId} in the builder …`);
-      const res = await this.container.provisionApp(appId, appDir, runtime, { ...(opts.onLine ? { onLine: opts.onLine } : {}) });
+      const res = await this.builder().provision({ appId, appDir, runtime, ...(opts.onLine ? { onLine: opts.onLine } : {}) });
       const ok = res.ok && !needsProvisioning(appDir, runtime);
       console.log(`[AppManager] provision: ${appId} ${ok ? 'ok' : 'FAILED'}`);
       return { ok, ran: true, output: res.output };
@@ -4192,6 +4206,13 @@ export class AppManager {
     console.error(`[AppManager] ${instanceId} crashed (exit code ${code})`);
   }
 }
+
+/** No runtime exposes ports: nothing is live, and an expose fails explicitly (D100: never a silent no-op). */
+const NO_ENDPOINTS: RuntimeEndpoints = {
+  list: () => [],
+  expose: async () => { throw new Error('capability-missing: portExpose (no installed runtime exposes ports)'); },
+  remove: () => { throw new Error('capability-missing: portExpose (no installed runtime exposes ports)'); },
+};
 
 /**
  * Singleton stored on globalThis so it survives Vite 7's Environments API,
