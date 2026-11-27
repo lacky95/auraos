@@ -41,6 +41,12 @@
     "./aura-channel": {
       "import": "./dist/app-hosts/auraChannel.js",
       "types": "./dist/app-hosts/auraChannel.d.ts"
+    },
+    "./workers/ownership-apply": {
+      "default": "./dist/identity/ownershipApplyWorker.js"
+    },
+    "./workers/home-seed": {
+      "default": "./dist/app-manager/homeSeedWorker.js"
     }
   },
   "scripts": {

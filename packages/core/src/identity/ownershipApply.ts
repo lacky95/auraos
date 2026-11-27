@@ -24,7 +24,7 @@
 import { execFile } from 'node:child_process';
 import { closeSync, constants, fchmodSync, fchownSync, fstatSync, lchownSync, lstatSync, mkdirSync, openSync, readFileSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { coreWorkerPath } from '../system/workerPath.js';
 import { chownTree, type OwnershipJournalEntry } from './appOwnership.js';
 import type { OwnershipReport, OwnershipRow } from './ownershipReport.js';
 
@@ -170,10 +170,17 @@ export async function runOwnershipApply(
   const journal = join(dir, `${stamp}-${digest.slice(0, 12)}.ndjson`);
   const stdout = await new Promise<string>((resolve, reject) => {
     // Resolved at the call: core is also bundled as CommonJS (the CLI), which never applies.
-    const worker = fileURLToPath(new URL('./ownershipApplyWorker.js', import.meta.url));
+    let worker: string;
+    try { worker = coreWorkerPath(import.meta.url, 'ownershipApplyWorker.js', 'ownership-apply'); }
+    catch (err) { reject(new Error(`ownership apply failed: its worker script was not found (${(err as Error).message.split('\n')[0]})`)); return; }
     const child = execFile(process.execPath, [worker, journal], {
       timeout: opts.timeoutMs ?? 60 * 60_000, maxBuffer: 16 * 1024 * 1024, encoding: 'utf-8',
-    }, (err, out, errOut) => (err ? reject(new Error(`ownership apply failed: ${String(errOut || err.message).trim().slice(-500)}`)) : resolve(out)));
+    }, (err, out, errOut) => {
+      if (!err) { resolve(out); return; }
+      // The error line, not Node's source excerpt or stack (paths and messages only).
+      const text = String(errOut || err.message).trim();
+      reject(new Error(`ownership apply failed (worker ${worker}): ${(text.split('\n').find((l) => /Error\b/.test(l)) ?? text.slice(-300)).slice(0, 300)}`));
+    });
     child.stdin?.end(JSON.stringify(rows));
   });
   return { journal, rows: JSON.parse(stdout) as OwnershipApplyResult['rows'] };

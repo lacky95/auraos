@@ -19,7 +19,7 @@
 import { execFileSync } from 'node:child_process';
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { coreWorkerPath } from '../system/workerPath.js';
 
 /** `~/CLAUDE.md` as the seed shipped it before `~/.claude/CLAUDE.md` existed. */
 export const LEGACY_HOME_CLAUDE_MD =
@@ -105,7 +105,7 @@ export function seedHomeAs(seedDir: string, home: string, warn: (msg: string) =>
   if (st.uid === 0) return seedHome(seedDir, home, warn);
   try {
     // Resolved at the call: core is also bundled as CommonJS (the CLI), which never seeds.
-    const worker = fileURLToPath(new URL('./homeSeedWorker.js', import.meta.url));
+    const worker = coreWorkerPath(import.meta.url, 'homeSeedWorker.js', 'home-seed');
     const out = execFileSync(process.execPath, [worker, seedDir, home], {
       uid: st.uid, gid: st.gid, cwd: '/', env: { HOME: home, PATH: '/usr/bin:/bin' }, encoding: 'utf-8', timeout: 30_000,
       stdio: ['ignore', 'pipe', 'pipe'],

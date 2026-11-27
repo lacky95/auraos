@@ -421,3 +421,20 @@ test('homeRequirements: plain, serializable data per context and mode (5b requir
   const appJump = homeRequirements({ executionContext: 'jump', jumpHomeMode: 'app' });
   assert.deepEqual([appJump.capabilities, appJump.jumpAuthorization, appJump.nonRootTarget], [{ sessionExec: true }, true, false]);
 });
+
+test("5-main (VM finding): core finds its worker scripts when another build bundled it", async () => {
+  const { coreWorkerPath } = await import("../dist/system/workerPath.js");
+  const { realpathSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const real = (p) => realpathSync(p);
+  const dist = (f) => real(fileURLToPath(new URL(`../dist/${f}`, import.meta.url)));
+  // From core's own dist: next to the caller.
+  const here = new URL("../dist/identity/ownershipApply.js", import.meta.url).href;
+  assert.equal(real(coreWorkerPath(here, "ownershipApplyWorker.js", "ownership-apply")), dist("identity/ownershipApplyWorker.js"));
+  // From a bundle elsewhere (the shell's chunks): through the declared export, to the real dist file.
+  const bundled = new URL("../../shell/dist-prod/server/chunks/x.mjs", import.meta.url).href;
+  assert.equal(real(coreWorkerPath(bundled, "ownershipApplyWorker.js", "ownership-apply")), dist("identity/ownershipApplyWorker.js"));
+  assert.equal(real(coreWorkerPath(bundled, "homeSeedWorker.js", "home-seed")), dist("app-manager/homeSeedWorker.js"));
+  // Nothing found: an error, never another file.
+  assert.throws(() => coreWorkerPath("file:///nonexistent/x.js", "ownershipApplyWorker.js", "ownership-apply"));
+});
