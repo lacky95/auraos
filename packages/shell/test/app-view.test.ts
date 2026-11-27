@@ -358,6 +358,8 @@ test('route: ungranted → 202 needs-approval (click, apps.view) with the hint; 
   assert.equal(b.target, TARGET);
   assert.match(b.hint, /aura grant perms io\.lakner\.marklayer apps\.view --target com\.aura\.sentinel/);
   assert.match(t.created[0].display.title, /Let MarkLayer read Sentinel/);
+  // The dialog states the limit of read-only honestly (D104 owner clarification).
+  assert.ok(t.created[0].display.details.some((d: string) => /only reads through \(GET and HEAD/.test(d) && /changes data by itself/.test(d)));
   assert.equal(t.issued.length, 0);
 
   t.approve();

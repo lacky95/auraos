@@ -256,7 +256,8 @@ export function appViewDisplay(ask: AppViewAsk, consumerName: string, targetName
     title: `Let ${consumerName} read ${targetName}`,
     details: [
       `Reads: ${named(targetName, ask.target)}, everything you can see there: its pages and its read-only API.`,
-      `Reader: ${named(consumerName, ask.consumer)}, on its server. Your browser never gets this access, and it cannot change anything in ${targetName} (no forms, no sockets).`,
+      `Reader: ${named(consumerName, ask.consumer)}, on its server. Your browser never gets this access.`,
+      `AuraOS lets only reads through (GET and HEAD; no forms, no sockets, no event streams). It cannot see inside ${targetName}: if one of its read pages changes data by itself, this access would trigger that too. ${targetName} is told the request is a delegated read and can refuse it.`,
       'This can be sensitive content. It lasts until you revoke it:',
       `aura revoke perms ${ask.consumer} apps.view --target ${ask.target}`,
     ],

@@ -209,7 +209,7 @@ async function grantAppAccess(ctx: RouteCtx, a: SubjectArgs): Promise<Response> 
     payload: { subjectKind: 'app', subjectId: a.id, permission: a.permission, target, consumerInstallation: consumer.installationId, targetInstallation },
     title: `Let ${consumerName} read ${mgr.registry.getById(target)?.name ?? target}`,
     details: [
-      `Reader: ${a.id}, on its server, with GET and HEAD only.`,
+      `Reader: ${a.id}, on its server. AuraOS lets only reads through (GET and HEAD; no forms, no sockets); a read page of ${target} that changes data by itself would still run.`,
       `Reads: ${target}, everything you can see there: its pages and its read-only API. This can be sensitive content.`,
       ...warnings,
     ],

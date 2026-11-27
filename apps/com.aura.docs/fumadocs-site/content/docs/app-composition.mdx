@@ -73,27 +73,33 @@ aura admin grants                                         # lists them; "stale" 
   Nexus, …), an owner agent (the System Terminal) or an app that shows the
   owner's Terminal sessions (it requests a `terminal.*` permission).
 
-### Read-only, honestly
+### Read-only, honestly: what AuraOS can and cannot guarantee
 
-AuraOS lets only `GET` and `HEAD` through, opens no socket and gives the target
-no AuraOS identity of the user. It cannot see inside the target: an app whose
-`GET` routes change state (against HTTP's rules) would still run them. So every
-delegated request carries two headers the target can trust (a client cannot set
-them):
+`apps.view` is read-only **at the HTTP level**. AuraOS lets only `GET` and
+`HEAD` through, opens no socket or event stream, and gives the target no AuraOS
+identity of the user. That alone **cannot guarantee read-only behaviour inside
+the target**: AuraOS cannot see what a route does, and an app whose `GET` routes
+change state (marking something read, starting a job, a "delete" link) would
+still run them for a delegated read. The approval dialog says this to the owner.
+
+What closes the gap is the target's own code, with two tools AuraOS gives it:
+
+1. Every delegated request carries two headers the target can trust (AuraOS
+   strips any a client sends):
 
 ```
 x-aura-access: view
 x-aura-access-by: io.lakner.marklayer
 ```
 
-In the target, refuse what must not be read this way:
+2. In the target, refuse what must not be read this way:
 
 ```ts
 import { delegatedAccess } from '@aura/app-sdk';
 if (delegatedAccess(request)) return new Response('not for delegated reads', { status: 403 });
 ```
 
-A target can refuse all delegated reads in its manifest:
+3. Or refuse all delegated reads in the manifest (the default is `allow`):
 
 ```json title="app.manifest.json (of the target)"
 { "composition": { "view": "deny" } }
@@ -130,3 +136,6 @@ Every refusal says what is missing and how to fix it, in AuraOS's error body
 | `read-only` | A write, a socket or an event stream | Read with `GET`/`HEAD` |
 | `not-through-target` | AuraOS's API through the target | Ask AuraOS with your own token |
 | `server-only` | Called from a page or a browser | Call it on your server |
+
+**For target developers:** keep `GET` routes free of side effects (HTTP's own
+rule), and check `delegatedAccess(request)` on any that are not.
