@@ -19,7 +19,9 @@
 //   audit-public --repo R --config F                             public build inputs under publicFallback: deny
 //   write-data  --data D [--seed S] [--system-mode M] [--source-json F]   first-boot handoff into the data volume
 //   build-inputs --state-dir S [--config F]                      the release builder's D94 inputs (JSON; paths, never values)
+//   runner-plan --root R [--config F] [--node-image I]           RUNNER_TAG/RUNNER_NODE/RUNNER_CLI KEY=value lines
 //   redact      [--config F --credentials-dir D]                 stdin → stdout with secrets redacted
+import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -263,6 +265,8 @@ export function requirements(repo, cfg) {
     packages = (sect.match(/^ {2}\S.*:$/gm) ?? []).length;
   }
   const mirrors = cfg?.registries?.oci?.mirrors ?? {};
+  // The release builder's runner (Normal installs) pulls its two base images too.
+  if (existsSync(join(repo, RUNNER_DOCKERFILE))) { const r = runnerBaseImages(repo); for (const i of [r.node, r.cli]) if (i) images.add(i); }
   return {
     images: [...images].sort().map((i) => ({ image: i, via: rewriteImage(i, mirrors) })),
     downloads: [...urls].sort().map((u) => ({ url: u, via: rewriteUrl(u, cfg?.registries?.artifacts?.rewrites ?? {}) })),
@@ -349,6 +353,41 @@ export function buildInputs({ stateDir, config }) {
   return out;
 }
 
+export const RUNNER_DOCKERFILE = 'os/release/runner/Dockerfile';
+const HELPER_SOURCE = 'os/rename-exchange/rename-exchange.c';
+
+/** The ARG defaults of the runner Dockerfile (its base images). */
+export function runnerBaseImages(root) {
+  const df = readFileSync(join(root, RUNNER_DOCKERFILE), 'utf8');
+  const arg = (n) => new RegExp(`^ARG ${n}=(\\S+)$`, 'm').exec(df)?.[1];
+  return { df, node: arg('NODE_IMAGE'), cli: arg('DOCKER_CLI_IMAGE') };
+}
+
+/**
+ * The builder runner image (os/release/runner/Dockerfile): its base images
+ * through the D94 OCI mirrors, and a tag that fingerprints the Dockerfile, the
+ * base refs and the helper source (a changed input builds a new runner).
+ */
+export function runnerPlan({ root, config, nodeImage }) {
+  const { df, node, cli } = runnerBaseImages(root);
+  const mirrors = config ? loadConfig(config).config.registries?.oci?.mirrors ?? {} : {};
+  const out = { node: rewriteImage(nodeImage ?? node, mirrors), cli: rewriteImage(cli, mirrors) };
+  const h = createHash('sha256').update(df).update('\0').update(out.node).update('\0').update(out.cli).update('\0')
+    .update(readFileSync(join(root, HELPER_SOURCE)));
+  return { tag: `aura-release-runner:${h.digest('hex').slice(0, 16)}`, ...out };
+}
+
+const shellSafe = (v) => /^[A-Za-z0-9._:/@+-]+$/.test(v);
+
+function cmdRunnerPlan(a) {
+  const p = runnerPlan({ root: a.root, config: a.config, nodeImage: a['node-image'] });
+  for (const [k, v] of [['RUNNER_TAG', p.tag], ['RUNNER_NODE', p.node], ['RUNNER_CLI', p.cli]]) {
+    if (!shellSafe(v)) { fail(`runner-plan: unsafe image reference ${JSON.stringify(v)}`); return 1; }
+    say(`${k}=${v}`);
+  }
+  return 0;
+}
+
 function cmdRedact(a) {
   let known = [];
   if (a.config && a['credentials-dir']) {
@@ -376,10 +415,11 @@ export function main(argv = process.argv.slice(2)) {
       case 'audit-public': need('repo', 'config'); return cmdAuditPublic(a);
       case 'write-data': need('data'); say(JSON.stringify(writeData({ data: a.data, seed: a.seed, systemMode: a['system-mode'], sourceJson: a['source-json'] }))); return 0;
       case 'store-show': need('data'); { const s = readStore(infraDir(a.data)); say(s ? `${s.file} ${s.digest}` : 'no infrastructure config'); return 0; }
+      case 'runner-plan': need('root'); return cmdRunnerPlan(a);
       case 'build-inputs': need('state-dir'); say(JSON.stringify(buildInputs({ stateDir: a['state-dir'], config: a.config }))); return 0;
       case 'redact': return cmdRedact(a);
       case 'node-ok': return 0;
-      default: fail('usage: installer.mjs validate|endpoints|net-config|stage|select|tree|fingerprint|requirements|audit-public|write-data|build-inputs|redact (see the file header)'); return 64;
+      default: fail('usage: installer.mjs validate|endpoints|net-config|stage|select|tree|fingerprint|requirements|audit-public|write-data|build-inputs|runner-plan|redact (see the file header)'); return 64;
     }
   } catch (e) {
     if (e instanceof InfraConfigError) { fail(`infrastructure config is invalid:\n${e.errors.map((x) => `  ${x.path || '(root)'}: ${x.message}`).join('\n')}`); return 1; }

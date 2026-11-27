@@ -4,7 +4,7 @@ import { join, resolve, dirname } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { AppManifestSchema, AURA_CONTRACT, AURA_NPMRC, initRepo, needsNpmrc, newOriginId, portPackageJsonForScope, portToolsForScope, requirementsOf, type AppManifest, type RuntimeRequirements } from '@aura/core';
 import { color, error, fail, info, ok, warn } from '../lib/format.js';
-import { CONTRACT_DOCS_HINT, DOCS_HINT, lintAppSources, lintContract, lintManifestKeys, type Finding } from '../lib/apphost-lint.js';
+import { CONTRACT_DOCS_HINT, DOCS_HINT, lintAppSources, lintContract, lintManifestKeys, lintReleaseBuild, type Finding } from '../lib/apphost-lint.js';
 import { promptText, promptChoice, promptConfirm, promptMultiSelect, PromptCancelled, BACK, type MultiSelectMode } from '../lib/prompts.js';
 import { fetchCapabilities, loadState } from '../lib/registry.js';
 import { api } from '../lib/client.js';
@@ -856,6 +856,8 @@ Besides the schema, the App Host checks (warnings unless noted) report with file
   - reads of the AURA_APP_BASE_PATH / AURA_APP_ID / AURA_INSTANCE_ID globals or aura-* meta tags
   - /api/proxy/ URLs in browser-served files (pages are served from / on their App Host)
   - notes: on('upgrade') handlers with no path check, hmr: false
+Release builds (Phase 6): build.release cwd and command exist (errors), a command without outputs (warning),
+  apps the release builder would not build without build.release (note).
 The app contract checks (D48, warnings: report only):
   - auraContract missing, or newer than this AuraOS (${AURA_CONTRACT})
   - context.get('KEY') of a key not in context[]; reads of the raw Context (/run/context)
@@ -912,6 +914,7 @@ Skips node_modules, dist, .astro and .next. ${DOCS_HINT}; ${CONTRACT_DOCS_HINT}.
             }
             findings.push(...lintManifestKeys(m, text, data, result.data, REMOVED_MANIFEST_KEYS));
             findings.push(...lintContract(m, text, result.data, { source: opts.source !== false }));
+            findings.push(...lintReleaseBuild(m, text, result.data));
             requirements.push({ manifest: result.data, req: requirementsOf(result.data) });
           }
         } catch (err) { warn(`${m}: ${String(err)}`); failed++; }

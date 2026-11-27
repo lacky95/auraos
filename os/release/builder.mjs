@@ -16,7 +16,7 @@
 //
 // Job steps (each one a line of the job checklist, aura/release/jobs/<job>.json,
 // in SelfUpdater's step format):
-//   lock       the one activation lock, for the whole job (lock.mjs)
+//   lock       the one `system` activation lock, for the whole job (lock.mjs = core release/lock.ts's format)
 //   source     fetch into the bare mirror aura/release/mirror.git (D94 git config), never /workspace
 //   verify     the signed release metadata against commit and tree (D71) BEFORE anything of it runs
 //   stage      git archive → releases/.staging-<job>; its tree must equal the verified tree (no .git)
@@ -357,11 +357,11 @@ export async function build(o) {
     // 1. lock
     begin('lock');
     if (ownLock) {
-      try { lock = acquireLock(L.lock, { jobId, purpose: o.firstInstall ? 'install' : 'build' }); } catch (e) {
-        if (e instanceof LockError) throw new BuildError('locked', e.message, { exit: 3 });
+      try { lock = acquireLock(L.lock, { jobId, by: o.firstInstall ? 'system.release.install' : 'system.release.build' }); } catch (e) {
+        if (e instanceof LockError) throw new BuildError(e.code, e.message, { exit: 3 });
         throw e;
       }
-    } else if (!lock.owned()) refuse('locked', 'the caller\'s activation lock is not held');
+    } else if (!lock.owned()) refuse('activation-busy', 'the caller\'s activation lock is not held');
     done('lock', lock.brokeStale ? `took over a stale lock of ${lock.brokeStale.jobId ?? 'an unknown job'}` : `held by ${lock.jobId}`);
 
     // 2. source: the bare mirror under /data, never /workspace
@@ -539,7 +539,7 @@ export async function build(o) {
     const builtComps = [
       ...sourceComps.filter((x) => x.kind === 'package').map((x) => ({ name: x.name, kind: 'package' })),
       { name: 'shell-bundle', kind: 'shell', composition, outDir: 'packages/shell/dist-prod' },
-      ...apps.filter((a) => a.built).map((a) => ({ name: a.id, kind: 'app', fingerprint: a.fingerprint })),
+      ...apps.filter((a) => a.built).map((a) => ({ name: a.id, kind: 'app', via: a.via, ...(a.fingerprint ? { fingerprint: a.fingerprint } : {}), ...(a.outputs ? { outputs: a.outputs } : {}) })),
     ];
     const record = {
       v: RELEASE_RECORD_VERSION,
@@ -668,7 +668,7 @@ export async function main(argv = process.argv.slice(2)) {
       case 'gc': {
         if (!a['data-root']) return usage();
         const L = layout(a['data-root']);
-        const lock = acquireLock(L.lock, { jobId: newJobId(), purpose: 'gc' });
+        const lock = acquireLock(L.lock, { jobId: newJobId(), by: 'system.release.gc' });
         try { jsonOut({ ok: true, ...(await gc({ dataRoot: a['data-root'], activeJob: lock.jobId })) }); } finally { lock.release(); }
         return 0;
       }

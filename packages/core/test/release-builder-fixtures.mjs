@@ -37,6 +37,13 @@ if ((a[0] === 'buildx' && a[1] === 'build') || a[0] === 'build') {
   exit(0);
 }
 if (a[0] === 'run') {
+  // install.sh's builder runner: run its command here, with the data volume at FAKE_DATA_ROOT.
+  const ri = a.findIndex((x) => x.startsWith('aura-release-runner:'));
+  if (ri >= 0) {
+    const cmd = a.slice(ri + 1).map((x, i, all) => (all[i - 1] === '--data-root' && x === '/data' ? env('FAKE_DATA_ROOT', '') : x));
+    const r = require('node:child_process').spawnSync(cmd[0], cmd.slice(1), { stdio: 'inherit' });
+    exit(r.status ?? 1);
+  }
   if (a.includes('-v') && a[a.indexOf('--entrypoint') + 1] === 'node') { console.log(env('FAKE_NODE', 'v22.23.5')); exit(0); }
   const i = a.indexOf('os/release/build.sh');
   if (i < 0) exit(0);

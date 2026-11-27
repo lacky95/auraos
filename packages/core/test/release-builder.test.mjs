@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { hostname } from 'node:os';
 import { ROOT, commitAll, git, release, throwawayKey, tmp, trustOf, write } from './release-fixtures.mjs';
 import { auraSource, fakeDocker } from './release-builder-fixtures.mjs';
 
@@ -124,27 +125,50 @@ test('a tampered or untrusted release is refused at verify, before anything is e
   assert.equal(moved.code, 'verify-moved');
 });
 
-test('lock contention: a second job is refused while the lock is fresh; a stale lock is taken over', async () => {
+test('lock contention: a second job is refused while the holder lives; a dead or silent holder is taken over (core release/lock.ts format)', async () => {
   const s = setup();
   const held = LOCK.acquireLock(s.L.lock, { jobId: '2026-01-01T00-00-00-000Z', autoHeartbeat: false });
+  const h = JSON.parse(readFileSync(s.L.lock, 'utf8'));
+  assert.deepEqual(Object.keys(h).sort(), ['at', 'by', 'heartbeatAt', 'host', 'jobId', 'pid', 'start'], 'lock.ts holder + heartbeatAt');
+  assert.equal(s.L.lock, join(s.data, 'aura/release/lock'), "lock.ts activationLockPath(dataDir, 'system')");
   const e = await err(s.go());
-  assert.equal(e.code, 'locked');
+  assert.equal(e.code, 'activation-busy');
   assert.match(e.message, /holds the activation lock: 2026-01-01T00-00-00-000Z/);
   assert.equal(s.fake.calls(), '', 'nothing ran');
   assert.equal(existsSync(s.L.mirror), false, 'not even fetched');
   assert.equal(held.owned(), true, 'the holder keeps it');
   held.release();
-  // A crashed holder: its heartbeat is old.
-  const old = new Date(Date.now() - LOCK.STALE_MS - 1000).toISOString();
-  writeFileSync(s.L.lock, JSON.stringify({ v: 1, jobId: '2026-01-02T00-00-00-000Z', purpose: 'build', startedAt: old, heartbeatAt: old }));
+  const old = Date.now() - LOCK.STALE_MS - 1000;
+  // A holder on this host whose process is gone (lock.ts staleHere).
+  writeFileSync(s.L.lock, JSON.stringify({ jobId: '2026-01-02T00-00-00-000Z', pid: 2 ** 22 + 7, host: hostname(), start: null, at: Date.now(), by: 'x' }));
   const r = await s.go();
-  assert.equal(r.ok, true);
   const job = JSON.parse(readFileSync(s.L.job(r.job), 'utf8'));
   assert.match(job.steps.find((x) => x.key === 'lock').detail, /took over a stale lock of 2026-01-02T00-00-00-000Z/);
+  // Another host (the updater container): busy while its heartbeat is fresh, stale after STALE_MS.
+  writeFileSync(s.L.lock, JSON.stringify({ jobId: '2026-01-03T00-00-00-000Z', pid: 1, host: 'updater', start: null, at: old, heartbeatAt: Date.now() }));
+  assert.equal((await err(s.go({ composition: 'server' }))).code, 'activation-busy');
+  writeFileSync(s.L.lock, JSON.stringify({ jobId: '2026-01-03T00-00-00-000Z', pid: 1, host: 'updater', start: null, at: old, heartbeatAt: old }));
+  assert.equal((await s.go({ composition: 'server' })).ok, true);
+  assert.ok(LOCK.heartbeatStale({ at: old }) && !LOCK.heartbeatStale({ at: old, heartbeatAt: Date.now() }));
   // Same-process double acquire is refused too.
-  const h = LOCK.acquireLock(s.L.lock, { jobId: '2026-01-03T00-00-00-000Z', autoHeartbeat: false });
-  assert.throws(() => LOCK.acquireLock(s.L.lock, { jobId: '2026-01-04T00-00-00-000Z' }), (x) => x.code === 'locked');
-  h.release();
+  const h2 = LOCK.acquireLock(s.L.lock, { jobId: '2026-01-04T00-00-00-000Z', autoHeartbeat: false });
+  assert.throws(() => LOCK.acquireLock(s.L.lock, { jobId: '2026-01-05T00-00-00-000Z' }), (x) => x.code === 'activation-busy');
+  h2.release();
+});
+
+test('durable: renames never replace; an exchange needs the rename-exchange helper (no two-rename fallback)', async () => {
+  const D = await import(join(ROOT, 'os/release/durable.mjs'));
+  const d = tmp('aura-durable-');
+  mkdirSync(join(d, 'a')); mkdirSync(join(d, 'b'));
+  const saved = process.env.AURA_RENAME_EXCHANGE;
+  process.env.AURA_RENAME_EXCHANGE = join(d, 'no-helper');
+  try {
+    assert.throws(() => D.renameDurable(join(d, 'a'), join(d, 'b')), (e) => e.code === 'EEXIST');
+    D.renameDurable(join(d, 'a'), join(d, 'c'));
+    assert.ok(existsSync(join(d, 'c')) && !existsSync(join(d, 'a')));
+    assert.throws(() => D.exchangeDurable(join(d, 'b'), join(d, 'c')), (e) => e.code === 'unsupported');
+  } finally { if (saved === undefined) delete process.env.AURA_RENAME_EXCHANGE; else process.env.AURA_RENAME_EXCHANGE = saved; }
+  assert.equal(readFileSync(join(ROOT, 'os/rename-exchange/rename-exchange.c'), 'utf8').includes('RENAME_EXCHANGE'), true, "Phase 7a's helper, the one implementation");
 });
 
 test('a failed build leaves the current release, the pointer and every other release untouched', async () => {
@@ -308,4 +332,43 @@ test('dataSubpath: the build mounts stay under the data root\'s place in the vol
   assert.match(run, /target=\/workspace,volume-subpath=e2e-scratch\/releases\/\.staging-/);
   assert.match(run, /target=\/pnpm-store,volume-subpath=e2e-scratch\/aura\/pnpm-store/);
   await assert.rejects(s.go({ dataSubpath: '../x' }), (e) => e.code === 'usage');
+});
+
+test('build-apps: build.release runs the app\'s declared argv (outputs checked), {} ships as is, raw apps without it are skipped, an invalid manifest fails', () => {
+  const root = tmp('aura-buildapps-');
+  // The staging tree's own core build: here, this worktree's packages/.
+  spawnSync('ln', ['-s', join(ROOT, 'packages'), join(root, 'packages')]);
+  const app = (id, manifest, files = {}) => {
+    write(root, `apps/${id}/app.manifest.json`, JSON.stringify({ id, name: id, version: '1.0.0', ...manifest }));
+    for (const [f, t] of Object.entries(files)) write(root, `apps/${id}/${f}`, t);
+  };
+  app('com.example.built', { runtime: 'raw', build: { release: { command: ['node', '-e', "require('fs').mkdirSync('out/x',{recursive:true})"], cwd: 'site', outputs: ['site/out/x'] } } }, { 'site/.keep': '', 'entrypoint.sh': '' });
+  app('com.example.asis', { runtime: 'raw', build: { release: {} } }, { 'entrypoint.sh': '' });
+  app('com.example.raw', { runtime: 'raw' }, { 'entrypoint.sh': '' });
+  const run = () => spawnSync(process.execPath, [join(ROOT, 'os/release/build-apps.mjs'), root], { encoding: 'utf8' });
+  let r = run();
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const apps = JSON.parse(r.stdout.trim().split('\n').pop()).apps;
+  assert.deepEqual(apps.map((a) => [a.id, a.built, a.via ?? a.skipped]), [
+    ['com.example.asis', true, 'build.release'], ['com.example.built', true, 'build.release'], ['com.example.raw', false, 'own-entrypoint'],
+  ]);
+  assert.ok(existsSync(join(root, 'apps/com.example.built/site/out/x')));
+  app('com.example.noout', { runtime: 'raw', build: { release: { command: ['node', '-e', '0'], outputs: ['dist'] } } }, { 'entrypoint.sh': '' });
+  app('com.example.escape', { runtime: 'raw', build: { release: { cwd: '../..' } } }, { 'entrypoint.sh': '' });
+  r = run();
+  assert.equal(r.status, 1);
+  const bad = JSON.parse(r.stdout.trim().split('\n').pop()).apps.filter((a) => a.failed);
+  assert.deepEqual(bad.map((a) => a.id), ['com.example.escape', 'com.example.noout']);
+  assert.match(bad[0].error, /invalid manifest: build\.release\.cwd: must be a path inside the app dir/);
+  assert.match(bad[1].error, /missing outputs: dist/);
+});
+
+test('the system apps declare their release builds (Docs, Registry; Console serves a build)', () => {
+  const m = (id) => JSON.parse(readFileSync(join(ROOT, 'apps', id, 'app.manifest.json'), 'utf8'));
+  assert.deepEqual(m('com.aura.docs').build.release, { command: ['node', 'serve.mjs', '--build-only'], cwd: 'fumadocs-site', outputs: ['fumadocs-site/.next'] });
+  assert.deepEqual(m('com.aura.registry').build.release, {});
+  assert.equal(m('com.aura.console').serve, 'auto');
+  assert.ok(existsSync(join(ROOT, 'apps/com.aura.console/server.mjs')));
+  const builder = readFileSync(join(ROOT, 'os/release/build-apps.mjs'), 'utf8');
+  assert.doesNotMatch(builder, /com\.aura\./, 'no app-specific code in the builder');
 });

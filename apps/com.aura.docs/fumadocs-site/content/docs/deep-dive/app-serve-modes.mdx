@@ -80,3 +80,30 @@ Other things to check when an app moves to prod:
   Astro middleware).
 - Absolute `/_astro/…` URLs built at runtime (Vite's preload helper) reach
   the app directly on its App Host, so dynamic imports work.
+
+## Builds in an AuraOS release (`build.release`)
+
+In Normal Mode AuraOS runs a locked, read-only release: the release builder
+builds every app shipped in it once, in a throwaway container with no
+network, and nothing is built or written into an app dir afterwards.
+
+- An Astro app the rule above calls prod-capable needs nothing: the builder
+  runs `astro build` and stamps it like a normal build.
+- Any other app declares how it builds in `build.release`:
+
+```json
+{ "build": { "release": {
+  "command": ["node", "serve.mjs", "--build-only"],
+  "cwd": "fumadocs-site",
+  "outputs": ["fumadocs-site/.next"]
+} } }
+```
+
+`command` is an argv (no shell), run in `cwd` (relative to the app dir) with
+`NODE_ENV=production` after the release's dependencies are installed;
+`outputs` are the paths it must produce. `{ "release": {} }` says the app runs
+from its sources as they are (e.g. a small Node wrapper). Paths must stay
+inside the app dir. At runtime the app must not write into its own dir
+(the tree is read-only): data goes to `/data`. `aura dev validate` reports
+apps with their own entrypoint, or dev-only Astro apps, that declare no
+`build.release`.

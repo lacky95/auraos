@@ -15,6 +15,14 @@ aura dev validate .   # manifest schema + App Host contract checks
 aura run {{APP_ID}}   # start it in AuraOS (prints the instance id)
 ```
 
+**Builds in a release (Normal Mode).** An AuraOS release is read-only and builds
+every app it ships once, offline. An Astro app with no dev-server hooks needs
+nothing. An app with its own `entrypoint.sh`, or a dev-only Astro config,
+declares its build in the manifest: `"build": { "release": { "command": [...],
+"cwd": "...", "outputs": [...] } }` (argv, no shell), or `{ "release": {} }` when
+it runs from its sources as is. Never write into the app dir at runtime.
+`aura dev validate` checks it (Aura Docs: "App serve modes").
+
 Add your own test command as `scripts.test` in `package.json` and list it
 here, so whoever patches an installed copy can run it in the workspace.
 

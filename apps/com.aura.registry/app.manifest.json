@@ -13,6 +13,7 @@
   "sandbox":        "container",
   "runtime":        "raw",
   "entrypoint":     "entrypoint.sh",
+  "build":          { "release": {} },
   "autoStart":      true,
   "critical":       true,
   "tools":          ["bash", "node", "zot"],

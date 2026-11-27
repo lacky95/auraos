@@ -170,13 +170,17 @@ test('Normal Mode (default): the release builder builds the verified release, th
   const r = install(['--source', `file://${src.dir}`, '--trusted-key', keyFile], { fake });
   assert.equal(r.status, 3, r.out);
   assert.match(r.out, /Verified stable release 0\.1\.0 \(v0\.1\.0\): commit [0-9a-f]{40}/);
-  assert.match(r.out, /ok +release builder runtime: host node/);
+  assert.match(r.out, /ok +release builder runner aura-release-runner:[0-9a-f]{16} built/);
+  assert.match(r.calls, /docker buildx build --load -t aura-release-runner:[0-9a-f]{16} --build-arg NODE_IMAGE=node:22\.23\.5-bookworm --build-arg DOCKER_CLI_IMAGE=docker:29\.3\.1-cli -f \S+os\/release\/runner\/Dockerfile \S+\/os$/m);
+  const runner = r.calls.split('\n').find((l) => / aura-release-runner:\S+ node \S+os\/release\/builder\.mjs build /.test(l));
+  assert.match(runner, /^docker run --rm --network none --name aura-release-builder .*-v \S+:\/var\/run\/docker\.sock -v aura[a-z0-9_-]*_aura-app-data:\/data /);
+  assert.match(runner, /--data-root \/data --data-volume \S+_aura-app-data .*--expect-commit [0-9a-f]{40} .*--first-install/);
   assert.match(r.out, /stage: staged tree = verified tree/);
   assert.match(r.out, /release (0\.1\.0-[0-9a-f]{12}-[0-9a-f]{8}) built \(read-only, current\)/);
-  assert.match(r.out, /no Normal-mode runtime yet \(Phase 6 stream L\): nothing was started/);
+  assert.match(r.out, /the Normal-mode runtime \(Phase 6 stream L\) is not there yet: nothing was started/);
   const lines = r.calls.split('\n');
   const handoff = lines.findIndex((l) => / write-data --data \/data .*--system-mode normal --source-json /.test(l));
-  const firstBuild = lines.findIndex((l) => /^docker (buildx build|run .*os\/release\/build\.sh)/.test(l));
+  const firstBuild = lines.findIndex((l) => /^docker (buildx build --load --target|run .*os\/release\/build\.sh)/.test(l));
   assert.ok(handoff >= 0 && firstBuild > handoff, r.calls);
   assert.doesNotMatch(r.calls, /docker compose .* up/, 'nothing started');
   // The release and the first pointer are on the data volume; no staging copy on the host.
