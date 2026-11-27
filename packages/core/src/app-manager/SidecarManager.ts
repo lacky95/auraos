@@ -14,7 +14,7 @@ import type { SpawnIdentity } from '../identity/types.js';
 import { listToolchainBinaries, provisionAllowlist, readSidecarMap, toolchainMirrorBin } from './tool-provision.js';
 import { SIDECAR_TOOL_RE, effectiveSidecarTools } from './sidecar-tools.js';
 import { privateHomeSidecarRefusal } from './privateHomeNetwork.js';
-import { inheritHomeUser } from '../runtimes/spawn/identityArgs.js';
+import { SidecarHomeError, inheritHomeUser, isRootInstallation } from '../runtimes/spawn/identityArgs.js';
 import type { ResolvedHome } from '../homes/types.js';
 import { authFailureReason, isAuthFailure, parseImageRef } from '../nexus/RegistryAuth.js';
 import type { PullCredential } from '../nexus/types.js';
@@ -170,6 +170,12 @@ interface SidecarManagerOpts {
    * registry). Asked before anything is created for an isolated sidecar.
    */
   requireNetwork?(level: 'instance'): void;
+  /**
+   * B12b: whether the app's current installation holds
+   * `home.inherit.sidecar:<template>` (GrantStore, pinned). Absent or failing:
+   * not granted, so a root installation's home sidecar is refused.
+   */
+  homeInheritGranted?(appId: string, template: string): Promise<boolean>;
 }
 
 /**
@@ -327,9 +333,17 @@ export class SidecarManager {
       legacyVolumeExists: (n) => legacy.has(n),
     });
     // B12: an inheritHome sidecar runs as its app's identity; a conflicting template user is refused (D105).
-    if (spec.inheritHome && spec.user !== undefined) {
-      const appUser = inheritHomeUser(inst.identity);
-      if (spec.user !== appUser) throw new SidecarIdentityError(inst.appId, spec.template, spec.user, appUser);
+    const appUser = spec.inheritHome ? inheritHomeUser(inst.identity) : null;
+    if (appUser !== null && spec.user !== undefined && spec.user !== appUser) {
+      throw new SidecarIdentityError(inst.appId, spec.template, spec.user, appUser);
+    }
+    // B12b (owner decision 7): a root installation's home sidecar only with the owner's explicit grant
+    // for this template and installation (b); the runtime then verifies a non-root user (a) and that
+    // it can't escalate (c), else refuses (identityArgs SidecarHomeError). Never implicit.
+    const rootHome = !!spec.inheritHome && isRootInstallation(inst.identity);
+    if (rootHome) {
+      const granted = await this.opts.homeInheritGranted?.(inst.appId, spec.template).catch(() => false);
+      if (granted !== true) throw SidecarHomeError.notAuthorized(inst.appId, spec.template);
     }
     // D107: mandatory isolation, refused before anything is made when the runtime can't enforce it.
     if (spec.network === 'instance') this.opts.requireNetwork?.('instance');
@@ -374,7 +388,9 @@ export class SidecarManager {
           }
         } else {
           const rec = parseRecord(existing.labels['aura.sidecar.spec']);
-          if (rec && rec.specHash === hash && existing.state === 'running') {
+          // B12b: a root installation's home sidecar is never adopted (one made before B12b skipped its checks):
+          // it is recreated, and the runtime's create checks (a) and (c) again.
+          if (rec && rec.specHash === hash && existing.state === 'running' && !rootHome) {
             // Same spec, already up: adopt. Re-learn its nonce and make sure its
             // mounts are there (idempotent — present ones are skipped).
             if (rec.nonce) this.opts.tokens.register(instanceId, rec.nonce, spec.name);
@@ -441,11 +457,16 @@ export class SidecarManager {
       }
       const permissions = this.opts.registry.getById(inst.appId)?.permissions;
       const parentIdentity = this.opts.instance(instanceId)?.identity;
+      // A refused create (B12b: the runtime's identity checks) leaves no token or tool grant behind.
       const id = await this.wl().create({
         instanceId, appId: inst.appId, spec, record: JSON.stringify(record), ...(record.owner ? { owner: record.owner } : {}),
         env, token: token?.token ?? null, home,
         ...(parentIdentity ? { parentIdentity } : {}),
         ...(permissions ? { permissions } : {}),
+      }).catch((err: unknown) => {
+        if (token) this.opts.tokens.forget(instanceId, spec.name);
+        undoTools();
+        throw err;
       });
       // Started and up, or removed again with its own words (a failed start, a runtime that dies on boot).
       try {

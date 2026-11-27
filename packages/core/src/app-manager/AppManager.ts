@@ -61,7 +61,7 @@ import { HomeDeniedError, type HomeResolver, type ResolvedHome } from '../homes/
 import { kernelHomeResolver } from '../homes/HomeResolver.js';
 import { isUserEnvironment, TERMINAL_APP_ID } from '../system/systemApps.js';
 import { requirePrivateHomeIsolation } from './privateHomeNetwork.js';
-import { appJumpPermission } from '../auth/GrantStore.js';
+import { appGrantCounts, appJumpPermission, homeInheritSidecarPermission } from '../auth/GrantStore.js';
 import {
   APP_ROOT_EXECUTION_OPTION, RootExecutionError, executionConfigOf, executionDecision, type AppRootExecutionPolicy, type ExecutionApproval,
 } from '../identity/execution.js';
@@ -554,6 +554,10 @@ export class AppManager {
       changed: () => { void this.syncSidecars(2).catch(() => undefined); },
       // Private images: only the login of the app's own install source (pullCredentialFor).
       pullCredential: (appId, image) => this.pullCredentialFor(appId, image),
+      // B12b: a root installation's home sidecar only with the owner's grant, pinned to this installation (S1).
+      homeInheritGranted: async (appId, template) => appGrantCounts(
+        await this.auth().grants.get({ kind: 'app', id: appId }, homeInheritSidecarPermission(template)),
+        await this.appGrantBinding(appId)),
     });
     // services[].prePull: fetch template images as soon as an app is
     // installed (init() covers the apps already loaded at boot).

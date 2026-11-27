@@ -744,6 +744,21 @@
         "aura-io.test.app-legacy"
       ],
       [
+        "volume",
+        "inspect",
+        "aura-io.test.app-data"
+      ],
+      [
+        "volume",
+        "inspect",
+        "aura-io.test.app-pg"
+      ],
+      [
+        "volume",
+        "inspect",
+        "aura-io.test.app-legacy"
+      ],
+      [
         "inspect",
         "--format",
         "{{.Name}}\t{{.State.Status}}\t{{json .Config.Labels}}\t{{.RestartCount}}",
@@ -767,48 +782,64 @@
         "ghcr.io/example/webui:1"
       ],
       [
-        "create",
-        "--name",
-        "aura-io.test.app-2--homeforeign-root",
-        "--network",
-        "aura-inst-io.test.app-2",
-        "--restart",
-        "unless-stopped",
-        "--cap-drop",
-        "NET_RAW",
-        "--label",
-        "aura.parent=io.test.app-2",
-        "--label",
-        "aura.app=io.test.app",
-        "--label",
-        "aura.service=homeforeign-root",
-        "--label",
-        "aura.managed=os",
-        "--label",
-        "aura.sidecar.template=homeforeign",
-        "--label",
-        "aura.sidecar.owner=-",
-        "--label",
-        "aura.sidecar.spec={\"name\":\"homeforeign-root\",\"template\":\"homeforeign\",\"image\":\"ghcr.io/example/webui:1\",\"specHash\":\"c5e4dcd7fa75e60a\",\"mounts\":{\"own\":false,\"inherit\":false,\"exclude\":[],\"forceRo\":false},\"network\":\"instance\",\"createdAt\":\"<TS>\"}",
-        "--mount",
-        "type=volume,source=appvol,target=/home/aura,volume-subpath=aura/apphomes/i/global",
-        "-e",
-        "HOME=/home/aura",
-        "--cap-drop",
-        "ALL",
-        "--security-opt",
-        "no-new-privileges",
-        "ghcr.io/example/webui:1"
+        "image",
+        "inspect",
+        "ghcr.io/example/webui:1",
+        "--format",
+        "{{.Config.User}}"
       ],
       [
-        "start",
-        "id2"
+        "volume",
+        "inspect",
+        "aura-io.test.app-data"
+      ],
+      [
+        "volume",
+        "inspect",
+        "aura-io.test.app-pg"
+      ],
+      [
+        "volume",
+        "inspect",
+        "aura-io.test.app-legacy"
       ],
       [
         "inspect",
         "--format",
         "{{.Name}}\t{{.State.Status}}\t{{json .Config.Labels}}\t{{.RestartCount}}",
-        "aura-io.test.app-2--homeforeign-root"
+        "aura-io.test.app-2--homeuser-root"
+      ],
+      [
+        "ps",
+        "-a",
+        "--filter",
+        "label=aura.managed=os",
+        "--filter",
+        "label=aura.parent=io.test.app-2",
+        "--format",
+        "{{.Names}}\t{{.State}}\t{{.Label \"aura.sidecar.spec\"}}"
+      ],
+      [
+        "image",
+        "inspect",
+        "--format",
+        "{{.Id}}",
+        "ghcr.io/example/webui:1"
+      ],
+      [
+        "volume",
+        "inspect",
+        "aura-io.test.app-data"
+      ],
+      [
+        "volume",
+        "inspect",
+        "aura-io.test.app-pg"
+      ],
+      [
+        "volume",
+        "inspect",
+        "aura-io.test.app-legacy"
       ]
     ],
     "refusal": {
@@ -819,6 +850,53 @@
         "category": "invalid-request",
         "manifestField": "services[homeuser].user",
         "hint": "drop \"user\" from services[homeuser] in app.manifest.json (an inheritHome sidecar always runs as its app's identity)"
+      }
+    },
+    "root": {
+      "noGrant": {
+        "status": 403,
+        "body": {
+          "error": "sidecar-home-not-authorized",
+          "message": "io.test.app runs as root (no app identity), so its sidecar 'homeforeign' gets the app's home only with an explicit grant of home.inherit.sidecar:homeforeign to this installation: not created",
+          "category": "missing-permission",
+          "permission": "home.inherit.sidecar:homeforeign",
+          "target": "io.test.app",
+          "hint": "run the app as its own identity (aura admin apps run-as io.test.app app), or grant it: aura admin grant io.test.app home.inherit.sidecar:homeforeign",
+          "suggest": [
+            "aura admin apps run-as io.test.app app",
+            "aura admin grant io.test.app home.inherit.sidecar:homeforeign"
+          ]
+        }
+      },
+      "rootImage": {
+        "status": 409,
+        "body": {
+          "error": "sidecar-home-root-user",
+          "message": "io.test.app runs as root, so its sidecar 'homeforeign' with the app's home must run as a verifiably non-root user, and its user (services[homeforeign].user, else ghcr.io/example/webui:1's image user) is empty (root): not created",
+          "category": "invalid-request",
+          "manifestField": "services[homeforeign].user",
+          "target": "io.test.app",
+          "hint": "set services[homeforeign].user to a numeric non-root \"uid:gid\" the image runs as, or run the app as its own identity (aura admin apps run-as io.test.app app)"
+        }
+      },
+      "nonRootUser": {
+        "status": 409,
+        "body": {
+          "error": "sidecar-home-escalation",
+          "message": "io.test.app runs as root, so its sidecar 'homeuser' gets the app's home only where it can't escalate, and the container runtime cannot mount the home nosuid (docker's --mount has no nosuid for a writable volume, and a host-side nosuid bind would not survive a daemon restart): not created",
+          "category": "unsupported-feature",
+          "missing": [
+            "nosuidHomeMount"
+          ],
+          "target": "io.test.app",
+          "details": {
+            "runtime": "container"
+          },
+          "hint": "run the app as its own identity (aura admin apps run-as io.test.app app): its sidecar then runs as the app's uid"
+        }
+      },
+      "nonRootImage": {
+        "status": 404
       }
     }
   },

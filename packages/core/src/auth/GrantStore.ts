@@ -116,9 +116,20 @@ export const userScope = (userId: string): GrantScope => ({ kind: 'user', id: us
 export const CONTEXT_READ_PERMISSION_RE = /^context\.read:[A-Z_][A-Z0-9_]{0,127}$/;
 export const contextReadPermission = (key: string): string => `context.read:${key}`;
 
+/**
+ * B12b (owner decision 7): a root installation's sidecar template `<name>`
+ * (manifest `services[].name`, `inheritHome`) gets the app's home. One grant
+ * per app and template, OS-wide, pinned to the installation like every app
+ * grant (a reinstall inherits nothing); given by the owner (`admin.grant`)
+ * only, never implicitly. The sidecar must also be verifiably non-root and
+ * unable to escalate (runtimes/spawn/identityArgs.ts `SidecarHomeError`).
+ */
+export const HOME_INHERIT_SIDECAR_PERMISSION_RE = /^home\.inherit\.sidecar:[a-z][a-z0-9-]{0,47}$/;
+export const homeInheritSidecarPermission = (template: string): string => `home.inherit.sidecar:${template}`;
+
 export function isPrivilegedPermission(p: string): boolean {
   return (PRIVILEGED_PERMISSIONS as readonly string[]).includes(p) || KV_OS_WRITE_PERMISSION_RE.test(p)
-    || CREDENTIAL_READ_PERMISSION_RE.test(p) || CONTEXT_READ_PERMISSION_RE.test(p);
+    || CREDENTIAL_READ_PERMISSION_RE.test(p) || CONTEXT_READ_PERMISSION_RE.test(p) || HOME_INHERIT_SIDECAR_PERMISSION_RE.test(p);
 }
 
 const SUBJECT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
@@ -213,10 +224,13 @@ export class GrantStore {
       return;
     }
     if (!isPrivilegedPermission(permission)) {
-      throw new GrantError(400, `'${permission}' cannot be granted here — grantable: ${GRANTABLE_PERMISSIONS.join(', ')}, system.kv.os.<topic>.write, credential.read:<NAME>, context.read:<KEY>`);
+      throw new GrantError(400, `'${permission}' cannot be granted here — grantable: ${GRANTABLE_PERMISSIONS.join(', ')}, system.kv.os.<topic>.write, credential.read:<NAME>, context.read:<KEY>, home.inherit.sidecar:<template>`);
     }
     if (CONTEXT_READ_PERMISSION_RE.test(permission) && (subject.kind !== 'app' || scope.kind !== 'os')) {
       throw new GrantError(400, 'a context.read:<KEY> grant is an app\'s, OS-wide');
+    }
+    if (HOME_INHERIT_SIDECAR_PERMISSION_RE.test(permission) && (subject.kind !== 'app' || scope.kind !== 'os')) {
+      throw new GrantError(400, 'a home.inherit.sidecar:<template> grant is an app\'s, OS-wide');
     }
     const credential = CREDENTIAL_READ_PERMISSION_RE.test(permission);
     if (credential || scope.kind === 'user') {
