@@ -216,3 +216,20 @@ test('migration: a tracked registry edited in place is reported only', () => {
 test('overlayFromDiff: a base without a template list and an empty local list is no op', () => {
   assert.equal(overlayFromDiff(base({ services: [{ name: 's' }] }), base({ services: [{ name: 's', tools: [] }] })), null);
 });
+
+test('the overlay ends with the installation: removing the app drops its grants (a reinstall earns them again)', async () => {
+  const { NexusManager } = await import('../dist/nexus/NexusManager.js');
+  const root = mkdtempSync(join(tmpdir(), 'aura-overlay-nexus-'));
+  const scope = (id, priority, immutable) => ({ id, appsDir: join(root, id, 'apps'), dataDir: join(root, id, 'data'), immutable, priority });
+  const scopes = [scope('system', 0, true), scope('global', 1, false), scope('user', 2, false)];
+  const rootDataDir = join(root, 'data');
+  const mgr = new NexusManager({ scopes, rootDataDir });
+  mkdirSync(join(scopes[2].appsDir, 'io.user.app'), { recursive: true });
+  writeFileSync(join(scopes[2].appsDir, 'io.user.app', 'app.manifest.json'), JSON.stringify(base({ id: 'io.user.app' })));
+  const overlayApps = layout(rootDataDir).overlayApps;
+  writeManifestOverlay(overlayApps, 'io.user.app', { v: 1, permissions: { add: ['apps.mount'], remove: [] } });
+  writeManifestOverlay(overlayApps, 'io.other.app', { v: 1, tools: { add: ['git'], remove: [] } });
+  await mgr.removeFromScope('io.user.app', 'user');
+  assert.equal(readManifestOverlay(overlayApps, 'io.user.app'), null);
+  assert.ok(readManifestOverlay(overlayApps, 'io.other.app'), 'other apps keep theirs');
+});
