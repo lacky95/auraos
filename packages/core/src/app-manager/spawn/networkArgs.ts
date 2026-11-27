@@ -3,7 +3,7 @@
  * N owns this file: D58 adds the per-user Terminal network here).
  */
 import { DEFAULT_OWNER_ID } from '../../auth/identityContracts.js';
-import { TERM_NETWORK_CONTAINER_LABEL, type TermNetwork } from '../TermNetworks.js';
+import { TERM_NETWORK_CONTAINER_LABEL, type TermNetwork } from '../../runtimes/container/networks.js';
 
 import { TERMINAL_APP_ID } from '../../system/systemApps.js';
 

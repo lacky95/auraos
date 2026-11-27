@@ -292,11 +292,11 @@ export function operationResult(
 // A group is present on a module exactly when its features are supported
 // (`GROUP_FEATURE`); the registry refuses a module where they disagree. Shapes
 // carry instance ids, workload ids and opaque refs: never a PID, a container
-// name or id, a host path or an engine handle. The groups whose mechanism still
-// lives in the kernel managers (mounts, endpoints, build, diagnostics, and
-// the create/exec/logs half of workloads) are typed here and move behind ARI
-// in 5b-2 stream D (rows D-M, D-P, D-B, D-R/D-C, D-S/D-X); until then their
-// presence is not required (`GROUPS_PENDING_EXTRACTION`).
+// name or id, a host path or an engine handle. 5b-2 stream D moved the
+// endpoints, build, diagnostics, logs and workload exec/logs mechanisms behind
+// these groups; the mounts group and workload create still live in the kernel
+// managers (rows D-M, D-S: Phase 6) and their presence is not required yet
+// (`GROUPS_PENDING_EXTRACTION`).
 
 /** An instance that outlived the previous kernel, as its runtime reports it (D77). */
 export interface RuntimeSurvivor {
@@ -327,6 +327,18 @@ export interface RuntimeAdoption {
   removeAllOf(appId: string): Promise<void>;
 }
 
+/** An app process in a runtime's own process space (`orphans`; the pid is local to that space). */
+export interface RuntimeOrphanProcess { pid: number; appId: string; cmdline: string }
+/**
+ * Squatters (5b-2 D-#11): app processes in the runtime's process space that
+ * no tracked process reaches (the kernel's instance records plus every
+ * runtime's in-flight processes). Present on a runtime whose workloads run in
+ * the kernel's own process space; reported only: the kernel decides the kill.
+ */
+export interface RuntimeOrphans {
+  scan(tracked: ReadonlySet<number>): { all: RuntimeOrphanProcess[]; squatters: RuntimeOrphanProcess[] };
+}
+
 /** A session open inside an instance (D74), as listed. */
 export interface RuntimeSessionInfo {
   sessionId: string;
@@ -343,21 +355,113 @@ export interface RuntimeSessions {
   end(sessionId: string): Promise<boolean>;
 }
 
-/** `workload.dynamic`: associated workloads (sidecars; present ⇔ `sidecars`). Create, exec and logs move here in 5b-2 (D-S, D-X). */
+/**
+ * A process running in a workload (a session, an exec), its stdio streamed
+ * (`aura jump`, `aura exec`). A stream handle, not data: it never crosses
+ * a process boundary as is.
+ */
+export interface RuntimeExecSession {
+  input(data: Buffer): void;
+  /** Close the process's stdin (non-TTY: EOF). */
+  endInput(): void;
+  resize(cols: number, rows: number): void;
+  /**
+   * A signal for the process. With a TTY, INT, QUIT and TSTP go in as the
+   * terminal's control characters; anything else (and every signal without a
+   * TTY) ends the session where the runtime cannot signal an exec process.
+   * Returns false when the session was ended instead.
+   */
+  signal(sig: string): boolean;
+  close(): void;
+  /** The exit code; null when it could not be read (the session was cut). */
+  readonly exited: Promise<number | null>;
+}
+
+/** A process to run in an associated workload (5b-2 D-X: `jump --sidecar`, `exec sc`), with the workload's own user unless `user`. */
+export interface RuntimeWorkloadExec {
+  argv: string[];
+  tty: boolean;
+  env: Record<string, string>;
+  cols: number;
+  rows: number;
+  /** Attach stdin (absent: the runtime's default for the kind of session). */
+  attachStdin?: boolean;
+  user?: string;
+  workdir?: string;
+}
+
+/** A workload's output (`aura logs`): `out` or `err`. */
+export type RuntimeOutputStream = 'out' | 'err';
+export interface RuntimeLogsRequest { tail?: number; since?: number; timestamps?: boolean; follow?: boolean }
+/** A running read of a log: `done` resolves when the output ends (never, while following, until `close`). */
+export interface RuntimeLogsStream { done: Promise<void>; close(): void }
+/** Reads a workload's log (`observability.logs`, 5b-2 D-X); `onChunk` gets each piece as it comes. */
+export type RuntimeLogs = (id: string, req: RuntimeLogsRequest, onChunk: (stream: RuntimeOutputStream, data: Buffer) => void) => Promise<RuntimeLogsStream>;
+
+/** `workload.dynamic`: associated workloads (sidecars; present ⇔ `sidecars`). Create moves here in 5b-2 (D-S). */
 export interface RuntimeWorkloads {
   /** Every associated workload; null when the runtime could not be read (never reap on that). */
   list(): Promise<SidecarInfo[] | null>;
   remove(workloadIds: string[]): void;
   /** Removes an instance's app-spawned workloads; those the kept services name stay (a restart). */
   removeOf(instanceId: string, opts?: { keepServices?: string[] }): number;
+  /** Runs a process in a running workload (by its listed id); refusals are `RuntimeExecError`s. */
+  exec(workloadId: string, spec: RuntimeWorkloadExec, onOutput: (channel: 1 | 2, data: Buffer) => void): Promise<RuntimeExecSession>;
+  /** A workload's own output. */
+  logs: RuntimeLogs;
 }
 
 /** The logical tool grant (D100 §5): tool ids, never a host directory. */
 export interface RuntimeToolSet { tools: AppManifest['tools'] }
+/** One provisioned tool of an instance, as its runtime sees it (`tools.status`). */
+export interface RuntimeToolEntry {
+  name: string;
+  /** How the entry is provisioned: `hardlink`, `file`, `symlink` (legacy, advisory) or `unknown`. */
+  kind: string;
+  /** A symlink's target inside the workload; null otherwise. */
+  target: string | null;
+  /** The tool and the libraries it needs are there. */
+  resolves: boolean;
+  libs: { needed: number; missing: string[] };
+}
+/** What an instance's tools are, as provisioned (`tools.status`, 5b-2 D-C; `GET /api/admin/inspect-tools`). Reported only. */
+export interface RuntimeToolsStatus {
+  /** The instance has a provisioned tool set at all. */
+  provisioned: boolean;
+  entries: RuntimeToolEntry[];
+  /** The granted libraries' sonames; null when the instance has none provisioned. */
+  libs: string[] | null;
+}
 /** `tools.*`: physical provisioning of `/aura/my-tools` (present ⇔ `hostFilesystem` in this release). */
 export interface RuntimeTools {
   /** Applies the grant to a running instance; `applied` only when the provider made it so. */
   apply(instanceId: string, set: RuntimeToolSet): RuntimeOperationResult;
+  /** What is provisioned for the instance now. */
+  status(instanceId: string): RuntimeToolsStatus;
+}
+
+/**
+ * Read-only diagnostics a runtime can answer (D100 §§11, 16; 5b-2 D-R, D-C):
+ * reported, never enforced. Every member is optional; a missing one is
+ * reported as not inspectable, never guessed. Instance ids only: the module
+ * maps them to its own workloads.
+ */
+export interface RuntimeDiagnostics {
+  /**
+   * What the workload wrote into its own root filesystem outside every mount
+   * (`aura admin contract`, the dataDir report): one change per line,
+   * `A|C|D <path>` (added, changed, deleted). Null when it can't be read.
+   */
+  inspectWrites?(instanceId: string): Promise<string[] | null>;
+  /** The workload's mounts as it sees them (destination, writable). Null when they can't be read. */
+  workloadMounts?(instanceId: string): Promise<Array<{ destination: string; rw: boolean }> | null>;
+  /**
+   * `aura cap doctor`: runs the tools probe (`script`, which prints its report
+   * on stdout) in a fresh, short-lived sandbox of this runtime over the
+   * toolchain store (`binDir`, `libDir`: its binaries and libraries, with the
+   * libraries on `LD_LIBRARY_PATH`). `skipped`: the probe could not run here.
+   */
+  probeTools?(probe: { script: string; binDir: string; libDir: string }): { stdout: string } | { skipped: string; missing?: string };
 }
 
 /** `mount.*` (5b-2 D-M): a mount by logical source, never a host path. */
@@ -373,14 +477,54 @@ export interface RuntimeMounts {
   list(consumer: string): Promise<RuntimeMountSpec[]>;
   limits(): Record<string, string | boolean>;
 }
-/** `network.endpointExposure` (5b-2 D-P). */
-export interface RuntimeEndpoints {
-  expose(instanceId: string, port: number, scope: 'app' | 'host'): Promise<RuntimeOperationResult & { endpoint?: RuntimeEndpoint }>;
-  unexpose(instanceId: string, port: number): Promise<RuntimeOperationResult>;
+/**
+ * One port exposure (`aura port expose`, 5b-2 D-P): a source instance's port
+ * made reachable `into` the owner's loopback or on the `host`. The kernel
+ * decides the request (who, which id, persistence); the runtime realises it.
+ */
+export interface RuntimeExposeRequest {
+  /** The kernel's id of the exposure, unique per owner (`into-<port>`, `host-<addr>-<port>`). */
+  id: string;
+  kind: 'into' | 'host';
+  /** `into`: the instance whose loopback gets the port; `host`: the source instance. */
+  ownerInstanceId: string;
+  sourceAppId: string;
+  sourceInstanceId: string;
+  sourcePort: number;
+  /** The listen port (into) or the published host port (host). */
+  port: number;
+  /** `host` only: the host address bound. */
+  bindAddr?: string;
+  sticky: boolean;
 }
-/** `build.execute` (5b-2 D-B). */
+/**
+ * A live exposure as the runtime keeps it (its record of what runs, D100 §13
+ * actual state). `containerName` is the runtime's opaque handle of it (the
+ * container module: its forwarder), named so for the stored records and the
+ * port API, which keep their shape (5b-2 is refactor only).
+ */
+export interface RuntimeExposure extends RuntimeExposeRequest { containerName: string; createdAt: string }
+/** `network.endpointExposure` (present ⇔ `portExpose`; 5b-2 D-P). */
+export interface RuntimeEndpoints {
+  /** Every live exposure; [] when they can't be read. */
+  list(): RuntimeExposure[];
+  /** Realises one; throws (nothing left behind) when it can't. */
+  expose(req: RuntimeExposeRequest): Promise<RuntimeExposure>;
+  /** Ends one by its handle; throws when the runtime could not. */
+  remove(containerName: string): void;
+}
+/**
+ * `build.execute` (5b-2 D-B): app builds and dependency provisioning in a
+ * throwaway sandbox of this runtime, never in the app and never in the
+ * kernel. The kernel decides when and stages the result; the runtime only
+ * runs it. `appDir` is a host path (A4: a runtime with `hostFilesystem`). The
+ * AuraOS release builder is OS infrastructure, outside ARI.
+ */
 export interface RuntimeBuild {
-  run(spec: { appId: string; kind: 'build' | 'provision' }): Promise<RuntimeOperationResult>;
+  /** `astro build` the app's sources into its staging dir. */
+  build(spec: { appId: string; appDir: string; timeoutMs?: number }): Promise<{ ok: boolean; output: string }>;
+  /** Installs the app's dependencies (its package manager's tree, the `@aura/*` packages). */
+  provision(spec: { appId: string; appDir: string; runtime: 'astro' | 'raw'; onLine?: (line: string) => void }): Promise<{ ok: boolean; output: string }>;
 }
 
 /**
@@ -407,10 +551,12 @@ export const GROUP_FEATURE = Object.freeze({
   workloads: 'workload.dynamic',
   tools: 'tools.provision',
   usage: 'observability.metrics',
+  endpoints: 'network.endpointExposure',
+  build: 'build.execute',
 } as const satisfies Record<string, RuntimeFeatureId>);
 export type RuntimeGroupName = keyof typeof GROUP_FEATURE;
 /** Typed groups whose mechanism moves behind ARI in 5b-2 stream D (at the latest Phase 6). */
-export const GROUPS_PENDING_EXTRACTION = Object.freeze(['mounts', 'endpoints', 'build', 'diagnostics', 'logs'] as const);
+export const GROUPS_PENDING_EXTRACTION = Object.freeze(['mounts'] as const);
 
 /**
  * Why a module's groups and features disagree (a group without its
@@ -444,6 +590,17 @@ export interface RuntimeModule extends Pick<AuraRuntime,
   readonly sessions?: RuntimeSessions;
   readonly workloads?: RuntimeWorkloads;
   readonly tools?: RuntimeTools;
+  readonly endpoints?: RuntimeEndpoints;
+  readonly build?: RuntimeBuild;
+  /** Orphan app processes in the runtime's process space (no feature of its own; D-#11). */
+  readonly orphans?: RuntimeOrphans;
+  /**
+   * An instance's own output as its runtime keeps it (5b-2 D-X). Absent: the
+   * kernel reads the runner's output ring (`outputLog`), or there is none.
+   */
+  readonly logs?: RuntimeLogs;
+  /** Read-only diagnostics (no feature of its own: a missing member is reported as not inspectable). */
+  readonly diagnostics?: RuntimeDiagnostics;
   /** Live usage by instance id and workload id (a record, never a `Map`). */
   usage?(req: { instanceIds: string[]; sidecarIds: string[] }): Promise<RuntimeUsage>;
   /** Owner and diagnose actions, by id (`aura runtime`, the admin routes). */

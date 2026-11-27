@@ -704,8 +704,15 @@ export class ProotRunner implements SandboxRunner {
     });
   }
 
+  /**
+   * Tracked and its process alive (ARI dup #11: the kernel's liveness check
+   * asks the runtime, never a pid). An entry outlives its child's natural
+   * exit until a kill or the reconciler clears it, so the pid is probed.
+   */
   isRunning(instanceId: string): boolean {
-    return this.processes.has(instanceId);
+    const pid = this.processes.get(instanceId)?.process.pid;
+    if (pid == null) return false;
+    try { process.kill(pid, 0); return true; } catch { return false; }
   }
 
   /**

@@ -343,7 +343,7 @@ test('D75 owner decision: adopt the default, or keep PRoot for an open app only;
 test('a fake runtime registers through the registry and resolves in AppManager with no edit to it', async () => {
   const dataDir = mkdtempSync(join(TMP, 'mgr-'));
   // A provider with none of the container's groups (5b CR: a group is present exactly when its feature is).
-  const fakeCaps = { ...CONTAINER_CAPS, isolation: 'vm', survivesShellRestart: false, sidecars: false, usage: false, sessionExec: false, hostFilesystem: false };
+  const fakeCaps = { ...CONTAINER_CAPS, isolation: 'vm', survivesShellRestart: false, sidecars: false, usage: false, sessionExec: false, hostFilesystem: false, portExpose: false };
   const fake = { descriptor: { id: 'fake', version: '0.1.0', ari: 1, title: 'Fake', description: 'test', builtIn: false, settingsSchema: { type: 'object', properties: {} }, settingsVersion: 1 },
     runner: { capabilities: () => fakeCaps }, capabilities: () => fakeCaps, health: () => ({ status: 'ok', checks: [] }), endpoint: () => null };
   const mgr = new AppManager({ appsDir: join(dataDir, 'apps'), dataDir, baseRootfs: ROOTFS, toolchainDir: join(dataDir, 'tc'), runtimes: [fake] });

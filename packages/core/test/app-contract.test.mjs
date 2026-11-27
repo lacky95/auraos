@@ -86,13 +86,13 @@ test('dataDirReport combines install folder, container layer and the home mount'
   const deps = {
     homePath: '/home/aura',
     installWrites: (dir) => ({ writes: dir === '/a' ? ['notes.db'] : [], truncated: false }),
-    dockerDiff: async (c) => (c === 'aura-b-1' ? ['C /root', 'A /root/.cache-x'] : null),
-    dockerMounts: async () => [{ destination: '/home/aura', rw: true }, { destination: '/data', rw: true }],
+    inspectWrites: async (id) => (id === 'b-1' ? ['C /root', 'A /root/.cache-x'] : null),
+    workloadMounts: async () => [{ destination: '/home/aura', rw: true }, { destination: '/data', rw: true }],
   };
   const r = await dataDirReport([
     { appId: 'a', scope: 'user', dir: '/a', sandbox: 'proot', ownNamespace: false, instances: [{ instanceId: 'a' }] },
-    { appId: 'b', scope: 'user', dir: '/b', sandbox: 'container', ownNamespace: true, instances: [{ instanceId: 'b-1', container: 'aura-b-1' }] },
-    { appId: 'c', scope: 'user', dir: '/c', sandbox: 'container', ownNamespace: true, instances: [{ instanceId: 'c-1', container: 'aura-c-1' }] },
+    { appId: 'b', scope: 'user', dir: '/b', sandbox: 'container', ownNamespace: true, instances: [{ instanceId: 'b-1', inspect: true }] },
+    { appId: 'c', scope: 'user', dir: '/c', sandbox: 'container', ownNamespace: true, instances: [{ instanceId: 'c-1', inspect: true }] },
   ], deps);
   assert.deepEqual(r.map((x) => [x.appId, x.outside, x.home]), [['a', true, 'rw'], ['b', true, 'rw'], ['c', false, 'rw']]);
   assert.deepEqual(r[1].containerLayer, [{ instanceId: 'b-1', writes: ['/root/.cache-x'], truncated: false }]);

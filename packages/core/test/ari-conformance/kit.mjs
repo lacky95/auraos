@@ -25,6 +25,9 @@ import {
   RuntimeRegistry, RuntimeCapabilityError, builtInRuntimeRecord, settingsDefaults, validateSettings, healthRefusal,
   requirementsOf, runtimeRefusal, RUNTIME_FEATURE_IDS, moduleFeatures, CATEGORY_OF_CODE, GROUP_FEATURE, groupMismatch,
 } from '../../dist/index.js';
+import { buildSpawnSpec } from '../../dist/runtimes/spawnSpec.js';
+
+const EXEC_CODES = ['not-found', 'not-running', 'engine'];
 
 const plain = (v) => JSON.parse(JSON.stringify(v));
 
@@ -119,6 +122,53 @@ export function describeRuntime(name, makeModule, harness = {}) {
       assert.equal(typeof a.mutating, 'boolean', id);
     }
     await harness.groups?.(m);
+  });
+
+  // 5b-2 D: the groups whose mechanism moved behind ARI (D-X, D-P, D-B, D-R/D-C, D-#11).
+  test(`[ARI ${name}] moved groups: workloads exec/logs, logs, endpoints, build, diagnostics, orphans are functions; refusals carry a code`, async () => {
+    const m = makeModule();
+    const fn = (v, what) => assert.equal(typeof v, 'function', what);
+    if (m.workloads) {
+      fn(m.workloads.exec, 'workloads.exec');
+      fn(m.workloads.logs, 'workloads.logs');
+      // An exec into a workload that isn't there fails explicitly, with a neutral code (never a silent no-op).
+      const spec = { argv: ['true'], tty: false, env: {}, cols: 80, rows: 24 };
+      await assert.rejects(m.workloads.exec('no-such-workload', spec, () => {}), (e) => EXEC_CODES.includes(e.code), 'workloads.exec');
+    }
+    if (m.logs) fn(m.logs, 'logs');
+    if (m.endpoints) { fn(m.endpoints.list, 'endpoints.list'); fn(m.endpoints.expose, 'endpoints.expose'); fn(m.endpoints.remove, 'endpoints.remove'); }
+    if (m.build) { fn(m.build.build, 'build.build'); fn(m.build.provision, 'build.provision'); }
+    for (const k of ['inspectWrites', 'workloadMounts', 'probeTools']) if (m.diagnostics?.[k] !== undefined) fn(m.diagnostics[k], `diagnostics.${k}`);
+    if (m.orphans) {
+      fn(m.orphans.scan, 'orphans.scan');
+      const r = m.orphans.scan(new Set());
+      assert.ok(Array.isArray(r.all) && Array.isArray(r.squatters));
+      assert.deepEqual(plain(r), r);
+    }
+    if (m.tools && harness.instance) {
+      const st = m.tools.status(harness.instance);
+      assert.equal(typeof st.provisioned, 'boolean');
+      assert.deepEqual(plain(st), st);
+    }
+  });
+
+  test(`[ARI ${name}] A4 spec (buildSpawnSpec): a runtime without hostFilesystem gets no host path; one with it gets the spec as resolved`, () => {
+    const m = makeModule();
+    const caps = m.capabilities(settingsList()[0]);
+    const context = {
+      appDir: '/workspace/apps/org.k.app', instanceDataDir: '/data/apps/org.k.app/org.k.app-1', instanceToken: { token: 't', nonce: 'n' },
+      home: { kind: 'app', mode: 'app', hostPath: '/data/aura/app-homes/i', path: '/home/aura' }, env: { A: '1' }, owner: 'default',
+    };
+    const spec = buildSpawnSpec({ instanceId: 'org.k.app-1', appId: 'org.k.app', port: 4100, manifest: { id: 'org.k.app' }, context }, caps);
+    assert.deepEqual(plain(spec), spec, 'plain data');
+    assert.equal(spec.instanceToken.token, 't', 'the token always (D89)');
+    if (caps.hostFilesystem) {
+      assert.equal(spec.appDir, context.appDir);
+      assert.equal(spec.home.hostPath, context.home.hostPath);
+    } else {
+      assert.deepEqual([spec.appDir, spec.instanceDataDir, spec.home.hostPath], ['', '', null], 'no host path reaches it');
+      assert.equal(JSON.stringify(spec).includes('/data/'), false);
+    }
   });
 
   test(`[ARI ${name}] settings: schema defaults; unknown keys refused`, () => {

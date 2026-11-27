@@ -14,7 +14,9 @@ import { execFileSync } from 'node:child_process';
  * user's network outlives their Terminals.
  *
  * Network names stay inside the container runtime (D85 A7): nothing outside
- * it builds or reads them.
+ * it builds or reads them. Part of the container module since 5b-2 D-T
+ * (was app-manager/TermNetworks.ts): a mechanism of this runtime only, used
+ * by its runner's spawn; the kernel never sees a network.
  */
 
 /** Label on a Terminal network: the user it belongs to. */

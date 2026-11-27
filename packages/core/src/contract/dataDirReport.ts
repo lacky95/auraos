@@ -6,9 +6,10 @@
  *   install-folder  files in the app's install folder changed after its
  *                   manifest (build output and node_modules excluded). The
  *                   install folder is read-only from Phase 6.
- *   container-layer `docker diff` of a running container instance: files the
- *                   app wrote into its image layer, outside every mount. They
- *                   are lost on every restart today.
+ *   container-layer what a running instance wrote into its own root
+ *                   filesystem, outside every mount, as its runtime reports
+ *                   it (`diagnostics.inspectWrites`, 5b-2 D-R; the container
+ *                   runtime's image layer). Lost on every restart today.
  *   home            the app's home `~` (its App Home since Phase 5) is
  *                   mounted read-write (the mount info). It is no data
  *                   store: this says only that the app can write there.
@@ -16,12 +17,9 @@
  * The documented place for app data is the SDK's `getAppContext().dataDir`
  * (`/data` in the sandbox): it persists and is private to the app.
  */
-import { execFile } from 'node:child_process';
 import { readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { promisify } from 'node:util';
-
-const execFileAsync = promisify(execFile);
+import type { RuntimeDiagnostics } from '../runtimes/ari.js';
 
 /** Build output and dependencies: written by the build, not by the running app. */
 const BUILD_DIRS = new Set(['node_modules', 'dist', '.astro', '.next', '.turbo', '.cache', '.git', '.svelte-kit', '.output', '.vite']);
@@ -44,8 +42,8 @@ export interface DataDirAppInput {
    * filesystem and its home is the shell's, read-write.
    */
   ownNamespace: boolean;
-  /** Running instances; those whose workload layer can be inspected with its engine name. */
-  instances: Array<{ instanceId: string; container?: string }>;
+  /** Running instances; `inspect`: its runtime can report the workload's own writes (`diagnostics`). */
+  instances: Array<{ instanceId: string; inspect?: boolean }>;
 }
 
 export interface DataDirAppReport {
@@ -60,10 +58,10 @@ export interface DataDirAppReport {
 }
 
 export interface DataDirDeps {
-  /** `docker diff <container>` lines (`A /path`), or null when it can't be read. */
-  dockerDiff(container: string): Promise<string[] | null>;
-  /** The container's mounts (destination + rw), or null. */
-  dockerMounts(container: string): Promise<Array<{ destination: string; rw: boolean }> | null>;
+  /** The workload's own writes (`A|C|D /path` lines), or null when they can't be read. */
+  inspectWrites(instanceId: string): Promise<string[] | null>;
+  /** The workload's mounts (destination + rw), or null. */
+  workloadMounts(instanceId: string): Promise<Array<{ destination: string; rw: boolean }> | null>;
   /** Files under `dir` changed after the app's manifest, relative paths. */
   installWrites(dir: string): { writes: string[]; truncated: boolean };
   /** The sandbox's home path. */
@@ -100,14 +98,14 @@ export function scanInstallWrites(dir: string, max = DATADIR_REPORT_MAX_PATHS): 
   return { writes: writes.sort(), truncated };
 }
 
-/** The `A`/`C` paths of `docker diff` that are files the app wrote, not scratch or parents of others. */
+/** The `A`/`C` paths of a write set that are files the app wrote, not scratch or parents of others. */
 export function layerWrites(lines: readonly string[], max = DATADIR_REPORT_MAX_PATHS): { writes: string[]; truncated: boolean } {
   const paths = lines
     .map((l) => /^([ACD]) (\/.*)$/.exec(l.trim()))
     .filter((m): m is RegExpExecArray => !!m && m[1] !== 'D')
     .map((m) => m[2]!)
     .filter((p) => !SCRATCH.some((re) => re.test(p)));
-  // `docker diff` lists every changed parent directory too: keep the leaves.
+  // A write set lists every changed parent directory too: keep the leaves.
   const leaves = paths.filter((p) => !paths.some((q) => q !== p && q.startsWith(`${p}/`))).sort();
   return { writes: leaves.slice(0, max), truncated: leaves.length > max };
 }
@@ -119,10 +117,10 @@ export async function dataDirReport(apps: readonly DataDirAppInput[], deps: Data
     const containerLayer: DataDirAppReport['containerLayer'] = [];
     let home: DataDirAppReport['home'] = app.ownNamespace ? 'unknown' : 'rw';
     for (const inst of app.instances) {
-      if (!inst.container) continue;
-      const diff = await deps.dockerDiff(inst.container);
+      if (!inst.inspect) continue;
+      const diff = await deps.inspectWrites(inst.instanceId);
       containerLayer.push(diff ? { instanceId: inst.instanceId, ...layerWrites(diff) } : { instanceId: inst.instanceId, error: 'docker diff unavailable' });
-      const mounts = await deps.dockerMounts(inst.container);
+      const mounts = await deps.workloadMounts(inst.instanceId);
       if (mounts) {
         const h = mounts.find((m) => m.destination === deps.homePath);
         home = h ? (h.rw ? 'rw' : 'ro') : 'none';
@@ -134,25 +132,12 @@ export async function dataDirReport(apps: readonly DataDirAppInput[], deps: Data
   return out;
 }
 
-/** The live deps: the docker CLI the runners use, the shell's filesystem. */
-export function liveDataDirDeps(homePath = '/home/aura'): DataDirDeps {
-  const docker = async (args: string[]): Promise<string | null> => {
-    try { return (await execFileAsync('docker', args, { timeout: 10_000, maxBuffer: 8 * 1024 * 1024 })).stdout; } catch { return null; }
-  };
+/** The live deps: the instance's runtime diagnostics (5b-2 D-R), the shell's filesystem. */
+export function liveDataDirDeps(diagnosticsOf: (instanceId: string) => RuntimeDiagnostics | null, homePath = '/home/aura'): DataDirDeps {
   return {
     homePath,
     installWrites: (dir) => scanInstallWrites(dir),
-    async dockerDiff(container) {
-      const s = await docker(['diff', container]);
-      return s === null ? null : s.split('\n').filter(Boolean);
-    },
-    async dockerMounts(container) {
-      const s = await docker(['inspect', '-f', '{{json .Mounts}}', container]);
-      if (s === null) return null;
-      try {
-        const mounts = JSON.parse(s) as Array<{ Destination?: string; RW?: boolean }>;
-        return mounts.map((m) => ({ destination: String(m.Destination ?? ''), rw: m.RW === true }));
-      } catch { return null; }
-    },
+    inspectWrites: async (instanceId) => (await diagnosticsOf(instanceId)?.inspectWrites?.(instanceId)) ?? null,
+    workloadMounts: async (instanceId) => (await diagnosticsOf(instanceId)?.workloadMounts?.(instanceId)) ?? null,
   };
 }

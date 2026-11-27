@@ -7,7 +7,7 @@
 import type { SandboxRunner } from '../../app-manager/SandboxRunner.js';
 import type { RuntimeModule } from '../ari.js';
 import { containerRuntime, type ContainerRunnerSurface } from '../container/index.js';
-import type { ToolsMode } from '../hostTools.js';
+import type { HostToolStore, ToolsMode } from '../hostTools.js';
 import { prootRuntime } from '../proot/index.js';
 
 /** What the built-ins are made from, handed in by the composition point (today's runners). */
@@ -18,11 +18,19 @@ export interface BuiltinRuntimeDeps {
   env?: Record<string, string | undefined>;
   /** The host's tools mode (tool-provision `currentToolsMode`). */
   toolsMode?: () => ToolsMode;
+  /** The toolchain store the allowlist dirs are provisioned from (`tools.status`). */
+  toolStore?: () => HostToolStore;
+  /** The image app containers run (BaseImage `BASE_IMAGE`). */
+  baseImage?: string;
 }
 
 export const BUILTIN_RUNTIMES: ReadonlyArray<{ id: string; create(deps: BuiltinRuntimeDeps): RuntimeModule }> = Object.freeze([
-  { id: 'container', create: (d: BuiltinRuntimeDeps) => containerRuntime(d.container, d.toolsMode ? { toolsMode: d.toolsMode } : {}) },
+  { id: 'container', create: (d: BuiltinRuntimeDeps) => containerRuntime(d.container, {
+    ...(d.toolsMode ? { toolsMode: d.toolsMode } : {}), ...(d.toolStore ? { toolStore: d.toolStore } : {}),
+    ...(d.baseImage ? { baseImage: d.baseImage } : {}), ...(d.env ? { env: d.env } : {}),
+  }) },
   { id: 'proot', create: (d: BuiltinRuntimeDeps) => prootRuntime(d.proot, {
     baseRootfs: d.baseRootfs, ...(d.env ? { env: d.env } : {}), ...(d.toolsMode ? { toolsMode: d.toolsMode } : {}),
+    ...(d.toolStore ? { toolStore: d.toolStore } : {}),
   }) },
 ]);

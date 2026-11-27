@@ -50,7 +50,7 @@ function fakeManager() {
     providers: { registerInstance: (i) => registered.providers.push(i.instanceId) },
     // Stream R: the resolved runtime (registry.ts); the preview path does not choose it.
     resolveRuntime: async () => ({
-      runtime: 'container', source: 'manifest', installationId: null, capabilities: {}, settings: {},
+      runtime: 'container', source: 'manifest', installationId: null, capabilities: { hostFilesystem: true }, settings: {},
       module: { runner: { spawn: async (id, appId, port, m, ctx) => { spawned.push({ id, ctx }); return 1000 + spawned.length; }, lifecycleStatus: () => null } },
     }),
     // The Phase 5 spawn seams: the resolver is asked (a preview gets its own App Home, never the installed app's).

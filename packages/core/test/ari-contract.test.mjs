@@ -37,7 +37,7 @@ mkdirSync(ROOTFS);
 const CONTAINER_CAPS = ContainerRunner.prototype.capabilities.call({});
 const PROOT_CAPS = ProotRunner.prototype.capabilities.call({});
 /** A test module with no capability groups declares none of their features (5b CR: groups ⇔ features). */
-const NO_GROUP_CAPS = { ...CONTAINER_CAPS, survivesShellRestart: false, sessionExec: false, sidecars: false, usage: false, hostFilesystem: false };
+const NO_GROUP_CAPS = { ...CONTAINER_CAPS, survivesShellRestart: false, sessionExec: false, sidecars: false, usage: false, hostFilesystem: false, portExpose: false };
 const runner = (caps) => ({ capabilities: () => caps, getHost: () => null, getPort: () => null });
 const app = (extra = {}) => AppManifestSchema.parse({ id: 'org.k.app', name: 'K', version: '1.0.0', ...extra });
 

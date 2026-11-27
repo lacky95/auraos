@@ -5,7 +5,7 @@
 // from it (ari-modules.test.mjs): the kernel depends on the contract only.
 // Its instance operations (spawn, kill, forceKill, onExit) are in memory too,
 // so the kit's instance-ops, workload-token and G1 rows run against it (5b E).
-import { HEALTHY, runnerEndpoint } from '../../dist/index.js';
+import { HEALTHY, RuntimeExecError, runnerEndpoint } from '../../dist/index.js';
 
 export function mockProvider() {
   const MOCK_CAPS = {
@@ -53,7 +53,20 @@ export function mockProvider() {
       removeAllOf: async (appId) => { for (const id of [...running.keys()]) if (id.startsWith(appId)) running.delete(id); },
     },
     sessions: { list: () => sessions.map((x) => ({ ...x })), end: async (id) => sessions.some((x) => x.sessionId === id) },
-    workloads: { list: async () => [], remove: () => {}, removeOf: () => 0 },
+    // Associated workloads in memory: an exec or a log of one that isn't there fails with a neutral code (5b-2 D-X).
+    workloads: {
+      list: async () => [], remove: () => {}, removeOf: () => 0,
+      exec: async (id) => { throw new RuntimeExecError('not-found', `no workload ${id}`); },
+      logs: async (id) => { throw new RuntimeExecError('not-found', `no workload ${id}`); },
+    },
+    // The instance's own output, kept by the provider (no runner output ring, no engine).
+    logs: async (id, _req, onChunk) => {
+      if (!running.has(id)) throw new RuntimeExecError('not-running', `${id} is not running`);
+      onChunk('out', Buffer.from(`${id} started\n`));
+      return { done: Promise.resolve(), close: () => {} };
+    },
+    // Read-only diagnostics of a remote workload: what it wrote outside its mounts, by instance id only.
+    diagnostics: { inspectWrites: async (id) => (running.has(id) ? [] : null) },
     usage: async (req) => Object.fromEntries(req.instanceIds.filter((id) => running.has(id)).map((id) => [id, { memBytes: 1, cpuPct: 1 }])),
     // A remote provider: no host tool directory, so no `tools` group (tools.* unsupported).
     _running: running,

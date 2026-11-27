@@ -9,9 +9,11 @@
  * `usage`) are written against the provider-neutral interfaces of `ari.ts`
  * and delegate to today's mechanism, so nothing in the spawn path moves and
  * golden argv is unchanged. Container names, PIDs and engine handles stay in
- * here: a survivor's `ref` is opaque to the kernel. The Docker mechanics of
- * mounts, port expose, sidecar create/exec, logs and builds move behind the
- * pending groups in 5b-2 stream D.
+ * here: a survivor's `ref` is opaque to the kernel. 5b-2 D moved behind its
+ * groups: port expose (`endpoints`), builds (`build`), sidecar exec/logs
+ * (`workloads`), instance logs (`logs`), the dataDir and cap-doctor
+ * inspections (`diagnostics`). Mounts and sidecar create stay in the
+ * managers until Phase 6 (D-M, D-S).
  *
  * The runner is handed in by the composition point (AppManager today,
  * `bootSystem()` in Phase 6): this module imports no app-manager code at
@@ -20,18 +22,28 @@
 import type { ContainerRunner } from '../../app-manager/ContainerRunner.js';
 import type { SandboxRunner } from '../../app-manager/SandboxRunner.js';
 import {
-  runnerEndpoint, type RuntimeAdoption, type RuntimeHealthCheck, type RuntimeModule, type RuntimeSessions, type RuntimeSurvivor, type RuntimeWorkloads,
+  runnerEndpoint, type RuntimeAdoption, type RuntimeBuild, type RuntimeLogsRequest, type RuntimeOutputStream, type RuntimeHealthCheck, type RuntimeModule, type RuntimeSessions, type RuntimeSurvivor, type RuntimeWorkloads,
 } from '../ari.js';
-import { hostToolsGroup, toolsEnforcement, toolsFeatureOverrides, type ToolsMode } from '../hostTools.js';
+import { containerDiagnostics } from './diagnostics.js';
+import { containerEndpoints } from './endpoints.js';
+import { RuntimeExecError } from '../types.js';
+import { hostToolsGroup, toolsEnforcement, toolsFeatureOverrides, type HostToolStore, type ToolsMode } from '../hostTools.js';
 
 /** The runner surface the module adapts: the SandboxRunner contract plus the container's own groups. */
-export type ContainerRunnerSurface = SandboxRunner & Partial<Pick<ContainerRunner, 'openSessions' | 'endSession' | 'canPropagateMounts'>>;
+export type ContainerRunnerSurface = SandboxRunner & Partial<Pick<ContainerRunner,
+  'openSessions' | 'endSession' | 'canPropagateMounts' | 'instanceLogs' | 'execWorkload' | 'workloadLogs' | 'forwarderFacts' | 'buildApp' | 'provisionApp'>>;
 
 type OrphanRecord = NonNullable<Awaited<ReturnType<NonNullable<SandboxRunner['listOrphanRecords']>>>>[number] & { user?: string };
 
 export interface ContainerRuntimeDeps {
   /** The host's tools mode (tool-provision `currentToolsMode`); absent: not reported. */
   toolsMode?: () => ToolsMode;
+  /** The toolchain store (`tools.status`); absent: no library checks. */
+  toolStore?: () => HostToolStore;
+  /** The image app containers run (BaseImage `BASE_IMAGE`; default `aura-base`). */
+  baseImage?: string;
+  /** Environment (the `cap doctor` probe's volume name; default `process.env`). */
+  env?: Record<string, string | undefined>;
 }
 
 export function containerRuntime(runner: ContainerRunnerSurface, deps: ContainerRuntimeDeps = {}): RuntimeModule {
@@ -55,7 +67,7 @@ export function containerRuntime(runner: ContainerRunnerSurface, deps: Container
     },
     runner,
     capabilities: () => runner.capabilities({}),
-    // App builds and provisioning run on this runtime today (the kernel build service; D-B moves them behind `build`).
+    // App builds and provisioning run on this runtime (its `build` group, D-B).
     featureOverrides: () => ({ 'build.execute': { support: 'supported' }, ...toolsFeatureOverrides(runner.capabilities({}), toolsMode()) }),
     // Never `unavailable`: the default runtime must not be blocked by a probe. A failed check degrades (and its
     // feature fails closed where it is used: a mount without propagation is refused by MountManager).
@@ -106,8 +118,38 @@ export function containerRuntime(runner: ContainerRunnerSurface, deps: Container
       list: async () => (runner.listSidecars ? runner.listSidecars() : []),
       remove: (ids) => { runner.removeSidecars?.(ids); },
       removeOf: (instanceId, opts = {}) => runner.reapSiblingsOf?.(instanceId, opts.keepServices ? { keep: { services: opts.keepServices } } : {}) ?? 0,
+      exec: async (workloadId, spec, onOutput) => {
+        if (!runner.execWorkload) throw new RuntimeExecError('engine', `no exec into ${workloadId}: the runner has no engine`);
+        return runner.execWorkload(workloadId, spec, onOutput);
+      },
+      logs: async (workloadId, req, onChunk) => {
+        if (!runner.workloadLogs) throw new RuntimeExecError('engine', `no log of ${workloadId}: the runner has no engine`);
+        return runner.workloadLogs(workloadId, req, onChunk);
+      },
     } satisfies RuntimeWorkloads } : {}),
-    ...(caps.hostFilesystem ? { tools: hostToolsGroup(runner, toolsMode) } : {}),
+    // The instance's own output: the engine's log (5b-2 D-X).
+    ...(runner.instanceLogs ? { logs: (instanceId: string, req: RuntimeLogsRequest, onChunk: (stream: RuntimeOutputStream, data: Buffer) => void) => runner.instanceLogs!(instanceId, req, onChunk) } : {}),
+    ...(caps.portExpose ? { endpoints: containerEndpoints(() => {
+      if (!runner.forwarderFacts) throw new Error('the container runner has no forwarder facts');
+      return runner.forwarderFacts();
+    }) } : {}),
+    // App builds and provisioning in a throwaway builder container (D-B; the runner's `buildApp`/`provisionApp`).
+    build: {
+      build: async ({ appId, appDir, timeoutMs }) => {
+        if (!runner.buildApp) throw new Error('the container runner has no builder');
+        return runner.buildApp(appId, appDir, timeoutMs !== undefined ? { timeoutMs } : {});
+      },
+      provision: async ({ appId, appDir, runtime, onLine }) => {
+        if (!runner.provisionApp) throw new Error('the container runner has no builder');
+        return runner.provisionApp(appId, appDir, runtime, onLine ? { onLine } : {});
+      },
+    } satisfies RuntimeBuild,
+    ...(caps.hostFilesystem ? { tools: hostToolsGroup(runner, toolsMode, () => deps.toolStore?.() ?? null) } : {}),
+    diagnostics: containerDiagnostics({
+      baseImage: deps.baseImage ?? 'aura-base',
+      // As the `cap doctor` route always named it (the compose project's app-data volume).
+      appDataVolume: () => (deps.env ?? process.env)['AURA_APP_DATA_VOLUME'] ?? 'aura_aura-app-data',
+    }),
     ...(caps.usage ? { usage: async (req: { instanceIds: string[]; sidecarIds: string[] }) => (runner.usage ? Object.fromEntries(await runner.usage(req)) : {}) } : {}),
   };
 }

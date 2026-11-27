@@ -6,7 +6,8 @@
  * rootfs (no request input reaches it), run on the executor the route hands
  * in; a failing probe reports `<error: …>` instead of failing the action.
  */
-import type { RuntimeAction, RuntimeActionHost } from '../ari.js';
+import { execFileSync } from 'node:child_process';
+import type { RuntimeAction, RuntimeActionHost, RuntimeDiagnostics } from '../ari.js';
 
 function probe(host: RuntimeActionHost, cmd: string, max = 200): string {
   try { return host.run('sh', ['-c', cmd], { timeoutMs: 10_000 }).trim(); }
@@ -77,5 +78,24 @@ export function prootDiagnostics(baseRootfs: string): Record<'info' | 'inspectRo
         };
       },
     },
+  };
+}
+
+/**
+ * The PRoot `diagnostics` group (5b-2 D-C, `aura cap doctor`): the tools
+ * probe in a fresh PRoot over the base rootfs, the store bound in, moved here
+ * from the `cap-doctor` route unchanged.
+ */
+export function prootDiagnosticsGroup(baseRootfs: string): RuntimeDiagnostics {
+  return {
+    probeTools: ({ script, binDir, libDir }) => ({
+      stdout: execFileSync('proot', [
+        `--rootfs=${baseRootfs}`,
+        `--bind=${binDir}:/probe/bin`,
+        `--bind=${libDir}:/probe/lib`,
+        '--cwd=/',
+        '/bin/sh', '-c', `LD_LIBRARY_PATH=/probe/lib; export LD_LIBRARY_PATH; ${script}`,
+      ], { stdio: ['ignore', 'pipe', 'pipe'] }).toString(),
+    }),
   };
 }

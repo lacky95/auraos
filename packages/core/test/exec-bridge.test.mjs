@@ -15,7 +15,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { DockerApi, EngineDemux } from '../dist/app-manager/DockerApi.js';
+import { DockerApi, EngineDemux, engineExec, engineLogs } from '../dist/app-manager/DockerApi.js';
 import {
   ExecBridge, ExecBridgeError, parseSessionOpen, parseSince, parseTail, execAudit, DEFAULT_JUMP_ARGV,
   sessionCallerOf,
@@ -151,15 +151,17 @@ function bridgeOver(engine, { sandbox = 'container', running = true, sidecars = 
     docker: async (args) => { docker.push(args); return args[0] === 'inspect' ? 'true session-broker' : ''; },
     helperBinary: async () => helper,
   }) : null;
+  // The container module's groups over the engine (5b-2 D-X): the bridge holds no engine itself.
+  const container = sandbox === 'container' && engine;
   const bridge = new ExecBridge({
-    engine,
     instance: (id) => instances.get(id),
+    logs: () => (container ? (id, req, cb) => engineLogs(engine, 'aura-io.test.app-1', req, cb) : undefined),
+    workloads: () => (container ? { exec: (w, spec, out) => engineExec(engine, w, spec, out), logs: (w, req, cb) => engineLogs(engine, w, req, cb) } : undefined),
     runner: () => ({
       isRunning: () => running,
       capabilities: () => (sandbox === 'container' ? CONTAINER_CAPS : PROOT_CAPS),
       ...(sandbox === 'container'
         ? {
-          engineContainer: () => ({ container: 'aura-io.test.app-1', workdir: '/workspace/apps/io.test.app' }),
           openSession: (id, spec, out) => broker.openSession({ ...spec, cwd: spec.cwd ?? '/workspace/apps/io.test.app' }, { containerId: CONTAINER_ID, pid: 777 }, out),
         }
         : { outputLog: () => log }),
