@@ -13,35 +13,46 @@ import { PromptCancelled, promptChoice, promptMultiSelect } from '../src/lib/pro
 import { choiceOptions, multiGroups, multiOptions, multiTitle, pickTargets } from '../test-tui/fixtures.js';
 import { assertGolden } from './helpers/golden.js';
 
-/** A terminal for one TUI run: keys in through a fake stdin, every byte out of stdout recorded. */
+/**
+ * A terminal for one TUI run: keys in through a fake stdin, every byte the TUI writes recorded by a fake
+ * stdout. Both replace `process.stdin` / `process.stdout` for the run (the CLI reads them from `node:process`
+ * at each use); node:test keeps its own reference to the real stdout, so its reporter protocol never lands in
+ * a frame, and nothing in a frame depends on the worktree path.
+ */
 async function drive(run: () => Promise<unknown>, keys: string[]): Promise<{ frames: string[]; result: unknown }> {
-  const fake = Object.assign(new EventEmitter(), {
-    isTTY: true, setRawMode() { return fake; }, resume() { return fake; }, pause() { return fake; }, setEncoding() { return fake; },
+  const fakeIn = Object.assign(new EventEmitter(), {
+    isTTY: true, setRawMode() { return fakeIn; }, resume() { return fakeIn; }, pause() { return fakeIn; }, setEncoding() { return fakeIn; },
   });
-  const stdinDesc = Object.getOwnPropertyDescriptor(process, 'stdin')!;
-  const out = process.stdout as NodeJS.WriteStream & { isTTY: boolean };
-  const saved = { write: out.write, isTTY: out.isTTY, columns: out.columns, rows: out.rows };
   let buf = '';
+  const fakeOut = Object.assign(new EventEmitter(), {
+    isTTY: true, columns: 80, rows: 24,
+    write(chunk: string | Uint8Array, ...rest: unknown[]) {
+      buf += typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8');
+      const cb = rest.find((x) => typeof x === 'function') as (() => void) | undefined;
+      cb?.();
+      return true;
+    },
+    // node:readline's cursor helpers (moveCursor, clearScreenDown) only call write().
+  });
+  const saved = { stdin: Object.getOwnPropertyDescriptor(process, 'stdin')!, stdout: Object.getOwnPropertyDescriptor(process, 'stdout')! };
   const frames: string[] = [];
   const tick = () => new Promise((r) => setImmediate(r));
-  Object.defineProperty(process, 'stdin', { value: fake, configurable: true, writable: true });
-  Object.assign(out, { isTTY: true, columns: 80, rows: 24 });
-  out.write = ((chunk: string | Uint8Array) => { buf += typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'); return true; }) as typeof out.write;
+  Object.defineProperty(process, 'stdin', { value: fakeIn, configurable: true, writable: true });
+  Object.defineProperty(process, 'stdout', { value: fakeOut, configurable: true, writable: true });
   let result: unknown;
   try {
     const done = run().then((r) => { result = r; }, (e) => { result = e instanceof PromptCancelled ? 'cancelled' : String(e); });
     await tick();
     frames.push(buf); buf = '';
     for (const k of keys) {
-      fake.emit('data', k);
+      fakeIn.emit('data', k);
       await tick();
       frames.push(buf); buf = '';
     }
     await done;
   } finally {
-    out.write = saved.write;
-    Object.assign(out, { isTTY: saved.isTTY, columns: saved.columns, rows: saved.rows });
-    Object.defineProperty(process, 'stdin', stdinDesc);
+    Object.defineProperty(process, 'stdin', saved.stdin);
+    Object.defineProperty(process, 'stdout', saved.stdout);
   }
   return { frames, result };
 }
@@ -69,6 +80,11 @@ test('golden: TUI frames of the jump picker, the choice and the multi-select pic
   assert.equal(multi.result, 'cancelled');
   record('multi-select (8 options)', multi);
 
-  for (const [k, v] of Object.entries(frames)) if (!k.endsWith('result')) assert.ok(v.length > 0, `${k} drew nothing`);
+  for (const [k, v] of Object.entries(frames)) {
+    if (k.endsWith('result')) continue;
+    assert.ok(v.length > 0, `${k} drew nothing`);
+    // Only the picker's bytes: no test-runner protocol, no path of the checkout it runs in.
+    assert.doesNotMatch(v, /test:(enqueue|dequeue|start|pass|fail|plan|diagnostic)|\/data\/|\.test\.(ts|cjs|mjs)|node:test/, `${k} holds runner output`);
+  }
   assertGolden('tui-frames.json', frames);
 });
