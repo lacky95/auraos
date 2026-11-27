@@ -568,6 +568,22 @@ static void pin(const struct spec *sp, struct pinned *pn) {
       if (sp_) *sp_ = '\0';
       if (*cur && strcmp(cur, "unconfined")) snprintf(pn->apparmor, sizeof pn->apparmor, "%s", cur);
     } else if (generic && strchr(cur, ':') && strcmp(cur, "unconfined")) {
+      /* The app's own workload label: PID 1 may be an init shim (docker-init/tini) still in the runtime's context
+       * (vm: docker-init container_runtime_t, the app's node spc_t); its first child is what the app runs as. */
+      char kids[64];
+      snprintf(kids, sizeof kids, "/proc/%d/task/%d/children", (int)sp->pid, (int)sp->pid);
+      char *kl = read_file(kids, 255);
+      int child = kl ? atoi(kl) : 0;
+      free(kl);
+      if (child > 0) {
+        char ca[64];
+        snprintf(ca, sizeof ca, "/proc/%d/attr/current", child);
+        char *cc = read_file(ca, 255);
+        if (cc) {
+          char *n3 = strchr(cc, '\n'); if (n3) *n3 = '\0';
+          if (strchr(cc, ':')) { free(cur); cur = cc; } else free(cc);
+        }
+      }
       /* Only a different context needs an exec transition: the same one (an SELinux host whose Docker does not
        * label containers: app and broker both in the daemon's domain) is inherited as is, and an explicit setexec
        * under no_new_privs is refused there (vm: "bash: Operation not permitted", 126). */
