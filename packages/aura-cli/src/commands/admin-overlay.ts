@@ -80,6 +80,6 @@ export function registerAdminOverlay(admin: Command): void {
       ok(`overlay written for ${r.overlays.length} app(s)${r.overlays.length ? `: ${r.overlays.join(', ')}` : ''}`);
       if (r.restored.length) ok(`manifests restored: ${r.restored.join(', ')}`);
       for (const m of r.movedAside) ok(`${m.file} moved to ${m.to}`);
-      for (const e of r.reloadErrors ?? []) warn(`reload: ${e}`);
+      for (const e of r.reloadErrors ?? []) warn(`${e}: not reloaded yet (the next shell start loads it)`);
     });
 }

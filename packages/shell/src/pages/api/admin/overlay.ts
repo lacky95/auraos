@@ -2,6 +2,7 @@ import type { APIRoute } from 'astro';
 import { dirname } from 'node:path';
 import * as core from '@aura/core';
 import { auditOwner, ownerAction } from '../../../lib/approvals/admin.ts';
+import { failureResponse } from '../../../lib/appResponse.ts';
 
 /**
  * The one-shot migration of local grant edits into the settings overlay (Phase 6 O,
@@ -60,13 +61,18 @@ export const POST: APIRoute = async (ctx) => {
   let result: core.OverlayMigrationResult;
   try { result = core.applyOverlayMigration(opts, report.digest); }
   catch (err) {
-    const e = err as Error & { code?: string };
-    await auditOwner(actor, 'overlay.migrated', { target: 'system:overlay', outcome: 'failed', detail: { digest: report.digest, error: e.message } });
-    return json({ error: e.code ?? 'migration-failed', message: e.message }, e.code === 'digest-mismatch' ? 409 : 500);
+    await auditOwner(actor, 'overlay.migrated', { target: 'system:overlay', outcome: 'failed', detail: { digest: report.digest, error: (err as Error).message } });
+    // The migration's own refusals say what to do; anything else is redacted for all but the owner.
+    if (err instanceof core.OverlayMigrationError) {
+      return err.code === 'digest-mismatch'
+        ? json({ error: err.code, message: 'The state changed since that report: review the new one.' }, 409)
+        : json({ error: err.code, message: 'This install runs from a release: there is nothing to migrate.' }, 422);
+    }
+    return failureResponse(ctx, err);
   }
   const reloadErrors: string[] = [];
   for (const appId of new Set([...result.overlays, ...result.restored])) {
-    try { mgr.reloadManifest(appId); mgr.refreshInstanceTools(appId); } catch (err) { reloadErrors.push(`${appId}: ${(err as Error).message}`); }
+    try { mgr.reloadManifest(appId); mgr.refreshInstanceTools(appId); } catch { reloadErrors.push(appId); }
   }
   await auditOwner(actor, 'overlay.migrated', {
     target: 'system:overlay', outcome: 'ok',

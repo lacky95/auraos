@@ -125,7 +125,7 @@ export const POST: APIRoute = async (ctx) => {
   const overlayApps = releasePaths.layout(mgr.getDataDir()).overlayApps;
   let overlay: ManifestOverlay | null;
   try { overlay = readManifestOverlay(overlayApps, appId); }
-  catch (err) { return json({ error: 'overlay-invalid', message: `${appId}'s settings overlay is invalid (${(err as Error).message.replace(/^.*: /, '')}): fix or remove it; the app is refused until then.` }, 500); }
+  catch { return json({ error: 'overlay-invalid', message: `${appId}'s settings overlay is invalid: fix or remove it (diagnose/overlay names the problem); the app is refused until then.` }, 500); }
   const manifest = applyManifestOverlay(base, overlay);
 
   // D105 Pass B (review row 21): a tool the capability registry does not know is refused before the owner is asked.
