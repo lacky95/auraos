@@ -209,8 +209,7 @@ export function renderWizard(root: HTMLElement, model: WizardModel, on: WizardCa
         form = renderFieldViews(section, plan.fields, {
           profile: model.profile,
           disabled: model.busy,
-          // `bound` is field → handle; P7's SecretFieldOptions intersects it with the picker's own `bound?: string` (reported).
-          secrets: { handles: [], bound: model.secrets, onAsk: (name: string) => on.onAskSecret(name) } as unknown as SecretFieldOptions,
+          secrets: { handles: [], bound: model.secrets, onAsk: (name: string) => on.onAskSecret(name) } satisfies SecretFieldOptions,
         });
       } else if (model.step === 'requirements') {
         renderDependencies(section, { dependencies: [], requirements: plan.requirements, degraded: plan.degraded });

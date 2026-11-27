@@ -50,7 +50,7 @@ export interface SchemaForm {
 }
 
 /** How secret fields render: the existing vault handles and the shell's credential dialog (D56). */
-export type SecretFieldOptions = Omit<SecretPickerProps, 'field' | 'name' | 'title'> & {
+export type SecretFieldOptions = Omit<SecretPickerProps, 'field' | 'name' | 'title' | 'bound'> & {
   /** field → the handle bound now (the desired record's `secrets`). */
   bound?: Record<string, string>;
 };
