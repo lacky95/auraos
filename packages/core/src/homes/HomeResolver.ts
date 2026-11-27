@@ -6,7 +6,8 @@
  *   application, sidecar   the App Home of the installation: `global`, or the
  *                          owner's `users/<userId>` for `environmentScope: user`.
  *                          Never a Private Home (D65 §8, D84).
- *   terminal-session       the session user's Private Home (D69). The
+ *   user-environment       the session user's Private Home (D69; D107 S2,
+ *                          `terminal-session` is its read alias). The
  *                          instance itself is the user's session context
  *                          (P5-4), so it needs a namespace runtime and runs
  *                          as that user (stream T); as root only while the
@@ -45,7 +46,7 @@ import { RuntimeCapabilityError, missingCapabilities, type RuntimeCapabilities, 
 import { requestNeeds } from '../runtimes/requirements.js';
 import { APP_HOMES_SUBPATH, planHomeTarget } from './plan.js';
 import { HOMES_ROOT_SUBPATH } from '../scopes/home.js';
-import { HomeDeniedError, LOGICAL_HOME_PATH, type ExecutionContext, type HomeRequest, type HomeResolver, type JumpHomeMode, type ResolvedHome } from './types.js';
+import { HomeDeniedError, LOGICAL_HOME_PATH, canonicalExecutionContext, type ExecutionContext, type HomeRequest, type HomeResolver, type JumpHomeMode, type ResolvedHome } from './types.js';
 
 /** Mode of every home directory (D65: private by default). */
 export const HOME_DIR_MODE = 0o700;
@@ -90,15 +91,15 @@ export interface HomeRequirements {
 }
 
 export function homeRequirements(req: { executionContext: ExecutionContext; jumpHomeMode?: JumpHomeMode }): HomeRequirements {
-  const ctx = req.executionContext;
+  const ctx = canonicalExecutionContext(req.executionContext);
   const mode = ctx === 'jump' ? req.jumpHomeMode ?? 'private' : undefined;
-  // The one needs derivation (runtimes/requirements.ts, D85 A5): a Terminal instance is a user's session
+  // The one needs derivation (runtimes/requirements.ts, D85 A5): a user environment is a user's session
   // context, a namespace boundary at least (PRoot never, D65 §11); a jump is a session inside the instance.
   const capabilities: Partial<RuntimeCapabilities> = requestNeeds(ctx, mode ? { jumpHomeMode: mode } : {});
   return {
     executionContext: ctx, ...(mode ? { jumpHomeMode: mode } : {}), capabilities,
     installation: ctx === 'application' || ctx === 'sidecar' || mode === 'app',
-    principal: ctx === 'jump' || ctx === 'terminal-session',
+    principal: ctx === 'jump' || ctx === 'user-environment',
     nonRootTarget: ctx === 'jump' && mode !== 'app',
     jumpAuthorization: mode === 'app',
   };
@@ -114,11 +115,12 @@ export function kernelHomeResolver(deps: KernelHomeResolverDeps): HomeResolver {
   const create = deps.create ?? true;
   return {
     async resolve(req: HomeRequest): Promise<ResolvedHome> {
-      const session = req.executionContext === 'jump' || req.executionContext === 'terminal-session';
+      const ctx = canonicalExecutionContext(req.executionContext);
+      const session = ctx === 'jump' || ctx === 'user-environment';
       // A session's user is its principal (planHomeTarget refuses another user's Private Home).
       const userId = session ? req.userId ?? req.principal?.userId : req.userId;
       const target = planHomeTarget(deps.dataDir, {
-        installationId: req.installationId, environmentScope: req.environmentScope, executionContext: req.executionContext,
+        installationId: req.installationId, environmentScope: req.environmentScope, executionContext: ctx,
         ...(userId ? { userId } : {}),
         ...(req.jumpHomeMode ? { jumpHomeMode: req.jumpHomeMode } : {}),
         ...(req.principal ? { principal: req.principal } : {}),
@@ -134,7 +136,7 @@ export function kernelHomeResolver(deps: KernelHomeResolverDeps): HomeResolver {
       }
 
       const app = req.appIdentity;
-      if (req.executionContext === 'jump') {
+      if (ctx === 'jump') {
         const mode = req.jumpHomeMode ?? 'private';
         if (mode === 'app') {
           const p = req.principal!;
@@ -156,7 +158,7 @@ export function kernelHomeResolver(deps: KernelHomeResolverDeps): HomeResolver {
         if (!id) throw new HomeDeniedError('identity-unresolved', `user ${target.owner!.userId} has no Linux identity`);
         owner = id;
       }
-      if (req.executionContext === 'terminal-session') {
+      if (ctx === 'user-environment') {
         // The session's own user (stream T); root only for the owner before the ownership apply. Never an app or another user.
         if (app && app.uid !== 0 && (app.uid !== owner.uid || app.gid !== owner.gid)) {
           throw new HomeDeniedError('not-authorized', 'a Terminal session runs as its own user only');

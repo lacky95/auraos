@@ -124,8 +124,11 @@ export function requirementsOf(m: RequirementsManifest, installation?: Requireme
  *                                          ephemeral) Home: an isolated session
  *                                          inside the instance (D67, D74)
  *   home-app                               a session as the app (D79)
- *   terminal-session                       a user's session host: a namespace
- *                                          boundary at least (D65 §11)
+ *   user-environment                       an instance that is its user's
+ *                                          environment: a namespace boundary at
+ *                                          least (D65 §11, D107 S2);
+ *                                          `terminal-session` is its read alias
+ *                                          for one release
  *   application, sidecar                   an app process: nothing extra
  *   mount, idmap-mount                     a cross-app mount; a writable one
  *                                          between different app uids (D80)
@@ -133,7 +136,7 @@ export function requirementsOf(m: RequirementsManifest, installation?: Requireme
  *   host-filesystem, user-namespaces
  */
 export const REQUEST_KINDS = [
-  'jump', 'home-private', 'home-ephemeral', 'home-app', 'terminal-session', 'application', 'sidecar',
+  'jump', 'home-private', 'home-ephemeral', 'home-app', 'user-environment', 'terminal-session', 'application', 'sidecar',
   'mount', 'idmap-mount', 'closed', 'sidecars', 'port-expose', 'host-filesystem', 'user-namespaces',
 ] as const;
 export type RequestKind = (typeof REQUEST_KINDS)[number];
@@ -147,6 +150,7 @@ export function requestNeeds(kind: RequestKind | ExecutionContext, opts: { jumpH
     case 'home-private':
     case 'home-ephemeral': return { sessionExec: true, privateHomeSession: true };
     case 'home-app': return { sessionExec: true };
+    case 'user-environment':
     case 'terminal-session': return { isolation: 'namespace' };
     case 'application':
     case 'sidecar': return {};

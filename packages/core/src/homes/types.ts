@@ -14,7 +14,17 @@ import type { LinuxIdentity } from '../identity/types.js';
 export type EnvironmentScope = 'global' | 'user';
 /** `aura jump --home` (D67, D74, D79). */
 export type JumpHomeMode = 'private' | 'app' | 'ephemeral';
-export type ExecutionContext = 'application' | 'sidecar' | 'jump' | 'terminal-session';
+/**
+ * `user-environment` (D107 S2): an instance that is its owner's environment
+ * (`isUserEnvironment`, system/systemApps.ts): the owner's Private Home, as
+ * that user. `terminal-session` is its read alias for one release: accepted
+ * on input, never produced (`canonicalExecutionContext`).
+ */
+export type ExecutionContext = 'application' | 'sidecar' | 'jump' | 'user-environment' | 'terminal-session';
+/** D107 S2: an execution context with its read alias resolved (`terminal-session` is `user-environment`). */
+export function canonicalExecutionContext(ctx: ExecutionContext): Exclude<ExecutionContext, 'terminal-session'> {
+  return ctx === 'terminal-session' ? 'user-environment' : ctx;
+}
 export type HomeKind = 'app-global' | 'app-user' | 'private' | 'ephemeral';
 
 export const LOGICAL_HOME_PATH = '/home/aura' as const;
@@ -28,7 +38,7 @@ export interface HomeRequest {
   installationId: string | null;
   /**
    * `application`, `sidecar`: the instance's owner (a `user`-scope App Home is
-   * theirs). `jump`, `terminal-session`: the session's user, which must be
+   * theirs). `jump`, `user-environment`: the session's user, which must be
    * the principal's own id. Required for `user` scope and every session.
    */
   userId?: string;
@@ -37,7 +47,7 @@ export interface HomeRequest {
   /** `jump` only; default `private`. */
   jumpHomeMode?: JumpHomeMode;
   /**
-   * The verified caller, required only for `jump` and `terminal-session`.
+   * The verified caller, required only for `jump` and `user-environment`.
    * Private Homes are human-user only (D84): `application` and `sidecar`
    * never carry a principal and never get `private`.
    */
@@ -47,7 +57,7 @@ export interface HomeRequest {
   /**
    * The identity the installation's processes run as (P5-3): the app uid for
    * `runAs: app`, `0:0` for root. It owns the App Home; for `jump` and
-   * `terminal-session` it is the running target instance's identity (a
+   * `user-environment` it is the running target instance's identity (a
    * `private` or `ephemeral` jump into a root instance is refused, J.5).
    */
   appIdentity: LinuxIdentity | null;

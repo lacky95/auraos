@@ -217,14 +217,19 @@ test('requestNeeds: one table for request needs; the Home Resolver and the check
   assert.deepEqual(requestNeeds('jump', { jumpHomeMode: 'app' }), { sessionExec: true });
   assert.deepEqual(requestNeeds('home-ephemeral'), { sessionExec: true, privateHomeSession: true });
   assert.deepEqual(requestNeeds('home-app'), { sessionExec: true });
-  assert.deepEqual(requestNeeds('terminal-session'), { isolation: 'namespace' });
+  assert.deepEqual(requestNeeds('user-environment'), { isolation: 'namespace' });
+  // D107 S2: `terminal-session` is the read alias of `user-environment` for one release.
+  assert.deepEqual(requestNeeds('terminal-session'), requestNeeds('user-environment'));
+  assert.ok(REQUEST_KINDS.includes('user-environment') && REQUEST_KINDS.includes('terminal-session'));
   assert.deepEqual(requestNeeds('idmap-mount'), { mounts: true, idmappedMounts: true });
   assert.deepEqual(requestNeeds('host-filesystem'), { hostFilesystem: true });
   for (const k of REQUEST_KINDS) assert.equal(typeof requestNeeds(k), 'object', k);
   for (const mode of ['private', 'app', 'ephemeral']) {
     assert.deepEqual(homeRequirements({ executionContext: 'jump', jumpHomeMode: mode }).capabilities, requestNeeds('jump', { jumpHomeMode: mode }));
   }
-  assert.deepEqual(homeRequirements({ executionContext: 'terminal-session' }).capabilities, { isolation: 'namespace' });
+  assert.deepEqual(homeRequirements({ executionContext: 'user-environment' }).capabilities, { isolation: 'namespace' });
+  assert.deepEqual(homeRequirements({ executionContext: 'terminal-session' }), homeRequirements({ executionContext: 'user-environment' }));
+  assert.equal(homeRequirements({ executionContext: 'terminal-session' }).executionContext, 'user-environment', 'the alias is read, never produced');
   assert.deepEqual(homeRequirements({ executionContext: 'application' }).capabilities, {});
 });
 

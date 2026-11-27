@@ -14,11 +14,21 @@ export const AURASHELLD_APP_ID = 'com.aura.aurashelld';
 export const SETTINGS_APP_ID = 'com.aura.settings';
 export const NEXUS_APP_ID = 'com.aura.nexus';
 
+/** D69 (stream T): the apps whose instances are each ONE user's session host. Read through `isUserEnvironment`. */
+const SESSION_HOST_APP_IDS: ReadonlySet<string> = new Set([TERMINAL_APP_ID]);
+
 /**
- * D69 (stream T): the apps whose instances are each ONE user's session host.
- * Longer term a manifest field; for now this one list (no framework).
+ * D107 S1: whether an instance hosts a user's environment: it runs as its
+ * owner's identity with its owner's Private Home, as that user's session
+ * context (the `user-environment` execution context, homes/types.ts). The
+ * one predicate the identity provider, the home request, the pool, the jump
+ * guard and the session enders branch on; nothing else keys this on an app
+ * id. Today the System Terminal's instances (D69); D107-a adds an instance
+ * whose effective home is `private` (the `home.private` grant).
  */
-export const SESSION_HOST_APP_IDS: ReadonlySet<string> = new Set([TERMINAL_APP_ID]);
+export function isUserEnvironment(instance: { appId: string }): boolean {
+  return SESSION_HOST_APP_IDS.has(instance.appId);
+}
 
 /** Apps that act for a user as the owner's agents (the shell relays their calls, D89 B4). */
 export const OWNER_AGENT_APP_IDS: ReadonlySet<string> = new Set([TERMINAL_APP_ID, AURASHELLD_APP_ID]);

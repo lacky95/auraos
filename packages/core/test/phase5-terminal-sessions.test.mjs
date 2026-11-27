@@ -25,13 +25,13 @@ import { ASTRO_START_SHELL } from '../dist/app-manager/provisioning.js';
 import { ContainerRunner } from '../dist/app-manager/ContainerRunner.js';
 import { SECURITY_OPTIONS } from '../dist/security/options.js';
 import { adoptedIdentity, ownerHomeAwaitsOwnership, retireForeignSessionData, terminalRootTransitionOpen, TERMINAL_ROOT_TRANSITION_FILE, TERMINAL_ROOT_TRANSITION_MS } from '../dist/app-manager/AppManager.js';
-import { TERMINAL_SESSION_APPS } from '../dist/homes/plan.js';
+import { isUserEnvironment } from '../dist/system/systemApps.js';
 
 const TERMINAL = 'com.aura.terminal';
 
 function provider(accounts, identities, base = { identityFor: async () => ({ uid: 0, gid: 0, range: 'root' }) }) {
   return sessionHostIdentityProvider(base, {
-    sessionApps: TERMINAL_SESSION_APPS,
+    isUserEnvironment,
     ownerId: 'default',
     account: async (id) => accounts[id] ?? null,
     identity: async (id) => {
@@ -69,9 +69,15 @@ test('T: fail closed: no user, an unknown or disabled user, an unallocatable or 
   await assert.rejects(p.identityFor(req('bad')), /could not be allocated/);
 });
 
+test('D107 S1: isUserEnvironment is the one predicate; the System Terminal\'s instances are user environments today, nothing else', () => {
+  assert.equal(isUserEnvironment({ appId: TERMINAL }), true);
+  assert.equal(isUserEnvironment({ appId: TERMINAL, instanceId: `${TERMINAL}-2`, owner: 'u2' }), true);
+  for (const appId of ['com.aura.aurashelld', 'com.aura.settings', 'com.aura.terminalx', 'com.aura.counter', '']) assert.equal(isUserEnvironment({ appId }), false, appId);
+});
+
 test('T: every other app keeps its own provider (stream A)', async () => {
   const p = sessionHostIdentityProvider(appIdentityProvider(async () => ({ ensureApp: async () => ({ uid: 200005, gid: 200005, state: 'active' }) })), {
-    sessionApps: TERMINAL_SESSION_APPS, ownerId: 'default', account: async () => { throw new Error('not asked'); }, identity: async () => { throw new Error('not asked'); },
+    isUserEnvironment, ownerId: 'default', account: async () => { throw new Error('not asked'); }, identity: async () => { throw new Error('not asked'); },
   });
   assert.deepEqual(await p.identityFor({ appId: 'com.aura.counter', installationId: 'inst-1', runAs: 'app', userId: 'default' }), { uid: 200005, gid: 200005, range: 'app' });
   assert.deepEqual(await p.identityFor({ appId: 'com.aura.counter', installationId: 'inst-1', runAs: 'root' }), { uid: 0, gid: 0, range: 'root' });

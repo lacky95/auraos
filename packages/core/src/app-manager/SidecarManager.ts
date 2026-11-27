@@ -14,11 +14,12 @@ import type { SpawnIdentity } from '../identity/types.js';
 import { listToolchainBinaries, provisionAllowlist, readSidecarMap, toolchainMirrorBin } from './tool-provision.js';
 import { SIDECAR_TOOL_RE, effectiveSidecarTools } from './sidecar-tools.js';
 import { privateHomeSidecarRefusal } from './privateHomeNetwork.js';
+import { inheritHomeUser } from '../runtimes/spawn/identityArgs.js';
 import type { ResolvedHome } from '../homes/types.js';
 import { authFailureReason, isAuthFailure, parseImageRef } from '../nexus/RegistryAuth.js';
 import type { PullCredential } from '../nexus/types.js';
 import {
-  SpecError, resolveSidecarSpec, specHash,
+  SidecarIdentityError, SpecError, resolveSidecarSpec, specHash,
   type ResolvedSidecarSpec, type SidecarSetupValues, type SidecarSpawnRequest,
 } from './sidecar-spec.js';
 import { isEnvValueRef } from '../types/setupManifest.js';
@@ -337,6 +338,11 @@ export class SidecarManager {
       legacyVolumeExists: (n) => legacy.has(n),
       ...(setupValues ? { setupEnv: setupValues } : {}),
     });
+    // B12: an inheritHome sidecar runs as its app's identity; a conflicting template user is refused (D105).
+    if (spec.inheritHome && spec.user !== undefined) {
+      const appUser = inheritHomeUser(inst.identity);
+      if (spec.user !== appUser) throw new SidecarIdentityError(inst.appId, spec.template, spec.user, appUser);
+    }
     // D107: mandatory isolation, refused before anything is made when the runtime can't enforce it.
     if (spec.network === 'instance') this.opts.requireNetwork?.('instance');
     // D107 / D9: a parent with a Private Home: none of its sidecars on the shared network (privateHomeNetwork.ts).

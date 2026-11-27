@@ -109,3 +109,6 @@ export { bootStatusFile, readBootStatus, BOOTSTRAP_VERSION } from './system/stat
 export type * from './system/types.js';
 import { composeKernel } from './system/compose.js';
 composeKernel();
+// Phase 6 Stage 1b (6B.0, D108 A3): the frozen maintenance-start / updateInstance contract (stream M implements it).
+export { MAINTENANCE_REASONS } from './app-manager/maintenance.js';
+export type * from './app-manager/maintenance.js';
