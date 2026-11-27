@@ -1,0 +1,116 @@
+{
+  "app-identity:host": {
+    "appDir": "/data/scopes/global/apps/io.g.app",
+    "instanceDataDir": "/data/scopes/global/apps/io.g.app/io.g.app-1",
+    "instanceToken": {
+      "token": "tok",
+      "nonce": "non"
+    },
+    "sourceMode": "closed",
+    "installationId": "inst-1",
+    "owner": "default",
+    "home": {
+      "kind": "app-global",
+      "hostPath": "/data/aura/apphomes/i/global",
+      "volumeSubpath": "aura/apphomes/i/global",
+      "logicalPath": "/home/aura",
+      "uid": 200001,
+      "gid": 200001,
+      "mode": 448
+    },
+    "identity": {
+      "uid": 200001,
+      "gid": 200001,
+      "range": "app"
+    },
+    "env": {
+      "A": "1"
+    },
+    "contextEnv": {
+      "KEY": "v"
+    },
+    "instanceId": "io.g.app-1",
+    "appId": "io.g.app",
+    "port": 4101,
+    "manifest": {
+      "id": "io.g.app",
+      "name": "G",
+      "version": "1.0.0",
+      "runtime": "astro"
+    }
+  },
+  "app-identity:no-host": {
+    "appDir": "",
+    "instanceDataDir": "",
+    "instanceToken": {
+      "token": "tok",
+      "nonce": "non"
+    },
+    "sourceMode": "closed",
+    "installationId": "inst-1",
+    "owner": "default",
+    "home": {
+      "kind": "app-global",
+      "hostPath": null,
+      "volumeSubpath": "aura/apphomes/i/global",
+      "logicalPath": "/home/aura",
+      "uid": 200001,
+      "gid": 200001,
+      "mode": 448
+    },
+    "identity": {
+      "uid": 200001,
+      "gid": 200001,
+      "range": "app"
+    },
+    "env": {
+      "A": "1"
+    },
+    "contextEnv": {
+      "KEY": "v"
+    },
+    "instanceId": "io.g.app-1",
+    "appId": "io.g.app",
+    "port": 4101,
+    "manifest": {
+      "id": "io.g.app",
+      "name": "G",
+      "version": "1.0.0",
+      "runtime": "astro"
+    }
+  },
+  "preview-no-home:host": {
+    "appDir": "/a",
+    "instanceDataDir": "/d",
+    "instanceToken": {
+      "token": "t2",
+      "nonce": "n2"
+    },
+    "preview": "aura/workspaces/u/i/1",
+    "instanceId": "io.g.app-2",
+    "appId": "io.g.app",
+    "port": 4102,
+    "manifest": {
+      "id": "io.g.app",
+      "name": "G",
+      "version": "1.0.0"
+    }
+  },
+  "preview-no-home:no-host": {
+    "appDir": "",
+    "instanceDataDir": "",
+    "instanceToken": {
+      "token": "t2",
+      "nonce": "n2"
+    },
+    "preview": "aura/workspaces/u/i/1",
+    "instanceId": "io.g.app-2",
+    "appId": "io.g.app",
+    "port": 4102,
+    "manifest": {
+      "id": "io.g.app",
+      "name": "G",
+      "version": "1.0.0"
+    }
+  }
+}
