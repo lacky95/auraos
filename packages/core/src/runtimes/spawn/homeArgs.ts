@@ -8,8 +8,7 @@
  * can't mount (a tmpfs `ephemeral` home is a session's, never an app's), is
  * refused. Nothing falls back to the shared home.
  */
-import { SHARED_HOME_PATH } from '../tool-provision.js';
-import type { ResolvedHome } from '../../homes/types.js';
+import { LOGICAL_HOME_PATH as SHARED_HOME_PATH, type ResolvedHome } from '../../homes/types.js';
 
 export class HomeMountError extends Error {
   override readonly name = 'HomeMountError';

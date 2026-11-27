@@ -108,6 +108,7 @@ export function execCaller(
 export function execError(err: unknown): Response {
   // By name, not instanceof: under `astro dev` core can load twice (SSR and Node's loader).
   const e = err as Partial<ExecBridgeError> | null;
-  if (e?.name === 'ExecBridgeError' && typeof e.status === 'number') return jsonResponse({ error: e.message, code: e.code }, e.status);
+  // The SDK convention (error-messages-review.md §4): `error` is the code, `message` the sentence.
+  if (e?.name === 'ExecBridgeError' && typeof e.status === 'number') return jsonResponse({ error: e.code, message: e.message }, e.status);
   return errorResponse(err instanceof Error ? err.message : String(err), 500);
 }

@@ -25,6 +25,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SidecarManager } from '../dist/app-manager/SidecarManager.js';
+import { containerSidecars } from '../dist/runtimes/container/sidecars.js';
+import { containerMounts } from '../dist/runtimes/container/mounts.js';
 import { MountManager } from '../dist/app-manager/MountManager.js';
 import { InstanceTokens } from '../dist/app-manager/InstanceTokens.js';
 
@@ -140,6 +142,7 @@ function sidecars(t, { toolsMode = 'hardlink', pullCredential } = {}) {
   };
   const mgr = new SidecarManager({
     runner,
+    workloads: containerSidecars(runner, { baseImage: 'aura-base' }),
     registry: { getById: (id) => (id === APP ? { id: APP, services: SERVICES, tools: ['jq', 'rg'], permissions: ['sidecars.spawn', 'net.raw'] } : undefined) },
     permissions: { hasPermission: (_app, p) => ['sidecars.tools', 'sidecars.privileged'].includes(p) },
     tokens: new InstanceTokens(join(dataDir, 'aura', 'secrets', 'k')),
@@ -264,13 +267,13 @@ function mounts(t, { noCat = new Set(), noMountRoot = new Set(), idmap = false }
     dataDir,
     registry: { getById: (id) => (id.startsWith('gone.') ? undefined : { id, appDir: `/workspace/apps/${id}`, scopeId: 'global' }) },
     scopeRegistry: { getById: () => ({ dataDir: join(dataDir, 'scopes', 'global') }) },
-    runner: {
+    mounts: containerMounts({
       canPropagateMounts: () => ({ ok: true }),
       canIdmapMounts: () => ({ ok: true }),
       idmapHelperHostPath: () => '/helper/aura-session-enter',
       mountRootDir,
       toDaemonHostPath: (p) => p.replace(dataDir, `${dataDir}/daemon`),
-    },
+    }, { helperImage: 'aura-base' }),
     instanceDataDir: (k) => join(dataDir, 'scopes', 'global', 'apps', APP, k.split('--')[0]),
     fanoutTargets: (inst) => (inst === CONSUMER ? [{ consumer: SC, exclude: [], forceRo: true }] : []),
     sourceMode: () => 'open',

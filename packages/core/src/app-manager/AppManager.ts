@@ -47,7 +47,8 @@ import { RuntimeRegistry, type ResolvedRuntime, type RuntimeModule } from '../ru
 import {
   RESPAWN_FREEZE_MS, readRespawnRecord, respawnEntries, writeRespawnRecord, type RespawnEntry,
 } from '../runtimes/respawn.js';
-import { moduleFeatures, operationResult, type RuntimeFeature, type RuntimeOperationResult, type RuntimeBuild, type RuntimeDiagnostics, type RuntimeEndpoints, type RuntimeOrphanProcess, type RuntimeSessionInfo, type RuntimeToolsStatus } from '../runtimes/ari.js';
+import { DEFAULT_BUILD_LIMITS } from '../runtimes/container/limits.js';
+import { moduleFeatures, operationResult, requireLimits, type ResourceLimits, type RuntimeFeature, type RuntimeOperationResult, type RuntimeBuild, type RuntimeDiagnostics, type RuntimeEndpoints, type RuntimeOrphanProcess, type RuntimeSessionInfo, type RuntimeToolsStatus } from '../runtimes/ari.js';
 import { BUILTIN_RUNTIMES } from '../runtimes/builtins/index.js';
 import { RUNTIME_AUDIT_ACTIONS, RuntimeSettingsStore, runtimeSettingsRevision } from '../runtimes/settingsStore.js';
 import { migrateLegacyRuntimes, migrationReport, processLegacyEnv, type MigrationApp, type MigrationReport } from '../runtimes/migrateLegacy.js';
@@ -79,7 +80,7 @@ import { installationAppHomes } from '../homes/appHomeAdmin.js';
 import type { AppInstallation, AppRunAsMigration } from '../app-hosts/contracts.js';
 import type { AppGrantBinding } from '../auth/types.js';
 import { RuntimeCapabilityError, RuntimeModuleError } from '../runtimes/types.js';
-import { BASE_GROUP, BASE_PASSWD, identityAccountName, isNonRootIdentity, isSessionIdentity } from './spawn/identityArgs.js';
+import { BASE_GROUP, BASE_PASSWD, identityAccountName, isNonRootIdentity, isSessionIdentity } from '../runtimes/spawn/identityArgs.js';
 import { renderGroup, renderPasswd, type PasswdEntry } from '../identity/passwd.js';
 import type { SessionCaller, SessionContext } from './ExecBridge.js';
 import type { JumpHomeMode } from '../homes/types.js';
@@ -461,11 +462,13 @@ export class AppManager {
     // replaces instance objects on every transition, so a held reference
     // would go stale immediately.
     this.interfaces  = new InterfaceRegistry((id) => this.instances.get(id));
+    const liveMounts = this.runtimes.list().find((m) => m.mounts)?.mounts;
     this.mounts      = new MountManager({
       dataDir:       opts.dataDir,
       registry:      this.registry,
       scopeRegistry: this.scopeRegistry,
-      runner:        this.container,
+      // The runtime that realises the binds (D-M): the one with the `mounts` group (the container module).
+      ...(liveMounts ? { mounts: liveMounts } : {}),
       sourceMode:    (appId) => this.sourceModeOf(appId)?.mode ?? 'closed',
       // D80 and the work/patches owner: the consumer's process identity (its latched identity;
       // an OS sidecar: as before, no cross-uid handling).
@@ -509,8 +512,11 @@ export class AppManager {
       sidecars: (id) => this.getSidecars(id),
       sessionContext: (id, req) => this.sessionContext(id, req),
     });
+    // The runtime that realises OS sidecars (D-S): the one with the `workloads` group (the container module).
+    const sidecarWorkloads = this.runtimes.list().find((m) => m.workloads)?.workloads;
     this.osSidecars  = new SidecarManager({
       runner:      this.container,
+      ...(sidecarWorkloads ? { workloads: sidecarWorkloads } : {}),
       registry:    this.registry,
       permissions: this.permissions,
       tokens:      this.tokens,
@@ -1525,10 +1531,16 @@ export class AppManager {
    * container module today, as before). None: builds fail closed, never in
    * the kernel or the app.
    */
-  private builder(): RuntimeBuild {
-    const b = this.runtimes.list().find((m) => m.build)?.build;
-    if (!b) throw new Error('capability-missing: build.execute (no installed runtime builds apps)');
-    return b;
+  /**
+   * The runtime that runs build workloads, checked to enforce every limit of
+   * `limits` (D106: mandatory; refused with `feature-unsupported` naming the
+   * missing limits, never run without them).
+   */
+  private builder(limits: ResourceLimits = DEFAULT_BUILD_LIMITS): RuntimeBuild {
+    const m = this.runtimes.list().find((x) => x.build);
+    if (!m?.build) throw new Error('capability-missing: build.execute (no installed runtime builds apps)');
+    requireLimits(m, {}, limits, this.runtimes.list());
+    return m.build;
   }
 
   /** One app build at a time (each is a capped container, still heavy). */
@@ -1565,7 +1577,7 @@ export class AppManager {
       let res: { ok: boolean; output: string };
       try {
         prepareBuildStaging(manifest.appDir);
-        res = await this.builder().build({ appId, appDir: manifest.appDir });
+        res = await this.builder(DEFAULT_BUILD_LIMITS).build({ appId, appDir: manifest.appDir, limits: DEFAULT_BUILD_LIMITS });
         if (res.ok) {
           installBuild(manifest.appDir, { prune: this.getInstancesByApp(appId).length === 0 });
           writeBuildStamp(manifest.appDir, fingerprint);
@@ -1623,7 +1635,7 @@ export class AppManager {
     if (running) return running;
     const run = (async () => {
       console.log(`[AppManager] provision: ${appId} in the builder …`);
-      const res = await this.builder().provision({ appId, appDir, runtime, ...(opts.onLine ? { onLine: opts.onLine } : {}) });
+      const res = await this.builder(DEFAULT_BUILD_LIMITS).provision({ appId, appDir, runtime, limits: DEFAULT_BUILD_LIMITS, ...(opts.onLine ? { onLine: opts.onLine } : {}) });
       const ok = res.ok && !needsProvisioning(appDir, runtime);
       console.log(`[AppManager] provision: ${appId} ${ok ? 'ok' : 'FAILED'}`);
       return { ok, ran: true, output: res.output };

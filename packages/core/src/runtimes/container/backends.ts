@@ -1,11 +1,10 @@
 /**
- * The container runtime's mechanism, as the kernel managers still drive it in
- * 5b-1 (5b G): MountManager, PortManager and SidecarManager are typed to these
- * narrow surfaces, never to `ContainerRunner`. ContainerRunner implements
- * them. Port expose moved behind the `endpoints` group in 5b-2 D (D-P;
- * PortManager keeps only `isRunning` here); mounts and sidecars move behind
- * `mounts` and `workloads` in Phase 6 (D-M, D-S), and these surfaces go
- * with them.
+ * The container runner's facts the container module's groups and the kernel
+ * managers read (5b G; Phase 6): mount roots and daemon paths, the mount and
+ * idmap probes (the `mounts` group, `mounts.ts`), the sidecar coordinates
+ * (the `workloads` group's OS sidecars, `sidecars.ts`; SidecarManager's
+ * storage dirs), liveness for PortManager. ContainerRunner implements them.
+ * Facts only: every Docker call is in the module's groups.
  *
  * A leaf: types and one constant, no runtime import.
  */

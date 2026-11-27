@@ -20,7 +20,7 @@ import {
 } from '../dist/identity/execution.js';
 import { createAppHostRegistry } from '../dist/app-hosts/AppHostRegistry.js';
 import { AppHostLifecycle } from '../dist/app-hosts/lifecycle.js';
-import { containerIdentityArgs, sidecarIdentityArgs, requireProotIdentity } from '../dist/app-manager/spawn/identityArgs.js';
+import { containerIdentityArgs, sidecarIdentityArgs, requireProotIdentity } from '../dist/runtimes/spawn/identityArgs.js';
 import { AppManager, adoptedIdentity } from '../dist/app-manager/AppManager.js';
 import { NexusManager } from '../dist/nexus/NexusManager.js';
 import { installExposure } from '../dist/nexus/PermissionDiff.js';

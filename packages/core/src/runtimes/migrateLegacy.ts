@@ -197,7 +197,7 @@ export interface InstallationResolution {
   runtime: string | null;
   source: RuntimeSource | null;
   settingsRev?: string;
-  error?: { code: string; category?: RuntimeErrorCategory; message: string; missing?: RuntimeCapability[]; suggest?: string[] };
+  error?: { code: string; category?: RuntimeErrorCategory; message: string; missing?: Array<RuntimeCapability | string>; suggest?: string[] };
 }
 
 export function resolutionOf(registry: RuntimeRegistry, app: MigrationApp, record: RuntimeSettingsRecord | null): InstallationResolution {

@@ -32,7 +32,9 @@ test('CR: one containerName(); the runtime modules import no app-manager code at
   assert.equal(containerName('com.aura.terminal-3'), 'aura-com.aura.terminal-3');
   assert.equal(containerName('a:b/c'), 'aura-a_b_c');
   for (const f of ['container/index.ts', 'container/diagnostics.ts', 'container/endpoints.ts', 'container/networks.ts', 'proot/index.ts', 'proot/actions.ts',
-    'proot/diagnostics.ts', 'proot/host.ts', 'proot/orphans.ts', 'hostTools.ts', 'respawn.ts', 'spawnSpec.ts', 'builtins/index.ts']) {
+    'proot/diagnostics.ts', 'proot/host.ts', 'proot/orphans.ts', 'hostTools.ts', 'respawn.ts', 'spawnSpec.ts', 'builtins/index.ts',
+    'container/sidecars.ts', 'container/mounts.ts', 'spawn/networkArgs.ts', 'spawn/identityArgs.ts', 'spawn/homeArgs.ts', 'spawn/contextArgs.ts', 'spawn/sessionArgs.ts',
+    'spawn/socketArgs.ts', 'spawn/paths.ts']) {
     const src = readFileSync(new URL(`../src/runtimes/${f}`, import.meta.url), 'utf8');
     for (const line of src.split('\n').filter((l) => /^import .*app-manager\//.test(l))) {
       assert.match(line, /^import type /, `${f}: ${line}`);
@@ -208,13 +210,53 @@ test('D-X: the exec bridge reads logs through the runtime\'s `logs` and refuses 
   await assert.rejects(bridge.logs('org.mock.gone', {}, () => {}), (e) => e.status === 409 && e.code === 'not-running');
 });
 
-test('D-B, D-P: builds and port exposure go through the groups; the container module declares both, PRoot and the mock neither', () => {
+test('D-B, D-P: builds and port exposure go through the groups; the container module declares both, PRoot neither, the mock builds (D106)', () => {
   const mgr = mgrOf({ runtimes: [mockProvider()] });
   const withBuild = mgr.runtimes.list().filter((m) => m.build).map((m) => m.descriptor.id);
   const withEndpoints = mgr.runtimes.list().filter((m) => m.endpoints).map((m) => m.descriptor.id);
-  assert.deepEqual([withBuild, withEndpoints], [['container'], ['container']]);
+  assert.deepEqual([withBuild, withEndpoints], [['container', 'mock'], ['container']]);
   const src = readFileSync(new URL('../src/app-manager/AppManager.ts', import.meta.url), 'utf8');
   assert.doesNotMatch(src, /this\.container\.(buildApp|provisionApp)\b/, 'builds never call the concrete runner (D-B)');
   const pm = readFileSync(new URL('../src/app-manager/PortManager.ts', import.meta.url), 'utf8');
   assert.doesNotMatch(pm, /execFile|['"]docker['"]/, 'PortManager holds no Docker mechanism (D-P)');
+});
+
+// ── Phase 6 D-S: OS sidecars through the workloads group ──────────────────────
+
+test('D-S: SidecarManager spawns, lists, adopts, removes and reconciles OS sidecars through any workloads group: the reference mock, no Docker', async () => {
+  const { SidecarManager } = await import('../dist/app-manager/SidecarManager.js');
+  const { InstanceTokens } = await import('../dist/app-manager/InstanceTokens.js');
+  const mock = mockProvider();
+  const dataDir = mkdtempSync(join(TMP, 'sc-'));
+  const INST = 'org.mock.app-1';
+  const services = [{ name: 'box', image: 'alpine:3', command: ['sleep', 'infinity'], volumes: [], inheritIdentity: true }];
+  const tokens = new InstanceTokens(join(dataDir, 'k'));
+  const mgr = new SidecarManager({
+    runner: {
+      sidecarRuntime: () => ({ dataDir, appDataVolume: 'v', nodeModulesVolume: 'nm', network: 'n', osApiBase: 'x', shellHostname: 'h', workspaceRoot: '/w', toolsMode: 'hardlink' }),
+      mountRootDir: (k) => join(dataDir, 'm', k), mountRootSubpath: (k) => `m/${k}`, toolsDir: (k) => join(dataDir, 't', k), clearToolsDir: () => {},
+    },
+    workloads: mock.workloads,
+    registry: { getById: (id) => (id === 'org.mock.app' ? { id, services, tools: [], permissions: [] } : undefined) },
+    permissions: { hasPermission: () => false },
+    tokens,
+    mounts: { reapplyConsumer: async () => ({}), removeAll: () => {}, forgetConsumer: () => {} },
+    context: async () => ({ env: {}, known: new Set() }),
+    instance: (id) => (id === INST ? { appId: 'org.mock.app', instanceDataDir: join(dataDir, 'apps', 'org.mock.app', INST) } : null),
+    appHome: async () => null,
+  });
+  const res = await mgr.spawn(INST, { template: 'box' }, { instanceId: INST });
+  assert.equal(res.created, true);
+  assert.equal(res.sidecar.containerName, `urn:mock:wl/${INST}/box`, 'the runtime\'s opaque ref');
+  const w = mock._workloads.get(res.sidecar.containerName);
+  assert.equal(w.state, 'running');
+  assert.match(w.env.AURA_INSTANCE_TOKEN ?? '', /./, 'D89: its own workload token');
+  assert.deepEqual((await mgr.list(INST)).map((s) => s.name), ['box']);
+  assert.equal((await mgr.spawn(INST, { template: 'box' }, { instanceId: INST })).created, false, 'same spec: adopted');
+  assert.deepEqual(await mgr.reconcile(new Set([INST])), { adopted: 1, reaped: 0 });
+  await mgr.remove(INST, 'box');
+  assert.equal(mock._workloads.size, 0);
+  // Without a runtime that runs OS sidecars: refused explicitly, never a silent no-op.
+  const none = new SidecarManager({ ...mgr.opts, workloads: undefined });
+  await assert.rejects(none.list(INST), /capability-missing: sidecars/);
 });

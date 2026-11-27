@@ -29,8 +29,9 @@ import type { SandboxRunner } from '../app-manager/SandboxRunner.js';
 import type { SettingsSchema } from './settingsSchema.js';
 import type { SidecarInfo } from '../types/instance.js';
 import type { LifecycleStatus } from '../app-manager/lifecycleGate.js';
+import type { ResolvedSidecarSpec } from '../app-manager/sidecar-spec.js';
 import {
-  CATEGORY_OF_CODE, RUNTIME_ID_PATTERN, RuntimeModuleError,
+  CATEGORY_OF_CODE, RUNTIME_ID_PATTERN, RuntimeModuleError, RuntimeFeatureError,
   type RuntimeCapabilities, type RuntimeRefusal, type RuntimeRefusalCode, type RuntimeSettings,
 } from './types.js';
 import { refuseUnknownMajor } from '../contract/types.js';
@@ -235,7 +236,8 @@ const FEATURE_OF_CAPS: Record<RuntimeFeatureId, (c: RuntimeCapabilities) => Omit
   'workload.identityInheritance': (c) => ({ support: yes(c.sidecars) }),
   'network.isolation': (c) => ({ support: yes(c.network !== 'shell-netns' && c.isolation !== 'none') }),
   'network.endpointExposure': (c) => ({ support: yes(c.portExpose), applyMode: 'live' }),
-  'resources.limits': () => ({ support: 'unsupported' }),
+  // Per limit as constraints (D106): a module that enforces limits overrides the whole entry.
+  'resources.limits': () => ({ support: 'unsupported', constraints: { cpus: 'unsupported', memoryBytes: 'unsupported', pids: 'unsupported' } }),
   'resources.hardware': (c) => ({ support: yes(c.gpu) }),
   'build.execute': () => ({ support: 'unsupported' }),
   'build.sourceSync': () => ({ support: 'unsupported' }),
@@ -295,9 +297,8 @@ export function operationResult(
 // carry instance ids, workload ids and opaque refs: never a PID, a container
 // name or id, a host path or an engine handle. 5b-2 stream D moved the
 // endpoints, build, diagnostics, logs and workload exec/logs mechanisms behind
-// these groups; the mounts group and workload create still live in the kernel
-// managers (rows D-M, D-S: Phase 6) and their presence is not required yet
-// (`GROUPS_PENDING_EXTRACTION`).
+// these groups; Phase 6 (ari-rest) moved OS sidecars (`workloads`, D-S) and
+// cross-app mounts (`mounts`, D-M).
 
 /** An instance that outlived the previous kernel, as its runtime reports it (D77). */
 export interface RuntimeSurvivor {
@@ -399,7 +400,75 @@ export interface RuntimeLogsStream { done: Promise<void>; close(): void }
 /** Reads a workload's log (`observability.logs`, 5b-2 D-X); `onChunk` gets each piece as it comes. */
 export type RuntimeLogs = (id: string, req: RuntimeLogsRequest, onChunk: (stream: RuntimeOutputStream, data: Buffer) => void) => Promise<RuntimeLogsStream>;
 
-/** `workload.dynamic`: associated workloads (sidecars; present ⇔ `sidecars`). Create moves here in 5b-2 (D-S). */
+/**
+ * An associated workload as its runtime keeps it (Phase 6 D-S): its state and
+ * the tags it was created with. The kernel's record of an OS sidecar travels
+ * as one tag until Phase 8 moves that desired state into the kernel; the
+ * tags are actual state, reported only.
+ */
+export interface RuntimeWorkloadState {
+  /** The runtime's handle of it, also where it is reached on the runtime's network (opaque to the kernel). */
+  ref: string;
+  /** The runtime's word for its state (`running`, `exited`, `created`, ...). */
+  state: string;
+  tags: Record<string, string>;
+  /** Restarts by the runtime's restart policy since it was created. */
+  restarts: number;
+}
+/** One OS-managed workload of a listing: its ref, its instance, its state (per-instance listings) and the kernel's record. */
+export interface RuntimeManagedWorkload { ref: string; instanceId: string; state?: string; record?: string }
+
+/**
+ * One OS sidecar as the kernel decided it (Phase 6 D-S): the resolved spec
+ * (sidecar-spec.ts: what the app may run, checked against its templates and
+ * permissions), the record the runtime keeps with it, the env and the
+ * identity pieces. The runtime only realises it (its own argv, network,
+ * tools and mount-root wiring). Plain data; `home` carries host fields only
+ * for a runtime with `hostFilesystem` (A4).
+ */
+export interface RuntimeWorkloadCreate {
+  instanceId: string;
+  appId: string;
+  spec: ResolvedSidecarSpec;
+  /** The kernel's record (JSON), kept with the workload; `owner`: the sidecar that spawned it. */
+  record: string;
+  owner?: string;
+  /** Inherited, then the spec's own (the runtime adds HOME and the identity after it). */
+  env: Record<string, string>;
+  /** D89: its own workload token when the spec inherits the identity. */
+  token: string | null;
+  /** D65: the parent's App Home when the spec inherits it. */
+  home: ResolvedHome | null;
+  /** The parent's process identity (P5-3: an inheritHome base-image sidecar is the app's own code). */
+  parentIdentity?: SpawnIdentity;
+  /** The app's permissions when the spec inherits them. */
+  permissions?: string[];
+}
+/** A registry login for one image pull (nexus `PullCredential`): named by its source, written to a throwaway auth file. */
+export interface RuntimePullCredential {
+  readonly source: string;
+  authFile(): { dir: string; dispose(): void };
+  /** Registry output with the secret masked. */
+  redact(text: string): string;
+}
+/** A one-shot command in a running workload, its output captured (`POST …/sidecars/:name/exec`). */
+export interface RuntimeWorkloadRun {
+  argv: string[];
+  user?: string;
+  workdir?: string;
+  env?: Record<string, string>;
+  /** Small stdin payload. */
+  stdin?: string;
+  timeoutMs: number;
+}
+export interface RuntimeWorkloadRunResult { exitCode: number | null; stdout: string; stderr: string; truncated: boolean; timedOut: boolean }
+
+/**
+ * `workload.dynamic`: associated workloads (sidecars; present ⇔ `sidecars`).
+ * The kernel (SidecarManager) decides what runs, for whom, with which
+ * tokens, tools and mounts; the runtime creates, starts, lists, inspects and
+ * removes (Phase 6 D-S). Refusals throw with the runtime's own words.
+ */
 export interface RuntimeWorkloads {
   /** Every associated workload; null when the runtime could not be read (never reap on that). */
   list(): Promise<SidecarInfo[] | null>;
@@ -410,6 +479,43 @@ export interface RuntimeWorkloads {
   exec(workloadId: string, spec: RuntimeWorkloadExec, onOutput: (channel: 1 | 2, data: Buffer) => void): Promise<RuntimeExecSession>;
   /** A workload's own output. */
   logs: RuntimeLogs;
+
+  // OS sidecars (Phase 6 D-S).
+  /** The ref of an instance's sidecar `name` (also its address). */
+  ref(instanceId: string, name: string): string;
+  /** The OS-managed workloads of an instance, with state and record; throws when they can't be read. */
+  listOf(instanceId: string): Promise<RuntimeManagedWorkload[]>;
+  /** Every OS-managed workload (reconcile after a kernel restart); null when they can't be read. */
+  listManaged(): Promise<RuntimeManagedWorkload[] | null>;
+  /** Refs of the OS-managed workloads of an instance that sidecar `owner` spawned. */
+  spawnedBy(instanceId: string, owner: string): Promise<string[]>;
+  inspect(ref: string): Promise<RuntimeWorkloadState | null>;
+  /** A runtime storage volume of that name exists (a pre-OS-sidecar per-app volume). */
+  storageExists(name: string): Promise<boolean>;
+  /**
+   * The image is present (fetched once, concurrent callers with the same
+   * credential share the fetch). `credential` is asked only when it is
+   * missing; its login goes into a throwaway auth file, never argv, env or an
+   * error. Throws when it can't be fetched; the error's `output` is the
+   * registry's (redacted) words, for the kernel's auth classification.
+   */
+  prepareImage(image: string, credential?: () => Promise<RuntimePullCredential | null>): Promise<void>;
+  /** The env an instance's own workload runs with. */
+  instanceEnv(instanceId: string): Promise<Record<string, string>>;
+  /** Runs the spec's one-shot seed in a throwaway workload on its storage; throws with its output. */
+  seed(req: { instanceId: string; spec: ResolvedSidecarSpec; env: Record<string, string> }): Promise<void>;
+  /** Creates the workload (not started); its id. Throws, leaving nothing behind. */
+  create(req: RuntimeWorkloadCreate): Promise<string>;
+  /** Starts a created workload and checks it stays up; on failure it is removed and the call throws with its last words. */
+  start(id: string, ref: string): Promise<void>;
+  /** Removes a workload; throws when the runtime could not (`quiet`: never throws). */
+  destroy(ref: string, opts?: { quiet?: boolean }): Promise<void>;
+  /** A one-shot command in a running workload, output captured. */
+  run(ref: string, req: RuntimeWorkloadRun): Promise<RuntimeWorkloadRunResult>;
+  /** The tail of a workload's output; throws when it can't be read. */
+  output(ref: string, opts: { tail: number; since?: string; timestamps?: boolean }): Promise<{ stdout: string; stderr: string }>;
+  /** Its last 20 lines of output, trimmed (a failure report). */
+  lastWords(ref: string): Promise<string>;
 }
 
 /** The logical tool grant (D100 §5): tool ids, never a host directory. */
@@ -465,18 +571,49 @@ export interface RuntimeDiagnostics {
   probeTools?(probe: { script: string; binDir: string; libDir: string }): { stdout: string } | { skipped: string; missing?: string };
 }
 
-/** `mount.*` (5b-2 D-M): a mount by logical source, never a host path. */
-export interface RuntimeMountSpec {
-  source: { appId: string; kind: string; subpath?: string };
-  target: string;
+/**
+ * One cross-app bind as the kernel resolved it (Phase 6 D-M): MountManager
+ * decides the source (kind, nesting, closed sources), the destination under
+ * the consumer's mount root, the mode and a D80 idmapping; the runtime only
+ * binds. Host paths as the runtime's host sees them (`hostPath`): a runtime
+ * with `hostFilesystem` only (A4).
+ */
+export interface RuntimeMountBind {
+  source: string;
+  dest: string;
   mode: 'ro' | 'rw';
-  inherit?: boolean;
+  /** D80: the on-disk owner (`from`, `uid:gid`) shows as the consumer (`to`) inside the bind only. */
+  idmap?: { from: string; to: string };
 }
+/** One line of a consumer's own mount table: where, and its options (`ro`, `idmapped`, ...). */
+export interface RuntimeMountEntry { destination: string; options: string[] }
+/** What a consumer's own mount table says about a promised bind. */
+export type RuntimeMountCheck = 'ok' | 'unreadable' | 'missing' | 'writable' | 'not-idmapped';
+/**
+ * `mount.*` (present ⇔ `mounts`; Phase 6 D-M): live binds into a running
+ * consumer (an instance, or its OS sidecar `<instanceId>--<name>`). The
+ * kernel keeps kinds, persistence, fan-out and authorization; the runtime
+ * attaches, detaches, lists and verifies. Synchronous and terminal; a
+ * failure throws with the runtime's words.
+ */
 export interface RuntimeMounts {
-  attach(consumer: string, spec: RuntimeMountSpec): Promise<RuntimeOperationResult>;
-  detach(consumer: string, target: string): Promise<RuntimeOperationResult>;
-  list(consumer: string): Promise<RuntimeMountSpec[]>;
-  limits(): Record<string, string | boolean>;
+  /** Live mounts work on this host at all (propagation into running workloads). */
+  capable(): { ok: boolean; reason?: string };
+  /** D80: idmapped binds work here (probed at boot; fail closed until then). */
+  idmapProbe(): { ok: boolean; reason?: string };
+  /** The kernel-side dir a consumer's binds land under. */
+  rootDir(consumer: string): string;
+  /** A kernel-side path as the runtime's host sees it (bind sources and destinations). */
+  hostPath(shellPath: string): string;
+  /** Where a consumer's binds appear: its mount root (`canonical`) or, without one, under its data dir (`legacy`). */
+  rootOf(consumer: string): 'canonical' | 'legacy';
+  attach(consumer: string, bind: RuntimeMountBind): void;
+  /** Ends every bind stacked at `dest` (a host path); throws when the runtime could not. */
+  detach(consumer: string, dest: string): void;
+  /** The consumer's own mount table; null when it can't be read. */
+  table(consumer: string): RuntimeMountEntry[] | null;
+  /** Whether a promised bind arrived in the consumer as promised. */
+  verify(consumer: string, expect: { path: string; mode: 'ro' | 'rw'; idmap: boolean }): RuntimeMountCheck;
 }
 /**
  * One port exposure (`aura port expose`, 5b-2 D-P): a source instance's port
@@ -522,10 +659,62 @@ export interface RuntimeEndpoints {
  * AuraOS release builder is OS infrastructure, outside ARI.
  */
 export interface RuntimeBuild {
-  /** `astro build` the app's sources into its staging dir. */
-  build(spec: { appId: string; appDir: string; timeoutMs?: number }): Promise<{ ok: boolean; output: string }>;
-  /** Installs the app's dependencies (its package manager's tree, the `@aura/*` packages). */
-  provision(spec: { appId: string; appDir: string; runtime: 'astro' | 'raw'; onLine?: (line: string) => void }): Promise<{ ok: boolean; output: string }>;
+  /** `astro build` the app's sources into its staging dir, within `limits` (D106). */
+  build(spec: { appId: string; appDir: string; timeoutMs?: number; limits?: ResourceLimits }): Promise<{ ok: boolean; output: string }>;
+  /** Installs the app's dependencies (its package manager's tree, the `@aura/*` packages), within `limits` (D106). */
+  provision(spec: { appId: string; appDir: string; runtime: 'astro' | 'raw'; onLine?: (line: string) => void; limits?: ResourceLimits }): Promise<{ ok: boolean; output: string }>;
+}
+
+/**
+ * `resources.limits` (D106): what a build or check workload may use, as
+ * plain data, runtime-independent. A runtime that declares the feature
+ * enforces every field given (the container: `runtimes/container/limits.ts`
+ * `limitArgs`); an invalid record is refused with `invalid-resource-limits`;
+ * a runtime without the feature is never handed one (the kernel fails closed).
+ * App instances stay `unsupported` until BT-M2 quotas.
+ */
+export interface ResourceLimits {
+  cpus?: number;
+  memoryBytes?: number;
+  pids?: number;
+}
+/** The limits a `ResourceLimits` record can carry, each reported in the `resources.limits` feature's constraints. */
+export const RESOURCE_LIMIT_KEYS = Object.freeze(['cpus', 'memoryBytes', 'pids'] as const);
+
+/**
+ * The parts of `limits` a runtime does NOT enforce, by its `resources.limits`
+ * feature: the feature itself unsupported, or a requested limit whose
+ * constraint is not `supported` (conditional counts as not enforced).
+ * Named `resources.limits.<key>`. Requested limits are mandatory (D106):
+ * any part missing refuses the whole workload; partial enforcement is a refusal.
+ */
+export function unenforcedLimits(features: readonly RuntimeFeature[], limits: ResourceLimits): string[] {
+  const f = features.find((x) => x.id === 'resources.limits');
+  return RESOURCE_LIMIT_KEYS.filter((k) => limits[k] !== undefined
+    && (f?.support !== 'supported' || (f.constraints?.[k] ?? 'supported') !== 'supported')).map((k) => `resources.limits.${k}`);
+}
+
+/**
+ * Refuses (throws `RuntimeFeatureError`, D105 shape) unless `module` enforces
+ * every requested limit. The one check: the kernel calls it before handing a
+ * build or check workload to a runtime, and a provider may call it again
+ * before running one. `others` are the modules a `suggest` may name.
+ */
+export function requireLimits(
+  module: Pick<RuntimeModule, 'descriptor' | 'capabilities' | 'featureOverrides'>, settings: RuntimeSettings, limits: ResourceLimits,
+  others: ReadonlyArray<Pick<RuntimeModule, 'descriptor' | 'capabilities' | 'featureOverrides' | 'build'>> = [],
+): void {
+  const missing = unenforcedLimits(moduleFeatures(module, settings), limits);
+  if (!missing.length) return;
+  const id = module.descriptor.id;
+  const suggest = others.filter((m) => m.descriptor.id !== id && m.build && !unenforcedLimits(moduleFeatures(m, settings), limits).length)
+    .map((m) => m.descriptor.id);
+  throw new RuntimeFeatureError(id, missing,
+    `runtime ${id} can't enforce ${missing.join(', ')}: the requested limits are mandatory, so the workload is not run (never without them)`,
+    suggest,
+    suggest.length
+      ? `run it on a runtime that enforces every requested limit (${suggest.join(', ')}); aura runtime show <id> lists each runtime's resources.limits`
+      : 'no installed runtime enforces every requested limit; aura runtime show <id> lists what each runtime enforces');
 }
 
 /**
@@ -554,10 +743,9 @@ export const GROUP_FEATURE = Object.freeze({
   usage: 'observability.metrics',
   endpoints: 'network.endpointExposure',
   build: 'build.execute',
+  mounts: 'mount.attach',
 } as const satisfies Record<string, RuntimeFeatureId>);
 export type RuntimeGroupName = keyof typeof GROUP_FEATURE;
-/** Typed groups whose mechanism moves behind ARI in 5b-2 stream D (at the latest Phase 6). */
-export const GROUPS_PENDING_EXTRACTION = Object.freeze(['mounts'] as const);
 
 /**
  * Why a module's groups and features disagree (a group without its
@@ -593,6 +781,7 @@ export interface RuntimeModule extends Pick<AuraRuntime,
   readonly tools?: RuntimeTools;
   readonly endpoints?: RuntimeEndpoints;
   readonly build?: RuntimeBuild;
+  readonly mounts?: RuntimeMounts;
   /** Orphan app processes in the runtime's process space (no feature of its own; D-#11). */
   readonly orphans?: RuntimeOrphans;
   /**

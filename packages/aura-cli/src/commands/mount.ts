@@ -64,8 +64,10 @@ function apiError(err: unknown): string {
   const e = err as ShellError;
   if (typeof e?.body === 'string' && e.body.length > 0) {
     try {
-      const parsed = JSON.parse(e.body) as { error?: string; message?: string };
-      const msg = parsed.error ?? parsed.message;
+      // `{error: <code>, message, hint?}` (runtime refusals) or `{error: <sentence>}` (older routes).
+      const parsed = JSON.parse(e.body) as { error?: string; message?: string; hint?: string };
+      const text = parsed.message ? (parsed.error && parsed.error !== parsed.message ? `${parsed.error}: ${parsed.message}` : parsed.message) : parsed.error;
+      const msg = text && parsed.hint ? `${text}\n  ${parsed.hint}` : text;
       if (msg) return e.status ? `${msg} ${color.dim(`(HTTP ${e.status})`)}` : msg;
     } catch {
       /* not JSON — fall through and show the raw body */

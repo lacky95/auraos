@@ -14,6 +14,7 @@ import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { containerMounts } from '../dist/runtimes/container/mounts.js';
 import { MountManager } from '../dist/app-manager/MountManager.js';
 import { ContainerRunner, idmapProbeArgs } from '../dist/app-manager/ContainerRunner.js';
 import { IDMAP_HELPER_PATH } from '../dist/runtimes/container/backends.js';
@@ -68,13 +69,13 @@ function world(t, { probe = { ok: true }, devMode = false, owners = {}, dropIdma
     dataDir,
     registry: { getById: (id) => ({ id, appDir: appDir(id), scopeId: 'global' }) },
     scopeRegistry: { getById: () => ({ dataDir: join(dataDir, 'scopes', 'global') }) },
-    runner: {
+    mounts: containerMounts({
       canPropagateMounts: () => ({ ok: true }),
       canIdmapMounts: () => probe,
       idmapHelperHostPath: () => (probe.ok ? '/helper/aura-session-enter' : null),
       mountRootDir,
       toDaemonHostPath: (p) => p,
-    },
+    }, { helperImage: 'aura-base' }),
     instanceDataDir: (k) => join(dataDir, 'scopes', 'global', 'apps', 'com.aura.terminal', k),
     sourceMode: () => 'open',
     consumerIdentity: () => consumer,

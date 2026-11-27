@@ -23,7 +23,7 @@ import assert from 'node:assert/strict';
 import {
   ARI_VERSION, RUNTIME_ID_PATTERN, RUNTIME_VERSION_PATTERN, RUNTIME_CAPABILITY_KEYS, RUNTIME_BOOLEAN_CAPABILITIES,
   RuntimeRegistry, RuntimeCapabilityError, builtInRuntimeRecord, settingsDefaults, validateSettings, healthRefusal,
-  requirementsOf, runtimeRefusal, RUNTIME_FEATURE_IDS, moduleFeatures, CATEGORY_OF_CODE, GROUP_FEATURE, groupMismatch,
+  requirementsOf, runtimeRefusal, RUNTIME_FEATURE_IDS, RESOURCE_LIMIT_KEYS, moduleFeatures, CATEGORY_OF_CODE, GROUP_FEATURE, groupMismatch,
 } from '../../dist/index.js';
 import { buildSpawnSpec } from '../../dist/runtimes/spawnSpec.js';
 
@@ -150,6 +150,52 @@ export function describeRuntime(name, makeModule, harness = {}) {
       assert.equal(typeof st.provisioned, 'boolean');
       assert.deepEqual(plain(st), st);
     }
+  });
+
+  // D106: resources.limits for build/check workloads, mandatory. The feature reports each limit; a requested
+  // limit the runtime can't enforce refuses the workload (feature-unsupported, D105 shape: category, missing,
+  // suggest, hint), partial enforcement too; an invalid record is refused with its stable code; nothing is dropped.
+  test(`[ARI ${name}] resources.limits (D106): each limit reported; unenforced or partial mandatory limits refused (D105 shape); invalid refused; nothing dropped`, async () => {
+    const m = makeModule();
+    const f = moduleFeatures(m, settingsList()[0]).find((x) => x.id === 'resources.limits');
+    assert.ok(['supported', 'conditional', 'unsupported'].includes(f.support));
+    const per = Object.fromEntries(RESOURCE_LIMIT_KEYS.map((k) => [k, f.support === 'unsupported' ? 'unsupported' : (f.constraints?.[k] ?? f.support)]));
+    for (const [k, v] of Object.entries(per)) assert.ok(['supported', 'conditional', 'unsupported'].includes(v), `${k}: ${v}`);
+    if (f.support === 'unsupported') for (const k of RESOURCE_LIMIT_KEYS) assert.equal(f.constraints?.[k], 'unsupported', `${k} reported`);
+    if (!m.build) return;   // nothing runs a build/check workload here (PRoot): the kernel never hands it limits
+    const spec = (limits) => ({ appId: 'org.k.app', appDir: '/nonexistent', limits });
+    for (const bad of [{ cpus: 0 }, { memoryBytes: 1.5 }, { pids: -1 }, { cpus: Infinity }, { swap: 1 }]) {
+      await assert.rejects(m.build.build(spec(bad)), (e) => e.code === 'invalid-resource-limits', JSON.stringify(bad));
+    }
+    const VALUE = { cpus: 1, memoryBytes: 268435456, pids: 64 };
+    const unenforced = RESOURCE_LIMIT_KEYS.filter((k) => per[k] !== 'supported');
+    const shape = (want) => (e) => {
+      const r = runtimeRefusal(e);
+      assert.equal(e.code, 'feature-unsupported');
+      assert.equal(r?.category, 'unsupported-feature');
+      assert.deepEqual(r.missing, want.map((k) => `resources.limits.${k}`));
+      assert.ok(Array.isArray(r.suggest), 'suggest');
+      assert.equal(typeof r.hint, 'string', 'hint');
+      return true;
+    };
+    for (const k of unenforced) await assert.rejects(m.build.build(spec({ [k]: VALUE[k] })), shape([k]), `${k} alone`);
+    if (unenforced.length) {
+      // Partial: every limit at once; the enforceable ones never run alone (no silent drop of the rest).
+      await assert.rejects(m.build.build(spec({ ...VALUE })), shape(unenforced), 'partial');
+      await assert.rejects(m.build.provision({ appId: 'org.k.app', appDir: '/nonexistent', runtime: 'astro', limits: { ...VALUE } }), shape(unenforced), 'provision partial');
+    } else if (m._builds) {
+      // Enforced: what the provider ran with is exactly what was asked (nothing dropped or weakened).
+      await m.build.build(spec({ ...VALUE }));
+      assert.deepEqual(m._builds.at(-1).limits, VALUE);
+    }
+  });
+
+  // Phase 6 D-M: the mounts group is the mechanism only; its shape is the contract.
+  test(`[ARI ${name}] mounts (D-M): present exactly with mount.attach; attach/detach/table/verify/rootOf are functions`, () => {
+    const m = makeModule();
+    if (!m.mounts) return;
+    for (const k of ['capable', 'idmapProbe', 'rootDir', 'hostPath', 'rootOf', 'attach', 'detach', 'table', 'verify']) assert.equal(typeof m.mounts[k], 'function', `mounts.${k}`);
+    assert.deepEqual(Object.keys(m.mounts.capable()).filter((k) => !['ok', 'reason'].includes(k)), []);
   });
 
   test(`[ARI ${name}] A4 spec (buildSpawnSpec): a runtime without hostFilesystem gets no host path; one with it gets the spec as resolved`, () => {

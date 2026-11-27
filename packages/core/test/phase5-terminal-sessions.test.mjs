@@ -14,11 +14,11 @@ import { join } from 'node:path';
 
 import { appIdentityProvider, sessionHostIdentityProvider } from '../dist/identity/appIdentityProvider.js';
 import { APP_MIGRATION, buildPrivilegeReview } from '../dist/identity/privilegeReview.js';
-import { containerIdentityArgs, identityAccountName, isSessionIdentity, renderIdentityFiles } from '../dist/app-manager/spawn/identityArgs.js';
+import { containerIdentityArgs, identityAccountName, isSessionIdentity, renderIdentityFiles } from '../dist/runtimes/spawn/identityArgs.js';
 import {
   readKernelSessionSecret, sessionSecretSubpath, sessionServerOwner, terminalSessionArgs, terminalSessionCommand, writeSessionSecret,
   SESSION_IDENTITY_LABEL, SESSION_SECRET_FILE, TERMINAL_RUN_DIR, TERMINAL_SERVER_RUN_DIR, TERM_LAUNCH_BIN, TERM_TMUX_BIN,
-} from '../dist/app-manager/spawn/sessionArgs.js';
+} from '../dist/runtimes/spawn/sessionArgs.js';
 import { LINUX_ID_RANGES, TERMINAL_SERVICE_ACCOUNT, TERMINAL_SERVICE_GID, TERMINAL_SERVICE_UID, linuxIdRangeOf } from '../dist/identity/types.js';
 import { enterSpec } from '../dist/app-manager/SessionBroker.js';
 import { ASTRO_START_SHELL } from '../dist/app-manager/provisioning.js';

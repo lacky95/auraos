@@ -12,8 +12,9 @@
  * here: a survivor's `ref` is opaque to the kernel. 5b-2 D moved behind its
  * groups: port expose (`endpoints`), builds (`build`), sidecar exec/logs
  * (`workloads`), instance logs (`logs`), the dataDir and cap-doctor
- * inspections (`diagnostics`). Mounts and sidecar create stay in the
- * managers until Phase 6 (D-M, D-S).
+ * inspections (`diagnostics`). Phase 6 moved OS sidecars (`workloads`
+ * create, start, list, remove: `sidecars.ts`, D-S) and cross-app mounts
+ * (`mounts`, D-M) behind their groups.
  *
  * The runner is handed in by the composition point (AppManager today,
  * `bootSystem()` in Phase 6): this module imports no app-manager code at
@@ -22,16 +23,20 @@
 import type { ContainerRunner } from '../../app-manager/ContainerRunner.js';
 import type { SandboxRunner } from '../../app-manager/SandboxRunner.js';
 import {
-  runnerEndpoint, type RuntimeAdoption, type RuntimeBuild, type RuntimeLogsRequest, type RuntimeOutputStream, type RuntimeHealthCheck, type RuntimeModule, type RuntimeSessions, type RuntimeSurvivor, type RuntimeWorkloads,
+  requireLimits, runnerEndpoint, type ResourceLimits, type RuntimeFeatureOverrides, type RuntimeAdoption, type RuntimeBuild, type RuntimeLogsRequest, type RuntimeOutputStream, type RuntimeHealthCheck, type RuntimeModule, type RuntimeSessions, type RuntimeSurvivor, type RuntimeWorkloads,
 } from '../ari.js';
 import { containerDiagnostics } from './diagnostics.js';
 import { containerEndpoints } from './endpoints.js';
+import { containerSidecars } from './sidecars.js';
+import { containerMounts } from './mounts.js';
+import { validateLimits } from './limits.js';
 import { RuntimeExecError } from '../types.js';
 import { hostToolsGroup, toolsEnforcement, toolsFeatureOverrides, type HostToolStore, type ToolsMode } from '../hostTools.js';
 
 /** The runner surface the module adapts: the SandboxRunner contract plus the container's own groups. */
 export type ContainerRunnerSurface = SandboxRunner & Partial<Pick<ContainerRunner,
-  'openSessions' | 'endSession' | 'canPropagateMounts' | 'instanceLogs' | 'execWorkload' | 'workloadLogs' | 'forwarderFacts' | 'buildApp' | 'provisionApp'>>;
+  'openSessions' | 'endSession' | 'canPropagateMounts' | 'instanceLogs' | 'execWorkload' | 'workloadLogs' | 'forwarderFacts' | 'buildApp' | 'provisionApp'
+  | 'sidecarRuntime' | 'mountRootSubpath' | 'mountRootDir' | 'toDaemonHostPath' | 'canIdmapMounts' | 'idmapHelperHostPath'>>;
 
 type OrphanRecord = NonNullable<Awaited<ReturnType<NonNullable<SandboxRunner['listOrphanRecords']>>>>[number] & { user?: string };
 
@@ -52,6 +57,19 @@ export function containerRuntime(runner: ContainerRunnerSurface, deps: Container
   const caps = runner.capabilities({});
   // The last scan's records by instance: `adopt` hands exactly what was listed back to the runner.
   let listed = new Map<string, OrphanRecord>();
+  // Build/check workloads take enforced resource limits, each of them (D106, `limits.ts`); app instances don't (BT-M2).
+  const featureOverrides = (): RuntimeFeatureOverrides => ({
+    'build.execute': { support: 'supported' },
+    'resources.limits': { support: 'supported', applyMode: 'recreate-required',
+      constraints: { workloads: 'build', instances: 'unsupported', cpus: 'supported', memoryBytes: 'supported', pids: 'supported' } },
+    ...toolsFeatureOverrides(runner.capabilities({}), toolsMode()),
+  });
+  // Requested limits are mandatory: validated, then each must be enforced here, before anything runs.
+  const checkLimits = (limits: ResourceLimits | undefined): void => {
+    if (limits === undefined) return;
+    validateLimits(limits);
+    requireLimits({ descriptor: { id: 'container' } as RuntimeModule['descriptor'], capabilities: () => runner.capabilities({}), featureOverrides }, {}, limits);
+  };
   return {
     descriptor: {
       id: 'container',
@@ -68,7 +86,7 @@ export function containerRuntime(runner: ContainerRunnerSurface, deps: Container
     runner,
     capabilities: () => runner.capabilities({}),
     // App builds and provisioning run on this runtime (its `build` group, D-B).
-    featureOverrides: () => ({ 'build.execute': { support: 'supported' }, ...toolsFeatureOverrides(runner.capabilities({}), toolsMode()) }),
+    featureOverrides,
     // Never `unavailable`: the default runtime must not be blocked by a probe. A failed check degrades (and its
     // feature fails closed where it is used: a mount without propagation is refused by MountManager).
     health: () => {
@@ -126,22 +144,50 @@ export function containerRuntime(runner: ContainerRunnerSurface, deps: Container
         if (!runner.workloadLogs) throw new RuntimeExecError('engine', `no log of ${workloadId}: the runner has no engine`);
         return runner.workloadLogs(workloadId, req, onChunk);
       },
+      // OS sidecars (Phase 6 D-S): create, start, list, inspect, remove, seed, run, output.
+      ...containerSidecars({
+        sidecarRuntime: () => {
+          if (!runner.sidecarRuntime) throw new Error('the container runner has no sidecar facts');
+          return runner.sidecarRuntime();
+        },
+        mountRootSubpath: (consumer) => {
+          if (!runner.mountRootSubpath) throw new Error('the container runner has no mount root');
+          return runner.mountRootSubpath(consumer);
+        },
+      }, { baseImage: deps.baseImage ?? 'aura-base' }),
     } satisfies RuntimeWorkloads } : {}),
     // The instance's own output: the engine's log (5b-2 D-X).
     ...(runner.instanceLogs ? { logs: (instanceId: string, req: RuntimeLogsRequest, onChunk: (stream: RuntimeOutputStream, data: Buffer) => void) => runner.instanceLogs!(instanceId, req, onChunk) } : {}),
+    // Cross-app mounts into running containers (Phase 6 D-M): the helper bind, the mount-table verify, the root inspect.
+    ...(caps.mounts ? { mounts: containerMounts({
+      canPropagateMounts: () => runner.canPropagateMounts?.() ?? { ok: false, reason: 'the container runner has no mount propagation' },
+      canIdmapMounts: () => runner.canIdmapMounts?.() ?? { ok: false, reason: 'the container runner has no idmap probe' },
+      idmapHelperHostPath: () => runner.idmapHelperHostPath?.() ?? null,
+      mountRootDir: (consumer) => {
+        if (!runner.mountRootDir) throw new Error('the container runner has no mount root');
+        return runner.mountRootDir(consumer);
+      },
+      toDaemonHostPath: (p) => {
+        if (!runner.toDaemonHostPath) throw new Error('the container runner has no daemon path map');
+        return runner.toDaemonHostPath(p);
+      },
+    }, { helperImage: deps.baseImage ?? 'aura-base' }) } : {}),
     ...(caps.portExpose ? { endpoints: containerEndpoints(() => {
       if (!runner.forwarderFacts) throw new Error('the container runner has no forwarder facts');
       return runner.forwarderFacts();
     }) } : {}),
     // App builds and provisioning in a throwaway builder container (D-B; the runner's `buildApp`/`provisionApp`).
     build: {
-      build: async ({ appId, appDir, timeoutMs }) => {
+      // Limits: valid (`invalid-resource-limits`) and enforced, or refused before anything runs; absent: DEFAULT_BUILD_LIMITS.
+      build: async ({ appId, appDir, timeoutMs, limits }) => {
+        checkLimits(limits);
         if (!runner.buildApp) throw new Error('the container runner has no builder');
-        return runner.buildApp(appId, appDir, timeoutMs !== undefined ? { timeoutMs } : {});
+        return runner.buildApp(appId, appDir, { ...(timeoutMs !== undefined ? { timeoutMs } : {}), ...(limits ? { limits } : {}) });
       },
-      provision: async ({ appId, appDir, runtime, onLine }) => {
+      provision: async ({ appId, appDir, runtime, onLine, limits }) => {
+        checkLimits(limits);
         if (!runner.provisionApp) throw new Error('the container runner has no builder');
-        return runner.provisionApp(appId, appDir, runtime, onLine ? { onLine } : {});
+        return runner.provisionApp(appId, appDir, runtime, { ...(onLine ? { onLine } : {}), ...(limits ? { limits } : {}) });
       },
     } satisfies RuntimeBuild,
     ...(caps.hostFilesystem ? { tools: hostToolsGroup(runner, toolsMode, () => deps.toolStore?.() ?? null) } : {}),

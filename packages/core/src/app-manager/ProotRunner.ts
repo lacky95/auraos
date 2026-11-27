@@ -3,11 +3,10 @@ import { promisify } from 'node:util';
 import { chmodSync, chownSync, existsSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AppManifest } from '../types/manifest.js';
-import { lifecyclePath } from '../types/manifest.js';
 import { ALL_TOOLS_PATH, MY_TOOLS_PATH, SHARED_HOME_PATH, currentToolsMode, provisionAllowlist } from './tool-provision.js';
-import { prootHomeBind } from './spawn/homeArgs.js';
-import { prootContextBinds } from './spawn/contextArgs.js';
-import { prootIdentityLaunch, requireProotIdentity, writeIdentityFiles } from './spawn/identityArgs.js';
+import { prootHomeBind } from '../runtimes/spawn/homeArgs.js';
+import { prootContextBinds } from '../runtimes/spawn/contextArgs.js';
+import { prootIdentityLaunch, requireProotIdentity, writeIdentityFiles } from '../runtimes/spawn/identityArgs.js';
 import { WORKSPACE_ROOT_FILES } from './ContainerRunner.js';
 import type { SpawnIdentity } from '../identity/types.js';
 import type { RuntimeCapabilities, RuntimeSettings } from '../runtimes/types.js';
@@ -17,18 +16,21 @@ import type { SpawnContext } from '../scopes/types.js';
 import { VolumeStore } from '../context/VolumeStore.js';
 import { prootUnavailable } from '../runtimes/proot/host.js';
 import {
-  ASTRO_START_SHELL, RAW_START_SHELL, PROVISION_TIMEOUT_MS, ProvisionWatch, nextHealthDeadline,
+  ASTRO_START_SHELL, RAW_START_SHELL, ProvisionWatch,
 } from './provisioning.js';
 import { serveState } from './appBuild.js';
 import {
-  checkHealthGuard, classifyHealthIdentity, healthIdentityRefusal, lifecycleHeaders, lifecycleStatusRefusal,
+  checkHealthGuard, lifecycleStatusRefusal,
   newLifecycleToken, relayStrictEnv, type HealthIdentityClass, type LifecycleStatus,
 } from './lifecycleGate.js';
+import {
+  DestinationBindingError, StartupFailure, callOptionalHook, callRequiredHook, lifecycleUrl, waitHealthy,
+  type LifecycleDestination, type LifecycleTraits,
+} from './lifecycleClient.js';
 import { relayKey } from '../app-hosts/relayClaim.js';
 
-const HEALTH_CHECK_INTERVAL_MS = 200;
-const HEALTH_CHECK_TIMEOUT_MS = 30_000;
-const LIFECYCLE_TIMEOUT_MS = 5_000;
+/** PRoot's part of the one lifecycle client (lifecycleClient.ts): its name, a 30 s boot budget, 1 s probes. */
+const LIFECYCLE: LifecycleTraits = { name: '[ProotRunner]', bootBudgetMs: 30_000, probeTimeoutMs: 1_000 };
 
 /**
  * Default entrypoint command used when the app dir has no `entrypoint.sh`.
@@ -459,7 +461,7 @@ export class ProotRunner implements SandboxRunner {
 
     try {
       const identity = await this.waitHealthy(instanceId, appId, port, () => exited);
-      const lifecycle: LifecycleStatus = { identity, guard: await checkHealthGuard(this.lifecycleUrl(port, 'health')) };
+      const lifecycle: LifecycleStatus = { identity, guard: await checkHealthGuard(lifecycleUrl('localhost', port, 'health')) };
       const refusal = lifecycleStatusRefusal(instanceId, lifecycle);
       if (refusal) throw new Error(`[ProotRunner] ${refusal}`);
       spawned.lifecycle = lifecycle;
@@ -507,136 +509,66 @@ export class ProotRunner implements SandboxRunner {
   }
 
   /**
-   * Probe /api/lifecycle/health until the app responds AND its declared
-   * identity matches what we just spawned. Identity match guards against the
-   * "another app squatting our port" failure mode that caused the wrong-
-   * content bug — a bare 200 is no longer enough.
-   *
-   * The probe carries the lifecycle token, so it goes out only once the
-   * listener on the port is proven to belong to the spawned process tree
-   * (`listenerOwnership`). A listener that belongs to anyone else fails the
-   * start; so does a port whose owner can't be read.
+   * The one health loop (lifecycleClient.ts) over PRoot's destination: the
+   * probe carries the lifecycle token, so it goes out only once the listener
+   * on the port is proven to belong to the spawned process tree
+   * (`listenerOwnership`). Nothing listening yet: keep waiting. A listener
+   * that belongs to anyone else fails the start; so does a port whose owner
+   * can't be read, and an exit while booting.
    */
-  private async waitHealthy(
+  private waitHealthy(
     instanceId: string, appId: string, port: number,
     exited: () => string | null = () => null,
   ): Promise<HealthIdentityClass> {
-    // See ContainerRunner.waitHealthy — a cold app installs its dependency
-    // tree in the entrypoint, which must not be timed with the boot budget.
-    const startedAt    = Date.now();
-    const hardDeadline = startedAt + PROVISION_TIMEOUT_MS;
-    const provision    = this.processes.get(instanceId)?.provision;
-    let   deadline     = startedAt + HEALTH_CHECK_TIMEOUT_MS;
-    const healthUrl = this.lifecycleUrl(port, 'health');
     const spawned = this.processes.get(instanceId);
-    let lastBody: string | null = null;
-    while (Date.now() < deadline) {
-      const exit = exited();
-      if (exit) {
-        throw new StartupFailure(`[ProotRunner] ${instanceId} exited during startup (${exit}) before answering on port ${port}`);
-      }
-      // Nothing listens yet: keep waiting. Someone else listens: the port is
-      // poisoned, fail loud. Only our own listener gets the token.
-      const owner = spawned ? listenerOwnership(port, spawned.process.pid) : 'unknown';
-      if (owner === 'foreign' || owner === 'unknown') {
-        throw new DestinationBindingError(
-          `[ProotRunner] ${instanceId} on port ${port}: ` + (owner === 'foreign'
-            ? 'the listener does not belong to the spawned process tree. Another process is likely squatting this port.'
-            : 'cannot confirm that the listener belongs to the spawned process tree.'),
-        );
-      }
-      if (owner === 'own') {
-        try {
-          const res = await fetch(healthUrl, { headers: lifecycleHeaders(spawned!.lifecycleToken), signal: AbortSignal.timeout(1000) });
-          if (res.ok) {
-            const text = await res.text();
-            lastBody = text;
-            const identity = classifyHealthIdentity(text, appId, instanceId);
-            const refusal = healthIdentityRefusal(identity, appId, instanceId);
-            // Port poisoned or identity required — fail loud, no point waiting.
-            if (refusal) throw new DestinationBindingError(`[ProotRunner] ${refusal} on port ${port}.`);
-            if (identity.kind === 'legacy') console.warn(`[ProotRunner] ${instanceId} health endpoint returned no identity body; admitted as a known legacy app (warn mode).`);
-            return identity.kind;
-          }
-        } catch (err) {
-          if (err instanceof DestinationBindingError) throw err;
-          // Otherwise keep polling (connection refused, etc.)
+    return waitHealthy(LIFECYCLE, instanceId, appId, {
+      next: () => {
+        const exit = exited();
+        if (exit) throw new StartupFailure(`[ProotRunner] ${instanceId} exited during startup (${exit}) before answering on port ${port}`);
+        const owner = spawned ? listenerOwnership(port, spawned.process.pid) : 'unknown';
+        if (owner === 'foreign' || owner === 'unknown') {
+          throw new DestinationBindingError(
+            `[ProotRunner] ${instanceId} on port ${port}: ` + (owner === 'foreign'
+              ? 'the listener does not belong to the spawned process tree. Another process is likely squatting this port.'
+              : 'cannot confirm that the listener belongs to the spawned process tree.'),
+          );
         }
-      }
-      deadline = nextHealthDeadline({
-        now: Date.now(), deadline, hardDeadline,
-        isProvisioning: provision?.isProvisioning ?? false,
-        bootBudgetMs:   HEALTH_CHECK_TIMEOUT_MS,
-      });
-      await sleep(HEALTH_CHECK_INTERVAL_MS);
-    }
-    const waited = Math.round((Date.now() - startedAt) / 1000);
-    throw new StartupFailure(
-      provision?.everProvisioned
-        ? `[ProotRunner] ${instanceId} did not become healthy ${waited}s after starting to install its dependencies (last body: ${lastBody ?? 'none'})`
-        : `[ProotRunner] ${instanceId} did not become healthy within ${HEALTH_CHECK_TIMEOUT_MS}ms (last body: ${lastBody ?? 'none'})`,
-    );
-  }
-
-  /** `http://localhost:<port>/api/lifecycle/<hook>` — PRoot apps share the shell's network. */
-  private lifecycleUrl(port: number, hook: string): string {
-    return `http://localhost:${port}${lifecyclePath(hook)}`;
+        return owner === 'own' ? { host: 'localhost', port, token: spawned!.lifecycleToken, unbound: () => null } : null;
+      },
+      ...(spawned ? { provision: spawned.provision } : {}),
+    });
   }
 
   /**
-   * The instance, if the listener on its port still belongs to its process
-   * tree — checked before every call that carries the lifecycle token.
+   * Where the instance answers (PRoot apps share the shell's network): its
+   * port on localhost, bound only while the listener still belongs to its
+   * process tree — checked before every call that carries the token.
    */
-  private boundInstance(instanceId: string): SpawnedApp | null {
+  private destination(instanceId: string): LifecycleDestination | null {
     const spawned = this.processes.get(instanceId);
     if (!spawned) return null;
-    const owner = listenerOwnership(spawned.port, spawned.process.pid);
-    if (owner === 'own') return spawned;
-    console.warn(`[ProotRunner] ${instanceId}: listener on port ${spawned.port} is ${owner}; lifecycle call not sent`);
-    return null;
+    return {
+      host: 'localhost', port: spawned.port, token: spawned.lifecycleToken,
+      unbound: () => {
+        const owner = listenerOwnership(spawned.port, spawned.process.pid);
+        if (owner === 'own') return null;
+        console.warn(`[ProotRunner] ${instanceId}: listener on port ${spawned.port} is ${owner}; lifecycle call not sent`);
+        return `port ${spawned.port} is not bound to the instance (listener ${owner})`;
+      },
+    };
   }
 
-  async callLifecycle(instanceId: string, hook: string, opts: { reason?: string } = {}): Promise<void> {
-    if (!this.processes.has(instanceId)) throw new Error(`[ProotRunner] ${instanceId} is not running`);
-    const spawned = this.boundInstance(instanceId);
-    if (!spawned) throw new Error(`[ProotRunner] ${instanceId}: port ${this.processes.get(instanceId)?.port} is not bound to the instance; ${hook} not sent`);
-    const res = await fetch(this.lifecycleUrl(spawned.port, hook), {
-      method: 'POST',
-      headers: lifecycleHeaders(spawned.lifecycleToken, opts.reason ? { 'x-aura-stop-reason': opts.reason } : {}),
-      signal: AbortSignal.timeout(LIFECYCLE_TIMEOUT_MS),
-    });
-    if (!res.ok) {
-      throw new Error(`[ProotRunner] ${instanceId} lifecycle hook ${hook} returned ${res.status}`);
-    }
+  callLifecycle(instanceId: string, hook: string, opts: { reason?: string } = {}): Promise<void> {
+    return callRequiredHook(LIFECYCLE, instanceId, this.destination(instanceId), hook, opts);
   }
 
   /**
-   * Call an OPTIONAL lifecycle hook on the app. Returns the response body
-   * (parsed JSON) on success, or null when the app returns 404 or fails to respond.
-   * Used for `onSubprocessCreate` / `onSubprocessDestroy` — apps that don't care
-   * about subprocesses just don't implement these routes.
+   * Call an OPTIONAL lifecycle hook on the app: its JSON answer, or null
+   * (`onSubprocessCreate`, `onIntent`, ... — apps that don't care just don't
+   * implement the route).
    */
-  async callOptionalLifecycle(
-    instanceId: string,
-    hook: string,
-    body?: unknown,
-  ): Promise<unknown | null> {
-    const spawned = this.boundInstance(instanceId);
-    if (!spawned) return null;
-    try {
-      const res = await fetch(this.lifecycleUrl(spawned.port, hook), {
-        method: 'POST',
-        headers: lifecycleHeaders(spawned.lifecycleToken, body !== undefined ? { 'Content-Type': 'application/json' } : {}),
-        body: body !== undefined ? JSON.stringify(body) : undefined,
-        signal: AbortSignal.timeout(LIFECYCLE_TIMEOUT_MS),
-      });
-      if (res.status === 404 || !res.ok) return null;
-      const text = await res.text();
-      if (!text) return null;
-      try { return JSON.parse(text); } catch { return text; }
-    } catch {
-      return null;
-    }
+  callOptionalLifecycle(instanceId: string, hook: string, body?: unknown): Promise<unknown | null> {
+    return callOptionalHook(LIFECYCLE, this.destination(instanceId), hook, body);
   }
 
   async kill(instanceId: string): Promise<void> {
@@ -735,12 +667,8 @@ export class ProotRunner implements SandboxRunner {
   }
 }
 
-/**
- * The app did not come up: it exited while booting or never answered its
- * health check. Distinct from an identity mismatch (someone else owns the
- * port), which a retry in another serve mode can't fix.
- */
-export class StartupFailure extends Error {}
+/** One definition each (lifecycleClient.ts). */
+export { DestinationBindingError, StartupFailure };
 
 /** The last few KB of an app's output, for the startup-failure log. */
 export class OutputTail {
@@ -761,12 +689,6 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/**
- * The port's listener does not belong to the instance just started (or that
- * can't be confirmed), or its health identity is refused. A retry in another
- * serve mode can't fix either.
- */
-export class DestinationBindingError extends Error {}
 
 export type ListenerOwnership = 'none' | 'own' | 'foreign' | 'unknown';
 

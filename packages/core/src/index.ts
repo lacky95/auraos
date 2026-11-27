@@ -95,7 +95,7 @@ export {
 export type {
   AppRootExecutionPolicy, ExecutionApproval, ExecutionApprovedVia, ExecutionBinding, ExecutionConfig, ExecutionDecision, ExecutionRequest,
 } from './identity/execution.js';
-export { renderIdentityFiles, identityFilesSubpath, isNonRootIdentity } from './app-manager/spawn/identityArgs.js';
+export { renderIdentityFiles, identityFilesSubpath, isNonRootIdentity } from './runtimes/spawn/identityArgs.js';
 export * from './homes/importReport.js';
 export * from './homes/importMarkers.js';
 export * from './homes/plan.js';
