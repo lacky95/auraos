@@ -304,3 +304,14 @@ test('real npm: a store app\'s and its dependency\'s install scripts do not run 
     assert.match(pending, /^nisdep@1\.0\.0 \(preinstall, postinstall\)$/m);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test("the Docker socket follows the release, never a declaration (owner 2026-11-27)", async () => {
+  const { dockerSocketGranted } = await import("../dist/app-manager/tool-allowlist.js");
+  assert.equal(dockerSocketGranted({ scopeId: "system", tools: ["*"] }), true);
+  assert.equal(dockerSocketGranted({ scopeId: "system", tools: ["docker"] }), true);
+  assert.equal(dockerSocketGranted({ scopeId: "system", tools: ["git"] }), false);
+  for (const scopeId of ["user", "global", undefined]) {
+    assert.equal(dockerSocketGranted({ scopeId, tools: ["docker"] }), false, String(scopeId));
+    assert.equal(dockerSocketGranted({ scopeId, tools: ["*"] }), false, String(scopeId));
+  }
+});
