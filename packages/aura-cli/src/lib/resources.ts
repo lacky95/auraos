@@ -76,6 +76,12 @@ export interface AppDto {
   activities: ActivityDto[];
   /** How the app starts next time (`prod` / `dev: changed` …) — `GET /api/apps/serve`; only on `get apps`. */
   serve?: string;
+  /**
+   * D108: the operational state of an app that declares setup or profiles
+   * (`ready`, `setup-required`, `blocked` …, `unknown` when the engine can't
+   * say). Absent for every other app: ready by derivation.
+   */
+  setupState?: string;
 }
 
 /** `GET /api/instances/:id/sidecars` items (core `SidecarInfo` + usage). */
@@ -187,6 +193,14 @@ export interface ResourceDef<T = any> {
   watchable?: boolean;
 }
 
+/** The SETUP cell of `get apps`: ready green, a state that keeps the app from starting red, `-` without setup. */
+export function setupStateCell(state: string | undefined): string {
+  if (state === undefined) return '-';
+  if (state === 'ready') return color.green(state);
+  if (state === 'blocked' || state === 'setup-failed' || state === 'repair-required' || state === 'unknown') return color.red(state);
+  return color.yellow(state);
+}
+
 const apps: ResourceDef<AppDto> = {
   name: 'apps',
   aliases: ['app'],
@@ -209,6 +223,8 @@ const apps: ResourceDef<AppDto> = {
     { header: 'VERSION', value: (a) => a.manifest.version },
     { header: 'INSTANCES', value: (a) => String(a.instances.length) },
     { header: 'SERVE', value: (a) => (a.serve === 'prod' ? color.green('prod') : a.serve ?? '?') },
+    // D108: the operational state of an app with setup or profiles; `-` for an app without (ready by derivation).
+    { header: 'SETUP', value: (a) => setupStateCell(a.setupState) },
     { header: 'MODE', value: (a) => `${a.manifest.instanceMode ?? '-'}/${a.manifest.activityMode ?? '-'}`, wide: true },
     { header: 'SANDBOX', value: (a) => a.manifest.sandbox ?? 'proot', wide: true },
     { header: 'BG', value: (a) => (a.manifest.backgroundService ? 'yes' : '-'), wide: true },

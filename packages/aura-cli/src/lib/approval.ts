@@ -81,7 +81,7 @@ const heldUntil = (v: Partial<ApprovalView>): string =>
   typeof v.expiresAt === 'number' ? new Date(v.expiresAt).toISOString() : 'up to 24 hours';
 
 /** The structured result for a caller that reads it (an agent): one JSON line on stdout, not on a terminal. */
-export function printApprovalResult(id: string, r: WaitResult): void {
+export function printApprovalResult(id: string, r: WaitResult, resume?: string): void {
   if (process.stdout.isTTY) return;
   const v = r.view ?? {};
   const out: Record<string, unknown> = { outcome: r.outcome, approvalId: id };
@@ -89,7 +89,7 @@ export function printApprovalResult(id: string, r: WaitResult): void {
   if (v.display?.title) out['title'] = v.display.title;
   if (r.outcome === 'on_hold') {
     out['heldUntil'] = heldUntil(v);
-    out['resume'] = 'Run the same command again (in this same app instance) to continue: it resumes this request, it does not ask again.';
+    out['resume'] = resume ?? 'Run the same command again (in this same app instance) to continue: it resumes this request, it does not ask again.';
   }
   if (r.outcome === 'denied' && v.feedback) out['feedback'] = v.feedback;
   if (r.outcome === 'cancelled' && v.cancelledBy) out['cancelledBy'] = v.cancelledBy;
@@ -110,11 +110,15 @@ export function outcomeText(r: WaitResult): string {
 
 /**
  * D102: the request is on hold and this caller does not wait: say how to
- * resume, print the structured result, exit 75.
+ * resume, print the structured result, exit 75. `resume`: the command that
+ * continues it, when that is not the same command again (`aura app setup
+ * <app> --resume`).
  */
-export function exitOnHold(id: string, view: Partial<ApprovalView>, print: (line: string) => void = (l) => process.stderr.write(`${l}\n`)): never {
-  print(`On hold in the AuraOS desktop until ${heldUntil(view)} (request ${id}). Run the same command again later to continue; it resumes this request.`);
-  printApprovalResult(id, { outcome: 'on_hold', view });
+export function exitOnHold(
+  id: string, view: Partial<ApprovalView>, print: (line: string) => void = (l) => process.stderr.write(`${l}\n`), resume?: string,
+): never {
+  print(`On hold in the AuraOS desktop until ${heldUntil(view)} (request ${id}). ${resume ?? 'Run the same command again later to continue; it resumes this request.'}`);
+  printApprovalResult(id, { outcome: 'on_hold', view }, resume);
   process.exit(EXIT_ON_HOLD);
 }
 
