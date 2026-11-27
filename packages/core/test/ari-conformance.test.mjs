@@ -97,6 +97,10 @@ describeRuntime('mock', mockProvider, {
   },
 });
 
+// D106: the reference mock with some limits it can't enforce (partial) and with none: the mandatory-limits contract.
+describeRuntime('mock (partial limits: no pids)', () => mockProvider({ limits: { cpus: 'supported', memoryBytes: 'supported', pids: 'unsupported' } }), { instance: 'known-1' });
+describeRuntime('mock (no limits)', () => mockProvider({ limits: { cpus: 'unsupported', memoryBytes: 'unsupported', pids: 'unsupported' } }), { instance: 'known-1' });
+
 // ── Rows over the built-ins' sources and golden argv (5b E) ─────────────────
 
 test('[ARI built-ins] D89: a start with a workload token injects AURA_INSTANCE_TOKEN in every runtime column (golden argv)', () => {

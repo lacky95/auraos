@@ -23,7 +23,7 @@
 import type { ContainerRunner } from '../../app-manager/ContainerRunner.js';
 import type { SandboxRunner } from '../../app-manager/SandboxRunner.js';
 import {
-  runnerEndpoint, type RuntimeAdoption, type RuntimeBuild, type RuntimeLogsRequest, type RuntimeOutputStream, type RuntimeHealthCheck, type RuntimeModule, type RuntimeSessions, type RuntimeSurvivor, type RuntimeWorkloads,
+  requireLimits, runnerEndpoint, type ResourceLimits, type RuntimeFeatureOverrides, type RuntimeAdoption, type RuntimeBuild, type RuntimeLogsRequest, type RuntimeOutputStream, type RuntimeHealthCheck, type RuntimeModule, type RuntimeSessions, type RuntimeSurvivor, type RuntimeWorkloads,
 } from '../ari.js';
 import { containerDiagnostics } from './diagnostics.js';
 import { containerEndpoints } from './endpoints.js';
@@ -57,6 +57,19 @@ export function containerRuntime(runner: ContainerRunnerSurface, deps: Container
   const caps = runner.capabilities({});
   // The last scan's records by instance: `adopt` hands exactly what was listed back to the runner.
   let listed = new Map<string, OrphanRecord>();
+  // Build/check workloads take enforced resource limits, each of them (D106, `limits.ts`); app instances don't (BT-M2).
+  const featureOverrides = (): RuntimeFeatureOverrides => ({
+    'build.execute': { support: 'supported' },
+    'resources.limits': { support: 'supported', applyMode: 'recreate-required',
+      constraints: { workloads: 'build', instances: 'unsupported', cpus: 'supported', memoryBytes: 'supported', pids: 'supported' } },
+    ...toolsFeatureOverrides(runner.capabilities({}), toolsMode()),
+  });
+  // Requested limits are mandatory: validated, then each must be enforced here, before anything runs.
+  const checkLimits = (limits: ResourceLimits | undefined): void => {
+    if (limits === undefined) return;
+    validateLimits(limits);
+    requireLimits({ descriptor: { id: 'container' } as RuntimeModule['descriptor'], capabilities: () => runner.capabilities({}), featureOverrides }, {}, limits);
+  };
   return {
     descriptor: {
       id: 'container',
@@ -73,12 +86,7 @@ export function containerRuntime(runner: ContainerRunnerSurface, deps: Container
     runner,
     capabilities: () => runner.capabilities({}),
     // App builds and provisioning run on this runtime (its `build` group, D-B).
-    // Build/check workloads take enforced resource limits (D106, `limits.ts`); app instances don't (BT-M2).
-    featureOverrides: () => ({
-      'build.execute': { support: 'supported' },
-      'resources.limits': { support: 'supported', applyMode: 'recreate-required', constraints: { workloads: 'build', instances: 'unsupported' } },
-      ...toolsFeatureOverrides(runner.capabilities({}), toolsMode()),
-    }),
+    featureOverrides,
     // Never `unavailable`: the default runtime must not be blocked by a probe. A failed check degrades (and its
     // feature fails closed where it is used: a mount without propagation is refused by MountManager).
     health: () => {
@@ -170,14 +178,14 @@ export function containerRuntime(runner: ContainerRunnerSurface, deps: Container
     }) } : {}),
     // App builds and provisioning in a throwaway builder container (D-B; the runner's `buildApp`/`provisionApp`).
     build: {
-      // Limits are validated before anything runs (`invalid-resource-limits`); absent: DEFAULT_BUILD_LIMITS.
+      // Limits: valid (`invalid-resource-limits`) and enforced, or refused before anything runs; absent: DEFAULT_BUILD_LIMITS.
       build: async ({ appId, appDir, timeoutMs, limits }) => {
-        if (limits !== undefined) validateLimits(limits);
+        checkLimits(limits);
         if (!runner.buildApp) throw new Error('the container runner has no builder');
         return runner.buildApp(appId, appDir, { ...(timeoutMs !== undefined ? { timeoutMs } : {}), ...(limits ? { limits } : {}) });
       },
       provision: async ({ appId, appDir, runtime, onLine, limits }) => {
-        if (limits !== undefined) validateLimits(limits);
+        checkLimits(limits);
         if (!runner.provisionApp) throw new Error('the container runner has no builder');
         return runner.provisionApp(appId, appDir, runtime, { ...(onLine ? { onLine } : {}), ...(limits ? { limits } : {}) });
       },

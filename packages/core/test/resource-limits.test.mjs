@@ -51,10 +51,11 @@ test('the default build profile: the caps the builders always had (2 CPUs, 3 GiB
 test('feature view: container supported for build workloads (instances unsupported), PRoot unsupported, the mock supported', () => {
   const stub = { capabilities: (s) => ContainerRunner.prototype.capabilities.call({}, s), getHost: () => null, getPort: () => null };
   const c = moduleFeatures(containerRuntime(stub, {}), {}).find((f) => f.id === 'resources.limits');
-  assert.deepEqual([c.support, c.constraints], ['supported', { workloads: 'build', instances: 'unsupported' }]);
+  assert.deepEqual([c.support, c.constraints], ['supported', { workloads: 'build', instances: 'unsupported', cpus: 'supported', memoryBytes: 'supported', pids: 'supported' }]);
   const p = prootRuntime({ capabilities: (s) => ProotRunner.prototype.capabilities.call({}, s), getHost: () => null, getPort: () => null, provisionToolsDir: () => '/x' },
     { baseRootfs: '/nonexistent', env: {} });
-  assert.equal(moduleFeatures(p, {}).find((f) => f.id === 'resources.limits').support, 'unsupported');
+  assert.deepEqual(moduleFeatures(p, {}).find((f) => f.id === 'resources.limits'),
+    { id: 'resources.limits', support: 'unsupported', constraints: { cpus: 'unsupported', memoryBytes: 'unsupported', pids: 'unsupported' } }, 'each limit reported');
   assert.equal(p.build, undefined, 'PRoot builds nothing, so it is never handed limits');
   assert.equal(moduleFeatures(mockProvider(), {}).find((f) => f.id === 'resources.limits').support, 'supported');
 });
@@ -66,8 +67,16 @@ test('the kernel build path: limits always passed (the default profile); a build
   const container = mgr.runtimes.list().find((m) => m.descriptor.id === 'container');
   const without = { ...container, featureOverrides: () => ({ 'build.execute': { support: 'supported' } }) };
   mgr.runtimes.list = () => [without];
-  assert.throws(() => mgr.builder(), /feature-unsupported: resources\.limits/);
+  assert.throws(() => mgr.builder(), (e) => e.code === 'feature-unsupported'
+    && JSON.stringify(e.missing) === JSON.stringify(['resources.limits.cpus', 'resources.limits.memoryBytes', 'resources.limits.pids'])
+    && typeof e.hint === 'string', 'mandatory: refused naming every limit it cannot enforce');
+  // Partial enforcement is a refusal too, and another runtime that enforces them is suggested.
+  const partial = { ...container, featureOverrides: () => ({ 'build.execute': { support: 'supported' },
+    'resources.limits': { support: 'supported', constraints: { cpus: 'supported', memoryBytes: 'supported', pids: 'unsupported' } } }) };
+  mgr.runtimes.list = () => [partial, { ...mockProvider(), descriptor: { ...mockProvider().descriptor } }];
+  assert.throws(() => mgr.builder(), (e) => e.code === 'feature-unsupported' && JSON.stringify(e.missing) === '["resources.limits.pids"]'
+    && JSON.stringify(e.suggest) === '["mock"]');
   const src = (await import('node:fs')).readFileSync(new URL('../src/app-manager/AppManager.ts', import.meta.url), 'utf8');
-  assert.match(src, /builder\(\)\.build\(\{[^}]*limits: DEFAULT_BUILD_LIMITS/, 'the build passes the profile');
-  assert.match(src, /builder\(\)\.provision\(\{[^}]*limits: DEFAULT_BUILD_LIMITS/, 'the install passes the profile');
+  assert.match(src, /builder\(DEFAULT_BUILD_LIMITS\)\.build\(\{[^}]*limits: DEFAULT_BUILD_LIMITS/, 'the build passes the profile');
+  assert.match(src, /builder\(DEFAULT_BUILD_LIMITS\)\.provision\(\{[^}]*limits: DEFAULT_BUILD_LIMITS/, 'the install passes the profile');
 });

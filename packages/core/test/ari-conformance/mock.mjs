@@ -5,9 +5,13 @@
 // from it (ari-modules.test.mjs): the kernel depends on the contract only.
 // Its instance operations (spawn, kill, forceKill, onExit) are in memory too,
 // so the kit's instance-ops, workload-token and G1 rows run against it (5b E).
-import { HEALTHY, RuntimeExecError, runnerEndpoint } from '../../dist/index.js';
+import { HEALTHY, RuntimeExecError, requireLimits, runnerEndpoint } from '../../dist/index.js';
 
-export function mockProvider() {
+/**
+ * `limits`: which resource limits it enforces (D106), each `supported` by default; a variant with some or all
+ * `unsupported` is the conformance kit's partial and no-limits provider.
+ */
+export function mockProvider({ limits = { cpus: 'supported', memoryBytes: 'supported', pids: 'supported' } } = {}) {
   const MOCK_CAPS = {
     isolation: 'remote', network: 'remote', appHome: true, privateHomeSession: true, sessionExec: true, identity: 'enforced',
     readOnlyBinds: true, hostFilesystem: false, mounts: false, idmappedMounts: false, portExpose: false, sidecars: true,
@@ -17,12 +21,19 @@ export function mockProvider() {
   const exits = new Map();     // instanceId → [cb]
   const workloads = new Map(); // OS sidecar ref → { ref, state, env, tags }
   const builds = [];           // { op, appId, limits }
+  const anyLimit = Object.values(limits).some((v) => v !== 'unsupported');
+  const featureOverrides = () => ({
+    'build.execute': { support: 'supported' },
+    'resources.limits': { support: anyLimit ? 'supported' : 'unsupported', constraints: { workloads: 'build', ...limits } },
+  });
   /** D106 `resources.limits`: positive finite; integer bytes and pids; nothing else. */
   const checkLimits = (l) => {
     if (l === undefined) return;
     const bad = !l || typeof l !== 'object' || Object.entries(l).some(([k, v]) => !['cpus', 'memoryBytes', 'pids'].includes(k)
       || typeof v !== 'number' || !Number.isFinite(v) || v <= 0 || (k !== 'cpus' && !Number.isInteger(v)));
     if (bad) throw Object.assign(new Error('invalid resource limits'), { code: 'invalid-resource-limits' });
+    // Mandatory (D106): a limit it can't enforce refuses the workload, the same contract check the kernel makes.
+    requireLimits({ descriptor: { id: 'mock' }, capabilities: () => ({ ...MOCK_CAPS }), featureOverrides }, {}, l);
   };
   const survivors = [{ instanceId: 'org.mock.app-1', appId: 'org.mock.app', port: 4700, ref: 'urn:mock:ws/7f3a', tokenNonce: 'n-1', owner: 'default' }];
   const sessions = [{ sessionId: 's-1', instanceId: 'org.mock.app-1', kind: 'user', userId: 'default', home: 'private', uid: 100000, startedAt: '2026-11-27T00:00:00.000Z' }];
@@ -54,7 +65,7 @@ export function mockProvider() {
       settingsVersion: 1, settingsSchema: { type: 'object', properties: {} } },
     runner, capabilities: () => ({ ...MOCK_CAPS }), health: () => HEALTHY, endpoint: (id) => runnerEndpoint(runner, id),
     // D106: it builds in memory, within the limits it is given (validated by its own rules: the contract, not Docker's).
-    featureOverrides: () => ({ 'build.execute': { support: 'supported' }, 'resources.limits': { support: 'supported', constraints: { workloads: 'build' } } }),
+    featureOverrides,
     build: {
       build: async (spec) => { checkLimits(spec.limits); builds.push({ op: 'build', appId: spec.appId, limits: spec.limits ?? null }); return { ok: true, output: '' }; },
       provision: async (spec) => { checkLimits(spec.limits); builds.push({ op: 'provision', appId: spec.appId, limits: spec.limits ?? null }); return { ok: true, output: '' }; },

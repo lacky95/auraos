@@ -108,6 +108,21 @@ export class RuntimeCapabilityError extends Error {
   }
 }
 
+/**
+ * A feature, or a part of one, the runtime can't enforce for this request
+ * (D100 §17; D106 mandatory resource limits): refused, never silently
+ * ignored, dropped or downgraded. `missing` names the parts
+ * (`resources.limits.memoryBytes`), `suggest` the runtimes that enforce
+ * them, `hint` what the owner can do (D105 shape).
+ */
+export class RuntimeFeatureError extends Error {
+  override readonly name = 'RuntimeFeatureError';
+  readonly code = 'feature-unsupported' as const;
+  constructor(readonly runtime: string, readonly missing: string[], message: string, readonly suggest?: string[], readonly hint?: string) {
+    super(message);
+  }
+}
+
 /** The tail of a capability refusal: which enabled runtimes could run it, or that none can (D73). */
 export function suggestText(suggest: readonly string[]): string {
   return suggest.length ? `; it could run on: ${suggest.join(', ')}` : '; no installed runtime can run it';
@@ -168,13 +183,20 @@ export interface RuntimeRefusal {
   message: string;
   runtime?: string;
   appId?: string;
-  missing?: RuntimeCapability[];
+  /** Capabilities (`capability-missing`) or feature parts (`feature-unsupported`, e.g. `resources.limits.pids`). */
+  missing?: Array<RuntimeCapability | string>;
   suggest?: string[];
+  /** What the owner can do about it (D105). */
+  hint?: string;
 }
 
 export function runtimeRefusal(err: unknown): RuntimeRefusal | null {
   if (err instanceof RuntimeCapabilityError) {
     return { code: err.code, category: CATEGORY_OF_CODE[err.code], message: err.message, runtime: err.runtime, missing: err.missing, ...(err.suggest ? { suggest: err.suggest } : {}) };
+  }
+  if (err instanceof RuntimeFeatureError) {
+    return { code: err.code, category: CATEGORY_OF_CODE[err.code], message: err.message, runtime: err.runtime, missing: [...err.missing],
+      ...(err.suggest ? { suggest: [...err.suggest] } : {}), ...(err.hint ? { hint: err.hint } : {}) };
   }
   if (err instanceof RuntimeUnavailableError || err instanceof RuntimeModuleError) {
     return { code: err.code, category: CATEGORY_OF_CODE[err.code], message: err.message, runtime: err.runtime };

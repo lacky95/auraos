@@ -45,7 +45,7 @@ import {
   RESPAWN_FREEZE_MS, readRespawnRecord, respawnEntries, writeRespawnRecord, type RespawnEntry,
 } from '../runtimes/respawn.js';
 import { DEFAULT_BUILD_LIMITS } from '../runtimes/container/limits.js';
-import { moduleFeatures, operationResult, type RuntimeFeature, type RuntimeOperationResult, type RuntimeBuild, type RuntimeDiagnostics, type RuntimeEndpoints, type RuntimeOrphanProcess, type RuntimeSessionInfo, type RuntimeToolsStatus } from '../runtimes/ari.js';
+import { moduleFeatures, operationResult, requireLimits, type ResourceLimits, type RuntimeFeature, type RuntimeOperationResult, type RuntimeBuild, type RuntimeDiagnostics, type RuntimeEndpoints, type RuntimeOrphanProcess, type RuntimeSessionInfo, type RuntimeToolsStatus } from '../runtimes/ari.js';
 import { BUILTIN_RUNTIMES } from '../runtimes/builtins/index.js';
 import { RUNTIME_AUDIT_ACTIONS, RuntimeSettingsStore, runtimeSettingsRevision } from '../runtimes/settingsStore.js';
 import { migrateLegacyRuntimes, migrationReport, processLegacyEnv, type MigrationApp, type MigrationReport } from '../runtimes/migrateLegacy.js';
@@ -1429,13 +1429,15 @@ export class AppManager {
    * container module today, as before). None: builds fail closed, never in
    * the kernel or the app.
    */
-  private builder(): RuntimeBuild {
+  /**
+   * The runtime that runs build workloads, checked to enforce every limit of
+   * `limits` (D106: mandatory; refused with `feature-unsupported` naming the
+   * missing limits, never run without them).
+   */
+  private builder(limits: ResourceLimits = DEFAULT_BUILD_LIMITS): RuntimeBuild {
     const m = this.runtimes.list().find((x) => x.build);
     if (!m?.build) throw new Error('capability-missing: build.execute (no installed runtime builds apps)');
-    // D106: builds run within resource limits; a runtime that can't enforce them gets none (fail closed).
-    if (moduleFeatures(m, {}).find((f) => f.id === 'resources.limits')?.support !== 'supported') {
-      throw new Error(`feature-unsupported: resources.limits (runtime ${m.descriptor.id} can't limit build workloads)`);
-    }
+    requireLimits(m, {}, limits, this.runtimes.list());
     return m.build;
   }
 
@@ -1473,7 +1475,7 @@ export class AppManager {
       let res: { ok: boolean; output: string };
       try {
         prepareBuildStaging(manifest.appDir);
-        res = await this.builder().build({ appId, appDir: manifest.appDir, limits: DEFAULT_BUILD_LIMITS });
+        res = await this.builder(DEFAULT_BUILD_LIMITS).build({ appId, appDir: manifest.appDir, limits: DEFAULT_BUILD_LIMITS });
         if (res.ok) {
           installBuild(manifest.appDir, { prune: this.getInstancesByApp(appId).length === 0 });
           writeBuildStamp(manifest.appDir, fingerprint);
@@ -1531,7 +1533,7 @@ export class AppManager {
     if (running) return running;
     const run = (async () => {
       console.log(`[AppManager] provision: ${appId} in the builder …`);
-      const res = await this.builder().provision({ appId, appDir, runtime, limits: DEFAULT_BUILD_LIMITS, ...(opts.onLine ? { onLine: opts.onLine } : {}) });
+      const res = await this.builder(DEFAULT_BUILD_LIMITS).provision({ appId, appDir, runtime, limits: DEFAULT_BUILD_LIMITS, ...(opts.onLine ? { onLine: opts.onLine } : {}) });
       const ok = res.ok && !needsProvisioning(appDir, runtime);
       console.log(`[AppManager] provision: ${appId} ${ok ? 'ok' : 'FAILED'}`);
       return { ok, ran: true, output: res.output };

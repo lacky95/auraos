@@ -43,9 +43,9 @@ export function capabilityRefusal(instanceId: string, needs: Partial<RuntimeCapa
 export function refusalResponse(err: unknown, appId?: string): Response | null {
   const r = core.runtimeRefusal(err);
   if (!r) return null;
-  const hint = r.code === 'capability-missing' && r.suggest?.length
+  const hint = r.hint ?? (r.code === 'capability-missing' && r.suggest?.length
     ? `the owner can move ${appId ?? 'the app'} to a runtime that has it: aura runtime set ${appId ?? '<app>'} ${r.suggest[0]} (or Settings → Runtimes)`
-    : undefined;
+    : undefined);
   return jsonResponse({
     error: r.code, message: r.message, category: r.category,
     ...(r.runtime ? { runtime: r.runtime } : {}), ...(r.missing ? { missing: r.missing } : {}),

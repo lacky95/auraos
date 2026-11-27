@@ -31,7 +31,7 @@ import type { SidecarInfo } from '../types/instance.js';
 import type { LifecycleStatus } from '../app-manager/lifecycleGate.js';
 import type { ResolvedSidecarSpec } from '../app-manager/sidecar-spec.js';
 import {
-  CATEGORY_OF_CODE, RUNTIME_ID_PATTERN, RuntimeModuleError,
+  CATEGORY_OF_CODE, RUNTIME_ID_PATTERN, RuntimeModuleError, RuntimeFeatureError,
   type RuntimeCapabilities, type RuntimeRefusal, type RuntimeRefusalCode, type RuntimeSettings,
 } from './types.js';
 
@@ -235,7 +235,8 @@ const FEATURE_OF_CAPS: Record<RuntimeFeatureId, (c: RuntimeCapabilities) => Omit
   'workload.identityInheritance': (c) => ({ support: yes(c.sidecars) }),
   'network.isolation': (c) => ({ support: yes(c.network !== 'shell-netns' && c.isolation !== 'none') }),
   'network.endpointExposure': (c) => ({ support: yes(c.portExpose), applyMode: 'live' }),
-  'resources.limits': () => ({ support: 'unsupported' }),
+  // Per limit as constraints (D106): a module that enforces limits overrides the whole entry.
+  'resources.limits': () => ({ support: 'unsupported', constraints: { cpus: 'unsupported', memoryBytes: 'unsupported', pids: 'unsupported' } }),
   'resources.hardware': (c) => ({ support: yes(c.gpu) }),
   'build.execute': () => ({ support: 'unsupported' }),
   'build.sourceSync': () => ({ support: 'unsupported' }),
@@ -662,6 +663,44 @@ export interface ResourceLimits {
   cpus?: number;
   memoryBytes?: number;
   pids?: number;
+}
+/** The limits a `ResourceLimits` record can carry, each reported in the `resources.limits` feature's constraints. */
+export const RESOURCE_LIMIT_KEYS = Object.freeze(['cpus', 'memoryBytes', 'pids'] as const);
+
+/**
+ * The parts of `limits` a runtime does NOT enforce, by its `resources.limits`
+ * feature: the feature itself unsupported, or a requested limit whose
+ * constraint is not `supported` (conditional counts as not enforced).
+ * Named `resources.limits.<key>`. Requested limits are mandatory (D106):
+ * any part missing refuses the whole workload; partial enforcement is a refusal.
+ */
+export function unenforcedLimits(features: readonly RuntimeFeature[], limits: ResourceLimits): string[] {
+  const f = features.find((x) => x.id === 'resources.limits');
+  return RESOURCE_LIMIT_KEYS.filter((k) => limits[k] !== undefined
+    && (f?.support !== 'supported' || (f.constraints?.[k] ?? 'supported') !== 'supported')).map((k) => `resources.limits.${k}`);
+}
+
+/**
+ * Refuses (throws `RuntimeFeatureError`, D105 shape) unless `module` enforces
+ * every requested limit. The one check: the kernel calls it before handing a
+ * build or check workload to a runtime, and a provider may call it again
+ * before running one. `others` are the modules a `suggest` may name.
+ */
+export function requireLimits(
+  module: Pick<RuntimeModule, 'descriptor' | 'capabilities' | 'featureOverrides'>, settings: RuntimeSettings, limits: ResourceLimits,
+  others: ReadonlyArray<Pick<RuntimeModule, 'descriptor' | 'capabilities' | 'featureOverrides' | 'build'>> = [],
+): void {
+  const missing = unenforcedLimits(moduleFeatures(module, settings), limits);
+  if (!missing.length) return;
+  const id = module.descriptor.id;
+  const suggest = others.filter((m) => m.descriptor.id !== id && m.build && !unenforcedLimits(moduleFeatures(m, settings), limits).length)
+    .map((m) => m.descriptor.id);
+  throw new RuntimeFeatureError(id, missing,
+    `runtime ${id} can't enforce ${missing.join(', ')}: the requested limits are mandatory, so the workload is not run (never without them)`,
+    suggest,
+    suggest.length
+      ? `run it on a runtime that enforces every requested limit (${suggest.join(', ')}); aura runtime show <id> lists each runtime's resources.limits`
+      : 'no installed runtime enforces every requested limit; aura runtime show <id> lists what each runtime enforces');
 }
 
 /**
