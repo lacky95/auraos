@@ -12,7 +12,10 @@
  *                          (P5-4), so it needs a namespace runtime and runs
  *                          as that user (stream T); as root only while the
  *                          owner's home still awaits the ownership apply
- *                          (AppManager `ownerHomeAwaitsOwnership`).
+ *                          (AppManager `ownerHomeAwaitsOwnership`). D107-a
+ *                          (D108 P9): also an app instance whose effective
+ *                          home environment is `private` (the user's
+ *                          `home.private` grant), as that user, never root.
  *   jump                   `private` (default) the jumping user's Private
  *                          Home, `app` the App Home (D79: as the app's
  *                          identity, owner or `app.jump:<installationId>`),
@@ -161,7 +164,7 @@ export function kernelHomeResolver(deps: KernelHomeResolverDeps): HomeResolver {
       if (ctx === 'user-environment') {
         // The session's own user (stream T); root only for the owner before the ownership apply. Never an app or another user.
         if (app && app.uid !== 0 && (app.uid !== owner.uid || app.gid !== owner.gid)) {
-          throw new HomeDeniedError('not-authorized', 'a Terminal session runs as its own user only');
+          throw new HomeDeniedError('not-authorized', 'a user environment runs as its own user only');
         }
       }
 

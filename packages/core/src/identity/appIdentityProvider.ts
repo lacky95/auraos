@@ -39,11 +39,19 @@ export function appIdentityProvider(store: () => Promise<Pick<LinuxIdentityStore
 }
 
 /**
- * Stream T (D69): a user environment (`isUserEnvironment`, D107 S1; the
- * System Terminal today) is not an app identity. Each such instance is the
- * session host of one user and runs as that user's uid/gid (the owner 1000,
- * members from 100000; D70), with no capability, never as root and never as
- * an app uid. Every other instance keeps `base`.
+ * Stream T (D69): a user environment (`isUserEnvironment`, D107 S1) is not
+ * an app identity. Each such instance is the environment of one user and
+ * runs as that user's uid/gid (the owner 1000, members from 100000; D70),
+ * with no capability, never as root and never as an app uid:
+ *   - the System Terminal: the session host of that user (stream T2's
+ *     launcher, spawn/identityArgs.ts);
+ *   - D107-a identity (A), D108 P9: an app instance whose effective home
+ *     environment is `private` (`req.homeEnvironment`, authorized by the
+ *     user's `home.private` grant). Its process itself runs as the user
+ *     (`userApp`). Only for an installation that runs as its app identity
+ *     (`runAs: app`): a root installation is refused (I3), never run as the
+ *     user with root's latitude.
+ * Every other instance keeps `base`.
  *
  * Fail closed: an instance with no user, a user without an enabled account,
  * or one whose identity can't be allocated or is retired does not start.
@@ -70,6 +78,11 @@ export function sessionHostIdentityProvider(base: SpawnIdentityProvider, deps: S
   return {
     async identityFor(req: SpawnIdentityRequest): Promise<SpawnIdentity> {
       if (!deps.isUserEnvironment(req)) return base.identityFor(req);
+      const userApp = req.homeEnvironment === 'private';
+      if (userApp && req.runAs !== 'app') {
+        throw new SessionIdentityError(req.appId, `${req.appId} is configured with your Private Home, and its installation runs as root: `
+          + 'a root installation never gets a Private Home (D107 I3); not started');
+      }
       const userId = req.userId;
       if (!userId) throw new SessionIdentityError(req.appId, `${req.appId} hosts a user's sessions and was asked to start for nobody; not started`);
       let account;
@@ -84,6 +97,7 @@ export function sessionHostIdentityProvider(base: SpawnIdentityProvider, deps: S
       if (!(rec.uid > 0 && rec.gid > 0)) throw new SessionIdentityError(req.appId, `${req.appId}: user ${userId} has no non-root identity; not started`);
       return {
         uid: rec.uid, gid: rec.gid, range: userId === deps.ownerId ? 'owner' : 'user', userId, account: account.username,
+        ...(userApp ? { userApp: true as const } : {}),
       };
     },
   };
