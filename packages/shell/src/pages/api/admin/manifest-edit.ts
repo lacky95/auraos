@@ -2,9 +2,10 @@ import type { APIRoute } from 'astro';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  BUILTIN_PERMISSIONS, ManifestOverlayError, applyManifestOverlay, editManifestOverlay, readAliasMap, readManifestOverlay,
-  releasePaths, toolchainMirrorBin, toolsGrant, writeManifestOverlay, type ManifestOverlay, type OverlayEdit,
+  applyManifestOverlay, closestName, closestPermission, editManifestOverlay, isKnownPermission, listToolchainBinaries, namedTools,
+  readAliasMap, readManifestOverlay, releasePaths, toolchainMirrorBin, toolsGrant, writeManifestOverlay, type ManifestOverlay, type OverlayEdit,
 } from '@aura/core';
+import { liveCapabilityDeps, resolveRegistry } from '../../../lib/capabilities.ts';
 import { auditOwner, manifestEditLevel, ownerAction } from '../../../lib/approvals/admin.ts';
 
 /**
@@ -112,19 +113,28 @@ export const POST: APIRoute = async (ctx) => {
   const mgr = getAppManager();
   const path = join(mgr.registry.getAppDir(appId), 'app.manifest.json');
   if (!existsSync(path)) {
-    return json({ error: 'manifest-not-found', appId, path }, 404);
+    // The host path is internal (D105 Pass B, review row 33): the app is named, not where it lives.
+    return json({ error: 'manifest-not-found', target: appId, appId, message: `${appId} has no app.manifest.json where it is installed.` }, 404);
   }
 
   // The installed manifest (the base the ops are relative to), the app's overlay, and the
   // effective manifest both make (what the registry serves).
   let base: Record<string, unknown>;
   try { base = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>; }
-  catch (err) { return json({ error: 'manifest-parse-failed', message: (err as Error).message }, 500); }
+  catch (err) { return json({ error: 'manifest-parse-failed', message: `${appId}'s app.manifest.json is not valid JSON: ${(err as Error).message}` }, 500); }
   const overlayApps = releasePaths.layout(mgr.getDataDir()).overlayApps;
   let overlay: ManifestOverlay | null;
   try { overlay = readManifestOverlay(overlayApps, appId); }
-  catch (err) { return json({ error: 'overlay-invalid', message: `${(err as Error).message}: fix or remove the file (the app is refused until then).` }, 500); }
+  catch (err) { return json({ error: 'overlay-invalid', message: `${appId}'s settings overlay is invalid (${(err as Error).message.replace(/^.*: /, '')}): fix or remove it; the app is refused until then.` }, 500); }
   const manifest = applyManifestOverlay(base, overlay);
+
+  // D105 Pass B (review row 21): a tool the capability registry does not know is refused before the owner is asked.
+  // Only names this edit adds: a set-tools that keeps an old, since removed tool stays possible.
+  const had = Array.isArray(manifest['tools']) ? manifest['tools'] as string[] : [];
+  const adds = action === 'set-tools' ? (setTools ?? []).filter((t) => !had.includes(t))
+    : action === 'add-tool' || action === 'add-service-tool' ? [tool ?? ''] : [];
+  const unknownTool = await unknownCapability(adds, mgr.getDataDir());
+  if (unknownTool) return json(unknownTool, 404);
 
   // The owner decides this exact edit (D50).
   const edit: { appId: string; action: Action; tool?: string; tools?: string[]; permission?: string; service?: string } = {
@@ -160,7 +170,8 @@ export const POST: APIRoute = async (ctx) => {
     // Unknown names are allowed through (PermissionSchema is a free-form
     // string and apps may define their own) but flagged, since a typo would
     // otherwise silently grant nothing.
-    const unknown = action === 'add-permission' && !BUILTIN_PERMISSIONS.includes(perm as never);
+    const unknown = action === 'add-permission' && !isKnownPermission(perm);
+    const suggest = unknown ? closestPermission(perm) : null;
 
     if (changed) {
       const failed = saveOverlay(overlayApps, appId, r.overlay);
@@ -186,12 +197,12 @@ export const POST: APIRoute = async (ctx) => {
       if (changed && perm === 'apps.mount' && action !== 'add-permission') {
         for (const i of mgr.getInstancesByApp(appId)) mgr.mounts.revokeConsumer(i.instanceId);
       }
-      return json({ ok: true, appId, action, permission: perm, changed, permissions: next, unknown, reloaded: true });
+      return json({ ok: true, appId, action, permission: perm, changed, permissions: next, unknown, ...(suggest ? { suggest: [suggest] } : {}), reloaded: true });
     } catch (err) {
       // The file is written but the running registry still has the old value,
       // so the grant won't take effect until a restart. Say so rather than
       // reporting a success the caller can't actually use.
-      return json({ ok: true, appId, action, permission: perm, changed, permissions: next, unknown, reloaded: false, reloadError: (err as Error).message });
+      return json({ ok: true, appId, action, permission: perm, changed, permissions: next, unknown, ...(suggest ? { suggest: [suggest] } : {}), reloaded: false, reloadError: (err as Error).message });
     }
   }
 
@@ -276,12 +287,39 @@ export const POST: APIRoute = async (ctx) => {
 
 const listOf = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
 
-/** Write the app's overlay; a Response when that failed. */
+/** Write the app's overlay (/data, never the installed tree); a Response when that failed (names the app, not the path). */
 function saveOverlay(dir: string, appId: string, overlay: ManifestOverlay): Response | null {
   try { writeManifestOverlay(dir, appId, overlay); return null; }
   catch (err) {
-    return json({ error: 'write-failed', message: (err as Error).message, ...(err instanceof ManifestOverlayError ? { overlay: true } : {}) }, 500);
+    return json({ error: 'write-failed', message: `${appId}'s settings overlay could not be written (${(err as NodeJS.ErrnoException).code ?? 'error'}).` }, 500);
   }
+}
+
+/**
+ * The first named tool the capability registry does not know, as the 404
+ * answer (markers `*` and `#` are not tools; a capability's registry
+ * aliases name its binary). Null when every name is known, or when the registry cannot be
+ * read (the edit then goes on as before).
+ */
+async function unknownCapability(tools: string[], dataDir: string): Promise<Record<string, unknown> | null> {
+  const aliases = readAliasMap(toolchainMirrorBin(dataDir));
+  const named = namedTools(tools.filter(Boolean), aliases);
+  if (named.length === 0) return null;
+  let known: string[];
+  try {
+    // The registry, plus whatever the toolchain holds (a binary installed without a registry entry is grantable too).
+    known = [...Object.keys(await resolveRegistry(liveCapabilityDeps())), ...listToolchainBinaries(toolchainMirrorBin(dataDir))];
+  } catch { return null; }
+  if (known.length === 0) return null;
+  const missing = named.find((t) => !known.includes(t));
+  if (!missing) return null;
+  const near = closestName(missing, known);
+  return {
+    error: 'unknown-capability', category: 'invalid-input', capability: missing,
+    message: `'${missing}' is not in the capability registry.`,
+    hint: `aura cap registry show lists the capabilities${near ? `; did you mean ${near}?` : '.'}`,
+    ...(near ? { suggest: [near] } : {}),
+  };
 }
 
 function json(payload: unknown, status = 200): Response {

@@ -93,6 +93,14 @@
  * it is just a mount that is never declared (it ends with the instance, or
  * when Developer Mode is switched off), never mirrored into sidecars and
  * never made into a sidecar.
+ *
+ * ## Releases (Phase 6 L, D80)
+ *
+ * A release tree is never writable through any mount: in the Normal layout
+ * `/workspace` is the running release, and every release lives under the
+ * data volume's `releases/`. A writable mount of one (and `aura mount
+ * workspace` there) is refused; a declaration or re-bind of one comes back
+ * read-only (runtimes/spawn/systemTreeArgs.ts `inReleaseTree`).
  */
 import { chownSync, existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -101,6 +109,7 @@ import type { ScopeRegistry } from '../scopes/ScopeRegistry.js';
 import type { RuntimeMounts } from '../runtimes/ari.js';
 import { RuntimeCapabilityError } from '../runtimes/types.js';
 import { MOUNT_ROOT_PATH } from '../runtimes/spawn/paths.js';
+import { inReleaseTree } from '../runtimes/spawn/systemTreeArgs.js';
 import { SYSTEM_APP_LATER, SYSTEM_APP_LATER_MESSAGE } from '../nexus/AppSource.js';
 
 /** Canonical mount root inside a consumer container (one definition: runtimes/spawn/paths.ts). */
@@ -747,7 +756,18 @@ export class MountManager {
     const containerPath = `${root.containerDir}/${dirName}`;
 
     let mode = spec.mode;
-    const plan = mode === 'rw' ? this.crossUid(instanceId, kind, srcShell, (opts.origin ?? 'added') === 'added' && opts.persist !== false) : null;
+    const requested = (opts.origin ?? 'added') === 'added' && opts.persist !== false;
+    // D80 (Phase 6 L): a release tree is never writable through a mount, in any mode: the
+    // Normal layout's /workspace (the running release) and every release on the data volume.
+    // A request (and the AuraOS tree itself) is refused; a declaration or re-bind comes back read-only.
+    if (mode === 'rw' && inReleaseTree(srcShell, this.opts.dataDir)) {
+      const what = kind === 'workspace' ? 'the AuraOS tree' : `${spec.targetAppId}'s source`;
+      const why = `${what} is part of a release, which is read-only (Normal Mode: system changes go through aura system patch)`;
+      if (kind === 'workspace' || requested) throw new Error(`refusing a writable mount: ${why}`);
+      console.warn(`[MountManager] ${why}: mounting it read-only into ${instanceId}`);
+      mode = 'ro';
+    }
+    const plan = mode === 'rw' ? this.crossUid(instanceId, kind, srcShell, requested) : null;
     if (plan === 'ro') mode = 'ro';
     const idmap = plan && plan !== 'ro'
       ? { from: `${plan.from.uid}:${plan.from.gid}`, to: `${plan.to.uid}:${plan.to.gid}` } : undefined;
@@ -1076,6 +1096,22 @@ export class MountManager {
       // `work/<id>` and `patches/<id>` (dirName): the app id follows the prefix dir.
       const targetAppId = kind === 'work' || kind === 'patches' ? dirName.slice(dirName.indexOf('/') + 1)
         : kind === 'data' ? dirName.slice(0, -'.data'.length) : dirName;
+      // D80 (Phase 6 L): outside Developer Mode nothing keeps writable access to the AuraOS tree. A
+      // checkout bind, or a writable bind of a built-in app's source, that survived a Developer Mode
+      // shell (the mode switch recreates the shell; the consumers keep running) is reaped, and with
+      // it its declaration (like revokeConsumer): it is mounted again on request, read-only.
+      const leavingDev = this.opts.developerMode !== undefined && !this.opts.developerMode();
+      if (leavingDev && (kind === 'workspace'
+        || (kind === 'source' && this.readModeAt(path) === 'rw' && this.opts.registry.getById(targetAppId)?.scopeId === 'system'))) {
+        try {
+          this.rt().detach(instanceId, this.rt().hostPath(path));
+          reaped++;
+          console.log(`[MountManager] revoked writable ${dirName} of ${instanceId}: Developer Mode is off (D80)`);
+        } catch (err) {
+          console.warn(`[MountManager] could not revoke ${path}: ${(err as Error).message}`);
+        }
+        continue;
+      }
       const decl = this.readDecls(instanceId).find((d) => d.targetAppId === targetAppId && kindOf(d) === kind);
       const mount: AuraMount = {
         id: this.mountId(targetAppId, kind),

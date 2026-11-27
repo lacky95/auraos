@@ -98,6 +98,26 @@ export async function fetchCapabilities(): Promise<Record<string, CapabilityEntr
   return loadRegistry().capabilities;
 }
 
+/**
+ * The install state as the shell has it (it is the writer; inside a sandbox
+ * the local file can be stale or missing). The local file only when the
+ * shell is unreachable, so a host shell with the server stopped still works.
+ */
+export async function fetchState(): Promise<State> {
+  try { return (await api.get<{ state: State }>('/api/admin/cap')).state; }
+  catch { return loadState(); }
+}
+
+/**
+ * Whether a capability counts as installed: its install record, or a
+ * `builtin` (part of the image, never recorded). The one rule of `aura get
+ * caps`, `aura cap ls`, `aura cap update` and `aura cap info` (Open WebUI gap 7:
+ * `cap info claude` said installed:false while `get caps` showed it).
+ */
+export function isCapInstalled(state: State, name: string, entry?: { source?: string }): boolean {
+  return state.capabilities[name]?.installed === true || entry?.source === 'builtin';
+}
+
 export function loadState(): State {
   if (!existsSync(STATE_PATH)) return { capabilities: {}, services: {} };
   try {

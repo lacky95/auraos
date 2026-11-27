@@ -26,12 +26,12 @@
  * 'hardlink' mode (leaving it is exactly the leak this module removes).
  */
 import {
-  chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync,
+  chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync,
   symlinkSync, unlinkSync, writeFileSync,
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { MY_TOOLS_PATH } from '../runtimes/spawn/paths.js';
-import { resolveToolBinaries, type AliasMap, type SidecarMap } from '../capabilities/tool-allowlist.js';
+import { namedTools, resolveToolBinaries, sidecarNames, type AliasMap, type SidecarMap } from '../capabilities/tool-allowlist.js';
 import {
   INSTANCE_LIB_DIR, libsForBinaries, materialiseLibs, readLibMap, toolchainLibFor,
   toolchainMirrorLib,
@@ -502,5 +502,46 @@ export function provisionAllowlist(opts: {
       `Repair with \`aura cap doctor --fix\`.`,
     );
   }
+  writeMissingIndex(dir, {
+    tools, aliases: readAliasMap(storeBin), linked, missing, store: listToolchainBinaries(storeBin), helpers: sidecarNames(readSidecarMap(storeBin)),
+    needsLibs: missingLibs.length ? wanted.filter((b) => libsForBinaries([b], readLibMap(storeBin)).some((l) => missingLibs.includes(l))) : [],
+  });
   return { mode, linked, missing, libs, missingLibs };
+}
+
+/**
+ * The allowlist dir's index of what is NOT on PATH, and why (D105 Pass B,
+ * review row 20): `<name>\t<state>` per line, read by the sandbox shell's
+ * `command_not_found_handle` (os/bashrc.aura.sh) so an agent sees the reason
+ * and the owner's command instead of a bare `command not found`.
+ *
+ *   not-granted      in the toolchain, not in this app's tools[]
+ *   not-installed    in tools[], not in the toolchain
+ *   needs-libraries  on PATH, but a library it needs is missing
+ *
+ * Names only: what the toolchain holds is what `aura get caps` lists anyway.
+ * A dotfile, so no tool listing counts it.
+ */
+export const MISSING_INDEX = '.missing';
+
+export function writeMissingIndex(dir: string, f: {
+  tools: string[]; linked: string[]; missing: string[]; store: string[]; helpers: Set<string>; needsLibs: string[];
+  /** The registry aliases (binary → names), so an alias in tools[] counts as its binary. */
+  aliases?: AliasMap;
+}): void {
+  const on = new Set(f.linked);
+  const lines = new Map<string, string>();
+  for (const name of f.store) if (!on.has(name) && !f.helpers.has(name)) lines.set(name, 'not-granted');
+  // With '#' (and no '*') the named tools are the ones withheld, not granted.
+  const granted = f.tools.includes('#') && !f.tools.includes('*') ? [] : namedTools(f.tools, f.aliases);
+  for (const name of [...granted, ...f.missing]) if (!on.has(name)) lines.set(name, 'not-installed');
+  for (const name of f.needsLibs) lines.set(name, 'needs-libraries');
+  const body = [...lines].sort(([a], [b]) => a.localeCompare(b)).map(([n, st]) => `${n}\t${st}\n`).join('');
+  try {
+    const tmp = join(dir, `${MISSING_INDEX}.tmp`);
+    writeFileSync(tmp, body, { mode: 0o644 });
+    renameSync(tmp, join(dir, MISSING_INDEX));
+  } catch (err) {
+    console.warn(`[tools] ${dir}: could not write ${MISSING_INDEX}: ${(err as Error).message}`);
+  }
 }

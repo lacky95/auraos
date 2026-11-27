@@ -6,6 +6,7 @@ import {
   type StoreEntryCtx,
 } from '@aura/core';
 import { jsonResponse, errorResponse } from '../../../lib/appResponse.js';
+import { nexusFailure } from '../../../lib/nexusErrors.ts';
 
 /**
  * Submit an app to the curated store index by opening a pull request.
@@ -28,7 +29,7 @@ import { jsonResponse, errorResponse } from '../../../lib/appResponse.js';
  *     dryRun?, updateMetadata?, noCodeowners?, force?, acceptPolicy?: boolean
  *   }
  */
-export const POST: APIRoute = async ({ request }) => {
+export const POST: APIRoute = async ({ request, locals }) => {
   const body = await request.json().catch(() => ({})) as {
     manifest?: unknown;
     source?:   { kind?: 'git' | 'oci'; ref?: string; defaultBranch?: string };
@@ -99,7 +100,7 @@ export const POST: APIRoute = async ({ request }) => {
         hint:  (err as { hint?: string }).hint,
       }, 400);
     }
-    return errorResponse((err as Error).message, 500);
+    return nexusFailure({ request, locals }, err);
   }
 };
 

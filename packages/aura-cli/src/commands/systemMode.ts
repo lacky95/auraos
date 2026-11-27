@@ -32,10 +32,16 @@ interface ModeState {
   env: Mode | null;
   default: Mode;
   normalEnforced: boolean;
+  /** The release AuraOS runs from (the Normal layout, Phase 6 L); null in the Developer layout. */
+  release?: ReleaseView | null;
   workspaceMounts?: Array<{ instanceId: string; containerPath: string }>;
   tree?: Tree;
 }
-interface Refusal { error?: string; message?: string; tree?: Tree; recommend?: Array<{ step: string; what: string }> }
+export interface ReleaseView {
+  id: string; commit: string | null; version: string | null; channel: string | null;
+  provenance: string | null; signed: boolean; keyId: string | null; previous: string | null;
+}
+interface Refusal { error?: string; message?: string; hint?: string; tree?: Tree; recommend?: Array<{ step: string; what: string }> }
 
 const ROUTE = '/api/admin/system-mode';
 const LIST = 15;
@@ -62,11 +68,29 @@ function printTree(t: Tree): void {
   section(`local commits not in ${t.release?.ref ?? 'the release'}`, t.counts.localCommits, t.localCommits.map((c) => `${c.sha} ${c.subject}`));
 }
 
+/** The release line (D34): `<version> <commit7>, previous <id>`. */
+export function releaseLine(r: ReleaseView): string {
+  return `release ${r.version ?? r.id}${r.commit ? ` ${r.commit.slice(0, 7)}` : ''}${r.previous ? `, previous ${r.previous}` : ''}`;
+}
+/** Channel and provenance; never "signed" unless the release is maintainer-signed (D71, owner answer a). */
+export function provenanceLine(r: ReleaseView): string {
+  const trust = r.signed ? color.green(`signed${r.keyId ? ` (key ${r.keyId})` : ''}`) : color.yellow('not maintainer-signed');
+  return `channel ${r.channel ?? '-'}, ${r.provenance ?? 'unknown provenance'}, ${trust}`;
+}
+/** Where system changes go in Normal Mode (D34, D68). */
+export const SYSTEM_CHANGES = 'aura system patch start | save | activate (D68): the release itself is read-only';
+
 async function show(): Promise<void> {
   const s = await api.get<ModeState>(`${ROUTE}?tree=1`);
-  console.log(`mode:       ${s.mode === 'developer' ? color.yellow('developer') : color.green('normal')}${s.env ? color.dim(' (AURA_SYSTEM_MODE on the container)') : s.configured ? '' : color.dim(' (default)')}`);
-  if (s.mode === 'normal' && !s.normalEnforced) {
-    console.log(color.dim('            Normal mode is recorded only: AuraOS keeps running from /workspace until Phase 6.'));
+  const enforced = s.normalEnforced && s.release;
+  console.log(`mode:       ${s.mode === 'developer' ? color.yellow('developer') : color.green('normal')}${enforced ? ` (${releaseLine(s.release!)})` : s.env ? color.dim(' (AURA_SYSTEM_MODE on the container)') : s.configured ? '' : color.dim(' (default)')}`);
+  if (enforced) {
+    console.log(`release:    ${provenanceLine(s.release!)}`);
+    console.log(`changes:    ${SYSTEM_CHANGES}`);
+    return;
+  }
+  if (s.mode === 'normal') {
+    console.log(color.dim('            Normal mode is recorded only: this install runs from its /workspace checkout (the Developer layout).'));
   }
   for (const m of s.workspaceMounts ?? []) console.log(`  workspace mount: ${m.instanceId} ${color.dim(m.containerPath)} (read-write)`);
   if (s.tree) printTree(s.tree);
@@ -85,7 +109,7 @@ async function setMode(mode: Mode, moveToBranch: boolean): Promise<void> {
       for (const step of r.recommend ?? []) console.error(`  (${step.step}) ${step.what}`);
       process.exit(1);
     }
-    fail(`mode: ${r?.message ?? r?.error ?? (err as Error).message}`);
+    fail(`mode: ${r?.message ?? r?.error ?? (err as Error).message}${r?.hint ? `\n  Fix: ${r.hint}` : ''}`);
   }
   if (s!.env && s!.env !== mode) console.log(color.yellow(`  Note: AURA_SYSTEM_MODE=${s!.env} on the container wins over this setting.`));
   if (mode === 'developer') {
@@ -96,7 +120,8 @@ async function setMode(mode: Mode, moveToBranch: boolean): Promise<void> {
     console.log(`  Your work is on branch ${color.bold(s!.cleanup.branch)}${s!.cleanup.mainBranch ? ` (and main's own on ${s!.cleanup.mainBranch})` : ''}; backup: ${s!.cleanup.backup} (kept 30 days).`);
   }
   if (s!.detached?.length) console.log(`  Detached the workspace mount from ${s!.detached.join(', ')}.`);
-  ok('Developer Mode is off (normal). AuraOS keeps running from /workspace until Phase 6 ships Normal mode.');
+  if (s!.normalEnforced) { ok('AuraOS runs from a release: Normal mode already.'); return; }
+  ok('Developer Mode is off (normal). This install keeps running from its /workspace checkout; the locked release is the Normal layout (install.sh).');
 }
 
 async function exportPatches(): Promise<void> {
@@ -120,7 +145,8 @@ export function registerSystemMode(program: Command): void {
       '  aura mode normal                   # off: refused while /workspace differs from the release',
       '  aura mode normal --move-to-branch  # off, with the automatic clean-up',
       '',
-      'Normal mode is recorded and shown, not enforced: AuraOS keeps running from /workspace until Phase 6.',
+      'Normal mode is enforced when AuraOS runs from a release (the Normal layout): the release is read-only,',
+      'system changes go through aura system patch (D68). In a checkout (the Developer layout) it is recorded only.',
     ].join('\n'))
     .action(async (mode: string | undefined, opts: { moveToBranch?: boolean }) => {
       try {

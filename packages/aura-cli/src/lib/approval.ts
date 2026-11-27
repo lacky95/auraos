@@ -20,6 +20,7 @@
  * stdout is not a terminal (`{"approval": {"outcome": …}}`), with the
  * owner's denial feedback when they gave any.
  */
+import { APPROVAL_REFUSAL_TEXT } from '@aura/core';
 import { issueSetupCode } from './setup-ticket.js';
 import { shellFetch } from './identity.js';
 
@@ -103,7 +104,7 @@ export function outcomeText(r: WaitResult): string {
   const v = r.view ?? {};
   switch (r.outcome) {
     case 'denied': return v.feedback ? `denied by the owner: ${v.feedback}` : 'denied by the owner';
-    case 'expired': return 'the request expired';
+    case 'expired': return 'the request expired without an answer: run the command again to ask again';
     case 'cancelled': return v.cancelledBy === 'system' ? 'the request is no longer valid and was cancelled' : 'the request was withdrawn';
     case 'on_hold': return `on hold in the AuraOS desktop until ${heldUntil(v)}`;
     default: return 'the request is unknown';
@@ -271,9 +272,12 @@ export async function askOwner(
 ): Promise<{ approvalId: string } | { refused: string; outcome?: ApprovalOutcome; feedback?: string }> {
   const print = opts.print ?? ((line: string) => process.stderr.write(`${line}\n`));
   if (!asked.approvalId) {
-    return { refused: asked.operatorOnly ? 'only the host operator can confirm this: run the command on the host' : 'no approval was offered' };
+    if (asked.operatorOnly) return { refused: 'only the host operator can confirm this: run the same command on the host (docker exec -it aura-shell aura …)' };
+    return { refused: asked.refused ? `no approval was offered: ${presentedRefusal(asked.refused)}` : 'no approval was offered for this request (it cannot be approved from here)' };
   }
   const id = asked.approvalId;
+  // The approval this request presented was not taken: say why before asking again (202 `refused`).
+  if (asked.refused) print(`The approval this request presented was not taken: ${presentedRefusal(asked.refused)}`);
   if (asked.display) for (const line of approvalLines({ display: asked.display, level: asked.level ?? 'session' })) print(line);
   if (asked.resumed) print(`Continuing your earlier request ${id}.`);
   // D102: held already (a resumed request): an agent gets the structured answer at once.
@@ -290,4 +294,10 @@ export async function askOwner(
   if (r.outcome === 'on_hold') exitOnHold(id, r.view ?? {}, print);
   printApprovalResult(id, r);
   return { refused: `not approved: ${outcomeText(r)}`, outcome: r.outcome, ...(r.view?.feedback ? { feedback: r.view.feedback } : {}) };
+}
+
+/** Why a presented approval was not taken, from core's one table (D105 Pass B, review row 27). */
+function presentedRefusal(code: string): string {
+  const text = (APPROVAL_REFUSAL_TEXT as Readonly<Record<string, { message: string; hint?: string }>>)[code];
+  return text ? `${text.message}${text.hint ? ` ${text.hint}` : ''}` : code;
 }

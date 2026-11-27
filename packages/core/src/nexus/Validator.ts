@@ -19,7 +19,8 @@ export function validateStagedDir(stagingDir: string): AppManifest {
   const manifestPath = join(stagingDir, 'app.manifest.json');
   if (!existsSync(manifestPath)) {
     throw new NexusValidationError([
-      `no app.manifest.json found at ${manifestPath}`,
+      // The staging path is internal: the reader learns what is missing, not where (D105 Pass B).
+      '<root>: no app.manifest.json at the top of the app',
     ]);
   }
   const text = readFileSync(manifestPath, 'utf-8');

@@ -10,10 +10,17 @@
  *                                      has the file: `migrateSystemModeFile()`
  *                                      writes `developer` at boot (D60)
  *
- * Normal mode is recorded and shown, but NOT enforced yet: AuraOS still runs
- * from /workspace either way. What the mode changes today: the desktop
- * indicator, `aura dev rebuild|restart` and `aura mount workspace` (Developer
- * Mode only), and the access context's `systemMode`.
+ * Normal mode is ENFORCED when AuraOS runs from a release (Phase 6 L, the
+ * Normal layout: os/release-entry.sh makes /workspace the read-only release,
+ * `normalEnforced: true`): every write into the tree fails with EROFS and the
+ * routes that write it answer the D34 body (lib/releaseReadOnly.ts). In the
+ * Developer layout (a checkout) Normal is recorded and shown only. Either way
+ * the mode switches the desktop indicator, `aura dev rebuild|restart` and
+ * `aura mount workspace` (Developer Mode only), and the access context's
+ * `systemMode`. Moving between the layouts is a recreate of the shell, not
+ * this switch (owner question f): Developer → Normal builds a release from
+ * the clean checkout (D4); Normal → Developer needs a host checkout
+ * (`install.sh --developer`).
  *
  * Switching off runs the clean-tree flow (D4, D60): `workspaceTree()` lists
  * what differs from the release, `exportPatches()` writes it as patch files,
@@ -56,8 +63,57 @@ export interface SystemModeState {
   /** AURA_SYSTEM_MODE on the container, which wins over the file. */
   env: SystemMode | null;
   default: SystemMode;
-  /** Whether Normal mode locks the source. Not before Phase 6. */
-  normalEnforced: false;
+  /** Whether Normal mode locks the source: AuraOS runs from a release (the Normal layout, Phase 6 L). */
+  normalEnforced: boolean;
+  /** The release AuraOS runs from (the Normal layout); null in the Developer layout. */
+  release: RunningRelease | null;
+}
+
+/** What `aura status` and Settings show of the release AuraOS runs from (its release.json and the pointer). */
+export interface RunningRelease {
+  id: string;
+  commit: string | null;
+  version: string | null;
+  channel: string | null;
+  provenance: string | null;
+  /** Maintainer-signed metadata: only ever true for `upstream-signed` (D71, owner answer a). */
+  signed: boolean;
+  keyId: string | null;
+  previous: string | null;
+}
+
+/**
+ * The release this process runs from (the Normal layout), or null (a
+ * checkout). Fixed for the process's life (a release switch restarts the
+ * shell): read once per workspace dir.
+ */
+let releaseCache: { dir: string; release: RunningRelease | null } | null = null;
+export function runningRelease(): RunningRelease | null {
+  const dir = workspaceDir();
+  if (releaseCache?.dir !== dir) {
+    let release: RunningRelease | null = null;
+    try {
+      const r = core.runningRelease(dir);
+      if (r) {
+        const rec = readJson(join(r.root, 'release.json')) as Partial<core.ReleaseManifest> | null;
+        const ptr = readJson(core.releasePaths.layout(dataDir()).pointer) as Partial<core.ReleasePointer> | null;
+        const str = (v: unknown): string | null => (typeof v === 'string' && v ? v : null);
+        const provenance = str(rec?.provenance);
+        release = {
+          id: r.id, commit: r.commit, version: str(rec?.version), channel: str(rec?.channel), provenance,
+          signed: provenance === 'upstream-signed' && rec?.meta?.signed === true,
+          keyId: rec?.meta?.signed === true ? str(rec.meta.keyId) : null,
+          previous: ptr?.current === r.id ? str(ptr.previous) : null,
+        };
+      }
+    } catch { /* an older core: no release runtime */ }
+    releaseCache = { dir, release };
+  }
+  return releaseCache.release;
+}
+
+function readJson(file: string): unknown {
+  try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return null; }
 }
 
 function readConfigured(): SystemMode | null {
@@ -75,9 +131,11 @@ function readEnv(): SystemMode | null {
 export function systemModeState(): SystemModeState {
   const configured = readConfigured();
   const env = readEnv();
+  const release = runningRelease();
   return {
-    mode: env ?? configured ?? DEFAULT_SYSTEM_MODE,
-    configured, env, default: DEFAULT_SYSTEM_MODE, normalEnforced: false,
+    // A release has no checkout to develop: Normal is the only mode it runs in.
+    mode: release ? 'normal' : env ?? configured ?? DEFAULT_SYSTEM_MODE,
+    configured, env, default: DEFAULT_SYSTEM_MODE, normalEnforced: release !== null, release,
   };
 }
 
@@ -88,6 +146,7 @@ let cached: { file: string; configured: SystemMode | null; at: number } | null =
 /** The mode in effect (the switch file cached briefly). */
 export function systemMode(now = Date.now()): SystemMode {
   const file = systemModeFile();
+  if (runningRelease()) return 'normal';
   if (!cached || cached.file !== file || now - cached.at >= CACHE_MS) cached = { file, configured: readConfigured(), at: now };
   return readEnv() ?? cached.configured ?? DEFAULT_SYSTEM_MODE;
 }

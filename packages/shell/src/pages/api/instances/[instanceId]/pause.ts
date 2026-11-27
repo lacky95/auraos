@@ -1,8 +1,8 @@
 import type { APIRoute } from 'astro';
 import { getAppManager } from '@aura/core';
-import { buildInstanceDTO, jsonResponse, errorResponse } from '../../../../lib/appResponse.js';
+import { buildInstanceDTO, jsonResponse, errorResponse, failureResponse } from '../../../../lib/appResponse.js';
 
-export const POST: APIRoute = async ({ params }) => {
+export const POST: APIRoute = async ({ params, request, locals }) => {
   const instanceId = params['instanceId'];
   if (!instanceId) return errorResponse('Missing instance id', 400);
   try {
@@ -11,6 +11,6 @@ export const POST: APIRoute = async ({ params }) => {
     if (!dto) return errorResponse(`Instance not found: ${instanceId}`, 404);
     return jsonResponse(dto);
   } catch (err) {
-    return errorResponse(String(err), 500);
+    return failureResponse({ request, locals }, err);
   }
 };

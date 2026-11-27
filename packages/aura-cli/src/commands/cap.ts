@@ -4,9 +4,10 @@ import { readFileSync } from 'node:fs';
 import { parse as parseYaml } from 'yaml';
 import {
   fetchCapabilities,
+  fetchState,
+  isCapInstalled,
   loadState,
   type ResolvedEntry,
-  type State,
 } from '../lib/registry.js';
 import { api } from '../lib/client.js';
 import {
@@ -266,20 +267,10 @@ export function registerCap(program: Command): void {
     .description('List capabilities from the registry with install status and which apps declare them.')
     .action(async (opts: { installed?: boolean; available?: boolean }) => {
       const reg = { capabilities: await fetchCapabilities() };
-      // Prefer the shell's view of state (it's the writer; when this CLI runs
-      // inside a PRoot the local /data bind has shown stale reads in practice).
-      // Fall back to the local file if the shell is unreachable so `cap list`
-      // still works from a host shell with the server stopped.
-      let state: State;
-      try {
-        const remote = await api.get<{ state: State }>('/api/admin/cap');
-        state = remote.state;
-      } catch {
-        state = loadState();
-      }
+      const state = await fetchState();
       const manifests = await fetchAllManifests();
       const rows = Object.entries(reg.capabilities).map(([name, entry]) => {
-        const installed = state.capabilities[name]?.installed === true || entry.source === 'builtin';
+        const installed = isCapInstalled(state, name, entry);
         // An app with `*` in tools[] gets every installed cap bound at spawn
         // time (see ProotRunner.buildArgs). Surface that here as a normal
         // grant for installed caps so DECLARED-BY reflects the real bind set.
@@ -354,15 +345,7 @@ export function registerCap(program: Command): void {
     )
     .action(async (names: string[], opts: { yes?: boolean; dryRun?: boolean; force?: boolean }) => {
       const reg = { capabilities: await fetchCapabilities() };
-      // Trust the shell for install state — same reasoning as `cap list`:
-      // when the CLI runs inside a sliced-bind sandbox the local /data read
-      // can lag the actual toolchain.
-      let state: State;
-      try {
-        state = (await api.get<{ state: State }>('/api/admin/cap')).state;
-      } catch {
-        state = loadState();
-      }
+      const state = await fetchState();
 
       const isUpdatable = (n: string): boolean => {
         const e = reg.capabilities[n];
@@ -577,14 +560,18 @@ export function registerCap(program: Command): void {
       const reg = { capabilities: await fetchCapabilities() };
       const entry = reg.capabilities[name];
       if (!entry) fail(`Unknown capability: ${name}`);
-      const state = loadState();
-      const installed = state.capabilities[name];
+      // The same state and rule as `aura get caps` (Open WebUI gap 7).
+      const state = await fetchState();
+      const installed = isCapInstalled(state, name, entry);
+      const record = state.capabilities[name];
       // Pull manifests via the shell so sliced-bind sandboxes see every
-      // installed app, not just the calling one.
+      // installed app, not just the calling one; `*` gets every installed cap.
       const manifests = await fetchAllManifests();
-      const declaredBy = manifests.filter((m) => m.tools?.includes(name)).map((m) => m.id);
+      const declaredBy = manifests
+        .filter((m) => Array.isArray(m.tools) && (m.tools.includes(name) || (installed && m.tools.includes('*'))))
+        .map((m) => m.id);
       console.log(color.bold(name));
-      console.log(JSON.stringify({ registry: entry, installed: installed ?? false, declaredBy }, null, 2));
+      console.log(JSON.stringify({ registry: entry, installed, ...(record ? { record } : {}), declaredBy }, null, 2));
     });
 
   const registry = cap.command('registry').description('Inspect the capability registry, or add your own capability definitions (the owner approves).');

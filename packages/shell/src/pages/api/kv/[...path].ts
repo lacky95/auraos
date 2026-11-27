@@ -7,6 +7,7 @@ import { isValidKey, isValidNamespace, type KvNamespace } from '@aura/kv-store';
 import { requestUserId } from '../../../lib/userContext.js';
 import { sharedKv } from '../../../lib/sharedKv.js';
 import { withEtag } from '../../../lib/etag.js';
+import { failureResponse } from '../../../lib/appResponse.js';
 
 /**
  * OS-wide key-value store proxy.
@@ -43,7 +44,7 @@ import { withEtag } from '../../../lib/etag.js';
  * An app is the verified caller (instance token or gateway claim), never a
  * Referer; that rule applies to app callers in every access mode.
  */
-export const ALL: APIRoute = async ({ params, request }) => {
+export const ALL: APIRoute = async ({ params, request, locals }) => {
   const segments = (params['path'] ?? '').split('/').filter(Boolean);
   if (segments.length < 2) {
     return jsonError('Path must be `<namespace>/<key>` — e.g. `/api/kv/os/theme`', 400);
@@ -161,7 +162,7 @@ export const ALL: APIRoute = async ({ params, request }) => {
 
     return jsonError(`Method ${method} not supported`, 405);
   } catch (err) {
-    return jsonError(`KV error: ${(err as Error).message}`, 500);
+    return failureResponse({ request, locals }, err, { what: 'KV error' });
   }
 };
 

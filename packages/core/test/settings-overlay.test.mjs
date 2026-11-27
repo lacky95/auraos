@@ -233,3 +233,11 @@ test('the overlay ends with the installation: removing the app drops its grants 
   assert.equal(readManifestOverlay(overlayApps, 'io.user.app'), null);
   assert.ok(readManifestOverlay(overlayApps, 'io.other.app'), 'other apps keep theirs');
 });
+
+test('containers see the effective registry at /workspace/.aura/capabilities.yaml, read-only, in both layouts (systemTreeMount)', async () => {
+  const { systemTreeMount } = await import('../dist/runtimes/spawn/systemTreeArgs.js');
+  const want = ['--mount', 'type=volume,source=appdata,target=/workspace/.aura/capabilities.yaml,volume-subpath=aura/overlay/capabilities.yaml,readonly'];
+  assert.deepEqual(systemTreeMount({ kind: 'checkout', hostRoot: '/srv/aura', nodeModulesVolume: 'nm', dataVolume: 'appdata' }, '.aura', '/workspace/.aura'), want);
+  assert.deepEqual(systemTreeMount({ kind: 'release', releaseId: '0.1.0-0123456789ab-cafebabe', dataVolume: 'appdata' }, '.aura', '/workspace/.aura'), want);
+  assert.equal(capabilityRegistryMount('/data').subpath, 'aura/overlay/capabilities.yaml', 'the path the shell writes');
+});

@@ -1,6 +1,6 @@
 import type { APIRoute } from 'astro';
 import { VolumeStore } from '@aura/core';
-import { jsonResponse, errorResponse } from '../../../lib/appResponse.js';
+import { jsonResponse, errorResponse, failureResponse } from '../../../lib/appResponse.js';
 
 /**
  * Aura Context Volumes API — OS-managed shared volumes ("Volumes" tab).
@@ -14,16 +14,16 @@ import { jsonResponse, errorResponse } from '../../../lib/appResponse.js';
 
 const NAME_PATTERN = /^[a-z0-9][a-z0-9_-]{0,62}$/;
 
-export const GET: APIRoute = async () => {
+export const GET: APIRoute = async ({ request, locals }) => {
   try {
     const volumes = await new VolumeStore().list();
     return jsonResponse({ volumes });
   } catch (err) {
-    return errorResponse((err as Error).message, 500);
+    return failureResponse({ request, locals }, err);
   }
 };
 
-export const POST: APIRoute = async ({ request }) => {
+export const POST: APIRoute = async ({ request, locals }) => {
   const body = await request.json().catch(() => null) as
     { name?: unknown; mountPath?: unknown; mode?: unknown } | null;
   if (!body || typeof body.name !== 'string' || typeof body.mountPath !== 'string') {

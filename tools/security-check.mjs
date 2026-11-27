@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // The security gate: cheap static checks every branch runs before a merge.
 //
-//   node tools/security-check.mjs [--json] [--only=secrets,deps,patterns,routes,headers]
+//   node tools/security-check.mjs [--json] [--only=secrets,deps,patterns,routes,headers,errors]
 //        [--skip=<checks>] [--offline] [--extra=<dir>]... [--no-extra] [--root=<dir>]
 //
 // Prints one summary line, then one line per finding (and per warning).
@@ -17,9 +17,10 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { errorFindings } from './error-lint.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const CHECKS = ['secrets', 'deps', 'patterns', 'routes', 'headers'];
+const CHECKS = ['secrets', 'deps', 'patterns', 'routes', 'headers', 'errors'];
 const EXIT = { CLEAN: 0, FINDINGS: 1, TOOL: 2 };
 
 // ── arguments ───────────────────────────────────────────────────────────────
@@ -714,7 +715,14 @@ function checkHeaders(ctx) {
 
 // ── run ─────────────────────────────────────────────────────────────────────
 
-const RUNNERS = { secrets: checkSecrets, deps: checkDeps, patterns: checkPatterns, routes: checkRoutes, headers: checkHeaders };
+// ── 6. error answers: the D105 ratchet (tools/error-lint.mjs) ───────────────
+
+/** New error-answer debt above tools/error-baseline.json: a sentence in `error`, raw error text, an ad-hoc body. */
+function checkErrors(ctx) {
+  return errorFindings(ctx.root);
+}
+
+const RUNNERS = { secrets: checkSecrets, deps: checkDeps, patterns: checkPatterns, routes: checkRoutes, headers: checkHeaders, errors: checkErrors };
 
 export async function main(argv, out = (s) => process.stdout.write(`${s}\n`)) {
   let opts;

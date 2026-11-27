@@ -109,8 +109,8 @@ function fixture(t, opts = {}) {
   }
   const isolated = [];
   const runner = {
-    sidecarRuntime: () => ({ dataDir, appDataVolume: 'appvol', nodeModulesVolume: 'nm', network: 'aura-net',
-      osApiBase: 'http://aura-shell:3000', shellHostname: 'aura-shell', workspaceRoot: '/ws', toolsMode: 'hardlink' }),
+    sidecarRuntime: () => ({ dataDir, appDataVolume: 'appvol', network: 'aura-net',
+      osApiBase: 'http://aura-shell:3000', shellHostname: 'aura-shell', systemTree: { kind: 'checkout', hostRoot: '/ws', nodeModulesVolume: 'nm' }, toolsMode: 'hardlink' }),
     mountRootDir: (k) => join(dataDir, 'aura', 'mounts', k),
     mountRootSubpath: (k) => `aura/mounts/${k}`,
     // D107: the instance network the runner would ensure (InstanceNetworks), recorded instead.

@@ -320,64 +320,6 @@ RUN pnpm --filter @aura/app-sdk build
 RUN pnpm --filter @aura/cli build
 RUN pnpm --filter @aura/shell build
 
-# ─── Stage: runtime ───────────────────────────────────────────────────────────
-FROM base AS runtime
-
-COPY --from=toolchain /os /os
-COPY --from=build /workspace/node_modules ./node_modules
-COPY --from=build /workspace/packages/core/dist ./packages/core/dist
-COPY --from=build /workspace/packages/kv-store/dist ./packages/kv-store/dist
-COPY --from=build /workspace/packages/ui/dist ./packages/ui/dist
-COPY --from=build /workspace/packages/app-sdk/dist ./packages/app-sdk/dist
-COPY --from=build /workspace/packages/shell/dist ./packages/shell/dist
-COPY --from=build /workspace/packages/aura-cli/dist ./packages/aura-cli/dist
-COPY apps/ ./apps/
-
-# Install aura CLI globally + expose as a forwardable capability (bind-mountable into PRoots)
-# NOTE: toolchain symlink must point directly at the .cjs file, NOT at /usr/local/bin/aura.
-# When the toolchain entry is bind-mounted into a PRoot at /usr/local/bin/aura, a target of
-# /usr/local/bin/aura would become a self-referential symlink inside the sandbox.
-RUN ln -sf /workspace/packages/aura-cli/dist/aura.cjs /usr/local/bin/aura \
- && ln -sf /workspace/packages/aura-cli/dist/aura.cjs /os/toolchain/bin/aura
-
-ENV NODE_ENV=development
-ENV AURA_APPS_DIR=/workspace/apps
-ENV AURA_DATA_DIR=/data
-ENV AURA_BASE_ROOTFS=/os/base-rootfs
-ENV AURA_TOOLCHAIN_DIR=/os/toolchain
-ENV AURA_APP_PORT_START=4001
-ENV AURA_APP_PORT_END=4999
-# See the development stage / os/toolchain-path.sh: the master container runs
-# the whole toolchain on PATH, sourced from the volume mirror so it survives
-# a container recreate.
-ENV PATH=$PATH:/data/aura/toolchain/bin
-COPY os/toolchain-path.sh /etc/profile.d/aura-toolchain.sh
-# Onboarding files seeded into the user home (AppManager.seedUserHome).
-COPY os/home-seed/ /os/home-seed/
-# The home import markers (data, audit #11): read by core homes/importMarkers.ts.
-COPY os/home-import/ /os/home-import/
-
-# See the development stage: one persistent home per identity — the master's
-# own (system scope) here, the user's at /home/aura for the apps it spawns.
-ENV HOME=/home/master
-
-# Corepack caches the pnpm binary under $HOME. The image already baked one
-# (`corepack prepare pnpm@${PNPM_VERSION} --activate` → /root/.cache/node/corepack);
-# moving HOME onto the volume orphaned it, so corepack tried to re-download
-# pnpm and BLOCKED on its interactive "Do you want to continue? [Y/n]" prompt
-# — compose gives this container a TTY, so nothing answered it and the OS
-# never finished booting. Pin COREPACK_HOME at the image's cache: the package
-# manager belongs to the IMAGE, only user/tool state belongs to the volume.
-# The prompt is disabled too, so a pnpm version bump downloads unattended
-# instead of hanging the boot again.
-ENV COREPACK_HOME=/root/.cache/node/corepack
-ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
-
-EXPOSE 3000
-
-# AuraOS always runs in dev mode for live-reload (AI-native, always editable)
-CMD ["sh", "-c", "mkdir -p /data/aura/home/master /data/aura/home/default && rm -f /home/master /home/aura && ln -s /data/aura/home/master /home/master && ln -s /data/aura/home/default /home/aura && pnpm install && pnpm --filter @aura/shell dev --host 0.0.0.0"]
-
 # ─── Stage: development ───────────────────────────────────────────────────────
 # Used by docker-compose for local dev — code is volume-mounted from host
 FROM base AS development
@@ -481,3 +423,19 @@ WORKDIR /workspace
 # "AuraOS is starting" splash on :3000 while they run (os/boot-splash.mjs)
 # and logs every step to /data/aura/boot/boot.log.
 CMD ["sh", "/workspace/os/boot.sh"]
+
+# ─── Stage: release ───────────────────────────────────────────────────────────
+# The Normal layout's image (Phase 6 L; docker-compose.release.yml), built by the
+# release builder per release (os/release/builder.mjs, SHELL_TARGET). The
+# development image plus the entry and host-recovery scripts: no source, no
+# build. The release tree comes from the data volume, read-only at
+# /releases/<id>; os/release-entry.sh links it at /workspace and starts the
+# shell. os/release-ctl.sh is the host recovery (status, rollback, use <id>),
+# run from any kept tag with only the data volume and the socket; it uses the
+# image's own copies of the dependency-free release modules, never a release's.
+FROM development AS release
+COPY os/release/layout.mjs os/release/lock.mjs os/release/durable.mjs /os/release/
+COPY os/release-entry.sh os/release-ctl.sh /os/
+RUN chmod 0755 /os/release-entry.sh /os/release-ctl.sh
+ENV NODE_ENV=production
+CMD ["/os/release-entry.sh"]

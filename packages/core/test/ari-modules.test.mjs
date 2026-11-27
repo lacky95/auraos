@@ -233,7 +233,7 @@ test('D-S: SidecarManager spawns, lists, adopts, removes and reconciles OS sidec
   const tokens = new InstanceTokens(join(dataDir, 'k'));
   const mgr = new SidecarManager({
     runner: {
-      sidecarRuntime: () => ({ dataDir, appDataVolume: 'v', nodeModulesVolume: 'nm', network: 'n', osApiBase: 'x', shellHostname: 'h', workspaceRoot: '/w', toolsMode: 'hardlink' }),
+      sidecarRuntime: () => ({ dataDir, appDataVolume: 'v', network: 'n', osApiBase: 'x', shellHostname: 'h', systemTree: { kind: 'checkout', hostRoot: '/w', nodeModulesVolume: 'nm' }, toolsMode: 'hardlink' }),
       mountRootDir: (k) => join(dataDir, 'm', k), mountRootSubpath: (k) => `m/${k}`, toolsDir: (k) => join(dataDir, 't', k), clearToolsDir: () => {},
     },
     workloads: mock.workloads,
@@ -273,7 +273,7 @@ test('D107: an isolated sidecar is created on its instance network and rejoined 
     const services = [{ name: 'db', image: 'redis:7', command: [], volumes: [], network: 'instance' }, { name: 'web', image: 'nginx:1', command: [], volumes: [] }];
     return new SidecarManager({
       runner: {
-        sidecarRuntime: () => ({ dataDir, appDataVolume: 'v', nodeModulesVolume: 'nm', network: 'n', osApiBase: 'x', shellHostname: 'h', workspaceRoot: '/w', toolsMode: 'hardlink' }),
+        sidecarRuntime: () => ({ dataDir, appDataVolume: 'v', network: 'n', osApiBase: 'x', shellHostname: 'h', systemTree: { kind: 'checkout', hostRoot: '/w', nodeModulesVolume: 'nm' }, toolsMode: 'hardlink' }),
         mountRootDir: (k) => join(dataDir, 'm', k), mountRootSubpath: (k) => `m/${k}`, toolsDir: (k) => join(dataDir, 't', k), clearToolsDir: () => {},
       },
       workloads: mock.workloads,

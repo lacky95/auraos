@@ -142,8 +142,8 @@ function sidecars(t, { toolsMode = 'hardlink', pullCredential, identity = { uid:
   for (const b of ['jq', 'rg']) fs.writeFileSync(join(dataDir, 'aura', 'toolchain', 'bin', b), `#!/bin/sh\necho ${b}\n`);
   const isolated = [];
   const runner = {
-    sidecarRuntime: () => ({ dataDir, appDataVolume: 'appvol', nodeModulesVolume: 'nm', network: 'aura-net',
-      osApiBase: 'http://aura-shell:3000', shellHostname: 'aura-shell', workspaceRoot: '/ws', toolsMode }),
+    sidecarRuntime: () => ({ dataDir, appDataVolume: 'appvol', network: 'aura-net',
+      osApiBase: 'http://aura-shell:3000', shellHostname: 'aura-shell', systemTree: { kind: 'checkout', hostRoot: '/ws', nodeModulesVolume: 'nm' }, toolsMode }),
     mountRootDir: (k) => join(dataDir, 'aura', 'mounts', k),
     mountRootSubpath: (k) => `aura/mounts/${k}`,
     // D107: the instance network the runner would ensure (InstanceNetworks), recorded instead.

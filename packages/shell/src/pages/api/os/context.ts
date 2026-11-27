@@ -1,6 +1,6 @@
 import type { APIRoute } from 'astro';
 import { ContextStore } from '@aura/core';
-import { jsonResponse, errorResponse } from '../../../lib/appResponse.js';
+import { jsonResponse, errorResponse, failureResponse } from '../../../lib/appResponse.js';
 import { contextGate } from '../../../lib/approvals/context.ts';
 import { contextWrite } from '../../../lib/approvals/display.ts';
 
@@ -26,16 +26,16 @@ import { contextWrite } from '../../../lib/approvals/display.ts';
 
 const KEY_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
 
-export const GET: APIRoute = async () => {
+export const GET: APIRoute = async ({ request, locals }) => {
   try {
     const entries = await new ContextStore().list();
     return jsonResponse({ entries });
   } catch (err) {
-    return errorResponse((err as Error).message, 500);
+    return failureResponse({ request, locals }, err);
   }
 };
 
-export const POST: APIRoute = async ({ request }) => {
+export const POST: APIRoute = async ({ request, locals }) => {
   const body = await request.json().catch(() => null) as
     { key?: unknown; value?: unknown; kind?: unknown; inject?: unknown } | null;
   if (!body || typeof body.key !== 'string' || typeof body.value !== 'string') {
@@ -63,7 +63,7 @@ export const POST: APIRoute = async ({ request }) => {
     const entry = await new ContextStore().set(write.key, body.value, write.kind, write.inject);
     return jsonResponse(entry);
   } catch (err) {
-    return errorResponse((err as Error).message, 500);
+    return failureResponse({ request, locals }, err);
   }
 };
 

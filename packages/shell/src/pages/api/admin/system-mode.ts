@@ -10,7 +10,7 @@ import {
 /**
  * The system mode (D30, D60; lib/systemMode.ts). Docs: developer-mode.
  *
- *   GET             → { mode, configured, env, default, normalEnforced, workspaceMounts }
+ *   GET             → { mode, configured, env, default, normalEnforced, release, workspaceMounts }
  *   GET ?tree=1     → + { tree }: what differs between /workspace and the release
  *   PUT { mode: 'developer' }
  *        → the owner confirms with the password (`fresh`): in the shell's
@@ -28,8 +28,11 @@ import {
  *          is detached. One click otherwise.
  *   POST { action: 'export-patches' } → { dir, files } (one click)
  *
- * Normal mode is recorded and shown, not enforced: AuraOS keeps running from
- * /workspace until Phase 6.
+ * In the Developer layout (a checkout) Normal mode is recorded and shown; it
+ * is enforced when AuraOS runs from a release (the Normal layout, Phase 6 L:
+ * `normalEnforced`, `release`). A release has no checkout: switching it to
+ * Developer Mode is refused here (409 `developer-needs-checkout`); moving
+ * between the layouts is a recreate of the shell (owner question f).
  */
 interface Body { mode?: unknown; cleanup?: unknown; action?: unknown }
 
@@ -86,6 +89,14 @@ export const PUT: APIRoute = async (ctx) => {
 
   if (body.mode === 'developer') {
     if (body.cleanup !== undefined) return json({ error: 'cleanup applies to switching off' }, 400);
+    if (before.release) {
+      return json({
+        ok: false, error: 'developer-needs-checkout', category: 'unsupported-operation', mode: 'normal',
+        message: `AuraOS runs from release ${before.release.id}, which is read-only and has no checkout to develop in.`,
+        hint: 'Developer Mode needs the Developer layout (a git checkout): on the host, install it with install.sh --developer. '
+          + 'System changes on this release: aura system patch start, then save and activate (D68).',
+      }, 409);
+    }
     const actor = await ownerAction(ctx, {
       action: 'admin.change', level: 'fresh', payload: { op: 'system-mode', mode: 'developer' },
       title: 'Turn on Developer Mode',
@@ -102,7 +113,8 @@ export const PUT: APIRoute = async (ctx) => {
     return json({ ok: true, ...state, workspaceMounts: workspaceMounts() });
   }
 
-  // Off: the clean-tree flow.
+  // Off: the clean-tree flow (a release is Normal already: nothing to switch).
+  if (before.release) return json({ ok: true, ...before, workspaceMounts: workspaceMounts() });
   const tree = workspaceTree();
   const cleanup = body.cleanup === 'branch';
   if (!tree.clean && !cleanup) {
@@ -123,7 +135,7 @@ export const PUT: APIRoute = async (ctx) => {
         `Moves ${differs(tree).join(', ')} to a new dev/<date> branch, keeps a backup for 30 days, and resets /workspace to ${tree.release?.ref ?? 'the release'}.`,
       ] : []),
       'Detaches every writable /workspace mount (aura mount workspace).',
-      'Normal mode is recorded and shown; AuraOS keeps running from /workspace until Phase 6.',
+      'Normal mode is recorded and shown; this install keeps running from its /workspace checkout (the locked release is the Normal layout, a separate install).',
     ],
   });
   if (actor instanceof Response) return actor;
