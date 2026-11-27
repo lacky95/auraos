@@ -49,12 +49,14 @@ key).
   Apps) and never started; `aura dev validate` reports it as an error. An
   app without `auraContract` still installs and runs. A future break means
   contract 2 and a migration guide, never a silent change.
-- The manifest keys `setup` and `profiles` are reserved for app setup and
-  operating profiles (D108), which a later AuraOS adds. Until then an app that
-  declares either is refused the same way, with the error
-  `setup-unsupported` (category `unsupported-feature`, a `hint`, and
-  `manifestField` naming the key): it never runs unconfigured. Apps without
-  them are not affected and start directly, as before.
+- The manifest keys `setup` and `profiles` describe app setup and operating
+  profiles (D108, [App setup and profiles](/docs/app-setup-and-profiles)).
+  Both are optional and part of contract 1 (no `auraContract: 2`). Until this
+  AuraOS has the setup engine, an app that declares either is refused the
+  same way, with the error `setup-unsupported` (category
+  `unsupported-feature`, a `hint`, and `manifestField` naming the key): it
+  never runs unconfigured. Apps without them are not affected and start
+  directly, as before.
 
 **Checklist**
 
@@ -174,6 +176,25 @@ a notice that the connection is not encrypted: use HTTPS for sensitive ones.
 | the docker CLI or socket | `"docker"` in `tools[]` |
 | another app's interface (MCP, REST, WS) | `consumes[]` |
 | what you offer others | `provides[]` ([Interfaces](/docs/interfaces)) |
+| configuration the owner chooses (fields, secrets, requirements, an init hook) | `setup` ([App setup and profiles](/docs/app-setup-and-profiles)) |
+| named ways to run the app (operating profiles: overlays on an allowlist) | `profiles[]` |
+| the home environments the app supports (App Home, or the user's Private Home as opt-in) | `homeEnvironments` |
+| a sidecar's home (`none`, `app`, `owner-environment`) | `services[].home` (`inheritHome: true` is the alias of `app`) |
+| a setup value or secret in a sidecar's env | `services[].env` references `fromSetup` / `fromSecret`, never a literal secret |
+
+How these keys are classified (D108):
+
+| Key | Kind | What AuraOS does with it |
+|---|---|---|
+| `setup` | request, optional | validated (field model, `when`, requirements); the setup engine asks the owner and authorizes; never grants by itself |
+| `profiles[]` | request, optional | overlays limited to `instanceScope`, `environmentScope`, `homeEnvironment`, `sandbox`, `services` (env, home, network, limits, readiness), `permissions`, `tools`, `context`, `resources`; no images, no identity-bearing key; requests only added |
+| `homeEnvironments` | declaration | which homes the app supports; `private` is authorized only by the user's `home.private` grant |
+| `services[].home` | request | `owner-environment` needs `home.private.sidecar:<name>` on a private instance |
+| env references | reference | resolved at spawn; a secret only from the vault, never stored in the spec |
+
+An **operating profile** (an app's `profiles[]`) is not a **deployment
+profile** (how AuraOS itself is installed and composed): the two terms are
+kept apart.
 
 Undeclared use shows first in the access report (the D39 gate) and in
 `aura dev validate`; Phase 3 enforcement then refuses only what is undeclared.

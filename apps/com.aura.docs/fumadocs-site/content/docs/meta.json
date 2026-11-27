@@ -20,6 +20,7 @@
     "app-hosts",
     "building-for-app-hosts",
     "app-contract",
+    "app-setup-and-profiles",
     "sidecars",
     "sdk-reference",
     "cli-reference",
